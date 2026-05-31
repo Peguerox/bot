@@ -36,7 +36,15 @@ export const accumulatorBot = schedules.task({
     if (!state) {
       const startBtc = START_USD / btcUsdPrice;
       await initAccumulatorState(startBtc);
-      state = await getAccumulatorState();
+      // Build state locally — avoids re-fetch race condition after insert
+      state = {
+        id:         "",
+        holding:    "BTC",
+        quantity:   startBtc,
+        btc_value:  startBtc,
+        switches:   0,
+        updated_at: new Date().toISOString(),
+      };
       console.log(`Accumulator initialised: ${startBtc.toFixed(6)} BTC`);
     }
 
