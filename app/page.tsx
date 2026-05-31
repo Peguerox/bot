@@ -6,29 +6,44 @@ import PnLChart from "@/components/PnLChart";
 import StatsCards from "@/components/StatsCards";
 import OpenPositions from "@/components/OpenPositions";
 import TradeHistory from "@/components/TradeHistory";
+import AccumulatorCard from "@/components/AccumulatorCard";
 
 export default function Dashboard() {
-  const [trades, setTrades]   = useState<any[]>([]);
-  const [open, setOpen]       = useState<any[]>([]);
-  const [loading, setLoading] = useState(true);
+  const [trades, setTrades]       = useState<any[]>([]);
+  const [open, setOpen]           = useState<any[]>([]);
+  const [accState, setAccState]   = useState<any>(null);
+  const [accSwitches, setAccSwitches] = useState<any[]>([]);
+  const [loading, setLoading]     = useState(true);
 
   async function load() {
-    const [{ data: closed }, { data: openPos }] = await Promise.all([
+    const [
+      { data: closed },
+      { data: openPos },
+      { data: accSt },
+      { data: accSw },
+    ] = await Promise.all([
       getSupabase().from("positions").select("*").eq("status", "closed").order("exit_time", { ascending: false }),
       getSupabase().from("positions").select("*").eq("status", "open"),
+      getSupabase().from("accumulator_state").select("*").single(),
+      getSupabase().from("accumulator_switches").select("*").order("switched_at", { ascending: false }).limit(5),
     ]);
     setTrades(closed ?? []);
     setOpen(openPos ?? []);
+    setAccState(accSt ?? null);
+    setAccSwitches(accSw ?? []);
     setLoading(false);
   }
 
   useEffect(() => {
     load();
-    const channel = getSupabase()
-      .channel("positions")
+    const sb = getSupabase();
+    const ch1 = sb.channel("positions")
       .on("postgres_changes", { event: "*", schema: "public", table: "positions" }, load)
       .subscribe();
-    return () => { getSupabase().removeChannel(channel); };
+    const ch2 = sb.channel("accumulator")
+      .on("postgres_changes", { event: "*", schema: "public", table: "accumulator_state" }, load)
+      .subscribe();
+    return () => { sb.removeChannel(ch1); sb.removeChannel(ch2); };
   }, []);
 
   return (
@@ -72,6 +87,8 @@ export default function Dashboard() {
             <TradeHistory trades={trades.slice(0, 20)} loading={loading} />
           </div>
         </div>
+
+        <AccumulatorCard state={accState} switches={accSwitches} loading={loading} />
 
       </div>
     </main>
