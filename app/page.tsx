@@ -1,65 +1,79 @@
-import Image from "next/image";
+"use client";
 
-export default function Home() {
+import { useEffect, useState } from "react";
+import { supabase } from "@/lib/supabase";
+import PnLChart from "@/components/PnLChart";
+import StatsCards from "@/components/StatsCards";
+import OpenPositions from "@/components/OpenPositions";
+import TradeHistory from "@/components/TradeHistory";
+
+export default function Dashboard() {
+  const [trades, setTrades]   = useState<any[]>([]);
+  const [open, setOpen]       = useState<any[]>([]);
+  const [loading, setLoading] = useState(true);
+
+  async function load() {
+    const [{ data: closed }, { data: openPos }] = await Promise.all([
+      supabase.from("positions").select("*").eq("status", "closed").order("exit_time", { ascending: false }),
+      supabase.from("positions").select("*").eq("status", "open"),
+    ]);
+    setTrades(closed ?? []);
+    setOpen(openPos ?? []);
+    setLoading(false);
+  }
+
+  useEffect(() => {
+    load();
+    const channel = supabase
+      .channel("positions")
+      .on("postgres_changes", { event: "*", schema: "public", table: "positions" }, load)
+      .subscribe();
+    return () => { supabase.removeChannel(channel); };
+  }, []);
+
   return (
-    <div className="flex flex-col flex-1 items-center justify-center bg-zinc-50 font-sans dark:bg-black">
-      <main className="flex flex-1 w-full max-w-3xl flex-col items-center justify-between py-32 px-16 bg-white dark:bg-black sm:items-start">
-        <Image
-          className="dark:invert"
-          src="/next.svg"
-          alt="Next.js logo"
-          width={100}
-          height={20}
-          priority
-        />
-        <div className="flex flex-col items-center gap-6 text-center sm:items-start sm:text-left">
-          <h1 className="max-w-xs text-3xl font-semibold leading-10 tracking-tight text-black dark:text-zinc-50">
-            To get started, edit the page.tsx file.
-          </h1>
-          <p className="max-w-md text-lg leading-8 text-zinc-600 dark:text-zinc-400">
-            Looking for a starting point or more instructions? Head over to{" "}
-            <a
-              href="https://vercel.com/templates?framework=next.js&utm_source=create-next-app&utm_medium=appdir-template-tw&utm_campaign=create-next-app"
-              className="font-medium text-zinc-950 dark:text-zinc-50"
-            >
-              Templates
-            </a>{" "}
-            or the{" "}
-            <a
-              href="https://nextjs.org/learn?utm_source=create-next-app&utm_medium=appdir-template-tw&utm_campaign=create-next-app"
-              className="font-medium text-zinc-950 dark:text-zinc-50"
-            >
-              Learning
-            </a>{" "}
-            center.
-          </p>
+    <main className="min-h-screen bg-gray-950 text-white p-6">
+      <div className="max-w-7xl mx-auto space-y-6">
+
+        <div className="flex items-center justify-between">
+          <div>
+            <h1 className="text-2xl font-bold text-white">TradeBot</h1>
+            <p className="text-gray-400 text-sm mt-1">
+              BNB + ATOM · 1m · Z=2.0 · TP 0.6% · SL 0.4% · Paper Trading
+            </p>
+          </div>
+          <div className="flex items-center gap-2">
+            <span className="w-2 h-2 rounded-full bg-green-400 animate-pulse" />
+            <span className="text-green-400 text-sm font-medium">Live</span>
+          </div>
         </div>
-        <div className="flex flex-col gap-4 text-base font-medium sm:flex-row">
-          <a
-            className="flex h-12 w-full items-center justify-center gap-2 rounded-full bg-foreground px-5 text-background transition-colors hover:bg-[#383838] dark:hover:bg-[#ccc] md:w-[158px]"
-            href="https://vercel.com/new?utm_source=create-next-app&utm_medium=appdir-template-tw&utm_campaign=create-next-app"
-            target="_blank"
-            rel="noopener noreferrer"
-          >
-            <Image
-              className="dark:invert"
-              src="/vercel.svg"
-              alt="Vercel logomark"
-              width={16}
-              height={16}
-            />
-            Deploy Now
-          </a>
-          <a
-            className="flex h-12 w-full items-center justify-center rounded-full border border-solid border-black/[.08] px-5 transition-colors hover:border-transparent hover:bg-black/[.04] dark:border-white/[.145] dark:hover:bg-[#1a1a1a] md:w-[158px]"
-            href="https://nextjs.org/docs?utm_source=create-next-app&utm_medium=appdir-template-tw&utm_campaign=create-next-app"
-            target="_blank"
-            rel="noopener noreferrer"
-          >
-            Documentation
-          </a>
+
+        <StatsCards trades={trades} open={open} loading={loading} />
+
+        <div className="bg-gray-900 rounded-xl p-5">
+          <h2 className="text-gray-300 font-semibold mb-4">Cumulative PnL</h2>
+          <PnLChart trades={trades} />
         </div>
-      </main>
-    </div>
+
+        <div className="grid grid-cols-1 lg:grid-cols-2 gap-6">
+          <div className="bg-gray-900 rounded-xl p-5">
+            <h2 className="text-gray-300 font-semibold mb-4">
+              Open Positions
+              {open.length > 0 && (
+                <span className="ml-2 bg-blue-500/20 text-blue-400 text-xs px-2 py-0.5 rounded-full">
+                  {open.length}
+                </span>
+              )}
+            </h2>
+            <OpenPositions positions={open} loading={loading} />
+          </div>
+          <div className="bg-gray-900 rounded-xl p-5">
+            <h2 className="text-gray-300 font-semibold mb-4">Recent Trades</h2>
+            <TradeHistory trades={trades.slice(0, 20)} loading={loading} />
+          </div>
+        </div>
+
+      </div>
+    </main>
   );
 }
