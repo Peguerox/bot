@@ -46,7 +46,7 @@ function ZScorePanel({ trades, open, loading }: { trades: any[]; open: any[]; lo
             <span className="text-green-400 text-xs font-medium">Live</span>
           </span>
         </div>
-        <p className="text-gray-500 text-xs mt-0.5">BNB + ATOM · 1m · Z=2.0 · TP 0.6% · SL 0.4%</p>
+        <p className="text-gray-500 text-xs mt-0.5">BNB + ATOM · 1m · Z=2.0 · TP 0.8% · SL 0.3%</p>
       </div>
 
       {/* Stats */}
