@@ -1,5 +1,5 @@
 // All database operations for the trading bot
-import { supabaseAdmin } from "./supabase";
+import { getSupabaseAdmin } from "./supabase";
 
 export const PAIRS = [
   { symbol: "BNBUSDT",  name: "BNB",  allocation: 1000 },
@@ -7,7 +7,7 @@ export const PAIRS = [
 ];
 
 export async function getOpenPosition(pair: string) {
-  const { data } = await supabaseAdmin
+  const { data } = await getSupabaseAdmin()
     .from("positions")
     .select("*")
     .eq("pair", pair)
@@ -19,7 +19,7 @@ export async function getOpenPosition(pair: string) {
 export async function openPosition(pair: string, signal: {
   entry: number; sl: number; tp: number; qty: number; z: number;
 }) {
-  await supabaseAdmin.from("positions").insert({
+  await getSupabaseAdmin().from("positions").insert({
     pair,
     entry_price: signal.entry,
     sl:          signal.sl,
@@ -33,12 +33,13 @@ export async function openPosition(pair: string, signal: {
 }
 
 export async function incrementHold(id: string) {
-  const { data } = await supabaseAdmin
+  const sb = getSupabaseAdmin();
+  const { data } = await sb
     .from("positions")
     .select("hold_count")
     .eq("id", id)
     .single();
-  await supabaseAdmin
+  await sb
     .from("positions")
     .update({ hold_count: (data?.hold_count ?? 0) + 1 })
     .eq("id", id);
@@ -47,7 +48,7 @@ export async function incrementHold(id: string) {
 export async function closePosition(id: string, exit: {
   exit_price: number; pnl: number; result: string;
 }) {
-  await supabaseAdmin.from("positions").update({
+  await getSupabaseAdmin().from("positions").update({
     status:     "closed",
     exit_price: exit.exit_price,
     pnl:        exit.pnl,
@@ -57,13 +58,14 @@ export async function closePosition(id: string, exit: {
 }
 
 export async function getStats() {
-  const { data: trades } = await supabaseAdmin
+  const sb = getSupabaseAdmin();
+  const { data: trades } = await sb
     .from("positions")
     .select("pnl, result, pair, entry_time, exit_time, entry_price, exit_price, quantity")
     .eq("status", "closed")
     .order("exit_time", { ascending: false });
 
-  const { data: open } = await supabaseAdmin
+  const { data: open } = await sb
     .from("positions")
     .select("*")
     .eq("status", "open");
@@ -72,7 +74,7 @@ export async function getStats() {
 }
 
 export async function logRun(data: object) {
-  await supabaseAdmin.from("bot_runs").insert({
+  await getSupabaseAdmin().from("bot_runs").insert({
     run_at: new Date().toISOString(),
     data,
   });

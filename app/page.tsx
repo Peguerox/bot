@@ -1,7 +1,7 @@
 "use client";
 
 import { useEffect, useState } from "react";
-import { supabase } from "@/lib/supabase";
+import { getSupabase } from "@/lib/supabase";
 import PnLChart from "@/components/PnLChart";
 import StatsCards from "@/components/StatsCards";
 import OpenPositions from "@/components/OpenPositions";
@@ -14,8 +14,8 @@ export default function Dashboard() {
 
   async function load() {
     const [{ data: closed }, { data: openPos }] = await Promise.all([
-      supabase.from("positions").select("*").eq("status", "closed").order("exit_time", { ascending: false }),
-      supabase.from("positions").select("*").eq("status", "open"),
+      getSupabase().from("positions").select("*").eq("status", "closed").order("exit_time", { ascending: false }),
+      getSupabase().from("positions").select("*").eq("status", "open"),
     ]);
     setTrades(closed ?? []);
     setOpen(openPos ?? []);
@@ -24,11 +24,11 @@ export default function Dashboard() {
 
   useEffect(() => {
     load();
-    const channel = supabase
+    const channel = getSupabase()
       .channel("positions")
       .on("postgres_changes", { event: "*", schema: "public", table: "positions" }, load)
       .subscribe();
-    return () => { supabase.removeChannel(channel); };
+    return () => { getSupabase().removeChannel(channel); };
   }, []);
 
   return (
