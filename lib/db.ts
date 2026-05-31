@@ -1,5 +1,5 @@
 // All database operations for the trading bot
-import { getSupabaseAdmin } from "./supabase";
+import { getSupabaseAdmin } from "./supabase-admin";
 
 export const PAIRS = [
   { symbol: "BNBUSDT",  name: "BNB",  allocation: 1000 },
