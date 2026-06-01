@@ -79,9 +79,11 @@ export function checkClose(pos: Position, currentPrice: number): CloseResult | n
 
   if (!hitTP && !hitSL && !expired) return null;
 
-  const pnl    = (currentPrice - pos.entry) * pos.qty;
-  const result = hitTP ? "TP" : hitSL ? "SL" : "EXPIRE";
-  return { pnl, result, exit_price: currentPrice };
+  // Use exact limit price for TP/SL — matches backtest and maker order fill behavior
+  const exitPrice = hitTP ? pos.tp : hitSL ? pos.sl : currentPrice;
+  const pnl       = (exitPrice - pos.entry) * pos.qty;
+  const result    = hitTP ? "TP" : hitSL ? "SL" : "EXPIRE";
+  return { pnl, result, exit_price: exitPrice };
 }
 
 export { TP_PCT, SL_PCT, MAX_HOLD, Z_THRESH };
