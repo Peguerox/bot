@@ -21,9 +21,10 @@ function Stat({ label, value, sub, color }: { label: string; value: string; sub:
 function ZScorePanel({ trades, open, loading }: { trades: any[]; open: any[]; loading: boolean }) {
   const totalPnL = trades.reduce((s, t) => s + (t.pnl ?? 0), 0);
   const balance  = INITIAL + totalPnL;
+  const decided  = trades.filter(t => t.result !== "EXPIRE");
   const wins     = trades.filter(t => t.pnl > 0);
-  const losses   = trades.filter(t => t.pnl <= 0);
-  const winRate  = trades.length > 0 ? (wins.length / trades.length * 100).toFixed(1) : "—";
+  const losses   = trades.filter(t => t.pnl < 0);
+  const winRate  = decided.length > 0 ? (wins.length / decided.length * 100).toFixed(1) : "—";
   const grossWin = wins.reduce((s, t) => s + t.pnl, 0);
   const grossLoss = Math.abs(losses.reduce((s, t) => s + t.pnl, 0));
   const pf       = grossLoss > 0 ? (grossWin / grossLoss).toFixed(2) : "∞";
@@ -57,7 +58,7 @@ function ZScorePanel({ trades, open, loading }: { trades: any[]; open: any[]; lo
       ) : (
         <div className="grid grid-cols-2 gap-2">
           <Stat label="Balance"       value={`$${balance.toFixed(2)}`}   sub={`${totalPnL >= 0 ? "+" : ""}$${totalPnL.toFixed(2)} PnL`} color={totalPnL >= 0 ? "text-green-400" : "text-red-400"} />
-          <Stat label="Win Rate"      value={`${winRate}%`}              sub={`${wins.length}W / ${losses.length}L of ${trades.length}`} color="text-blue-400" />
+          <Stat label="Win Rate"      value={`${winRate}%`}              sub={`${wins.length}W / ${losses.length}L of ${decided.length} (excl. expire)`} color="text-blue-400" />
           <Stat label="Profit Factor" value={pf}                         sub={open.length > 0 ? `${open.length} open` : "No open positions"} color="text-purple-400" />
           <Stat label="Max Drawdown"  value={`${maxDD.toFixed(1)}%`}     sub={`Started $${INITIAL.toLocaleString()}`} color={maxDD < -10 ? "text-red-400" : "text-yellow-400"} />
         </div>
