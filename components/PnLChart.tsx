@@ -45,7 +45,7 @@ export default function PnLChart({ trades }: { trades: any[] }) {
         <Tooltip
           contentStyle={{ backgroundColor: "#111827", border: "1px solid #374151", borderRadius: 8 }}
           labelStyle={{ color: "#9ca3af" }}
-          labelFormatter={(_: any, payload: any[]) => payload?.[0]?.payload?.label ?? ""}
+          labelFormatter={(_: any, payload: readonly any[]) => payload?.[0]?.payload?.label ?? ""}
           formatter={(v: any) => [`$${Number(v).toFixed(2)}`, "Balance"]}
         />
         <ReferenceLine y={INITIAL} stroke="#374151" strokeDasharray="4 4" />
