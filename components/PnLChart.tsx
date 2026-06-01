@@ -12,10 +12,11 @@ export default function PnLChart({ trades }: { trades: any[] }) {
   );
 
   let balance = INITIAL;
-  const data = [...trades].reverse().map(t => {
+  const data = [...trades].reverse().map((t, i) => {
     balance += t.pnl ?? 0;
     return {
-      time:    new Date(t.exit_time).toLocaleDateString("en-US", { month: "short", day: "numeric" }),
+      i,
+      label:   new Date(t.exit_time).toLocaleString("en-US", { month: "short", day: "numeric", hour: "2-digit", minute: "2-digit" }),
       balance: parseFloat(balance.toFixed(2)),
       pnl:     parseFloat((t.pnl ?? 0).toFixed(4)),
     };
@@ -28,11 +29,10 @@ export default function PnLChart({ trades }: { trades: any[] }) {
     <ResponsiveContainer width="100%" height={220}>
       <LineChart data={data} margin={{ top: 5, right: 10, left: 10, bottom: 5 }}>
         <XAxis
-          dataKey="time"
-          tick={{ fill: "#6b7280", fontSize: 11 }}
+          dataKey="i"
+          tick={false}
           tickLine={false}
           axisLine={false}
-          interval="preserveStartEnd"
         />
         <YAxis
           domain={[min * 0.999, max * 1.001]}
@@ -45,7 +45,8 @@ export default function PnLChart({ trades }: { trades: any[] }) {
         <Tooltip
           contentStyle={{ backgroundColor: "#111827", border: "1px solid #374151", borderRadius: 8 }}
           labelStyle={{ color: "#9ca3af" }}
-          formatter={(v: any) => [`$${v.toLocaleString()}`, "Balance"]}
+          labelFormatter={(_: any, payload: any[]) => payload?.[0]?.payload?.label ?? ""}
+          formatter={(v: any) => [`$${Number(v).toFixed(2)}`, "Balance"]}
         />
         <ReferenceLine y={INITIAL} stroke="#374151" strokeDasharray="4 4" />
         <Line
