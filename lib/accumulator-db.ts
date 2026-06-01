@@ -42,6 +42,19 @@ export async function updateAccumulatorState(opts: {
     .neq("id", "00000000-0000-0000-0000-000000000000");
 }
 
+// Returns the btc_value_before of the most recent BTC→SOL switch (the round-trip entry value)
+export async function getLastSolEntryBtc(): Promise<number | null> {
+  const { data } = await getSupabaseAdmin()
+    .from("accumulator_switches")
+    .select("btc_value_before")
+    .eq("from_asset", "BTC")
+    .eq("to_asset", "SOL")
+    .order("created_at", { ascending: false })
+    .limit(1)
+    .single();
+  return data ? (data as { btc_value_before: number }).btc_value_before : null;
+}
+
 export async function logSwitch(opts: {
   from:           "BTC" | "SOL";
   to:             "BTC" | "SOL";

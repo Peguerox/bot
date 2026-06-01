@@ -5,6 +5,7 @@ import {
   initAccumulatorState,
   updateAccumulatorState,
   logSwitch,
+  getLastSolEntryBtc,
 } from "../lib/accumulator-db";
 
 const BB_PERIOD       = 10;   // BB(10) on BTCUSDT
@@ -66,6 +67,12 @@ export const accumulatorBot = schedules.task({
         newBtcValue = newQty;
       }
 
+      // For SOL→BTC, btcValueBefore should be what we had when we entered SOL
+      // (not the mark-to-market now, which equals newBtcValue and always shows $0 gain)
+      const entryBtcValue = targetAsset === "BTC"
+        ? (await getLastSolEntryBtc()) ?? currentBtcValue
+        : currentBtcValue;
+
       await Promise.all([
         updateAccumulatorState({
           holding:  targetAsset,
@@ -77,7 +84,7 @@ export const accumulatorBot = schedules.task({
           from:           state!.holding,
           to:             targetAsset,
           solBtcPrice,
-          btcValueBefore: currentBtcValue,
+          btcValueBefore: entryBtcValue,
           btcValueAfter:  newBtcValue,
         }),
       ]);
