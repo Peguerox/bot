@@ -11,9 +11,23 @@ export async function getOpenPosition(pair: string) {
     .from("positions")
     .select("*")
     .eq("pair", pair)
-    .eq("status", "open")
+    .in("status", ["open", "chasing"])
     .single();
   return data;
+}
+
+export async function startChasing(id: string, chasePrice: number) {
+  await getSupabaseAdmin()
+    .from("positions")
+    .update({ status: "chasing", chase_price: chasePrice })
+    .eq("id", id);
+}
+
+export async function updateChasePrice(id: string, chasePrice: number) {
+  await getSupabaseAdmin()
+    .from("positions")
+    .update({ chase_price: chasePrice })
+    .eq("id", id);
 }
 
 export async function openPosition(pair: string, signal: {
@@ -68,7 +82,7 @@ export async function getStats() {
   const { data: open } = await sb
     .from("positions")
     .select("*")
-    .eq("status", "open");
+    .in("status", ["open", "chasing"]);
 
   return { trades: trades ?? [], openPositions: open ?? [] };
 }

@@ -52,7 +52,12 @@ export default function OpenPositions({ positions, loading }: {
                 <span className="text-xs bg-blue-500/20 text-blue-400 px-2 py-0.5 rounded-full">
                   LONG
                 </span>
-                <span className="text-xs text-gray-500">Hold {pos.hold_count}/3</span>
+                {pos.status === "chasing"
+                  ? <span className="text-xs bg-yellow-500/20 text-yellow-400 px-2 py-0.5 rounded-full">
+                      CHASING {pos.chase_price?.toFixed(4)}
+                    </span>
+                  : <span className="text-xs text-gray-500">Hold {pos.hold_count}/{6}</span>
+                }
               </div>
               <div className="text-gray-500 text-xs mt-1">
                 Entry ${pos.entry_price.toFixed(4)} · SL ${pos.sl.toFixed(4)} · TP ${pos.tp.toFixed(4)}

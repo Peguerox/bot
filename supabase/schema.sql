@@ -9,8 +9,9 @@ CREATE TABLE positions (
   quantity     DECIMAL(18,8) NOT NULL,
   z_score      DECIMAL(10,6),
   hold_count   INTEGER DEFAULT 0,
-  status       TEXT DEFAULT 'open',  -- 'open' | 'closed'
-  result       TEXT,                 -- 'TP' | 'SL' | 'EXPIRE'
+  status       TEXT DEFAULT 'open',  -- 'open' | 'chasing' | 'closed'
+  result       TEXT,                 -- 'TP' | 'SL' | 'CHASE_FILL'
+  chase_price  DECIMAL(18,8),        -- active limit price while chasing exit
   pnl          DECIMAL(18,8),
   exit_price   DECIMAL(18,8),
   entry_time   TIMESTAMPTZ DEFAULT NOW(),

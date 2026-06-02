@@ -197,7 +197,7 @@ export default function Dashboard() {
       { data: accSw },
     ] = await Promise.all([
       getSupabase().from("positions").select("*").eq("status", "closed").order("exit_time", { ascending: false }),
-      getSupabase().from("positions").select("*").eq("status", "open"),
+      getSupabase().from("positions").select("*").in("status", ["open", "chasing"]),
       getSupabase().from("accumulator_state").select("*").single(),
       getSupabase().from("accumulator_switches").select("*").order("switched_at", { ascending: false }).limit(10),
     ]);
