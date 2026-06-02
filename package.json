@@ -6,7 +6,8 @@
     "dev": "next dev",
     "build": "next build",
     "start": "next start",
-    "lint": "eslint"
+    "lint": "eslint",
+    "deploy:trigger": "npx trigger.dev@latest deploy"
   },
   "dependencies": {
     "@supabase/supabase-js": "^2.106.2",
