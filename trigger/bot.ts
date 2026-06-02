@@ -13,12 +13,14 @@ export const tradingBot = schedules.task({
     const CANDLES = 50;     // enough for 20-bar z-score + buffer
     const log: object[] = [];
 
-    // Fetch BTC candles once — shared across all pairs
-    const btcCandles = await getKlines("BTCUSDT", "1m", CANDLES);
+    // Fetch BTC candles once — shared across all pairs.
+    // Slice off the last candle (current open/incomplete) so the z-score
+    // is computed on closed candles only, matching backtest behavior.
+    const btcCandles = (await getKlines("BTCUSDT", "1m", CANDLES)).slice(0, -1);
 
     for (const { symbol, name, allocation } of PAIRS) {
       try {
-        const altCandles  = await getKlines(symbol, "1m", CANDLES);
+        const altCandles  = (await getKlines(symbol, "1m", CANDLES)).slice(0, -1);
         const currentPrice = altCandles[altCandles.length - 1].close;
         const z            = calcZScore(btcCandles, altCandles);
         const openPos      = await getOpenPosition(name);

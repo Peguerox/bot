@@ -27,8 +27,11 @@ export const accumulatorBot = schedules.task({
     // Fetch BTC 5m candles for the signal
     const btcCandles   = await getKlines("BTCUSDT", "5m", CANDLES_NEEDED);
     const solBtcPrice  = await getPrice("SOLBTC");
-    const btcUsdPrice  = btcCandles[btcCandles.length - 1].close;
-    const btcCloses    = btcCandles.map((c: { close: number }) => c.close);
+    // Drop the last candle — it's the current open (incomplete) candle.
+    // Using it would cause signal flips on a half-baked close, causing extra switches.
+    const closedCandles = btcCandles.slice(0, -1);
+    const btcUsdPrice  = closedCandles[closedCandles.length - 1].close;
+    const btcCloses    = closedCandles.map((c: { close: number }) => c.close);
     const uptrend      = getBBSignal(btcCloses);
     const targetAsset  = uptrend ? "SOL" : "BTC";
 
