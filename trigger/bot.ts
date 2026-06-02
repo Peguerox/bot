@@ -75,7 +75,7 @@ export const tradingBot = schedules.task({
                            pnl: close.pnl.toFixed(4), exit: close.exit_price });
               }
             } else {
-              await incrementHold(openPos.id);
+              await incrementHold(openPos.id, openPos.hold_count);
               log.push({ pair: name, action: "HOLD",
                          hold: openPos.hold_count + 1, price: currentPrice });
             }

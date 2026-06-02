@@ -46,16 +46,10 @@ export async function openPosition(pair: string, signal: {
   });
 }
 
-export async function incrementHold(id: string) {
-  const sb = getSupabaseAdmin();
-  const { data } = await sb
+export async function incrementHold(id: string, currentHold: number) {
+  await getSupabaseAdmin()
     .from("positions")
-    .select("hold_count")
-    .eq("id", id)
-    .single();
-  await sb
-    .from("positions")
-    .update({ hold_count: (data?.hold_count ?? 0) + 1 })
+    .update({ hold_count: currentHold + 1 })
     .eq("id", id);
 }
 
