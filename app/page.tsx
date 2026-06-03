@@ -21,7 +21,7 @@ function Stat({ label, value, sub, color }: { label: string; value: string; sub:
 
 function LagBotPanel({
   mode, trades, openPositions, loading,
-  usdtBalance, enabled, onToggle, toggling,
+  usdtBalance, enabled, onToggle, toggling, onReset, resetting,
 }: {
   mode:           "paper" | "live";
   trades:         any[];
@@ -31,6 +31,8 @@ function LagBotPanel({
   enabled?:       boolean;
   onToggle?:      () => void;
   toggling?:      boolean;
+  onReset?:       () => void;
+  resetting?:     boolean;
 }) {
   const initial    = mode === "paper" ? PAPER_INITIAL : LIVE_INITIAL;
   const totalPnL   = trades.reduce((s, t) => s + (t.pnl ?? 0), 0);
@@ -73,6 +75,18 @@ function LagBotPanel({
 
         {isLive ? (
           <div className="flex items-center gap-3">
+            <button
+              onClick={onReset}
+              disabled={resetting || enabled}
+              title={enabled ? "Turn bot OFF before resetting" : "Cancel all orders & clear position"}
+              className={`text-xs px-2 py-1 rounded border border-red-500/50 text-red-400 transition-colors ${
+                resetting ? "opacity-50 cursor-not-allowed" :
+                enabled   ? "opacity-30 cursor-not-allowed" :
+                "hover:bg-red-500/20 cursor-pointer"
+              }`}
+            >
+              {resetting ? "Resetting…" : "Reset"}
+            </button>
             <button
               onClick={onToggle}
               disabled={toggling}
@@ -238,6 +252,7 @@ export default function Dashboard() {
   const [liveTrades, setLiveTrades]     = useState<any[]>([]);
   const [loading, setLoading]           = useState(true);
   const [toggling, setToggling]         = useState(false);
+  const [resetting, setResetting]       = useState(false);
 
   async function load() {
     const [
@@ -273,6 +288,14 @@ export default function Dashboard() {
     await fetch("/api/live/toggle", { method: "POST" });
     await load();
     setToggling(false);
+  }
+
+  async function handleReset() {
+    if (!confirm("Cancel all open ATOM orders and clear position?")) return;
+    setResetting(true);
+    await fetch("/api/live/reset", { method: "POST" });
+    await load();
+    setResetting(false);
   }
 
   useEffect(() => {
@@ -314,6 +337,8 @@ export default function Dashboard() {
             enabled={liveSettings?.enabled}
             onToggle={handleToggle}
             toggling={toggling}
+            onReset={handleReset}
+            resetting={resetting}
           />
         </div>
 

@@ -125,6 +125,11 @@ export async function getOrder(symbol: string, orderId: number): Promise<OrderRe
   return signedGet("/order", { symbol, orderId });
 }
 
+// Cancel ALL open orders for a symbol at once
+export async function cancelAllOrders(symbol: string) {
+  return signedDelete("/openOrders", { symbol });
+}
+
 export async function getFreeBalance(asset: string): Promise<number> {
   const account = await signedGet("/account", {});
   const balance = account.balances.find((b: { asset: string }) => b.asset === asset);
