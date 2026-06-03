@@ -150,15 +150,20 @@ export const liveBot = schedules.task({
           log.push({ action: "CHASE_FILLED", exit: pos.chase_price, pnl: pnl.toFixed(4) });
 
         } else {
-          // Cancel and re-place every candle — guarantees order is always active
-          try { await cancelOrder(SYMBOL, pos.chase_order_id); } catch {}
           const newChasePrice = roundPrice(price * (1 - CHASE_OFFSET));
-          const newOrder      = await placeLimitSell(SYMBOL, pos.quantity, newChasePrice);
-          await updateLiveChaseOrder(pos.id, {
-            chase_order_id: newOrder.orderId,
-            chase_price:    newChasePrice,
-          });
-          log.push({ action: "CHASE_UP", price, newChasePrice });
+          if (newChasePrice > pos.chase_price) {
+            // Price moved up — cancel and re-place higher
+            try { await cancelOrder(SYMBOL, pos.chase_order_id); } catch {}
+            const newOrder = await placeLimitSell(SYMBOL, pos.quantity, newChasePrice);
+            await updateLiveChaseOrder(pos.id, {
+              chase_order_id: newOrder.orderId,
+              chase_price:    newChasePrice,
+            });
+            log.push({ action: "CHASE_UP", price, newChasePrice });
+          } else {
+            // Price flat or down — existing order is already in the right place
+            log.push({ action: "CHASE_WAIT", price, chasePrice: pos.chase_price });
+          }
         }
       }
 
