@@ -1,7 +1,7 @@
 import { schedules } from "@trigger.dev/sdk/v3";
 import {
   getKlines, placeLimitBuy, placeLimitSell, placeOCO,
-  cancelOrder, cancelOCO, getOrder, getFreeBalance,
+  cancelOrder, cancelOCO, getOrder, getFreeBalance, placeMarketSell,
 } from "../lib/binance";
 import { calcZScore, Z_THRESH, TP_PCT, SL_PCT, MAX_HOLD } from "../lib/strategy";
 import {
@@ -20,6 +20,16 @@ const CANDLES      = 50;
 // Lot size step: 0.01  |  Price tick: 0.0001  |  Min notional: $10
 function roundPrice(p: number) { return Math.round(p * 10000) / 10000; }
 function floorQty(q: number)   { return Math.floor(q * 100) / 100; }
+
+async function marketExit(
+  posId: string, qty: number, entryPrice: number, reason: string, log: object[]
+) {
+  const order     = await placeMarketSell(SYMBOL, qty);
+  const exitPrice = parseFloat(order.cummulativeQuoteQty) / parseFloat(order.executedQty);
+  const pnl       = (exitPrice - entryPrice) * qty;
+  await closeLivePosition(posId, { exit_price: exitPrice, pnl, result: reason });
+  log.push({ action: reason, exitPrice, pnl: pnl.toFixed(4) });
+}
 
 export const liveBot = schedules.task({
   id:          "live-bot-atom-1m",
@@ -78,8 +88,7 @@ export const liveBot = schedules.task({
             const slLimit   = roundPrice(sl - 0.0001);
 
             if (price >= tp) {
-              // Price already blew past TP — OCO would be rejected by Binance.
-              // Go straight to chasing with a limit sell below current price.
+              // Price already past TP — skip OCO, go straight to chase
               const chasePrice = roundPrice(price * (1 - CHASE_OFFSET));
               const chaseOrder = await placeLimitSell(SYMBOL, qty, chasePrice);
               await setLivePositionOpen(pos.id, {
@@ -91,6 +100,16 @@ export const liveBot = schedules.task({
                 chase_price:    chasePrice,
               });
               log.push({ action: "ENTRY_FILLED_SKIP_TO_CHASE", fillPrice, qty, price, chasePrice });
+
+            } else if (price <= sl) {
+              // Price already below SL — OCO would be rejected, exit immediately
+              await setLivePositionOpen(pos.id, {
+                entry_price: fillPrice, quantity: qty, tp, sl,
+                tp_order_id: 0, sl_order_id: 0, oco_order_list_id: 0,
+              });
+              log.push({ action: "ENTRY_FILLED_BELOW_SL", fillPrice, qty, price, sl });
+              await marketExit(pos.id, qty, fillPrice, "SL_IMMEDIATE", log);
+
             } else {
               const oco       = await placeOCO(SYMBOL, qty, tp, sl, slLimit);
               const tpOrderId = oco.orderReports[0].orderId;
@@ -108,13 +127,11 @@ export const liveBot = schedules.task({
             // Not filled yet — cancel and re-place if signal still valid
             try { await cancelOrder(SYMBOL, pos.entry_order_id); } catch {}
             if (z <= -Z_THRESH) {
-              // Signal still active — re-place at current price
               const entryPrice = roundPrice(price);
               const newOrder   = await placeLimitBuy(SYMBOL, pos.quantity, entryPrice);
               await updateLiveEntryOrder(pos.id, newOrder.orderId, entryPrice);
               log.push({ action: "ENTRY_RECHASE", price: entryPrice, z: z.toFixed(3) });
             } else {
-              // Signal gone — give up
               await closeLivePosition(pos.id, { exit_price: 0, pnl: 0, result: "MISSED" });
               log.push({ action: "ENTRY_MISSED", z: z.toFixed(3) });
             }
@@ -138,6 +155,13 @@ export const liveBot = schedules.task({
             await closeLivePosition(pos.id, { exit_price: fillPrice, pnl, result: "SL" });
             log.push({ action: "SL_FILLED", exit: fillPrice, pnl: pnl.toFixed(4) });
 
+          } else if (price < pos.sl) {
+            // Price dropped below SL stop price but limit sell didn't fill (gap-down).
+            // Cancel OCO and market sell to exit immediately.
+            try { await cancelOCO(SYMBOL, pos.oco_order_list_id); } catch {}
+            log.push({ action: "SL_STUCK_DETECTED", price, sl: pos.sl });
+            await marketExit(pos.id, pos.quantity, pos.entry_price, "SL_STUCK", log);
+
           } else if (pos.hold_count + 1 >= MAX_HOLD) {
             // Hold expired — cancel OCO, start chasing
             await cancelOCO(SYMBOL, pos.oco_order_list_id);
@@ -154,7 +178,7 @@ export const liveBot = schedules.task({
             log.push({ action: "HOLD", hold: pos.hold_count + 1, price });
           }
 
-        // 3. Chasing — trailing limit sell
+        // 3. Chasing — trailing limit sell with SL floor
         } else if (pos.status === "chasing") {
           const order = await getOrder(SYMBOL, pos.chase_order_id);
 
@@ -165,8 +189,14 @@ export const liveBot = schedules.task({
             });
             log.push({ action: "CHASE_FILLED", exit: pos.chase_price, pnl: pnl.toFixed(4) });
 
+          } else if (price < pos.sl) {
+            // Price dropped below original SL during chase — no limit will fill, market sell
+            try { await cancelOrder(SYMBOL, pos.chase_order_id); } catch {}
+            log.push({ action: "CHASE_SL_HIT", price, sl: pos.sl });
+            await marketExit(pos.id, pos.quantity, pos.entry_price, "SL_CHASE", log);
+
           } else {
-            // Always re-place — trails price up AND down, order always near market
+            // Re-place every candle — trails price up AND down
             try { await cancelOrder(SYMBOL, pos.chase_order_id); } catch {}
             const newChasePrice = roundPrice(price * (1 - CHASE_OFFSET));
             const newOrder      = await placeLimitSell(SYMBOL, pos.quantity, newChasePrice);
@@ -185,7 +215,7 @@ export const liveBot = schedules.task({
             log.push({ action: "SKIP_NO_FUNDS", balance: usdtBalance, needed: ALLOCATION });
           } else {
             const qty = floorQty(ALLOCATION / price);
-            if (qty * price >= 10) {   // min notional check
+            if (qty * price >= 10) {
               const entryPrice = roundPrice(price);
               const order      = await placeLimitBuy(SYMBOL, qty, entryPrice);
               await openLivePosition({
