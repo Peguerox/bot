@@ -1,6 +1,6 @@
 import { schedules } from "@trigger.dev/sdk/v3";
 import {
-  getKlines, placeLimitBuy, placeLimitSell, placeOCO,
+  getKlines, getPrice, placeLimitBuy, placeLimitSell, placeOCO,
   cancelOrder, cancelOCO, getOrder, getFreeBalance,
 } from "../lib/binance";
 import { calcZScore, Z_THRESH, TP_PCT, SL_PCT, MAX_HOLD } from "../lib/strategy";
@@ -55,10 +55,17 @@ export const liveBot = schedules.task({
 
     // ── Trading logic ────────────────────────────────────────────────────────
     try {
-      const btcCandles = (await getKlines("BTCUSDT", "1m", CANDLES)).slice(0, -1);
-      const altCandles = (await getKlines(SYMBOL,    "1m", CANDLES)).slice(0, -1);
-      const price      = altCandles[altCandles.length - 1].close;
-      const z          = calcZScore(btcCandles, altCandles);
+      const [btcCandles, altCandles, price, btcPrice] = await Promise.all([
+        getKlines("BTCUSDT", "1m", CANDLES).then(c => c.slice(0, -1)),
+        getKlines(SYMBOL,    "1m", CANDLES).then(c => c.slice(0, -1)),
+        getPrice(SYMBOL),
+        getPrice("BTCUSDT"),
+      ]);
+
+      // Append live prices as the 50th candle for z-score calculation
+      const btcWithLive = [...btcCandles, { close: btcPrice }];
+      const altWithLive = [...altCandles, { close: price }];
+      const z           = calcZScore(btcWithLive, altWithLive);
 
       const pos = await getLivePosition();
 
