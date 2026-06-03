@@ -150,7 +150,7 @@ export const liveBot = schedules.task({
           log.push({ action: "CHASE_FILLED", exit: pos.chase_price, pnl: pnl.toFixed(4) });
 
         } else {
-          // Price moved up — cancel and re-place below new price
+          // Cancel and re-place every candle — guarantees order is always active
           try { await cancelOrder(SYMBOL, pos.chase_order_id); } catch {}
           const newChasePrice = roundPrice(price * (1 - CHASE_OFFSET));
           const newOrder      = await placeLimitSell(SYMBOL, pos.quantity, newChasePrice);
