@@ -182,12 +182,125 @@ function AccumulatorPanel({ state, switches, loading }: { state: any; switches: 
   );
 }
 
+function LiveBotPanel({ settings, liveOpen, liveTrades, loading, onToggle, toggling }: {
+  settings: any; liveOpen: any[]; liveTrades: any[]; loading: boolean;
+  onToggle: () => void; toggling: boolean;
+}) {
+  const enabled    = settings?.enabled ?? false;
+  const balance    = settings?.usdt_balance ?? 0;
+  const totalPnL   = liveTrades.reduce((s: number, t: any) => s + (t.pnl ?? 0), 0);
+  const wins       = liveTrades.filter((t: any) => t.pnl > 0).length;
+  const losses     = liveTrades.filter((t: any) => t.pnl < 0).length;
+  const decided    = wins + losses;
+  const winRate    = decided > 0 ? (wins / decided * 100).toFixed(1) : "—";
+
+  return (
+    <div className="bg-gray-900 rounded-xl p-5 space-y-5 flex flex-col col-span-full">
+      {/* Header */}
+      <div className="flex items-center justify-between">
+        <div>
+          <h2 className="text-white font-bold text-lg">Live Bot — ATOM/USDT</h2>
+          <p className="text-gray-500 text-xs mt-0.5">Binance.US · 1m · Z=2.0 · TP 0.8% · SL 0.3% · $200 allocation</p>
+        </div>
+        <div className="flex items-center gap-3">
+          <div className="text-right">
+            <p className="text-gray-500 text-xs">USDT Balance</p>
+            <p className={`text-sm font-bold font-mono ${balance >= 200 ? "text-green-400" : "text-red-400"}`}>
+              ${Number(balance).toFixed(2)}
+            </p>
+          </div>
+          <button
+            onClick={onToggle}
+            disabled={toggling}
+            className={`relative inline-flex h-8 w-14 items-center rounded-full transition-colors focus:outline-none ${
+              enabled ? "bg-green-500" : "bg-gray-700"
+            } ${toggling ? "opacity-50 cursor-not-allowed" : "cursor-pointer"}`}
+          >
+            <span className={`inline-block h-6 w-6 transform rounded-full bg-white shadow transition-transform ${
+              enabled ? "translate-x-7" : "translate-x-1"
+            }`} />
+          </button>
+          <span className={`text-xs font-medium w-8 ${enabled ? "text-green-400" : "text-gray-500"}`}>
+            {enabled ? "ON" : "OFF"}
+          </span>
+        </div>
+      </div>
+
+      {/* Stats */}
+      {loading ? (
+        <div className="grid grid-cols-4 gap-2 animate-pulse">
+          {[...Array(4)].map((_, i) => <div key={i} className="h-16 bg-gray-800 rounded-lg" />)}
+        </div>
+      ) : (
+        <div className="grid grid-cols-2 lg:grid-cols-4 gap-2">
+          <Stat label="Total PnL"   value={`${totalPnL >= 0 ? "+" : ""}$${totalPnL.toFixed(2)}`} sub={`${liveTrades.length} closed trades`}    color={totalPnL >= 0 ? "text-green-400" : "text-red-400"} />
+          <Stat label="Win Rate"    value={`${winRate}%`}   sub={`${wins}W / ${losses}L`}         color="text-blue-400" />
+          <Stat label="Open"        value={String(liveOpen.length)} sub={liveOpen[0] ? `Entry $${Number(liveOpen[0].entry_price).toFixed(4)}` : "No open position"} color="text-purple-400" />
+          <Stat label="Status"      value={enabled ? "ACTIVE" : "PAUSED"} sub={enabled ? "Scanning every 1m" : "Toggle to activate"} color={enabled ? "text-green-400" : "text-gray-500"} />
+        </div>
+      )}
+
+      {/* Open position detail */}
+      {liveOpen.length > 0 && (
+        <div className="bg-gray-800/40 rounded-lg p-3 space-y-1">
+          <p className="text-gray-500 text-xs uppercase tracking-wide mb-2">Open Position</p>
+          {liveOpen.map((p: any) => (
+            <div key={p.id} className="flex items-center justify-between text-sm">
+              <div className="space-y-0.5">
+                <p className="text-white font-mono">Entry <span className="text-yellow-400">${Number(p.entry_price).toFixed(4)}</span></p>
+                <p className="text-gray-500 text-xs">TP <span className="text-green-400">${Number(p.tp).toFixed(4)}</span> · SL <span className="text-red-400">${Number(p.sl).toFixed(4)}</span></p>
+              </div>
+              <div className="text-right">
+                <span className={`text-xs font-bold px-2 py-0.5 rounded-full ${
+                  p.status === "chasing" ? "bg-yellow-500/20 text-yellow-400" :
+                  p.status === "pending" ? "bg-blue-500/20 text-blue-400" :
+                  "bg-green-500/20 text-green-400"
+                }`}>{p.status.toUpperCase()}</span>
+                <p className="text-gray-600 text-xs mt-1">Hold {p.hold_count}/6</p>
+              </div>
+            </div>
+          ))}
+        </div>
+      )}
+
+      {/* Recent live trades */}
+      {liveTrades.length > 0 && (
+        <div>
+          <p className="text-gray-500 text-xs uppercase tracking-wide mb-2">Recent Trades</p>
+          <div className="space-y-1.5">
+            {liveTrades.slice(0, 5).map((t: any) => (
+              <div key={t.id} className="flex items-center justify-between bg-gray-800/60 rounded-lg px-3 py-2 text-xs">
+                <div className="flex items-center gap-2">
+                  <span className={`font-bold px-1.5 py-0.5 rounded ${
+                    t.result === "TP" ? "bg-green-500/20 text-green-400" :
+                    t.result === "SL" ? "bg-red-500/20 text-red-400" :
+                    t.result === "CHASE_FILL" ? "bg-yellow-500/20 text-yellow-400" :
+                    "bg-gray-500/20 text-gray-400"
+                  }`}>{t.result}</span>
+                  <span className="text-gray-500 font-mono">${Number(t.entry_price).toFixed(4)} → ${Number(t.exit_price).toFixed(4)}</span>
+                </div>
+                <span className={`font-mono font-bold ${t.pnl >= 0 ? "text-green-400" : "text-red-400"}`}>
+                  {t.pnl >= 0 ? "+" : ""}${Number(t.pnl).toFixed(3)}
+                </span>
+              </div>
+            ))}
+          </div>
+        </div>
+      )}
+    </div>
+  );
+}
+
 export default function Dashboard() {
   const [trades, setTrades]           = useState<any[]>([]);
   const [open, setOpen]               = useState<any[]>([]);
   const [accState, setAccState]       = useState<any>(null);
   const [accSwitches, setAccSwitches] = useState<any[]>([]);
+  const [liveSettings, setLiveSettings] = useState<any>(null);
+  const [liveOpen, setLiveOpen]       = useState<any[]>([]);
+  const [liveTrades, setLiveTrades]   = useState<any[]>([]);
   const [loading, setLoading]         = useState(true);
+  const [toggling, setToggling]       = useState(false);
 
   async function load() {
     const [
@@ -195,17 +308,33 @@ export default function Dashboard() {
       { data: openPos },
       { data: accSt },
       { data: accSw },
+      { data: liveSt },
+      { data: liveOp },
+      { data: liveCl },
     ] = await Promise.all([
       getSupabase().from("positions").select("*").eq("status", "closed").order("exit_time", { ascending: false }),
       getSupabase().from("positions").select("*").in("status", ["open", "chasing"]),
       getSupabase().from("accumulator_state").select("*").single(),
       getSupabase().from("accumulator_switches").select("*").order("switched_at", { ascending: false }).limit(10),
+      getSupabase().from("live_settings").select("*").single(),
+      getSupabase().from("live_positions").select("*").in("status", ["pending", "open", "chasing"]),
+      getSupabase().from("live_positions").select("*").eq("status", "closed").order("exit_time", { ascending: false }).limit(20),
     ]);
     setTrades(closed ?? []);
     setOpen(openPos ?? []);
     setAccState(accSt ?? null);
     setAccSwitches(accSw ?? []);
+    setLiveSettings(liveSt ?? null);
+    setLiveOpen(liveOp ?? []);
+    setLiveTrades(liveCl ?? []);
     setLoading(false);
+  }
+
+  async function handleToggle() {
+    setToggling(true);
+    await fetch("/api/live/toggle", { method: "POST" });
+    await load();
+    setToggling(false);
   }
 
   useEffect(() => {
@@ -217,7 +346,11 @@ export default function Dashboard() {
     const ch2 = sb.channel("accumulator")
       .on("postgres_changes", { event: "*", schema: "public", table: "accumulator_state" }, load)
       .subscribe();
-    return () => { sb.removeChannel(ch1); sb.removeChannel(ch2); };
+    const ch3 = sb.channel("live")
+      .on("postgres_changes", { event: "*", schema: "public", table: "live_positions" }, load)
+      .on("postgres_changes", { event: "*", schema: "public", table: "live_settings" }, load)
+      .subscribe();
+    return () => { sb.removeChannel(ch1); sb.removeChannel(ch2); sb.removeChannel(ch3); };
   }, []);
 
   return (
@@ -227,10 +360,16 @@ export default function Dashboard() {
         {/* Top header */}
         <div className="flex items-center justify-between">
           <h1 className="text-2xl font-bold text-white">TradeBot Dashboard</h1>
-          <span className="text-gray-500 text-sm">Paper Trading</span>
+          <span className="text-gray-500 text-sm">Paper + Live</span>
         </div>
 
-        {/* Two panels side by side */}
+        {/* Live bot — full width */}
+        <LiveBotPanel
+          settings={liveSettings} liveOpen={liveOpen} liveTrades={liveTrades}
+          loading={loading} onToggle={handleToggle} toggling={toggling}
+        />
+
+        {/* Paper bots side by side */}
         <div className="grid grid-cols-1 lg:grid-cols-2 gap-6 items-start">
           <ZScorePanel  trades={trades} open={open} loading={loading} />
           <AccumulatorPanel state={accState} switches={accSwitches} loading={loading} />
