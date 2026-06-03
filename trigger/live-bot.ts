@@ -94,7 +94,7 @@ export const liveBot = schedules.task({
           log.push({ action: "TP_FILLED", exit: pos.tp, pnl: pnl.toFixed(4) });
 
         } else if (slOrder.status === "FILLED") {
-          const fillPrice = parseFloat(slOrder.price);
+          const fillPrice = parseFloat(slOrder.cummulativeQuoteQty) / parseFloat(slOrder.executedQty);
           const pnl       = (fillPrice - pos.entry_price) * pos.quantity;
           await closeLivePosition(pos.id, { exit_price: fillPrice, pnl, result: "SL" });
           log.push({ action: "SL_FILLED", exit: fillPrice, pnl: pnl.toFixed(4) });
