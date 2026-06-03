@@ -49,9 +49,11 @@ function LagBotPanel({
     if (dd < maxDD) maxDD = dd;
   });
 
-  const isLive    = mode === "live";
-  const balance   = isLive ? (usdtBalance ?? 0) : initial + totalPnL;
-  const balanceSub = isLive ? "free USDT · Binance.US" : `${totalPnL >= 0 ? "+" : ""}$${totalPnL.toFixed(2)} paper PnL`;
+  const isLive     = mode === "live";
+  const balance    = initial + totalPnL;
+  const balanceSub = isLive
+    ? `${totalPnL >= 0 ? "+" : ""}$${totalPnL.toFixed(2)} PnL · $${Number(usdtBalance ?? 0).toFixed(2)} avail`
+    : `${totalPnL >= 0 ? "+" : ""}$${totalPnL.toFixed(2)} paper PnL`;
 
   return (
     <div className="bg-gray-900 rounded-xl p-5 space-y-5 flex flex-col">
@@ -105,7 +107,7 @@ function LagBotPanel({
             label="Balance"
             value={`$${balance.toFixed(2)}`}
             sub={balanceSub}
-            color={isLive ? (balance >= LIVE_INITIAL ? "text-green-400" : "text-red-400") : (totalPnL >= 0 ? "text-green-400" : "text-red-400")}
+            color={balance >= initial ? "text-green-400" : "text-red-400"}
           />
           <Stat label="Win Rate"      value={`${winRate}%`}        sub={`${wins.length}W / ${losses.length}L of ${decided.length}`} color="text-blue-400" />
           <Stat label="Profit Factor" value={pf}                   sub={openPositions.length > 0 ? `${openPositions.length} open` : "No open positions"} color="text-purple-400" />
