@@ -97,15 +97,6 @@ export async function placeLimitSell(symbol: string, qty: number, price: number)
   });
 }
 
-export async function placeMarketSell(symbol: string, qty: number): Promise<OrderResponse> {
-  return signedPost("/order", {
-    symbol,
-    side:     "SELL",
-    type:     "MARKET",
-    quantity: qty.toFixed(2),
-  });
-}
-
 // TP = limit sell above market; SL = stop-limit sell below market
 export async function placeOCO(
   symbol: string, qty: number,
