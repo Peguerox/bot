@@ -8,6 +8,7 @@ import {
   getLivePosition, openLivePosition, setLivePositionOpen,
   incrementLiveHold, setLivePositionChasing, updateLiveChaseOrder,
   closeLivePosition, logLiveRun, getLiveSettings, updateLiveBalance,
+  updateLiveEntryOrder,
 } from "../lib/live-db";
 
 const SYMBOL       = "ATOMUSDT";
@@ -58,27 +59,49 @@ export const liveBot = schedules.task({
           const qty       = parseFloat(order.executedQty);
           const tp        = roundPrice(fillPrice * (1 + TP_PCT));
           const sl        = roundPrice(fillPrice * (1 - SL_PCT));
-          // SL limit price = 1 tick below SL stop to ensure fill
           const slLimit   = roundPrice(sl - 0.0001);
 
-          const oco = await placeOCO(SYMBOL, qty, tp, sl, slLimit);
-          // orderReports[0] is the limit (TP) leg, [1] is the stop-limit (SL) leg
-          const tpOrderId = oco.orderReports[0].orderId;
-          const slOrderId = oco.orderReports[1].orderId;
-
-          await setLivePositionOpen(pos.id, {
-            entry_price: fillPrice, quantity: qty,
-            tp, sl,
-            tp_order_id: tpOrderId, sl_order_id: slOrderId,
-            oco_order_list_id: oco.orderListId,
-          });
-          log.push({ action: "ENTRY_FILLED", price: fillPrice, qty, tp, sl });
+          if (price >= tp) {
+            // Price already blew past TP — OCO would be rejected by Binance.
+            // Go straight to chasing with a limit sell below current price.
+            const chasePrice = roundPrice(price * (1 - CHASE_OFFSET));
+            const chaseOrder = await placeLimitSell(SYMBOL, qty, chasePrice);
+            await setLivePositionOpen(pos.id, {
+              entry_price: fillPrice, quantity: qty, tp, sl,
+              tp_order_id: 0, sl_order_id: 0, oco_order_list_id: 0,
+            });
+            await setLivePositionChasing(pos.id, {
+              chase_order_id: chaseOrder.orderId,
+              chase_price:    chasePrice,
+            });
+            log.push({ action: "ENTRY_FILLED_SKIP_TO_CHASE", fillPrice, qty, price, chasePrice });
+          } else {
+            const oco       = await placeOCO(SYMBOL, qty, tp, sl, slLimit);
+            const tpOrderId = oco.orderReports[0].orderId;
+            const slOrderId = oco.orderReports[1].orderId;
+            await setLivePositionOpen(pos.id, {
+              entry_price: fillPrice, quantity: qty,
+              tp, sl,
+              tp_order_id: tpOrderId, sl_order_id: slOrderId,
+              oco_order_list_id: oco.orderListId,
+            });
+            log.push({ action: "ENTRY_FILLED", price: fillPrice, qty, tp, sl });
+          }
 
         } else {
-          // Signal is stale after 1 candle — cancel and mark missed
+          // Not filled yet — cancel and re-place if signal still valid
           try { await cancelOrder(SYMBOL, pos.entry_order_id); } catch {}
-          await closeLivePosition(pos.id, { exit_price: 0, pnl: 0, result: "MISSED" });
-          log.push({ action: "ENTRY_MISSED", z: z.toFixed(3) });
+          if (z <= -Z_THRESH) {
+            // Signal still active — re-place at current price
+            const entryPrice = roundPrice(price);
+            const newOrder   = await placeLimitBuy(SYMBOL, pos.quantity, entryPrice);
+            await updateLiveEntryOrder(pos.id, newOrder.orderId, entryPrice);
+            log.push({ action: "ENTRY_RECHASE", price: entryPrice, z: z.toFixed(3) });
+          } else {
+            // Signal gone — give up
+            await closeLivePosition(pos.id, { exit_price: 0, pnl: 0, result: "MISSED" });
+            log.push({ action: "ENTRY_MISSED", z: z.toFixed(3) });
+          }
         }
 
       // 2. In position, OCO active

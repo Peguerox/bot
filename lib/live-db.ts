@@ -26,6 +26,13 @@ export async function openLivePosition(params: {
   });
 }
 
+export async function updateLiveEntryOrder(id: string, entryOrderId: number, entryPrice: number) {
+  await getSupabaseAdmin()
+    .from("live_positions")
+    .update({ entry_order_id: entryOrderId, entry_price: entryPrice })
+    .eq("id", id);
+}
+
 export async function setLivePositionOpen(id: string, params: {
   entry_price:        number;
   quantity:           number;
