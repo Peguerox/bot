@@ -27,6 +27,11 @@ export const liveBot = schedules.task({
 
   run: async () => {
     const settings = await getLiveSettings();
+
+    // Always update balance so the dashboard stays current
+    const usdtBalance = await getFreeBalance("USDT");
+    await updateLiveBalance(usdtBalance);
+
     if (!settings?.enabled) {
       return { ok: false, reason: "disabled" };
     }
@@ -137,8 +142,6 @@ export const liveBot = schedules.task({
     // ── No open position — check for signal ──────────────────────────────────
     } else {
       if (z <= -Z_THRESH) {
-        const usdtBalance = await getFreeBalance("USDT");
-        await updateLiveBalance(usdtBalance);
         if (usdtBalance < ALLOCATION) {
           log.push({ action: "SKIP_NO_FUNDS", balance: usdtBalance, needed: ALLOCATION });
         } else {

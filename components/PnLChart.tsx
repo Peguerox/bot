@@ -2,16 +2,14 @@
 
 import { LineChart, Line, XAxis, YAxis, Tooltip, ResponsiveContainer, ReferenceLine } from "recharts";
 
-const INITIAL = 2000;
-
-export default function PnLChart({ trades }: { trades: any[] }) {
+export default function PnLChart({ trades, initial = 2000 }: { trades: any[]; initial?: number }) {
   if (trades.length === 0) return (
     <div className="h-48 flex items-center justify-center text-gray-600 text-sm">
-      No trades yet — bot is watching for signals
+      No trades yet — watching for signals
     </div>
   );
 
-  let balance = INITIAL;
+  let balance = initial;
   const data = [...trades].reverse().map((t, i) => {
     balance += t.pnl ?? 0;
     return {
@@ -48,7 +46,7 @@ export default function PnLChart({ trades }: { trades: any[] }) {
           labelFormatter={(_: any, payload: readonly any[]) => payload?.[0]?.payload?.label ?? ""}
           formatter={(v: any) => [`$${Number(v).toFixed(2)}`, "Balance"]}
         />
-        <ReferenceLine y={INITIAL} stroke="#374151" strokeDasharray="4 4" />
+        <ReferenceLine y={initial} stroke="#374151" strokeDasharray="4 4" />
         <Line
           type="monotone"
           dataKey="balance"
