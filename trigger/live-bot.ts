@@ -1,7 +1,7 @@
 import { schedules } from "@trigger.dev/sdk/v3";
 import {
   getKlines, getPrice, placeLimitBuy, placeLimitSell, placeOCO,
-  cancelOrder, cancelOCO, getOrder, getFreeBalance,
+  cancelOrder, cancelOCO, getOrder, getFreeBalance, placeMarketSell,
 } from "../lib/binance";
 import { calcZScore, Z_THRESH, TP_PCT, SL_PCT, MAX_HOLD } from "../lib/strategy";
 import {
@@ -85,8 +85,7 @@ export const liveBot = schedules.task({
             const slLimit   = roundPrice(sl - 0.0001);
 
             if (price >= tp) {
-              // Price already blew past TP — OCO would be rejected by Binance.
-              // Go straight to chasing with a limit sell below current price.
+              // Price already past TP — skip OCO, go straight to chase
               const chasePrice = roundPrice(price * (1 - CHASE_OFFSET));
               const chaseOrder = await placeLimitSell(SYMBOL, qty, chasePrice);
               await setLivePositionOpen(pos.id, {
@@ -98,6 +97,19 @@ export const liveBot = schedules.task({
                 chase_price:    chasePrice,
               });
               log.push({ action: "ENTRY_FILLED_SKIP_TO_CHASE", fillPrice, qty, price, chasePrice });
+
+            } else if (price <= sl) {
+              // Price already below SL — OCO would be rejected, market sell immediately
+              const exitOrder = await placeMarketSell(SYMBOL, qty);
+              const exitPrice = parseFloat(exitOrder.cummulativeQuoteQty) / parseFloat(exitOrder.executedQty);
+              const pnl       = (exitPrice - fillPrice) * qty;
+              await setLivePositionOpen(pos.id, {
+                entry_price: fillPrice, quantity: qty, tp, sl,
+                tp_order_id: 0, sl_order_id: 0, oco_order_list_id: 0,
+              });
+              await closeLivePosition(pos.id, { exit_price: exitPrice, pnl, result: "SL_IMMEDIATE" });
+              log.push({ action: "SL_IMMEDIATE", fillPrice, exitPrice, pnl: pnl.toFixed(4) });
+
             } else {
               const oco       = await placeOCO(SYMBOL, qty, tp, sl, slLimit);
               const tpOrderId = oco.orderReports[0].orderId;
