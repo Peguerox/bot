@@ -28,6 +28,7 @@ function LagBotPanel({
   openPositions:  any[];
   loading:        boolean;
   usdtBalance?:   number;
+  atomBalance?:   number;
   enabled?:       boolean;
   onToggle?:      () => void;
   toggling?:      boolean;
@@ -54,7 +55,7 @@ function LagBotPanel({
   const isLive     = mode === "live";
   const balance    = initial + totalPnL;
   const balanceSub = isLive
-    ? `${totalPnL >= 0 ? "+" : ""}$${totalPnL.toFixed(2)} PnL · $${Number(usdtBalance ?? 0).toFixed(2)} avail`
+    ? `${totalPnL >= 0 ? "+" : ""}$${totalPnL.toFixed(2)} PnL · $${Number(usdtBalance ?? 0).toFixed(2)} USDT · ${Number(atomBalance ?? 0).toFixed(2)} ATOM`
     : `${totalPnL >= 0 ? "+" : ""}$${totalPnL.toFixed(2)} paper PnL`;
 
   return (
@@ -161,6 +162,7 @@ export default function Dashboard() {
   const [liveSettings, setLiveSettings] = useState<any>(null);
   const [liveOpen, setLiveOpen]         = useState<any[]>([]);
   const [liveTrades, setLiveTrades]     = useState<any[]>([]);
+  const [atomBalance, setAtomBalance]   = useState<number>(0);
   const [loading, setLoading]           = useState(true);
   const [toggling, setToggling]         = useState(false);
   const [resetting, setResetting]       = useState(false);
@@ -182,10 +184,11 @@ export default function Dashboard() {
     setTrades(closed ?? []);
     setOpen(openPos ?? []);
     setLiveSettings(liveSt ?? null);
-    // normalize live open positions to match paper format
     setLiveOpen((liveOp ?? []).map((p: any) => ({ ...p, pair: "ATOM" })));
     setLiveTrades(liveCl ?? []);
     setLoading(false);
+    // Fetch live balances from Binance
+    fetch("/api/live/balances").then(r => r.json()).then(b => setAtomBalance(b.atom ?? 0)).catch(() => {});
   }
 
   async function handleToggle() {
@@ -236,6 +239,7 @@ export default function Dashboard() {
             openPositions={liveOpen}
             loading={loading}
             usdtBalance={liveSettings?.usdt_balance}
+            atomBalance={atomBalance}
             enabled={liveSettings?.enabled}
             onToggle={handleToggle}
             toggling={toggling}
