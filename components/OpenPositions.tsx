@@ -39,9 +39,10 @@ export default function OpenPositions({ positions, loading }: {
   return (
     <div className="space-y-3">
       {positions.map(pos => {
-        const price   = prices[pos.pair] ?? pos.entry_price;
-        const livePnL = (price - pos.entry_price) * pos.quantity;
-        const pct     = ((price - pos.entry_price) / pos.entry_price * 100).toFixed(2);
+        const price    = prices[pos.pair] ?? pos.entry_price;
+        const exitPrice = pos.status === "chasing" ? pos.chase_price : price;
+        const livePnL  = (exitPrice - pos.entry_price) * pos.quantity;
+        const pct      = ((exitPrice - pos.entry_price) / pos.entry_price * 100).toFixed(2);
         const isUp    = livePnL >= 0;
 
         return (
