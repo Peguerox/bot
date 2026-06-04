@@ -155,98 +155,9 @@ function LagBotPanel({
   );
 }
 
-function AccumulatorPanel({ state, switches, loading }: { state: any; switches: any[]; loading: boolean }) {
-  const startBtc  = state?.btc_value ?? 0;
-  const initBtc   = switches.length > 0
-    ? (switches[switches.length - 1]?.btc_value_before ?? startBtc)
-    : startBtc;
-  const gainBtc   = state ? state.btc_value - initBtc : 0;
-  const gainPct   = initBtc > 0 ? (gainBtc / initBtc * 100) : 0;
-  const isSOL     = state?.holding === "SOL";
-
-  return (
-    <div className="bg-gray-900 rounded-xl p-5 space-y-5">
-      <div>
-        <div className="flex items-center justify-between">
-          <h2 className="text-white font-bold text-lg">Accumulator Bot</h2>
-          <span className="flex items-center gap-1.5">
-            <span className="w-2 h-2 rounded-full bg-green-400 animate-pulse" />
-            <span className="text-green-400 text-xs font-medium">Running</span>
-          </span>
-        </div>
-        <p className="text-gray-500 text-xs mt-0.5">SOL/BTC · 5m · BB(10) · Accumulate BTC</p>
-      </div>
-
-      {loading || !state ? (
-        <div className="grid grid-cols-2 gap-2 animate-pulse">
-          {[...Array(4)].map((_, i) => <div key={i} className="h-16 bg-gray-800 rounded-lg" />)}
-        </div>
-      ) : (
-        <div className="grid grid-cols-2 gap-2">
-          <Stat label="BTC Value" value={Number(state.btc_value).toFixed(6)} sub={`≈ $${(Number(state.btc_value) * 73000).toFixed(0)}`} color="text-orange-400" />
-          <Stat label="BTC Gain"  value={`${gainBtc >= 0 ? "+" : ""}${gainBtc.toFixed(6)}`} sub={`${gainPct >= 0 ? "+" : ""}${gainPct.toFixed(2)}%`} color={gainBtc >= 0 ? "text-green-400" : "text-red-400"} />
-          <Stat label="Holding"   value={state.holding} sub={`${Number(state.quantity).toFixed(4)} ${state.holding}`} color={isSOL ? "text-purple-400" : "text-orange-400"} />
-          <Stat label="Switches"  value={String(state.switches)} sub="total switches" color="text-blue-400" />
-        </div>
-      )}
-
-      <div>
-        <p className="text-gray-500 text-xs uppercase tracking-wide mb-2">Recent Switches</p>
-        {loading ? (
-          <div className="animate-pulse space-y-2">
-            {[...Array(5)].map((_, i) => <div key={i} className="h-8 bg-gray-800 rounded" />)}
-          </div>
-        ) : switches.length === 0 ? (
-          <p className="text-gray-600 text-sm">No switches yet</p>
-        ) : (
-          <div className="space-y-2">
-            {switches.map((s: any, i: number) => {
-              const gained = s.btc_value_after - s.btc_value_before;
-              return (
-                <div key={i} className="flex items-center justify-between bg-gray-800/60 rounded-lg px-3 py-2">
-                  <div className="flex items-center gap-2">
-                    <span className={`text-xs font-bold px-2 py-0.5 rounded-full ${
-                      s.to_asset === "SOL" ? "bg-purple-500/20 text-purple-400" : "bg-orange-500/20 text-orange-400"
-                    }`}>{s.from_asset} → {s.to_asset}</span>
-                    <span className="text-gray-600 text-xs font-mono">{Number(s.sol_btc_price).toFixed(6)}</span>
-                  </div>
-                  <div className="text-right">
-                    <p className={`text-xs font-mono ${gained >= 0 ? "text-green-400" : "text-red-400"}`}>
-                      {gained >= 0 ? "+" : ""}{gained.toFixed(6)} BTC
-                    </p>
-                    <p className="text-gray-600 text-xs">
-                      {new Date(s.switched_at).toLocaleTimeString("en-US", { hour: "2-digit", minute: "2-digit" })}
-                    </p>
-                  </div>
-                </div>
-              );
-            })}
-          </div>
-        )}
-      </div>
-
-      {state && (
-        <div className="bg-gray-800/40 rounded-lg p-3">
-          <p className="text-gray-500 text-xs uppercase tracking-wide mb-1">Current Position</p>
-          <p className="text-white text-sm">
-            Holding <span className={`font-bold ${isSOL ? "text-purple-400" : "text-orange-400"}`}>{state.holding}</span>
-            {" "}— {Number(state.quantity).toFixed(6)} {state.holding}
-            {" "}= <span className="font-mono">{Number(state.btc_value).toFixed(6)} BTC</span>
-          </p>
-          <p className="text-gray-600 text-xs mt-1">
-            Last updated {new Date(state.updated_at).toLocaleTimeString("en-US", { hour: "2-digit", minute: "2-digit", second: "2-digit" })}
-          </p>
-        </div>
-      )}
-    </div>
-  );
-}
-
 export default function Dashboard() {
   const [trades, setTrades]             = useState<any[]>([]);
   const [open, setOpen]                 = useState<any[]>([]);
-  const [accState, setAccState]         = useState<any>(null);
-  const [accSwitches, setAccSwitches]   = useState<any[]>([]);
   const [liveSettings, setLiveSettings] = useState<any>(null);
   const [liveOpen, setLiveOpen]         = useState<any[]>([]);
   const [liveTrades, setLiveTrades]     = useState<any[]>([]);
@@ -258,24 +169,18 @@ export default function Dashboard() {
     const [
       { data: closed },
       { data: openPos },
-      { data: accSt },
-      { data: accSw },
       { data: liveSt },
       { data: liveOp },
       { data: liveCl },
     ] = await Promise.all([
       getSupabase().from("positions").select("*").eq("status", "closed").order("exit_time", { ascending: false }),
       getSupabase().from("positions").select("*").in("status", ["open", "chasing"]),
-      getSupabase().from("accumulator_state").select("*").single(),
-      getSupabase().from("accumulator_switches").select("*").order("switched_at", { ascending: false }).limit(10),
       getSupabase().from("live_settings").select("*").single(),
       getSupabase().from("live_positions").select("*").in("status", ["pending", "open", "chasing"]),
       getSupabase().from("live_positions").select("*").eq("status", "closed").order("exit_time", { ascending: false }).limit(20),
     ]);
     setTrades(closed ?? []);
     setOpen(openPos ?? []);
-    setAccState(accSt ?? null);
-    setAccSwitches(accSw ?? []);
     setLiveSettings(liveSt ?? null);
     // normalize live open positions to match paper format
     setLiveOpen((liveOp ?? []).map((p: any) => ({ ...p, pair: "ATOM" })));
@@ -304,14 +209,11 @@ export default function Dashboard() {
     const ch1 = sb.channel("positions")
       .on("postgres_changes", { event: "*", schema: "public", table: "positions" }, load)
       .subscribe();
-    const ch2 = sb.channel("accumulator")
-      .on("postgres_changes", { event: "*", schema: "public", table: "accumulator_state" }, load)
-      .subscribe();
     const ch3 = sb.channel("live")
       .on("postgres_changes", { event: "*", schema: "public", table: "live_positions" }, load)
       .on("postgres_changes", { event: "*", schema: "public", table: "live_settings" }, load)
       .subscribe();
-    return () => { sb.removeChannel(ch1); sb.removeChannel(ch2); sb.removeChannel(ch3); };
+    return () => { sb.removeChannel(ch1); sb.removeChannel(ch3); };
   }, []);
 
   return (
@@ -342,10 +244,8 @@ export default function Dashboard() {
           />
         </div>
 
-        {/* Accumulator full width */}
-        <AccumulatorPanel state={accState} switches={accSwitches} loading={loading} />
 
-      </div>
+</div>
     </main>
   );
 }
