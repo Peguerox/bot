@@ -21,7 +21,7 @@ function Stat({ label, value, sub, color }: { label: string; value: string; sub:
 
 function LagBotPanel({
   mode, trades, openPositions, loading,
-  usdtBalance, enabled, onToggle, toggling, onReset, resetting,
+  usdtBalance, atomBalance, enabled, onToggle, toggling, onReset, resetting,
 }: {
   mode:           "paper" | "live";
   trades:         any[];
