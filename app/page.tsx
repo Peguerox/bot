@@ -29,7 +29,7 @@ function actionColor(action: string) {
   if (action === "CHASE_HOLD")   return "text-gray-500";
   if (action === "HOLD")         return "text-gray-500";
   if (action === "SKIP_NO_FUNDS") return "text-orange-400";
-  if (action === "WATCH")        return "text-gray-600";
+  if (action === "WATCH")        return "text-gray-500";
   if (action === "ERROR")        return "text-red-400";
   return "text-gray-400";
 }
@@ -156,6 +156,14 @@ function LivePanel({
   });
   const balance = LIVE_INITIAL + totalPnL;
 
+  const latestPrice: number | null = (() => {
+    const actions: any[] = runs[0]?.data?.actions ?? [];
+    for (let i = actions.length - 1; i >= 0; i--) {
+      if (actions[i].price != null) return parseFloat(actions[i].price);
+    }
+    return null;
+  })();
+
   return (
     <div className="bg-gray-900 rounded-xl p-5 space-y-5 flex flex-col">
       {/* Header */}
@@ -234,10 +242,16 @@ function LivePanel({
               <td className="py-1.5 text-gray-400">USDT</td>
               <td className="py-1.5 text-right text-white">${botUsdt.toFixed(2)}</td>
             </tr>
-            <tr>
+            <tr className="border-b border-gray-800/50">
               <td className="py-1.5 text-gray-400">ATOM</td>
               <td className="py-1.5 text-right text-white">
                 {openPositions[0]?.quantity?.toFixed(4) ?? "0.0000"}
+              </td>
+            </tr>
+            <tr>
+              <td className="py-1.5 text-gray-400">ATOM price</td>
+              <td className="py-1.5 text-right text-yellow-400">
+                {latestPrice != null ? `$${latestPrice.toFixed(4)}` : "—"}
               </td>
             </tr>
           </tbody>
@@ -262,7 +276,7 @@ function LivePanel({
       {/* Live Activity Log */}
       <div>
         <p className="text-gray-500 text-xs uppercase tracking-wide mb-2">Live Activity</p>
-        <div className="space-y-0.5 font-mono text-xs">
+        <div className="h-56 overflow-y-auto space-y-0.5 font-mono text-sm pr-1">
           {runs.length === 0 && <p className="text-gray-600">No runs yet.</p>}
           {runs.map((r: any) => {
             const actions = r.data?.actions ?? [];
@@ -316,7 +330,7 @@ export default function Dashboard() {
       getSupabase().from("live_settings").select("*").single(),
       getSupabase().from("live_positions").select("*").in("status", ["open", "chasing"]),
       getSupabase().from("live_positions").select("*").eq("status", "closed").order("exit_time", { ascending: false }).limit(20),
-      getSupabase().from("live_runs").select("id,run_at,data").order("run_at", { ascending: false }).limit(15),
+      getSupabase().from("live_runs").select("id,run_at,data").order("run_at", { ascending: false }).limit(120),
     ]);
     setTrades(closed ?? []);
     setOpen(openPos ?? []);
