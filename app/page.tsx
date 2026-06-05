@@ -6,8 +6,9 @@ import PnLChart from "@/components/PnLChart";
 import TradeHistory from "@/components/TradeHistory";
 import OpenPositions from "@/components/OpenPositions";
 
-const PAPER_INITIAL = 2000;
-const LIVE_INITIAL  = 200;
+const PAPER_INITIAL  = 2000;
+const LIVE_INITIAL   = 200;
+const FAKING_INITIAL = 200;
 
 function Stat({ label, value, sub, color }: { label: string; value: string; sub: string; color: string }) {
   return (
@@ -23,7 +24,7 @@ function LagBotPanel({
   mode, trades, openPositions, loading,
   usdtBalance, atomBalance, enabled, onToggle, toggling, onReset, resetting,
 }: {
-  mode:           "paper" | "live";
+  mode:           "paper" | "live" | "faking";
   trades:         any[];
   openPositions:  any[];
   loading:        boolean;
@@ -35,7 +36,7 @@ function LagBotPanel({
   onReset?:       () => void;
   resetting?:     boolean;
 }) {
-  const initial    = mode === "paper" ? PAPER_INITIAL : LIVE_INITIAL;
+  const initial    = mode === "paper" ? PAPER_INITIAL : mode === "faking" ? FAKING_INITIAL : LIVE_INITIAL;
   const totalPnL   = trades.reduce((s, t) => s + (t.pnl ?? 0), 0);
   const decided    = trades.filter(t => t.result !== "EXPIRE" && t.result !== "MISSED");
   const wins       = decided.filter(t => t.pnl > 0);
@@ -52,7 +53,7 @@ function LagBotPanel({
     if (dd < maxDD) maxDD = dd;
   });
 
-  const isLive     = mode === "live";
+  const isLive     = mode === "live" || mode === "faking";
   const balance    = initial + totalPnL;
   const balanceSub = isLive
     ? `${totalPnL >= 0 ? "+" : ""}$${totalPnL.toFixed(2)} PnL · $${Number(usdtBalance ?? 0).toFixed(2)} USDT · ${Number(atomBalance ?? 0).toFixed(2)} ATOM`
@@ -66,11 +67,13 @@ function LagBotPanel({
           <div className="flex items-center gap-2">
             <h2 className="text-white font-bold text-lg">Lag Bot</h2>
             <span className={`text-xs font-bold px-2 py-0.5 rounded-full ${
-              isLive ? "bg-green-500/20 text-green-400" : "bg-blue-500/20 text-blue-400"
-            }`}>{isLive ? "LIVE" : "PAPER"}</span>
+              mode === "live"   ? "bg-green-500/20 text-green-400"  :
+              mode === "faking" ? "bg-orange-500/20 text-orange-400" :
+                                  "bg-blue-500/20 text-blue-400"
+            }`}>{mode === "live" ? "LIVE" : mode === "faking" ? "FAKING" : "PAPER"}</span>
           </div>
           <p className="text-gray-500 text-xs mt-0.5">
-            {isLive ? "ATOM/USDT · $200" : "BNB + ATOM · $2,000"} · 1m · Z=2.0 · TP 0.8% · SL 0.3%
+            {mode === "live" ? "ATOM/USDT · $200" : mode === "faking" ? "ATOM/USDT · $200" : "BNB + ATOM · $2,000"} · 1m · Z=2.0 · TP 0.8% · SL 0.3%
           </p>
         </div>
 
@@ -157,15 +160,20 @@ function LagBotPanel({
 }
 
 export default function Dashboard() {
-  const [trades, setTrades]             = useState<any[]>([]);
-  const [open, setOpen]                 = useState<any[]>([]);
-  const [liveSettings, setLiveSettings] = useState<any>(null);
-  const [liveOpen, setLiveOpen]         = useState<any[]>([]);
-  const [liveTrades, setLiveTrades]     = useState<any[]>([]);
-  const [atomBalance, setAtomBalance]   = useState<number>(0);
-  const [loading, setLoading]           = useState(true);
-  const [toggling, setToggling]         = useState(false);
-  const [resetting, setResetting]       = useState(false);
+  const [trades, setTrades]                   = useState<any[]>([]);
+  const [open, setOpen]                       = useState<any[]>([]);
+  const [liveSettings, setLiveSettings]       = useState<any>(null);
+  const [liveOpen, setLiveOpen]               = useState<any[]>([]);
+  const [liveTrades, setLiveTrades]           = useState<any[]>([]);
+  const [fakingSettings, setFakingSettings]   = useState<any>(null);
+  const [fakingOpen, setFakingOpen]           = useState<any[]>([]);
+  const [fakingTrades, setFakingTrades]       = useState<any[]>([]);
+  const [atomBalance, setAtomBalance]         = useState<number>(0);
+  const [loading, setLoading]                 = useState(true);
+  const [toggling, setToggling]               = useState(false);
+  const [resetting, setResetting]             = useState(false);
+  const [fakingToggling, setFakingToggling]   = useState(false);
+  const [fakingResetting, setFakingResetting] = useState(false);
 
   async function load() {
     const [
@@ -174,18 +182,27 @@ export default function Dashboard() {
       { data: liveSt },
       { data: liveOp },
       { data: liveCl },
+      { data: fakingSt },
+      { data: fakingOp },
+      { data: fakingCl },
     ] = await Promise.all([
       getSupabase().from("positions").select("*").eq("status", "closed").order("exit_time", { ascending: false }),
       getSupabase().from("positions").select("*").in("status", ["open", "chasing"]),
       getSupabase().from("live_settings").select("*").single(),
       getSupabase().from("live_positions").select("*").in("status", ["pending", "open", "chasing"]),
       getSupabase().from("live_positions").select("*").eq("status", "closed").order("exit_time", { ascending: false }).limit(20),
+      getSupabase().from("faking_settings").select("*").single(),
+      getSupabase().from("faking_positions").select("*").in("status", ["open", "chasing"]),
+      getSupabase().from("faking_positions").select("*").eq("status", "closed").order("exit_time", { ascending: false }).limit(20),
     ]);
     setTrades(closed ?? []);
     setOpen(openPos ?? []);
     setLiveSettings(liveSt ?? null);
     setLiveOpen((liveOp ?? []).map((p: any) => ({ ...p, pair: "ATOM" })));
     setLiveTrades(liveCl ?? []);
+    setFakingSettings(fakingSt ?? null);
+    setFakingOpen((fakingOp ?? []).map((p: any) => ({ ...p, pair: "ATOM" })));
+    setFakingTrades(fakingCl ?? []);
     setLoading(false);
     // Fetch live balances from Binance
     fetch("/api/live/balances").then(r => r.json()).then(b => setAtomBalance(b.atom ?? 0)).catch(() => {});
@@ -206,6 +223,21 @@ export default function Dashboard() {
     setResetting(false);
   }
 
+  async function handleFakingToggle() {
+    setFakingToggling(true);
+    await fetch("/api/faking/toggle", { method: "POST" });
+    await load();
+    setFakingToggling(false);
+  }
+
+  async function handleFakingReset() {
+    if (!confirm("Cancel all open ATOM orders and clear faking position?")) return;
+    setFakingResetting(true);
+    await fetch("/api/faking/reset", { method: "POST" });
+    await load();
+    setFakingResetting(false);
+  }
+
   useEffect(() => {
     load();
     const sb = getSupabase();
@@ -216,7 +248,11 @@ export default function Dashboard() {
       .on("postgres_changes", { event: "*", schema: "public", table: "live_positions" }, load)
       .on("postgres_changes", { event: "*", schema: "public", table: "live_settings" }, load)
       .subscribe();
-    return () => { sb.removeChannel(ch1); sb.removeChannel(ch3); };
+    const ch4 = sb.channel("faking")
+      .on("postgres_changes", { event: "*", schema: "public", table: "faking_positions" }, load)
+      .on("postgres_changes", { event: "*", schema: "public", table: "faking_settings" }, load)
+      .subscribe();
+    return () => { sb.removeChannel(ch1); sb.removeChannel(ch3); sb.removeChannel(ch4); };
   }, []);
 
   return (
@@ -225,8 +261,8 @@ export default function Dashboard() {
 
         <h1 className="text-2xl font-bold text-white">TradeBot Dashboard</h1>
 
-        {/* Lag bots side by side */}
-        <div className="grid grid-cols-1 lg:grid-cols-2 gap-6 items-start">
+        {/* All three bots */}
+        <div className="grid grid-cols-1 lg:grid-cols-3 gap-6 items-start">
           <LagBotPanel
             mode="paper"
             trades={trades}
@@ -245,6 +281,19 @@ export default function Dashboard() {
             toggling={toggling}
             onReset={handleReset}
             resetting={resetting}
+          />
+          <LagBotPanel
+            mode="faking"
+            trades={fakingTrades}
+            openPositions={fakingOpen}
+            loading={loading}
+            usdtBalance={fakingSettings?.usdt_balance}
+            atomBalance={atomBalance}
+            enabled={fakingSettings?.enabled}
+            onToggle={handleFakingToggle}
+            toggling={fakingToggling}
+            onReset={handleFakingReset}
+            resetting={fakingResetting}
           />
         </div>
 
