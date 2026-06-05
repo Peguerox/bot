@@ -149,7 +149,7 @@ export const fakingBot = schedules.task({
               // Market buy
               const buyOrder  = await placeMarketBuy(SYMBOL, estQty);
               const fillPrice = parseFloat(buyOrder.cummulativeQuoteQty) / parseFloat(buyOrder.executedQty);
-              const filledQty = parseFloat(buyOrder.executedQty);
+              const filledQty = floorQty(parseFloat(buyOrder.executedQty));
               const tp        = roundPrice(fillPrice * (1 + TP_PCT));
               const sl        = roundPrice(fillPrice * (1 - SL_PCT));
 
