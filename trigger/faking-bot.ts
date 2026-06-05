@@ -96,18 +96,25 @@ export const fakingBot = schedules.task({
         ]);
 
         if (tpOrder.status === "FILLED") {
-          await cancelOrder(SYMBOL, pos.sl_order_id);
+          try { await cancelOrder(SYMBOL, pos.sl_order_id); } catch {}  // cleanup — SL may already be gone
           const exitPrice = parseFloat(tpOrder.cummulativeQuoteQty) / parseFloat(tpOrder.executedQty);
           const pnl       = (exitPrice - pos.entry_price) * pos.quantity;
           await closeFakingPosition(pos.id, { exit_price: exitPrice, pnl, result: "TP" });
           log.push({ action: "TP_FILLED", exit: exitPrice, pnl: pnl.toFixed(4) });
 
         } else if (slOrder.status === "FILLED") {
-          await cancelOrder(SYMBOL, pos.tp_order_id);
+          try { await cancelOrder(SYMBOL, pos.tp_order_id); } catch {}  // cleanup — TP may already be gone
           const exitPrice = parseFloat(slOrder.cummulativeQuoteQty) / parseFloat(slOrder.executedQty);
           const pnl       = (exitPrice - pos.entry_price) * pos.quantity;
           await closeFakingPosition(pos.id, { exit_price: exitPrice, pnl, result: "SL" });
           log.push({ action: "SL_FILLED", exit: exitPrice, pnl: pnl.toFixed(4) });
+
+        } else if (tpOrder.status === "CANCELED" || slOrder.status === "CANCELED") {
+          // Orders cancelled externally — close DB position to avoid getting stuck
+          try { await cancelOrder(SYMBOL, pos.tp_order_id); } catch {}
+          try { await cancelOrder(SYMBOL, pos.sl_order_id); } catch {}
+          await closeFakingPosition(pos.id, { exit_price: 0, pnl: 0, result: "CANCELLED" });
+          log.push({ action: "CANCELLED_EXTERNAL", tpStatus: tpOrder.status, slStatus: slOrder.status });
 
         } else if (pos.hold_count + 1 >= MAX_HOLD) {
           // Chase: raise TP only if price moved up — SL stop-market stays on Binance untouched
