@@ -4,48 +4,25 @@ export async function getLivePosition() {
   const { data } = await getSupabaseAdmin()
     .from("live_positions")
     .select("*")
-    .in("status", ["pending", "open", "chasing"])
+    .in("status", ["open", "chasing"])
     .single();
   return data;
 }
 
 export async function openLivePosition(params: {
-  symbol:          string;
-  entry_price:     number;
-  sl:              number;
-  tp:              number;
-  quantity:        number;
-  z_score:         number;
-  entry_order_id:  number;
+  symbol:      string;
+  entry_price: number;
+  sl:          number;
+  tp:          number;
+  quantity:    number;
+  z_score:     number;
 }) {
   await getSupabaseAdmin().from("live_positions").insert({
     ...params,
-    status:     "pending",
+    status:     "open",
     hold_count: 0,
     entry_time: new Date().toISOString(),
   });
-}
-
-export async function updateLiveEntryOrder(id: string, entryOrderId: number, entryPrice: number) {
-  await getSupabaseAdmin()
-    .from("live_positions")
-    .update({ entry_order_id: entryOrderId, entry_price: entryPrice })
-    .eq("id", id);
-}
-
-export async function setLivePositionOpen(id: string, params: {
-  entry_price:        number;
-  quantity:           number;
-  tp:                 number;
-  sl:                 number;
-  tp_order_id:        number;
-  sl_order_id:        number;
-  oco_order_list_id:  number;
-}) {
-  await getSupabaseAdmin()
-    .from("live_positions")
-    .update({ status: "open", ...params })
-    .eq("id", id);
 }
 
 export async function incrementLiveHold(id: string, currentHold: number) {
@@ -55,23 +32,17 @@ export async function incrementLiveHold(id: string, currentHold: number) {
     .eq("id", id);
 }
 
-export async function setLivePositionChasing(id: string, params: {
-  chase_order_id: number;
-  chase_price:    number;
-}) {
+export async function setLiveChasing(id: string, chaseFloor: number) {
   await getSupabaseAdmin()
     .from("live_positions")
-    .update({ status: "chasing", ...params })
+    .update({ status: "chasing", chase_price: chaseFloor })
     .eq("id", id);
 }
 
-export async function updateLiveChaseOrder(id: string, params: {
-  chase_order_id: number;
-  chase_price:    number;
-}) {
+export async function updateLiveChaseFloor(id: string, chaseFloor: number) {
   await getSupabaseAdmin()
     .from("live_positions")
-    .update(params)
+    .update({ chase_price: chaseFloor })
     .eq("id", id);
 }
 
@@ -83,8 +54,8 @@ export async function closeLivePosition(id: string, params: {
   await getSupabaseAdmin()
     .from("live_positions")
     .update({
-      status:     "closed",
-      exit_time:  new Date().toISOString(),
+      status:    "closed",
+      exit_time: new Date().toISOString(),
       ...params,
     })
     .eq("id", id);

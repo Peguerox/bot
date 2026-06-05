@@ -1,26 +1,26 @@
 import { NextResponse } from "next/server";
-import { cancelAllOrders } from "@/lib/binance";
+import { getFreeBalance, placeMarketSell } from "@/lib/binance";
 import { getSupabaseAdmin } from "@/lib/supabase-admin";
 
 export async function POST() {
   const errors: string[] = [];
 
-  // 1. Cancel all open ATOMUSDT orders on Binance.US
+  // Market sell any ATOM currently held
   try {
-    await cancelAllOrders("ATOMUSDT");
+    const atomFree = await getFreeBalance("ATOM");
+    if (atomFree >= 0.01) {
+      const qty = Math.floor(atomFree * 100) / 100;
+      await placeMarketSell("ATOMUSDT", qty);
+    }
   } catch (err) {
-    errors.push(`Binance cancel: ${err}`);
+    errors.push(`sell ATOM: ${err}`);
   }
 
-  // 2. Mark any open/pending/chasing positions as cancelled in DB
+  // Close any open position in DB
   const { error: dbErr } = await getSupabaseAdmin()
     .from("live_positions")
-    .update({
-      status:    "closed",
-      result:    "CANCELLED",
-      exit_time: new Date().toISOString(),
-    })
-    .in("status", ["pending", "open", "chasing"]);
+    .update({ status: "closed", result: "CANCELLED", exit_time: new Date().toISOString() })
+    .in("status", ["open", "chasing"]);
 
   if (dbErr) errors.push(`DB: ${dbErr.message}`);
 
