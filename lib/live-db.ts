@@ -73,7 +73,15 @@ export async function getLiveSettings() {
     .from("live_settings")
     .select("*")
     .single();
-  return data as { id: string; enabled: boolean; usdt_balance: number } | null;
+  return data as { id: string; enabled: boolean; usdt_balance: number; baseline_usdt: number } | null;
+}
+
+export async function setBaseline(baseline: number) {
+  const sb = getSupabaseAdmin();
+  const { data } = await sb.from("live_settings").select("id").single();
+  await sb.from("live_settings")
+    .update({ baseline_usdt: baseline })
+    .eq("id", data!.id);
 }
 
 export async function setLiveEnabled(enabled: boolean) {

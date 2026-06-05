@@ -6,7 +6,7 @@ import { calcZScore, Z_THRESH, TP_PCT, SL_PCT, MAX_HOLD } from "../lib/strategy"
 import {
   getLivePosition, openLivePosition, incrementLiveHold,
   setLiveChasing, updateLiveChaseFloor, closeLivePosition,
-  logLiveRun, getLiveSettings, updateLiveBalance,
+  logLiveRun, getLiveSettings, updateLiveBalance, setBaseline,
 } from "../lib/live-db";
 
 const SYMBOL       = "ATOMUSDT";
@@ -35,11 +35,17 @@ export const liveBot = schedules.task({
     }
     if (!settings?.enabled) return { ok: false, reason: "disabled" };
 
-    // Real balance
+    // Real balance + baseline tracking
     let usdtFree = 0;
     try {
       usdtFree = await getFreeBalance("USDT");
-      await updateLiveBalance(usdtFree);
+      let baseline = settings.baseline_usdt ?? 0;
+      if (baseline === 0) {
+        baseline = usdtFree - ALLOCATION;
+        await setBaseline(baseline);
+      }
+      const botUsdt = usdtFree - baseline;
+      await updateLiveBalance(botUsdt);
     } catch (err) {
       log.push({ action: "ERROR", stage: "balance", error: String(err) });
       await logLiveRun({ actions: log });
@@ -106,9 +112,10 @@ export const liveBot = schedules.task({
 
       } else {
         if (z <= -Z_THRESH) {
-          const spend = Math.min(usdtFree, ALLOCATION);
+          const botUsdt = usdtFree - (settings.baseline_usdt ?? 0);
+          const spend = Math.min(botUsdt, ALLOCATION);
           if (spend < 5) {
-            log.push({ action: "SKIP_NO_FUNDS", balance: usdtFree });
+            log.push({ action: "SKIP_NO_FUNDS", balance: botUsdt });
           } else {
             const estQty = floorQty(spend / price);
             if (estQty * price >= 1) {

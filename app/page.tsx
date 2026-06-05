@@ -122,14 +122,14 @@ function PaperPanel({ trades, openPositions, loading }: {
 // ── Live bot panel ──────────────────────────────────────────────────────────
 
 function LivePanel({
-  trades, openPositions, loading, balances,
+  trades, openPositions, loading, botUsdt,
   enabled, onToggle, toggling, onReset, resetting,
   onClearHistory, clearingHistory, runs,
 }: {
   trades:          any[];
   openPositions:   any[];
   loading:         boolean;
-  balances:        { usdt: number; atom: number };
+  botUsdt:         number;
   enabled:         boolean;
   onToggle:        () => void;
   toggling:        boolean;
@@ -219,24 +219,26 @@ function LivePanel({
         <PnLChart trades={trades} initial={LIVE_INITIAL} />
       </div>
 
-      {/* Real balances from Binance */}
+      {/* Bot allocation */}
       <div>
-        <p className="text-gray-500 text-xs uppercase tracking-wide mb-2">Binance Balances</p>
+        <p className="text-gray-500 text-xs uppercase tracking-wide mb-2">Allocation</p>
         <table className="w-full text-xs font-mono">
           <thead>
             <tr className="text-gray-600 border-b border-gray-800">
               <th className="text-left pb-1 font-medium">Asset</th>
-              <th className="text-right pb-1 font-medium">Free Balance</th>
+              <th className="text-right pb-1 font-medium">Amount</th>
             </tr>
           </thead>
           <tbody>
             <tr className="border-b border-gray-800/50">
               <td className="py-1.5 text-gray-400">USDT</td>
-              <td className="py-1.5 text-right text-white">${balances.usdt.toFixed(2)}</td>
+              <td className="py-1.5 text-right text-white">${botUsdt.toFixed(2)}</td>
             </tr>
             <tr>
               <td className="py-1.5 text-gray-400">ATOM</td>
-              <td className="py-1.5 text-right text-white">{balances.atom.toFixed(4)}</td>
+              <td className="py-1.5 text-right text-white">
+                {openPositions[0]?.quantity?.toFixed(4) ?? "0.0000"}
+              </td>
             </tr>
           </tbody>
         </table>
@@ -295,18 +297,10 @@ export default function Dashboard() {
   const [liveOpen, setLiveOpen]       = useState<any[]>([]);
   const [liveTrades, setLiveTrades]   = useState<any[]>([]);
   const [liveRuns, setLiveRuns]       = useState<any[]>([]);
-  const [balances, setBalances]       = useState({ usdt: 0, atom: 0 });
   const [loading, setLoading]         = useState(true);
   const [toggling, setToggling]         = useState(false);
   const [resetting, setResetting]       = useState(false);
   const [clearingHistory, setClearingHistory] = useState(false);
-
-  async function loadBalances() {
-    fetch("/api/live/balances")
-      .then(r => r.json())
-      .then(b => setBalances({ usdt: b.usdt ?? 0, atom: b.atom ?? 0 }))
-      .catch(() => {});
-  }
 
   async function load() {
     const [
@@ -331,7 +325,6 @@ export default function Dashboard() {
     setLiveTrades(liveCl ?? []);
     setLiveRuns(liveRs ?? []);
     setLoading(false);
-    loadBalances();
   }
 
   async function handleToggle() {
@@ -366,7 +359,7 @@ export default function Dashboard() {
     const ch2 = sb.channel("live")
       .on("postgres_changes", { event: "*", schema: "public", table: "live_positions" }, load)
       .on("postgres_changes", { event: "*", schema: "public", table: "live_settings" }, load)
-      .on("postgres_changes", { event: "*", schema: "public", table: "live_runs" }, () => { load(); loadBalances(); })
+      .on("postgres_changes", { event: "*", schema: "public", table: "live_runs" }, load)
       .subscribe();
     return () => { sb.removeChannel(ch1); sb.removeChannel(ch2); };
   }, []);
@@ -385,7 +378,7 @@ export default function Dashboard() {
             trades={liveTrades}
             openPositions={liveOpen}
             loading={loading}
-            balances={balances}
+            botUsdt={liveSettings?.usdt_balance ?? 0}
             enabled={liveSettings?.enabled ?? false}
             onToggle={handleToggle}
             toggling={toggling}
