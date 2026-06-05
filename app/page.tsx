@@ -22,19 +22,21 @@ function Stat({ label, value, sub, color }: { label: string; value: string; sub:
 
 function LagBotPanel({
   mode, trades, openPositions, loading,
-  usdtBalance, atomBalance, enabled, onToggle, toggling, onReset, resetting,
+  usdtBalance, atomBalance, enabled, onToggle, toggling, onReset, resetting, onClearHistory, clearingHistory,
 }: {
-  mode:           "paper" | "live" | "faking";
-  trades:         any[];
-  openPositions:  any[];
-  loading:        boolean;
-  usdtBalance?:   number;
-  atomBalance?:   number;
-  enabled?:       boolean;
-  onToggle?:      () => void;
-  toggling?:      boolean;
-  onReset?:       () => void;
-  resetting?:     boolean;
+  mode:              "paper" | "live" | "faking";
+  trades:            any[];
+  openPositions:     any[];
+  loading:           boolean;
+  usdtBalance?:      number;
+  atomBalance?:      number;
+  enabled?:          boolean;
+  onToggle?:         () => void;
+  toggling?:         boolean;
+  onReset?:          () => void;
+  resetting?:        boolean;
+  onClearHistory?:   () => void;
+  clearingHistory?:  boolean;
 }) {
   const initial    = mode === "paper" ? PAPER_INITIAL : mode === "faking" ? FAKING_INITIAL : LIVE_INITIAL;
   const totalPnL   = trades.reduce((s, t) => s + (t.pnl ?? 0), 0);
@@ -79,6 +81,20 @@ function LagBotPanel({
 
         {isLive ? (
           <div className="flex items-center gap-3">
+            {onClearHistory && (
+              <button
+                onClick={onClearHistory}
+                disabled={clearingHistory || enabled}
+                title={enabled ? "Turn bot OFF before clearing" : "Delete all closed trade history"}
+                className={`text-xs px-2 py-1 rounded border border-gray-500/50 text-gray-400 transition-colors ${
+                  clearingHistory ? "opacity-50 cursor-not-allowed" :
+                  enabled         ? "opacity-30 cursor-not-allowed" :
+                  "hover:bg-gray-500/20 cursor-pointer"
+                }`}
+              >
+                {clearingHistory ? "Clearing…" : "Clear History"}
+              </button>
+            )}
             <button
               onClick={onReset}
               disabled={resetting || enabled}
@@ -172,8 +188,9 @@ export default function Dashboard() {
   const [loading, setLoading]                 = useState(true);
   const [toggling, setToggling]               = useState(false);
   const [resetting, setResetting]             = useState(false);
-  const [fakingToggling, setFakingToggling]   = useState(false);
-  const [fakingResetting, setFakingResetting] = useState(false);
+  const [fakingToggling, setFakingToggling]         = useState(false);
+  const [fakingResetting, setFakingResetting]       = useState(false);
+  const [fakingClearing, setFakingClearing]         = useState(false);
 
   async function load() {
     const [
@@ -238,6 +255,14 @@ export default function Dashboard() {
     setFakingResetting(false);
   }
 
+  async function handleFakingClearHistory() {
+    if (!confirm("Delete all closed faking trade history? This cannot be undone.")) return;
+    setFakingClearing(true);
+    await fetch("/api/faking/clear-history", { method: "POST" });
+    await load();
+    setFakingClearing(false);
+  }
+
   useEffect(() => {
     load();
     const sb = getSupabase();
@@ -294,6 +319,8 @@ export default function Dashboard() {
             toggling={fakingToggling}
             onReset={handleFakingReset}
             resetting={fakingResetting}
+            onClearHistory={handleFakingClearHistory}
+            clearingHistory={fakingClearing}
           />
         </div>
 
