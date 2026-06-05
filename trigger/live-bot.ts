@@ -106,11 +106,12 @@ export const liveBot = schedules.task({
 
       } else {
         if (z <= -Z_THRESH) {
-          if (usdtFree < ALLOCATION) {
-            log.push({ action: "SKIP_NO_FUNDS", balance: usdtFree, needed: ALLOCATION });
+          const spend = Math.min(usdtFree, ALLOCATION);
+          if (spend < 5) {
+            log.push({ action: "SKIP_NO_FUNDS", balance: usdtFree });
           } else {
-            const estQty = floorQty(ALLOCATION / price);
-            if (estQty * price >= 10) {
+            const estQty = floorQty(spend / price);
+            if (estQty * price >= 1) {
               const buyOrder  = await placeMarketBuy(SYMBOL, estQty);
               const fillPrice = parseFloat(buyOrder.cummulativeQuoteQty) / parseFloat(buyOrder.executedQty);
               const filledQty = floorQty(await getFreeBalance("ATOM"));

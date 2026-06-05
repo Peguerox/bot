@@ -177,10 +177,10 @@ function LivePanel({
             <button
               onClick={onReset}
               disabled={resetting || enabled}
-              title={enabled ? "Pause bot before resetting" : "Market sell ATOM & clear position"}
+              title={enabled ? "Pause bot before selling" : "Market sell all ATOM & clear position"}
               className="text-xs font-medium px-2.5 py-1.5 rounded-md bg-gray-800 text-red-400/70 hover:bg-red-950/60 hover:text-red-400 transition-all disabled:opacity-30 disabled:cursor-not-allowed"
             >
-              {resetting ? "Resetting…" : "Reset"}
+              {resetting ? "Selling…" : "Sell All"}
             </button>
             <button
               onClick={onToggle}
@@ -342,7 +342,7 @@ export default function Dashboard() {
   }
 
   async function handleReset() {
-    if (!confirm("Market sell any held ATOM and clear position?")) return;
+    if (!confirm("Market sell all ATOM and clear position?")) return;
     setResetting(true);
     await fetch("/api/live/reset", { method: "POST" });
     await load();
