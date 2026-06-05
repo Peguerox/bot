@@ -74,8 +74,8 @@ export const fakingBot = schedules.task({
             log.push({ action: "TP_FILLED", exit: pos.tp, pnl: pnl.toFixed(4) });
 
           } else if (currentPrice <= pos.sl) {
-            // Price hit SL — cancel TP order, market sell immediately
-            try { await cancelOrder(SYMBOL, pos.tp_order_id); } catch {}
+            // Price hit SL — cancel TP order first (must succeed before market sell)
+            await cancelOrder(SYMBOL, pos.tp_order_id);
             const exitOrder = await placeMarketSell(SYMBOL, pos.quantity);
             const exitPrice = parseFloat(exitOrder.cummulativeQuoteQty) / parseFloat(exitOrder.executedQty);
             const pnl       = (exitPrice - pos.entry_price) * pos.quantity;
@@ -83,8 +83,8 @@ export const fakingBot = schedules.task({
             log.push({ action: "SL_HIT", exitPrice, pnl: pnl.toFixed(4) });
 
           } else if (pos.hold_count + 1 >= MAX_HOLD) {
-            // Hold expired — cancel TP, start chasing with limit sell below market
-            try { await cancelOrder(SYMBOL, pos.tp_order_id); } catch {}
+            // Hold expired — cancel TP first (must succeed before placing chase)
+            await cancelOrder(SYMBOL, pos.tp_order_id);
             const chasePrice = roundPrice(currentPrice * (1 - CHASE_OFFSET));
             const chaseOrder = await placeLimitSell(SYMBOL, pos.quantity, chasePrice);
             await setFakingPositionChasing(pos.id, {
@@ -112,7 +112,7 @@ export const fakingBot = schedules.task({
             // Only raise the chase if price moved up — never lower it
             const newChasePrice = roundPrice(currentPrice * (1 - CHASE_OFFSET));
             if (newChasePrice > pos.chase_price) {
-              try { await cancelOrder(SYMBOL, pos.chase_order_id); } catch {}
+              await cancelOrder(SYMBOL, pos.chase_order_id);
               const newOrder = await placeLimitSell(SYMBOL, pos.quantity, newChasePrice);
               await updateFakingChaseOrder(pos.id, {
                 chase_order_id: newOrder.orderId,
