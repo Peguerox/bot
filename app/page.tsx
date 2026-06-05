@@ -112,13 +112,13 @@ function LagBotPanel({
         </div>
 
         {isLive ? (
-          <div className="flex items-center gap-1">
+          <div className="flex items-center gap-1.5">
             {onClearHistory && (
               <button
                 onClick={onClearHistory}
                 disabled={clearingHistory || enabled}
                 title={enabled ? "Pause bot before clearing" : "Delete all closed trade history"}
-                className="text-xs text-gray-500 hover:text-gray-300 px-2.5 py-1.5 rounded-md hover:bg-white/5 transition-all disabled:opacity-25 disabled:cursor-not-allowed"
+                className="text-xs font-medium px-2.5 py-1.5 rounded-md bg-gray-800 text-gray-400 hover:bg-gray-700 hover:text-gray-200 transition-all disabled:opacity-30 disabled:cursor-not-allowed"
               >
                 {clearingHistory ? "Clearing…" : "Clear"}
               </button>
@@ -127,21 +127,20 @@ function LagBotPanel({
               onClick={onReset}
               disabled={resetting || enabled}
               title={enabled ? "Pause bot before resetting" : "Cancel all orders & clear position"}
-              className="text-xs text-gray-500 hover:text-red-400 px-2.5 py-1.5 rounded-md hover:bg-red-500/10 transition-all disabled:opacity-25 disabled:cursor-not-allowed"
+              className="text-xs font-medium px-2.5 py-1.5 rounded-md bg-gray-800 text-red-400/70 hover:bg-red-950/60 hover:text-red-400 transition-all disabled:opacity-30 disabled:cursor-not-allowed"
             >
               {resetting ? "Resetting…" : "Reset"}
             </button>
-            <div className="w-px h-4 bg-gray-700 mx-1" />
             <button
               onClick={onToggle}
               disabled={toggling}
-              className={`flex items-center gap-2 text-xs font-medium px-3 py-1.5 rounded-md transition-all disabled:opacity-50 disabled:cursor-not-allowed ${
+              className={`flex items-center gap-2 text-xs font-semibold px-3 py-1.5 rounded-md transition-all disabled:opacity-50 disabled:cursor-not-allowed ${
                 enabled
-                  ? "bg-green-500/15 text-green-400 hover:bg-green-500/20"
-                  : "bg-gray-800 text-gray-500 hover:bg-gray-750 hover:text-gray-300"
+                  ? "bg-green-500/20 text-green-400 hover:bg-green-500/30"
+                  : "bg-gray-800 text-gray-400 hover:bg-gray-700 hover:text-gray-200"
               }`}
             >
-              <span className={`w-1.5 h-1.5 rounded-full transition-colors ${enabled ? "bg-green-400" : "bg-gray-600"}`} />
+              <span className={`w-1.5 h-1.5 rounded-full ${enabled ? "bg-green-400" : "bg-gray-600"}`} />
               {toggling ? "…" : enabled ? "Running" : "Paused"}
             </button>
           </div>
@@ -205,7 +204,9 @@ function LagBotPanel({
             )}
             {runs.map((r: any) => {
               const actions = r.actions ?? [];
-              const time = r.created_at?.slice(11, 19) ?? "";
+              const time = r.created_at
+                ? new Date(r.created_at).toLocaleTimeString([], { hour: "2-digit", minute: "2-digit", second: "2-digit", hour12: false })
+                : "";
               return (
                 <div key={r.id} className="flex gap-2 items-start">
                   <span className="text-gray-600 shrink-0">{time}</span>
