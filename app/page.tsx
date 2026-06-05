@@ -123,18 +123,21 @@ function PaperPanel({ trades, openPositions, loading }: {
 
 function LivePanel({
   trades, openPositions, loading, balances,
-  enabled, onToggle, toggling, onReset, resetting, runs,
+  enabled, onToggle, toggling, onReset, resetting,
+  onClearHistory, clearingHistory, runs,
 }: {
-  trades:        any[];
-  openPositions: any[];
-  loading:       boolean;
-  balances:      { usdt: number; atom: number };
-  enabled:       boolean;
-  onToggle:      () => void;
-  toggling:      boolean;
-  onReset:       () => void;
-  resetting:     boolean;
-  runs:          any[];
+  trades:          any[];
+  openPositions:   any[];
+  loading:         boolean;
+  balances:        { usdt: number; atom: number };
+  enabled:         boolean;
+  onToggle:        () => void;
+  toggling:        boolean;
+  onReset:         () => void;
+  resetting:       boolean;
+  onClearHistory:  () => void;
+  clearingHistory: boolean;
+  runs:            any[];
 }) {
   const totalPnL  = trades.reduce((s, t) => s + (t.pnl ?? 0), 0);
   const decided   = trades.filter(t => t.result !== "EXPIRE" && t.result !== "MISSED");
@@ -163,6 +166,14 @@ function LivePanel({
             <span className="text-xs font-bold px-2 py-0.5 rounded-full bg-green-500/20 text-green-400">LIVE</span>
           </div>
           <div className="flex items-center gap-1.5 shrink-0">
+            <button
+              onClick={onClearHistory}
+              disabled={clearingHistory || enabled}
+              title={enabled ? "Pause bot before clearing" : "Delete all closed trades and run logs"}
+              className="text-xs font-medium px-2.5 py-1.5 rounded-md bg-gray-800 text-gray-400 hover:bg-gray-700 hover:text-gray-200 transition-all disabled:opacity-30 disabled:cursor-not-allowed"
+            >
+              {clearingHistory ? "Clearing…" : "Clear"}
+            </button>
             <button
               onClick={onReset}
               disabled={resetting || enabled}
@@ -286,8 +297,9 @@ export default function Dashboard() {
   const [liveRuns, setLiveRuns]       = useState<any[]>([]);
   const [balances, setBalances]       = useState({ usdt: 0, atom: 0 });
   const [loading, setLoading]         = useState(true);
-  const [toggling, setToggling]       = useState(false);
-  const [resetting, setResetting]     = useState(false);
+  const [toggling, setToggling]         = useState(false);
+  const [resetting, setResetting]       = useState(false);
+  const [clearingHistory, setClearingHistory] = useState(false);
 
   async function loadBalances() {
     fetch("/api/live/balances")
@@ -337,6 +349,14 @@ export default function Dashboard() {
     setResetting(false);
   }
 
+  async function handleClearHistory() {
+    if (!confirm("Delete all closed trade history and run logs?")) return;
+    setClearingHistory(true);
+    await fetch("/api/live/clear-history", { method: "POST" });
+    await load();
+    setClearingHistory(false);
+  }
+
   useEffect(() => {
     load();
     const sb = getSupabase();
@@ -371,6 +391,8 @@ export default function Dashboard() {
             toggling={toggling}
             onReset={handleReset}
             resetting={resetting}
+            onClearHistory={handleClearHistory}
+            clearingHistory={clearingHistory}
             runs={liveRuns}
           />
         </div>
