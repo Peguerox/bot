@@ -82,7 +82,7 @@ export async function placeLimitBuy(symbol: string, qty: number, price: number):
     type:        "LIMIT",
     timeInForce: "GTC",
     quantity:    qty.toFixed(2),
-    price:       price.toFixed(4),
+    price:       price.toFixed(3),
   });
 }
 
@@ -93,7 +93,16 @@ export async function placeLimitSell(symbol: string, qty: number, price: number)
     type:        "LIMIT",
     timeInForce: "GTC",
     quantity:    qty.toFixed(2),
-    price:       price.toFixed(4),
+    price:       price.toFixed(3),
+  });
+}
+
+export async function placeMarketBuy(symbol: string, qty: number): Promise<OrderResponse> {
+  return signedPost("/order", {
+    symbol,
+    side:     "BUY",
+    type:     "MARKET",
+    quantity: qty.toFixed(2),
   });
 }
 
@@ -106,6 +115,31 @@ export async function placeMarketSell(symbol: string, qty: number): Promise<Orde
   });
 }
 
+export async function placeStopMarket(symbol: string, qty: number, stopPrice: number): Promise<OrderResponse> {
+  return signedPost("/order", {
+    symbol,
+    side:      "SELL",
+    type:      "STOP_LOSS",
+    quantity:  qty.toFixed(2),
+    stopPrice: stopPrice.toFixed(3),
+  });
+}
+
+export async function placeStopLimitSell(
+  symbol: string, qty: number,
+  stopPrice: number, limitPrice: number,
+): Promise<OrderResponse> {
+  return signedPost("/order", {
+    symbol,
+    side:        "SELL",
+    type:        "STOP_LOSS_LIMIT",
+    timeInForce: "GTC",
+    quantity:    qty.toFixed(2),
+    stopPrice:   stopPrice.toFixed(3),
+    price:       limitPrice.toFixed(3),
+  });
+}
+
 // TP = limit sell above market; SL = stop-limit sell below market
 export async function placeOCO(
   symbol: string, qty: number,
@@ -115,9 +149,9 @@ export async function placeOCO(
     symbol,
     side:                  "SELL",
     quantity:              qty.toFixed(2),
-    price:                 tpPrice.toFixed(4),
-    stopPrice:             slStopPrice.toFixed(4),
-    stopLimitPrice:        slLimitPrice.toFixed(4),
+    price:                 tpPrice.toFixed(3),
+    stopPrice:             slStopPrice.toFixed(3),
+    stopLimitPrice:        slLimitPrice.toFixed(3),
     stopLimitTimeInForce:  "GTC",
   });
 }

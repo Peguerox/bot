@@ -17,6 +17,7 @@ export async function openFakingPosition(params: {
   quantity:    number;
   z_score:     number;
   tp_order_id: number;
+  sl_order_id: number;
 }) {
   await getSupabaseAdmin().from("faking_positions").insert({
     ...params,
@@ -33,23 +34,13 @@ export async function incrementFakingHold(id: string, currentHold: number) {
     .eq("id", id);
 }
 
-export async function setFakingPositionChasing(id: string, params: {
-  chase_order_id: number;
-  chase_price:    number;
+export async function updateFakingChase(id: string, params: {
+  tp_order_id: number;
+  chase_price: number;
 }) {
   await getSupabaseAdmin()
     .from("faking_positions")
     .update({ status: "chasing", ...params })
-    .eq("id", id);
-}
-
-export async function updateFakingChaseOrder(id: string, params: {
-  chase_order_id: number;
-  chase_price:    number;
-}) {
-  await getSupabaseAdmin()
-    .from("faking_positions")
-    .update(params)
     .eq("id", id);
 }
 

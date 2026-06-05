@@ -1,19 +1,20 @@
 import { schedules } from "@trigger.dev/sdk/v3";
 import {
-  getKlines, placeLimitSell,
+  getKlines, placeLimitSell, placeStopMarket,
   cancelOrder, getOrder, getFreeBalance, placeMarketBuy, placeMarketSell,
 } from "../lib/binance";
 import { calcZScore, Z_THRESH, TP_PCT, SL_PCT, MAX_HOLD } from "../lib/strategy";
 import {
-  getFakingPosition, openFakingPosition,
-  incrementFakingHold, setFakingPositionChasing, updateFakingChaseOrder,
-  closeFakingPosition, logFakingRun, getFakingSettings, updateFakingBalance,
+  getFakingPosition, openFakingPosition, incrementFakingHold,
+  updateFakingChase, closeFakingPosition, logFakingRun,
+  getFakingSettings, updateFakingBalance,
 } from "../lib/faking-db";
 
 const SYMBOL       = "ATOMUSDT";
 const ALLOCATION   = 200;
-const CHASE_OFFSET = 0.0005;  // 0.05% below price for limit sell
+const CHASE_OFFSET = 0.0005;  // 0.05% below price when raising TP
 const CANDLES      = 50;
+const MIN_ATOM     = 1.0;     // real ATOM balance threshold to consider "in position"
 
 function roundPrice(p: number) { return Math.round(p * 1000) / 1000; }
 function floorQty(q: number)   { return Math.floor(q * 100) / 100; }
@@ -26,9 +27,8 @@ export const fakingBot = schedules.task({
   run: async () => {
     const log: object[] = [];
 
-    // ── Settings + balance ───────────────────────────────────────────────────
+    // ── Settings ─────────────────────────────────────────────────────────────
     let settings: { id: string; enabled: boolean; usdt_balance: number } | null = null;
-
     try {
       settings = await getFakingSettings();
     } catch (err) {
@@ -36,118 +36,134 @@ export const fakingBot = schedules.task({
       return { ok: false, error: String(err) };
     }
 
-    try {
-      const balance = await getFreeBalance("USDT");
-      await updateFakingBalance(balance);
-    } catch (err) {
-      log.push({ action: "ERROR", stage: "getFreeBalance", error: String(err) });
-      await logFakingRun(log);
-      return { ok: false, error: String(err) };
-    }
-
     if (!settings?.enabled) {
       return { ok: false, reason: "disabled" };
     }
 
-    // ── Trading logic ────────────────────────────────────────────────────────
+    // ── Real balances from Binance (source of truth) ──────────────────────────
+    let usdtFree = 0, atomFree = 0;
     try {
-      // Use last CLOSED candle — same as paper bot, guarantees same signal timing
+      [usdtFree, atomFree] = await Promise.all([
+        getFreeBalance("USDT"),
+        getFreeBalance("ATOM"),
+      ]);
+      await updateFakingBalance(usdtFree);
+    } catch (err) {
+      log.push({ action: "ERROR", stage: "getBalances", error: String(err) });
+      await logFakingRun(log);
+      return { ok: false, error: String(err) };
+    }
+
+    // ── Signal ────────────────────────────────────────────────────────────────
+    try {
       const [btcCandles, altCandles] = await Promise.all([
         getKlines("BTCUSDT", "1m", CANDLES).then(c => c.slice(0, -1)),
         getKlines(SYMBOL,    "1m", CANDLES).then(c => c.slice(0, -1)),
       ]);
-
       const currentPrice = altCandles[altCandles.length - 1].close;
       const z            = calcZScore(btcCandles, altCandles);
       const pos          = await getFakingPosition();
 
-      // ── Manage open position ─────────────────────────────────────────────
+      // ── Manage open position ───────────────────────────────────────────────
       if (pos) {
-
-        if (pos.status === "open") {
+        // Legacy position (no sl_order_id): close it on next TP or SL hit via price check
+        if (!pos.sl_order_id) {
           const tpOrder = await getOrder(SYMBOL, pos.tp_order_id);
-
           if (tpOrder.status === "FILLED") {
-            // TP limit sell filled on Binance — ATOM sold
-            const pnl = (pos.tp - pos.entry_price) * pos.quantity;
-            await closeFakingPosition(pos.id, { exit_price: pos.tp, pnl, result: "TP" });
-            log.push({ action: "TP_FILLED", exit: pos.tp, pnl: pnl.toFixed(4) });
-
+            const exitPrice = parseFloat(tpOrder.cummulativeQuoteQty) / parseFloat(tpOrder.executedQty);
+            const pnl       = (exitPrice - pos.entry_price) * pos.quantity;
+            await closeFakingPosition(pos.id, { exit_price: exitPrice, pnl, result: "TP" });
+            log.push({ action: "TP_FILLED", exit: exitPrice, pnl: pnl.toFixed(4) });
           } else if (currentPrice <= pos.sl) {
-            // Price hit SL — cancel TP order first (must succeed before market sell)
             await cancelOrder(SYMBOL, pos.tp_order_id);
             const exitOrder = await placeMarketSell(SYMBOL, pos.quantity);
             const exitPrice = parseFloat(exitOrder.cummulativeQuoteQty) / parseFloat(exitOrder.executedQty);
             const pnl       = (exitPrice - pos.entry_price) * pos.quantity;
-            await closeFakingPosition(pos.id, { exit_price: exitPrice, pnl, result: "SL" });
-            log.push({ action: "SL_HIT", exitPrice, pnl: pnl.toFixed(4) });
-
-          } else if (pos.hold_count + 1 >= MAX_HOLD) {
-            // Hold expired — cancel TP first (must succeed before placing chase)
-            await cancelOrder(SYMBOL, pos.tp_order_id);
-            const chasePrice = roundPrice(currentPrice * (1 - CHASE_OFFSET));
-            const chaseOrder = await placeLimitSell(SYMBOL, pos.quantity, chasePrice);
-            await setFakingPositionChasing(pos.id, {
-              chase_order_id: chaseOrder.orderId,
-              chase_price:    chasePrice,
-            });
-            log.push({ action: "START_CHASE", currentPrice, chasePrice });
-
+            await closeFakingPosition(pos.id, { exit_price: exitPrice, pnl, result: "SL_LEGACY" });
+            log.push({ action: "SL_LEGACY", exitPrice, pnl: pnl.toFixed(4) });
           } else {
             await incrementFakingHold(pos.id, pos.hold_count);
-            log.push({ action: "HOLD", hold: pos.hold_count + 1, currentPrice });
+            log.push({ action: "HOLD_LEGACY", hold: pos.hold_count + 1, currentPrice });
           }
-
-        } else if (pos.status === "chasing") {
-          const order = await getOrder(SYMBOL, pos.chase_order_id);
-
-          if (order.status === "FILLED") {
-            // Chase limit sell filled — ATOM sold
-            const fillPrice = parseFloat(order.cummulativeQuoteQty) / parseFloat(order.executedQty);
-            const pnl       = (fillPrice - pos.entry_price) * pos.quantity;
-            await closeFakingPosition(pos.id, { exit_price: fillPrice, pnl, result: "CHASE_FILL" });
-            log.push({ action: "CHASE_FILLED", exit: fillPrice, pnl: pnl.toFixed(4) });
-
-          } else {
-            // Only raise the chase if price moved up — never lower it
-            const newChasePrice = roundPrice(currentPrice * (1 - CHASE_OFFSET));
-            if (newChasePrice > pos.chase_price) {
-              await cancelOrder(SYMBOL, pos.chase_order_id);
-              const newOrder = await placeLimitSell(SYMBOL, pos.quantity, newChasePrice);
-              await updateFakingChaseOrder(pos.id, {
-                chase_order_id: newOrder.orderId,
-                chase_price:    newChasePrice,
-              });
-              log.push({ action: "CHASE_UP", currentPrice, newChasePrice });
-            } else {
-              log.push({ action: "CHASE_HOLD", currentPrice, chasePrice: pos.chase_price });
-            }
-          }
+          await logFakingRun(log);
+          return { ok: true, actions: log };
         }
 
-      // ── No position — check for signal ──────────────────────────────────
+        // New position: check both Binance orders
+        const [tpOrder, slOrder] = await Promise.all([
+          getOrder(SYMBOL, pos.tp_order_id),
+          getOrder(SYMBOL, pos.sl_order_id),
+        ]);
+
+        if (tpOrder.status === "FILLED") {
+          await cancelOrder(SYMBOL, pos.sl_order_id);
+          const exitPrice = parseFloat(tpOrder.cummulativeQuoteQty) / parseFloat(tpOrder.executedQty);
+          const pnl       = (exitPrice - pos.entry_price) * pos.quantity;
+          await closeFakingPosition(pos.id, { exit_price: exitPrice, pnl, result: "TP" });
+          log.push({ action: "TP_FILLED", exit: exitPrice, pnl: pnl.toFixed(4) });
+
+        } else if (slOrder.status === "FILLED") {
+          await cancelOrder(SYMBOL, pos.tp_order_id);
+          const exitPrice = parseFloat(slOrder.cummulativeQuoteQty) / parseFloat(slOrder.executedQty);
+          const pnl       = (exitPrice - pos.entry_price) * pos.quantity;
+          await closeFakingPosition(pos.id, { exit_price: exitPrice, pnl, result: "SL" });
+          log.push({ action: "SL_FILLED", exit: exitPrice, pnl: pnl.toFixed(4) });
+
+        } else if (pos.hold_count + 1 >= MAX_HOLD) {
+          // Chase: raise TP only if price moved up — SL stop-market stays on Binance untouched
+          const newTp  = roundPrice(currentPrice * (1 - CHASE_OFFSET));
+          const curTp  = pos.chase_price ?? pos.tp;
+          if (newTp > curTp) {
+            await cancelOrder(SYMBOL, pos.tp_order_id);
+            const newTpOrder = await placeLimitSell(SYMBOL, pos.quantity, newTp);
+            await updateFakingChase(pos.id, { tp_order_id: newTpOrder.orderId, chase_price: newTp });
+            log.push({ action: "CHASE_UP", currentPrice, newTp });
+          } else {
+            log.push({ action: "CHASE_HOLD", currentPrice, curTp });
+          }
+
+        } else {
+          await incrementFakingHold(pos.id, pos.hold_count);
+          log.push({ action: "HOLD", hold: pos.hold_count + 1, currentPrice });
+        }
+
+      // ── No DB position ────────────────────────────────────────────────────
       } else {
-        if (z <= -Z_THRESH) {
-          const usdtBalance = settings?.usdt_balance ?? 0;
-          if (usdtBalance < ALLOCATION) {
-            log.push({ action: "SKIP_NO_FUNDS", balance: usdtBalance, needed: ALLOCATION });
+        if (atomFree >= MIN_ATOM) {
+          // ATOM on Binance but no DB record — don't trade, flag for investigation
+          log.push({ action: "WARN_ATOM_NO_POS", atomFree });
+
+        } else if (z <= -Z_THRESH) {
+          if (usdtFree < ALLOCATION) {
+            log.push({ action: "SKIP_NO_FUNDS", balance: usdtFree, needed: ALLOCATION });
           } else {
             const estQty = floorQty(ALLOCATION / currentPrice);
             if (estQty * currentPrice >= 10) {
+              // Market buy
               const buyOrder  = await placeMarketBuy(SYMBOL, estQty);
               const fillPrice = parseFloat(buyOrder.cummulativeQuoteQty) / parseFloat(buyOrder.executedQty);
               const filledQty = parseFloat(buyOrder.executedQty);
               const tp        = roundPrice(fillPrice * (1 + TP_PCT));
               const sl        = roundPrice(fillPrice * (1 - SL_PCT));
 
-              // Place TP limit sell — only real order we keep open
-              // Safety net: if this fails, immediately market sell to avoid stranded ATOM
+              // Place TP limit sell — if fails, market sell and abort
               let tpOrder;
               try {
                 tpOrder = await placeLimitSell(SYMBOL, filledQty, tp);
               } catch (err) {
                 try { await placeMarketSell(SYMBOL, filledQty); } catch {}
-                log.push({ action: "ENTRY_ROLLBACK", error: String(err) });
+                log.push({ action: "ENTRY_ROLLBACK", stage: "tp", error: String(err) });
+                throw err;
+              }
+
+              // Place SL stop-market — if fails, cancel TP, market sell and abort
+              let slOrder;
+              try {
+                slOrder = await placeStopMarket(SYMBOL, filledQty, sl);
+              } catch (err) {
+                try { await cancelOrder(SYMBOL, tpOrder.orderId); } catch {}
+                try { await placeMarketSell(SYMBOL, filledQty); } catch {}
+                log.push({ action: "ENTRY_ROLLBACK", stage: "sl", error: String(err) });
                 throw err;
               }
 
@@ -158,6 +174,7 @@ export const fakingBot = schedules.task({
                 quantity:    filledQty,
                 z_score:     z,
                 tp_order_id: tpOrder.orderId,
+                sl_order_id: slOrder.orderId,
               });
               log.push({ action: "OPEN", entry: fillPrice, qty: filledQty, tp, sl, z: z.toFixed(3) });
             }
