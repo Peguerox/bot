@@ -20,9 +20,40 @@ function Stat({ label, value, sub, color }: { label: string; value: string; sub:
   );
 }
 
+function actionColor(action: string) {
+  if (action === "OPEN")         return "text-green-400";
+  if (action === "TP_FILLED")    return "text-green-400";
+  if (action === "SL_FILLED" || action === "SL_LEGACY") return "text-red-400";
+  if (action.startsWith("ERROR") || action === "ENTRY_ROLLBACK") return "text-red-400";
+  if (action === "WARN_ATOM_NO_POS") return "text-orange-400";
+  if (action === "CHASE_UP")     return "text-yellow-400";
+  if (action === "CHASE_HOLD")   return "text-gray-500";
+  if (action === "HOLD" || action === "HOLD_LEGACY") return "text-gray-500";
+  if (action === "SKIP_NO_FUNDS") return "text-orange-400";
+  if (action === "WATCH")        return "text-gray-600";
+  return "text-gray-400";
+}
+
+function formatAction(a: any): string {
+  if (a.action === "WATCH")           return `WATCH  z=${parseFloat(a.z).toFixed(2)}  $${a.price}`;
+  if (a.action === "OPEN")            return `OPEN  entry=$${a.entry}  tp=$${a.tp}  sl=$${a.sl}  z=${parseFloat(a.z).toFixed(2)}`;
+  if (a.action === "HOLD")            return `HOLD  [${a.hold}/${6}]  $${a.currentPrice}`;
+  if (a.action === "CHASE_UP")        return `CHASE UP  $${a.currentPrice} → tp=$${a.newTp}`;
+  if (a.action === "CHASE_HOLD")      return `CHASE HOLD  $${a.currentPrice}`;
+  if (a.action === "TP_FILLED")       return `TP FILLED  exit=$${a.exit}  pnl=$${parseFloat(a.pnl).toFixed(2)}`;
+  if (a.action === "SL_FILLED")       return `SL FILLED  exit=$${a.exit}  pnl=$${parseFloat(a.pnl).toFixed(2)}`;
+  if (a.action === "WARN_ATOM_NO_POS") return `BLOCKED — ${parseFloat(a.atomFree).toFixed(2)} ATOM held, no DB position`;
+  if (a.action === "SKIP_NO_FUNDS")   return `NO FUNDS  $${parseFloat(a.balance).toFixed(2)} USDT`;
+  if (a.action === "ENTRY_ROLLBACK")  return `ROLLBACK (${a.stage}): ${a.error}`;
+  if (a.action === "ERROR")           return `ERROR (${a.stage}): ${a.error}`;
+  if (a.action === "CANCELLED_EXTERNAL") return `CANCELLED EXTERNALLY`;
+  return a.action;
+}
+
 function LagBotPanel({
   mode, trades, openPositions, loading,
   usdtBalance, atomBalance, enabled, onToggle, toggling, onReset, resetting, onClearHistory, clearingHistory,
+  runs,
 }: {
   mode:              "paper" | "live" | "faking";
   trades:            any[];
@@ -37,6 +68,7 @@ function LagBotPanel({
   resetting?:        boolean;
   onClearHistory?:   () => void;
   clearingHistory?:  boolean;
+  runs?:             any[];
 }) {
   const initial    = mode === "paper" ? PAPER_INITIAL : mode === "faking" ? FAKING_INITIAL : LIVE_INITIAL;
   const totalPnL   = trades.reduce((s, t) => s + (t.pnl ?? 0), 0);
@@ -80,47 +112,38 @@ function LagBotPanel({
         </div>
 
         {isLive ? (
-          <div className="flex items-center gap-3">
+          <div className="flex items-center gap-1">
             {onClearHistory && (
               <button
                 onClick={onClearHistory}
                 disabled={clearingHistory || enabled}
-                title={enabled ? "Turn bot OFF before clearing" : "Delete all closed trade history"}
-                className={`text-xs px-2 py-1 rounded border border-gray-500/50 text-gray-400 transition-colors ${
-                  clearingHistory ? "opacity-50 cursor-not-allowed" :
-                  enabled         ? "opacity-30 cursor-not-allowed" :
-                  "hover:bg-gray-500/20 cursor-pointer"
-                }`}
+                title={enabled ? "Pause bot before clearing" : "Delete all closed trade history"}
+                className="text-xs text-gray-500 hover:text-gray-300 px-2.5 py-1.5 rounded-md hover:bg-white/5 transition-all disabled:opacity-25 disabled:cursor-not-allowed"
               >
-                {clearingHistory ? "Clearing…" : "Clear History"}
+                {clearingHistory ? "Clearing…" : "Clear"}
               </button>
             )}
             <button
               onClick={onReset}
               disabled={resetting || enabled}
-              title={enabled ? "Turn bot OFF before resetting" : "Cancel all orders & clear position"}
-              className={`text-xs px-2 py-1 rounded border border-red-500/50 text-red-400 transition-colors ${
-                resetting ? "opacity-50 cursor-not-allowed" :
-                enabled   ? "opacity-30 cursor-not-allowed" :
-                "hover:bg-red-500/20 cursor-pointer"
-              }`}
+              title={enabled ? "Pause bot before resetting" : "Cancel all orders & clear position"}
+              className="text-xs text-gray-500 hover:text-red-400 px-2.5 py-1.5 rounded-md hover:bg-red-500/10 transition-all disabled:opacity-25 disabled:cursor-not-allowed"
             >
               {resetting ? "Resetting…" : "Reset"}
             </button>
+            <div className="w-px h-4 bg-gray-700 mx-1" />
             <button
               onClick={onToggle}
               disabled={toggling}
-              className={`relative inline-flex h-8 w-14 items-center rounded-full transition-colors ${
-                enabled ? "bg-green-500" : "bg-gray-700"
-              } ${toggling ? "opacity-50 cursor-not-allowed" : "cursor-pointer"}`}
+              className={`flex items-center gap-2 text-xs font-medium px-3 py-1.5 rounded-md transition-all disabled:opacity-50 disabled:cursor-not-allowed ${
+                enabled
+                  ? "bg-green-500/15 text-green-400 hover:bg-green-500/20"
+                  : "bg-gray-800 text-gray-500 hover:bg-gray-750 hover:text-gray-300"
+              }`}
             >
-              <span className={`inline-block h-6 w-6 transform rounded-full bg-white shadow transition-transform ${
-                enabled ? "translate-x-7" : "translate-x-1"
-              }`} />
+              <span className={`w-1.5 h-1.5 rounded-full transition-colors ${enabled ? "bg-green-400" : "bg-gray-600"}`} />
+              {toggling ? "…" : enabled ? "Running" : "Paused"}
             </button>
-            <span className={`text-xs font-bold w-8 ${enabled ? "text-green-400" : "text-gray-500"}`}>
-              {enabled ? "ON" : "OFF"}
-            </span>
           </div>
         ) : (
           <span className="flex items-center gap-1.5">
@@ -171,6 +194,34 @@ function LagBotPanel({
         <p className="text-gray-500 text-xs uppercase tracking-wide mb-2">Recent Trades</p>
         <TradeHistory trades={trades.slice(0, 10)} loading={loading} />
       </div>
+
+      {/* Live Activity Log — faking bot only */}
+      {mode === "faking" && runs && (
+        <div>
+          <p className="text-gray-500 text-xs uppercase tracking-wide mb-2">Live Activity</p>
+          <div className="space-y-0.5 font-mono text-xs">
+            {runs.length === 0 && (
+              <p className="text-gray-600">No runs yet.</p>
+            )}
+            {runs.map((r: any) => {
+              const actions = r.actions ?? [];
+              const time = r.created_at?.slice(11, 19) ?? "";
+              return (
+                <div key={r.id} className="flex gap-2 items-start">
+                  <span className="text-gray-600 shrink-0">{time}</span>
+                  <div className="flex flex-col gap-0">
+                    {actions.map((a: any, i: number) => (
+                      <span key={i} className={actionColor(a.action)}>
+                        {formatAction(a)}
+                      </span>
+                    ))}
+                  </div>
+                </div>
+              );
+            })}
+          </div>
+        </div>
+      )}
     </div>
   );
 }
@@ -184,6 +235,7 @@ export default function Dashboard() {
   const [fakingSettings, setFakingSettings]   = useState<any>(null);
   const [fakingOpen, setFakingOpen]           = useState<any[]>([]);
   const [fakingTrades, setFakingTrades]       = useState<any[]>([]);
+  const [fakingRuns, setFakingRuns]           = useState<any[]>([]);
   const [atomBalance, setAtomBalance]         = useState<number>(0);
   const [loading, setLoading]                 = useState(true);
   const [toggling, setToggling]               = useState(false);
@@ -202,6 +254,7 @@ export default function Dashboard() {
       { data: fakingSt },
       { data: fakingOp },
       { data: fakingCl },
+      { data: fakingRs },
     ] = await Promise.all([
       getSupabase().from("positions").select("*").eq("status", "closed").order("exit_time", { ascending: false }),
       getSupabase().from("positions").select("*").in("status", ["open", "chasing"]),
@@ -211,6 +264,7 @@ export default function Dashboard() {
       getSupabase().from("faking_settings").select("*").single(),
       getSupabase().from("faking_positions").select("*").in("status", ["open", "chasing"]),
       getSupabase().from("faking_positions").select("*").eq("status", "closed").order("exit_time", { ascending: false }).limit(20),
+      getSupabase().from("faking_runs").select("id,created_at,actions").order("created_at", { ascending: false }).limit(15),
     ]);
     setTrades(closed ?? []);
     setOpen(openPos ?? []);
@@ -220,6 +274,7 @@ export default function Dashboard() {
     setFakingSettings(fakingSt ?? null);
     setFakingOpen((fakingOp ?? []).map((p: any) => ({ ...p, pair: "ATOM" })));
     setFakingTrades(fakingCl ?? []);
+    setFakingRuns(fakingRs ?? []);
     setLoading(false);
     // Fetch live balances from Binance
     fetch("/api/live/balances").then(r => r.json()).then(b => setAtomBalance(b.atom ?? 0)).catch(() => {});
@@ -276,6 +331,7 @@ export default function Dashboard() {
     const ch4 = sb.channel("faking")
       .on("postgres_changes", { event: "*", schema: "public", table: "faking_positions" }, load)
       .on("postgres_changes", { event: "*", schema: "public", table: "faking_settings" }, load)
+      .on("postgres_changes", { event: "*", schema: "public", table: "faking_runs" }, load)
       .subscribe();
     return () => { sb.removeChannel(ch1); sb.removeChannel(ch3); sb.removeChannel(ch4); };
   }, []);
@@ -321,6 +377,7 @@ export default function Dashboard() {
             resetting={fakingResetting}
             onClearHistory={handleFakingClearHistory}
             clearingHistory={fakingClearing}
+            runs={fakingRuns}
           />
         </div>
 
