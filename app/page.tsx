@@ -96,8 +96,8 @@ function LagBotPanel({
   return (
     <div className="bg-gray-900 rounded-xl p-5 space-y-5 flex flex-col">
       {/* Header */}
-      <div className="flex items-start justify-between gap-3">
-        <div className="min-w-0">
+      <div className="space-y-1.5">
+        <div className="flex items-center justify-between gap-2">
           <div className="flex items-center gap-2">
             <h2 className="text-white font-bold text-lg">Lag Bot</h2>
             <span className={`text-xs font-bold px-2 py-0.5 rounded-full shrink-0 ${
@@ -106,50 +106,50 @@ function LagBotPanel({
                                   "bg-blue-500/20 text-blue-400"
             }`}>{mode === "live" ? "LIVE" : mode === "faking" ? "FAKING" : "PAPER"}</span>
           </div>
-          <p className="text-gray-500 text-xs mt-0.5">
-            {mode === "live" ? "ATOM/USDT · $200" : mode === "faking" ? "ATOM/USDT · $200" : "BNB + ATOM · $2,000"} · 1m · Z=2.0 · TP 0.8% · SL 0.3%
-          </p>
-        </div>
 
-        {isLive ? (
-          <div className="flex items-center gap-1.5 shrink-0">
-            {onClearHistory && (
+          {isLive ? (
+            <div className="flex items-center gap-1.5 shrink-0">
+              {onClearHistory && (
+                <button
+                  onClick={onClearHistory}
+                  disabled={clearingHistory || enabled}
+                  title={enabled ? "Pause bot before clearing" : "Delete all closed trade history"}
+                  className="text-xs font-medium px-2.5 py-1.5 rounded-md bg-gray-800 text-gray-400 hover:bg-gray-700 hover:text-gray-200 transition-all disabled:opacity-30 disabled:cursor-not-allowed"
+                >
+                  {clearingHistory ? "Clearing…" : "Clear"}
+                </button>
+              )}
               <button
-                onClick={onClearHistory}
-                disabled={clearingHistory || enabled}
-                title={enabled ? "Pause bot before clearing" : "Delete all closed trade history"}
-                className="text-xs font-medium px-2.5 py-1.5 rounded-md bg-gray-800 text-gray-400 hover:bg-gray-700 hover:text-gray-200 transition-all disabled:opacity-30 disabled:cursor-not-allowed"
+                onClick={onReset}
+                disabled={resetting || enabled}
+                title={enabled ? "Pause bot before resetting" : "Cancel all orders & clear position"}
+                className="text-xs font-medium px-2.5 py-1.5 rounded-md bg-gray-800 text-red-400/70 hover:bg-red-950/60 hover:text-red-400 transition-all disabled:opacity-30 disabled:cursor-not-allowed"
               >
-                {clearingHistory ? "Clearing…" : "Clear"}
+                {resetting ? "Resetting…" : "Reset"}
               </button>
-            )}
-            <button
-              onClick={onReset}
-              disabled={resetting || enabled}
-              title={enabled ? "Pause bot before resetting" : "Cancel all orders & clear position"}
-              className="text-xs font-medium px-2.5 py-1.5 rounded-md bg-gray-800 text-red-400/70 hover:bg-red-950/60 hover:text-red-400 transition-all disabled:opacity-30 disabled:cursor-not-allowed"
-            >
-              {resetting ? "Resetting…" : "Reset"}
-            </button>
-            <button
-              onClick={onToggle}
-              disabled={toggling}
-              className={`flex items-center gap-2 text-xs font-semibold px-3 py-1.5 rounded-md transition-all disabled:opacity-50 disabled:cursor-not-allowed ${
-                enabled
-                  ? "bg-green-500/20 text-green-400 hover:bg-green-500/30"
-                  : "bg-gray-800 text-gray-400 hover:bg-gray-700 hover:text-gray-200"
-              }`}
-            >
-              <span className={`w-1.5 h-1.5 rounded-full ${enabled ? "bg-green-400" : "bg-gray-600"}`} />
-              {toggling ? "…" : enabled ? "Running" : "Paused"}
-            </button>
-          </div>
-        ) : (
-          <span className="flex items-center gap-1.5">
-            <span className="w-2 h-2 rounded-full bg-green-400 animate-pulse" />
-            <span className="text-green-400 text-xs font-medium">Running</span>
-          </span>
-        )}
+              <button
+                onClick={onToggle}
+                disabled={toggling}
+                className={`flex items-center gap-2 text-xs font-semibold px-3 py-1.5 rounded-md transition-all disabled:opacity-50 disabled:cursor-not-allowed ${
+                  enabled
+                    ? "bg-green-500/20 text-green-400 hover:bg-green-500/30"
+                    : "bg-gray-800 text-gray-400 hover:bg-gray-700 hover:text-gray-200"
+                }`}
+              >
+                <span className={`w-1.5 h-1.5 rounded-full ${enabled ? "bg-green-400" : "bg-gray-600"}`} />
+                {toggling ? "…" : enabled ? "Running" : "Paused"}
+              </button>
+            </div>
+          ) : (
+            <span className="flex items-center gap-1.5 shrink-0">
+              <span className="w-2 h-2 rounded-full bg-green-400 animate-pulse" />
+              <span className="text-green-400 text-xs font-medium">Running</span>
+            </span>
+          )}
+        </div>
+        <p className="text-gray-500 text-xs">
+          {mode === "live" ? "ATOM/USDT · $200" : mode === "faking" ? "ATOM/USDT · $200" : "BNB + ATOM · $2,000"} · 1m · Z=2.0 · TP 0.8% · SL 0.3%
+        </p>
       </div>
 
       {/* Stats */}
