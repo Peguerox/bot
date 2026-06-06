@@ -122,7 +122,7 @@ function PaperPanel({ trades, openPositions, loading }: {
 // ── Live bot panel ──────────────────────────────────────────────────────────
 
 function LivePanel({
-  trades, openPositions, loading, botUsdt,
+  trades, openPositions, loading, botUsdt, baseline,
   enabled, onToggle, toggling, onReset, resetting,
   onClearHistory, clearingHistory, runs,
 }: {
@@ -130,6 +130,7 @@ function LivePanel({
   openPositions:   any[];
   loading:         boolean;
   botUsdt:         number;
+  baseline:        number;
   enabled:         boolean;
   onToggle:        () => void;
   toggling:        boolean;
@@ -230,7 +231,7 @@ function LivePanel({
       {/* Bot allocation */}
       <div>
         <p className="text-gray-500 text-xs uppercase tracking-wide mb-2">Allocation</p>
-        <table className="w-full text-xs font-mono">
+        <table className="w-full text-sm font-mono">
           <thead>
             <tr className="text-gray-600 border-b border-gray-800">
               <th className="text-left pb-1 font-medium">Asset</th>
@@ -239,8 +240,18 @@ function LivePanel({
           </thead>
           <tbody>
             <tr className="border-b border-gray-800/50">
-              <td className="py-1.5 text-gray-400">USDT</td>
-              <td className="py-1.5 text-right text-white">${(botUsdt ?? 0).toFixed(2)}</td>
+              <td className="py-1.5 text-gray-400">Total USDT</td>
+              <td className="py-1.5 text-right text-white">${(botUsdt + baseline).toFixed(2)}</td>
+            </tr>
+            <tr className="border-b border-gray-800/50">
+              <td className="py-1.5 text-gray-400">Protected</td>
+              <td className="py-1.5 text-right text-gray-400">${baseline.toFixed(2)}</td>
+            </tr>
+            <tr className="border-b border-gray-800/50">
+              <td className="py-1.5 text-gray-500">Allocated</td>
+              <td className={`py-1.5 text-right font-bold ${botUsdt >= 49 ? "text-green-400" : botUsdt > 0 ? "text-yellow-400" : "text-blue-400"}`}>
+                ${botUsdt.toFixed(2)}
+              </td>
             </tr>
             <tr className="border-b border-gray-800/50">
               <td className="py-1.5 text-gray-400">ATOM</td>
@@ -393,6 +404,7 @@ export default function Dashboard() {
             openPositions={liveOpen}
             loading={loading}
             botUsdt={liveSettings?.usdt_balance ?? 0}
+            baseline={liveSettings?.baseline_usdt ?? 0}
             enabled={liveSettings?.enabled ?? false}
             onToggle={handleToggle}
             toggling={toggling}

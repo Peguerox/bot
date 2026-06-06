@@ -14,9 +14,18 @@ export async function POST() {
   const { error: runsErr } = await getSupabaseAdmin()
     .from("live_runs")
     .delete()
-    .neq("id", "00000000-0000-0000-0000-000000000000"); // delete all
+    .neq("id", "00000000-0000-0000-0000-000000000000");
 
   if (runsErr) errors.push(`runs: ${runsErr.message}`);
+
+  // Reset baseline so bot recalculates fresh on next run
+  const { data: st } = await getSupabaseAdmin().from("live_settings").select("id").single();
+  if (st) {
+    await getSupabaseAdmin()
+      .from("live_settings")
+      .update({ baseline_usdt: 0, usdt_balance: 0 })
+      .eq("id", st.id);
+  }
 
   return NextResponse.json({ ok: errors.length === 0, errors });
 }
