@@ -6,7 +6,7 @@ import { calcZScore, Z_THRESH, TP_PCT, SL_PCT, MAX_HOLD } from "../lib/strategy"
 import {
   getLivePosition, openLivePosition, incrementLiveHold,
   setLiveChasing, updateLiveChaseFloor, closeLivePosition,
-  logLiveRun, getLiveSettings, updateLiveBalance, setBaseline,
+  logLiveRun, getLiveSettings,
 } from "../lib/live-db";
 
 const SYMBOL       = "ATOMUSDT";
@@ -34,23 +34,6 @@ export const liveBot = schedules.task({
       return { ok: false };
     }
     if (!settings?.enabled) return { ok: false, reason: "disabled" };
-
-    // Real balance + baseline tracking
-    let usdtFree = 0;
-    try {
-      usdtFree = await getFreeBalance("USDT");
-      let baseline = settings.baseline_usdt ?? 0;
-      if (baseline === 0) {
-        baseline = usdtFree - ALLOCATION;
-        await setBaseline(baseline);
-      }
-      const botUsdt = usdtFree - baseline;
-      await updateLiveBalance(botUsdt);
-    } catch (err) {
-      log.push({ action: "ERROR", stage: "balance", error: String(err) });
-      await logLiveRun({ actions: log });
-      return { ok: false };
-    }
 
     try {
       const [btcCandles, altCandles, price] = await Promise.all([
@@ -112,21 +95,15 @@ export const liveBot = schedules.task({
 
       } else {
         if (z <= -Z_THRESH) {
-          const botUsdt = usdtFree - (settings.baseline_usdt ?? 0);
-          const spend = Math.min(botUsdt, ALLOCATION);
-          if (spend < 5) {
-            log.push({ action: "SKIP_NO_FUNDS", balance: botUsdt });
-          } else {
-            const estQty = floorQty(spend / price);
-            if (estQty * price >= 1) {
-              const buyOrder  = await placeMarketBuy(SYMBOL, estQty);
-              const fillPrice = parseFloat(buyOrder.cummulativeQuoteQty) / parseFloat(buyOrder.executedQty);
-              const filledQty = floorQty(await getFreeBalance("ATOM"));
-              const tp        = roundPrice(fillPrice * (1 + TP_PCT));
-              const sl        = roundPrice(fillPrice * (1 - SL_PCT));
-              await openLivePosition({ symbol: SYMBOL, entry_price: fillPrice, sl, tp, quantity: filledQty, z_score: z });
-              log.push({ action: "OPEN", entry: fillPrice, qty: filledQty, tp, sl, z: z.toFixed(3) });
-            }
+          const estQty = floorQty(ALLOCATION / price);
+          if (estQty * price >= 1) {
+            const buyOrder  = await placeMarketBuy(SYMBOL, estQty);
+            const fillPrice = parseFloat(buyOrder.cummulativeQuoteQty) / parseFloat(buyOrder.executedQty);
+            const filledQty = floorQty(await getFreeBalance("ATOM"));
+            const tp        = roundPrice(fillPrice * (1 + TP_PCT));
+            const sl        = roundPrice(fillPrice * (1 - SL_PCT));
+            await openLivePosition({ symbol: SYMBOL, entry_price: fillPrice, sl, tp, quantity: filledQty, z_score: z });
+            log.push({ action: "OPEN", entry: fillPrice, qty: filledQty, tp, sl, z: z.toFixed(3) });
           }
         } else {
           log.push({ action: "WATCH", z: z.toFixed(3), price });
