@@ -313,19 +313,175 @@ function LivePanel({
   );
 }
 
+// ── XLM Live bot panel ─────────────────────────────────────────────────────
+
+function XlmLivePanel({
+  trades, openPositions, loading, botUsdt, baseline,
+  enabled, onToggle, toggling, onReset, resetting,
+  onClearHistory, clearingHistory, runs,
+}: {
+  trades: any[]; openPositions: any[]; loading: boolean;
+  botUsdt: number; baseline: number; enabled: boolean;
+  onToggle: () => void; toggling: boolean;
+  onReset: () => void; resetting: boolean;
+  onClearHistory: () => void; clearingHistory: boolean;
+  runs: any[];
+}) {
+  const INITIAL    = 25;
+  const totalPnL   = trades.reduce((s, t) => s + (t.pnl ?? 0), 0);
+  const decided    = trades.filter(t => t.result !== "EXPIRE" && t.result !== "MISSED");
+  const wins       = decided.filter(t => t.pnl > 0);
+  const losses     = decided.filter(t => t.pnl < 0);
+  const winRate    = decided.length > 0 ? (wins.length / decided.length * 100).toFixed(1) : "—";
+  const grossWin   = wins.reduce((s, t) => s + t.pnl, 0);
+  const grossLoss  = Math.abs(losses.reduce((s, t) => s + t.pnl, 0));
+  const pf         = grossLoss > 0 ? (grossWin / grossLoss).toFixed(2) : "∞";
+  let peak = INITIAL, maxDD = 0, runBal = INITIAL;
+  [...trades].reverse().forEach(t => {
+    runBal += t.pnl ?? 0;
+    if (runBal > peak) peak = runBal;
+    const dd = (runBal - peak) / peak * 100;
+    if (dd < maxDD) maxDD = dd;
+  });
+
+  const latestPrice: number | null = (() => {
+    const actions: any[] = runs[0]?.data?.actions ?? [];
+    for (let i = actions.length - 1; i >= 0; i--) {
+      if (actions[i].price != null) return parseFloat(actions[i].price);
+    }
+    return null;
+  })();
+
+  const total     = botUsdt + baseline;
+  const allocated = botUsdt;
+
+  return (
+    <div className="bg-gray-900 rounded-xl p-5 space-y-5 flex flex-col">
+      <div className="space-y-1.5">
+        <div className="flex items-center justify-between gap-2">
+          <div className="flex items-center gap-2">
+            <h2 className="text-white font-bold text-lg">LAG XLM</h2>
+            <span className="text-xs font-bold px-2 py-0.5 rounded-full bg-green-500/20 text-green-400">LIVE</span>
+          </div>
+          <div className="flex items-center gap-1.5 shrink-0">
+            <button
+              onClick={onClearHistory}
+              disabled={clearingHistory || enabled}
+              className="text-xs px-2 py-1 rounded bg-gray-700 hover:bg-gray-600 disabled:opacity-40 disabled:cursor-not-allowed"
+              title={enabled ? "Pause bot before clearing" : "Delete all closed trades and run logs"}
+            >
+              {clearingHistory ? "…" : "Clear"}
+            </button>
+            <button
+              onClick={onReset}
+              disabled={resetting || enabled}
+              className="text-xs px-2 py-1 rounded bg-red-900/60 hover:bg-red-800/60 disabled:opacity-40 disabled:cursor-not-allowed text-red-300"
+              title={enabled ? "Pause bot before selling" : "Market sell all XLM & clear position"}
+            >
+              {resetting ? "…" : "Sell All"}
+            </button>
+            <button
+              onClick={onToggle}
+              disabled={toggling}
+              className={`text-xs px-3 py-1 rounded font-medium transition-colors ${enabled ? "bg-yellow-600 hover:bg-yellow-500 text-white" : "bg-green-700 hover:bg-green-600 text-white"} disabled:opacity-40`}
+            >
+              {toggling ? "…" : enabled ? "Pause" : "Enable"}
+            </button>
+          </div>
+        </div>
+        <p className="text-gray-500 text-xs">XLM/USDT · $25 · 1m · Z=1.5 · TP 0.8% · SL 0.3% · market orders</p>
+      </div>
+
+      {loading ? (
+        <div className="grid grid-cols-2 gap-2 animate-pulse">
+          {[...Array(4)].map((_, i) => <div key={i} className="h-16 bg-gray-800 rounded-lg" />)}
+        </div>
+      ) : (
+        <>
+          <div className="grid grid-cols-3 gap-2 text-xs">
+            <div className="bg-gray-800/60 rounded-lg p-2">
+              <p className="text-gray-500 uppercase tracking-wide">Total USDT</p>
+              <p className="text-white font-bold mt-0.5">${total.toFixed(2)}</p>
+            </div>
+            <div className="bg-gray-800/60 rounded-lg p-2">
+              <p className="text-gray-500 uppercase tracking-wide">Protected</p>
+              <p className="text-gray-400 font-bold mt-0.5">${baseline.toFixed(2)}</p>
+            </div>
+            <div className="bg-gray-800/60 rounded-lg p-2">
+              <p className="text-gray-500 uppercase tracking-wide">Allocated</p>
+              <p className="text-blue-400 font-bold mt-0.5">${allocated.toFixed(2)}</p>
+            </div>
+          </div>
+          <div className="grid grid-cols-2 gap-2">
+            <Stat label="PnL"          value={`${totalPnL >= 0 ? "+" : ""}$${totalPnL.toFixed(2)}`} sub={`of $${INITIAL} allocated`} color={totalPnL >= 0 ? "text-green-400" : "text-red-400"} />
+            <Stat label="Win Rate"     value={`${winRate}%`}              sub={`${wins.length}W / ${losses.length}L of ${decided.length}`} color="text-blue-400" />
+            <Stat label="Profit Factor" value={pf}                        sub={openPositions.length > 0 ? `${openPositions.length} open` : "No open positions"} color="text-purple-400" />
+            <Stat label="Max Drawdown" value={`${maxDD.toFixed(1)}%`}    sub={latestPrice ? `XLM $${latestPrice.toFixed(5)}` : `${trades.length} trades`} color={maxDD < -10 ? "text-red-400" : "text-yellow-400"} />
+          </div>
+        </>
+      )}
+
+      <div>
+        <p className="text-gray-500 text-xs uppercase tracking-wide mb-2">Cumulative PnL</p>
+        <PnLChart trades={trades} initial={INITIAL} />
+      </div>
+      <div>
+        <p className="text-gray-500 text-xs uppercase tracking-wide mb-2">
+          Open Positions
+          {openPositions.length > 0 && <span className="ml-1 bg-blue-500/20 text-blue-400 px-1.5 py-0.5 rounded-full text-xs">{openPositions.length}</span>}
+        </p>
+        <OpenPositions positions={openPositions} loading={loading} />
+      </div>
+      <div>
+        <p className="text-gray-500 text-xs uppercase tracking-wide mb-2">Recent Trades</p>
+        <TradeHistory trades={trades.slice(0, 10)} loading={loading} />
+      </div>
+      <div>
+        <p className="text-gray-500 text-xs uppercase tracking-wide mb-2">Activity</p>
+        <div className="h-56 overflow-y-auto space-y-0.5 font-mono text-sm pr-1">
+          {runs.length === 0 && <p className="text-gray-600">No runs yet.</p>}
+          {runs.map((r: any) => {
+            const actions = r.data?.actions ?? [];
+            const time = r.run_at
+              ? new Date(r.run_at).toLocaleTimeString([], { hour: "2-digit", minute: "2-digit", second: "2-digit", hour12: false })
+              : "";
+            return (
+              <div key={r.id} className="flex gap-2 items-start">
+                <span className="text-gray-600 shrink-0">{time}</span>
+                <div className="flex flex-col gap-0">
+                  {actions.map((a: any, i: number) => (
+                    <span key={i} className={actionColor(a.action)}>{formatAction(a)}</span>
+                  ))}
+                </div>
+              </div>
+            );
+          })}
+        </div>
+      </div>
+    </div>
+  );
+}
+
 // ── Dashboard ───────────────────────────────────────────────────────────────
 
 export default function Dashboard() {
-  const [trades, setTrades]           = useState<any[]>([]);
-  const [open, setOpen]               = useState<any[]>([]);
-  const [liveSettings, setLiveSettings] = useState<any>(null);
-  const [liveOpen, setLiveOpen]       = useState<any[]>([]);
-  const [liveTrades, setLiveTrades]   = useState<any[]>([]);
-  const [liveRuns, setLiveRuns]       = useState<any[]>([]);
-  const [loading, setLoading]         = useState(true);
-  const [toggling, setToggling]         = useState(false);
-  const [resetting, setResetting]       = useState(false);
+  const [trades, setTrades]                   = useState<any[]>([]);
+  const [open, setOpen]                       = useState<any[]>([]);
+  const [liveSettings, setLiveSettings]       = useState<any>(null);
+  const [liveOpen, setLiveOpen]               = useState<any[]>([]);
+  const [liveTrades, setLiveTrades]           = useState<any[]>([]);
+  const [liveRuns, setLiveRuns]               = useState<any[]>([]);
+  const [xlmSettings, setXlmSettings]         = useState<any>(null);
+  const [xlmOpen, setXlmOpen]                 = useState<any[]>([]);
+  const [xlmTrades, setXlmTrades]             = useState<any[]>([]);
+  const [xlmRuns, setXlmRuns]                 = useState<any[]>([]);
+  const [loading, setLoading]                 = useState(true);
+  const [toggling, setToggling]               = useState(false);
+  const [resetting, setResetting]             = useState(false);
   const [clearingHistory, setClearingHistory] = useState(false);
+  const [xlmToggling, setXlmToggling]         = useState(false);
+  const [xlmResetting, setXlmResetting]       = useState(false);
+  const [xlmClearing, setXlmClearing]         = useState(false);
 
   async function load() {
     const [
@@ -335,6 +491,10 @@ export default function Dashboard() {
       { data: liveOp },
       { data: liveCl },
       { data: liveRs },
+      { data: xlmSt },
+      { data: xlmOp },
+      { data: xlmCl },
+      { data: xlmRs },
     ] = await Promise.all([
       getSupabase().from("positions").select("*").eq("status", "closed").order("exit_time", { ascending: false }),
       getSupabase().from("positions").select("*").in("status", ["open", "chasing"]),
@@ -342,6 +502,10 @@ export default function Dashboard() {
       getSupabase().from("live_positions").select("*").in("status", ["open", "chasing"]),
       getSupabase().from("live_positions").select("*").eq("status", "closed").order("exit_time", { ascending: false }).limit(20),
       getSupabase().from("live_runs").select("id,run_at,data").order("run_at", { ascending: false }).limit(120),
+      getSupabase().from("xlm_live_settings").select("*").single(),
+      getSupabase().from("xlm_live_positions").select("*").in("status", ["open", "chasing"]),
+      getSupabase().from("xlm_live_positions").select("*").eq("status", "closed").order("exit_time", { ascending: false }).limit(20),
+      getSupabase().from("xlm_live_runs").select("id,run_at,data").order("run_at", { ascending: false }).limit(120),
     ]);
     setTrades(closed ?? []);
     setOpen(openPos ?? []);
@@ -349,6 +513,10 @@ export default function Dashboard() {
     setLiveOpen((liveOp ?? []).map((p: any) => ({ ...p, pair: "ATOM" })));
     setLiveTrades(liveCl ?? []);
     setLiveRuns(liveRs ?? []);
+    setXlmSettings(xlmSt ?? null);
+    setXlmOpen((xlmOp ?? []).map((p: any) => ({ ...p, pair: "XLM" })));
+    setXlmTrades(xlmCl ?? []);
+    setXlmRuns(xlmRs ?? []);
     setLoading(false);
   }
 
@@ -375,6 +543,29 @@ export default function Dashboard() {
     setClearingHistory(false);
   }
 
+  async function handleXlmToggle() {
+    setXlmToggling(true);
+    await fetch("/api/xlm/toggle", { method: "POST" });
+    await load();
+    setXlmToggling(false);
+  }
+
+  async function handleXlmReset() {
+    if (!confirm("Market sell all XLM and clear position?")) return;
+    setXlmResetting(true);
+    await fetch("/api/xlm/reset", { method: "POST" });
+    await load();
+    setXlmResetting(false);
+  }
+
+  async function handleXlmClearHistory() {
+    if (!confirm("Delete all XLM closed trade history and run logs?")) return;
+    setXlmClearing(true);
+    await fetch("/api/xlm/clear-history", { method: "POST" });
+    await load();
+    setXlmClearing(false);
+  }
+
   useEffect(() => {
     load();
     const sb = getSupabase();
@@ -386,14 +577,19 @@ export default function Dashboard() {
       .on("postgres_changes", { event: "*", schema: "public", table: "live_settings" }, load)
       .on("postgres_changes", { event: "*", schema: "public", table: "live_runs" }, load)
       .subscribe();
-    return () => { sb.removeChannel(ch1); sb.removeChannel(ch2); };
+    const ch3 = sb.channel("xlm")
+      .on("postgres_changes", { event: "*", schema: "public", table: "xlm_live_positions" }, load)
+      .on("postgres_changes", { event: "*", schema: "public", table: "xlm_live_settings" }, load)
+      .on("postgres_changes", { event: "*", schema: "public", table: "xlm_live_runs" }, load)
+      .subscribe();
+    return () => { sb.removeChannel(ch1); sb.removeChannel(ch2); sb.removeChannel(ch3); };
   }, []);
 
   return (
     <main className="min-h-screen bg-gray-950 text-white p-6">
-      <div className="max-w-5xl mx-auto space-y-6">
+      <div className="max-w-6xl mx-auto space-y-6">
         <h1 className="text-2xl font-bold text-white">TradeBot Dashboard</h1>
-        <div className="grid grid-cols-1 lg:grid-cols-2 gap-6 items-start">
+        <div className="grid grid-cols-1 lg:grid-cols-3 gap-6 items-start">
           <PaperPanel
             trades={trades}
             openPositions={open}
@@ -413,6 +609,21 @@ export default function Dashboard() {
             onClearHistory={handleClearHistory}
             clearingHistory={clearingHistory}
             runs={liveRuns}
+          />
+          <XlmLivePanel
+            trades={xlmTrades}
+            openPositions={xlmOpen}
+            loading={loading}
+            botUsdt={xlmSettings?.usdt_balance ?? 0}
+            baseline={xlmSettings?.baseline_usdt ?? 0}
+            enabled={xlmSettings?.enabled ?? false}
+            onToggle={handleXlmToggle}
+            toggling={xlmToggling}
+            onReset={handleXlmReset}
+            resetting={xlmResetting}
+            onClearHistory={handleXlmClearHistory}
+            clearingHistory={xlmClearing}
+            runs={xlmRuns}
           />
         </div>
       </div>

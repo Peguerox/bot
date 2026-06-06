@@ -1,0 +1,111 @@
+import { getSupabaseAdmin } from "./supabase-admin";
+
+export async function getXlmPosition() {
+  const { data } = await getSupabaseAdmin()
+    .from("xlm_live_positions")
+    .select("*")
+    .in("status", ["open", "chasing"])
+    .single();
+  return data;
+}
+
+export async function openXlmPosition(params: {
+  symbol:      string;
+  entry_price: number;
+  sl:          number;
+  tp:          number;
+  quantity:    number;
+  z_score:     number;
+}) {
+  await getSupabaseAdmin().from("xlm_live_positions").insert({
+    ...params,
+    status:     "open",
+    hold_count: 0,
+    entry_time: new Date().toISOString(),
+  });
+}
+
+export async function incrementXlmHold(id: string, currentHold: number) {
+  await getSupabaseAdmin()
+    .from("xlm_live_positions")
+    .update({ hold_count: currentHold + 1 })
+    .eq("id", id);
+}
+
+export async function setXlmChasing(id: string, chaseFloor: number) {
+  await getSupabaseAdmin()
+    .from("xlm_live_positions")
+    .update({ status: "chasing", chase_price: chaseFloor })
+    .eq("id", id);
+}
+
+export async function updateXlmChaseFloor(id: string, chaseFloor: number) {
+  await getSupabaseAdmin()
+    .from("xlm_live_positions")
+    .update({ chase_price: chaseFloor })
+    .eq("id", id);
+}
+
+export async function closeXlmPosition(id: string, params: {
+  exit_price: number;
+  pnl:        number;
+  result:     string;
+}) {
+  await getSupabaseAdmin()
+    .from("xlm_live_positions")
+    .update({
+      status:    "closed",
+      exit_time: new Date().toISOString(),
+      ...params,
+    })
+    .eq("id", id);
+}
+
+export async function logXlmRun(data: object) {
+  await getSupabaseAdmin().from("xlm_live_runs").insert({
+    run_at: new Date().toISOString(),
+    data,
+  });
+}
+
+export async function getXlmSettings() {
+  const { data } = await getSupabaseAdmin()
+    .from("xlm_live_settings")
+    .select("*")
+    .single();
+  return data as { id: string; enabled: boolean; pending_sell: boolean; baseline_usdt: number; usdt_balance: number } | null;
+}
+
+export async function setXlmBaseline(baseline: number) {
+  const sb = getSupabaseAdmin();
+  const { data } = await sb.from("xlm_live_settings").select("id").single();
+  if (data) await sb.from("xlm_live_settings").update({ baseline_usdt: baseline }).eq("id", data.id);
+}
+
+export async function updateXlmBalance(usdtBalance: number) {
+  const sb = getSupabaseAdmin();
+  const { data } = await sb.from("xlm_live_settings").select("id").single();
+  if (data) await sb.from("xlm_live_settings").update({ usdt_balance: usdtBalance }).eq("id", data.id);
+}
+
+export async function setXlmPendingSell(val: boolean) {
+  const sb = getSupabaseAdmin();
+  const { data } = await sb.from("xlm_live_settings").select("id").single();
+  if (data) await sb.from("xlm_live_settings").update({ pending_sell: val }).eq("id", data.id);
+}
+
+export async function getXlmPnLSum(): Promise<number> {
+  const { data } = await getSupabaseAdmin()
+    .from("xlm_live_positions")
+    .select("pnl")
+    .eq("status", "closed");
+  return (data ?? []).reduce((sum: number, p: any) => sum + (p.pnl ?? 0), 0);
+}
+
+export async function setXlmEnabled(enabled: boolean) {
+  const sb = getSupabaseAdmin();
+  const { data } = await sb.from("xlm_live_settings").select("id").single();
+  await sb.from("xlm_live_settings")
+    .update({ enabled, updated_at: new Date().toISOString() })
+    .eq("id", data!.id);
+}
