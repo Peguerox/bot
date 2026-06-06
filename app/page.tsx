@@ -394,58 +394,57 @@ function XlmLivePanel({
           {[...Array(4)].map((_, i) => <div key={i} className="h-16 bg-gray-800 rounded-lg" />)}
         </div>
       ) : (
-        <>
-          <div>
-            <p className="text-gray-500 text-xs uppercase tracking-wide mb-2">Allocation</p>
-            <table className="w-full text-sm font-mono">
-              <thead>
-                <tr className="text-gray-600 border-b border-gray-800">
-                  <th className="text-left pb-1 font-medium">Asset</th>
-                  <th className="text-right pb-1 font-medium">Amount</th>
-                </tr>
-              </thead>
-              <tbody>
-                <tr className="border-b border-gray-800/50">
-                  <td className="py-1.5 text-gray-400">Total USDT</td>
-                  <td className="py-1.5 text-right text-white">${(botUsdt + baseline).toFixed(2)}</td>
-                </tr>
-                <tr className="border-b border-gray-800/50">
-                  <td className="py-1.5 text-gray-400">Protected</td>
-                  <td className="py-1.5 text-right text-gray-400">${baseline.toFixed(2)}</td>
-                </tr>
-                <tr className="border-b border-gray-800/50">
-                  <td className="py-1.5 text-gray-500">Allocated</td>
-                  <td className={`py-1.5 text-right font-bold ${botUsdt >= 24 ? "text-green-400" : botUsdt > 0 ? "text-yellow-400" : "text-blue-400"}`}>
-                    ${botUsdt.toFixed(2)}
-                  </td>
-                </tr>
-                <tr className="border-b border-gray-800/50">
-                  <td className="py-1.5 text-gray-400">XLM</td>
-                  <td className="py-1.5 text-right text-white">
-                    {openPositions[0]?.quantity?.toFixed(0) ?? "0"}
-                  </td>
-                </tr>
-                <tr>
-                  <td className="py-1.5 text-gray-400">XLM price</td>
-                  <td className="py-1.5 text-right text-yellow-400">
-                    {latestPrice != null ? `$${latestPrice.toFixed(5)}` : "—"}
-                  </td>
-                </tr>
-              </tbody>
-            </table>
-          </div>
-          <div className="grid grid-cols-2 gap-2">
-            <Stat label="PnL"          value={`${totalPnL >= 0 ? "+" : ""}$${totalPnL.toFixed(2)}`} sub={`of $${INITIAL} allocated`} color={totalPnL >= 0 ? "text-green-400" : "text-red-400"} />
-            <Stat label="Win Rate"     value={`${winRate}%`}              sub={`${wins.length}W / ${losses.length}L of ${decided.length}`} color="text-blue-400" />
-            <Stat label="Profit Factor" value={pf}                        sub={openPositions.length > 0 ? `${openPositions.length} open` : "No open positions"} color="text-purple-400" />
-            <Stat label="Max Drawdown" value={`${maxDD.toFixed(1)}%`}    sub={latestPrice ? `XLM $${latestPrice.toFixed(5)}` : `${trades.length} trades`} color={maxDD < -10 ? "text-red-400" : "text-yellow-400"} />
-          </div>
-        </>
+        <div className="grid grid-cols-2 gap-2">
+          <Stat label="PnL"           value={`${totalPnL >= 0 ? "+" : ""}$${totalPnL.toFixed(2)}`} sub={`balance $${(INITIAL + totalPnL).toFixed(2)}`} color={totalPnL >= 0 ? "text-green-400" : "text-red-400"} />
+          <Stat label="Win Rate"      value={`${winRate}%`}             sub={`${wins.length}W / ${losses.length}L of ${decided.length}`} color="text-blue-400" />
+          <Stat label="Profit Factor" value={pf}                        sub={openPositions.length > 0 ? `${openPositions.length} open` : "No open positions"} color="text-purple-400" />
+          <Stat label="Max Drawdown"  value={`${maxDD.toFixed(1)}%`}   sub={`${trades.length} total trades`} color={maxDD < -10 ? "text-red-400" : "text-yellow-400"} />
+        </div>
       )}
 
       <div>
         <p className="text-gray-500 text-xs uppercase tracking-wide mb-2">Cumulative PnL</p>
         <PnLChart trades={trades} initial={INITIAL} />
+      </div>
+
+      <div>
+        <p className="text-gray-500 text-xs uppercase tracking-wide mb-2">Allocation</p>
+        <table className="w-full text-sm font-mono">
+          <thead>
+            <tr className="text-gray-600 border-b border-gray-800">
+              <th className="text-left pb-1 font-medium">Asset</th>
+              <th className="text-right pb-1 font-medium">Amount</th>
+            </tr>
+          </thead>
+          <tbody>
+            <tr className="border-b border-gray-800/50">
+              <td className="py-1.5 text-gray-400">Total USDT</td>
+              <td className="py-1.5 text-right text-white">${(botUsdt + baseline).toFixed(2)}</td>
+            </tr>
+            <tr className="border-b border-gray-800/50">
+              <td className="py-1.5 text-gray-400">Protected</td>
+              <td className="py-1.5 text-right text-gray-400">${baseline.toFixed(2)}</td>
+            </tr>
+            <tr className="border-b border-gray-800/50">
+              <td className="py-1.5 text-gray-500">Allocated</td>
+              <td className={`py-1.5 text-right font-bold ${botUsdt >= 24 ? "text-green-400" : botUsdt > 0 ? "text-yellow-400" : "text-blue-400"}`}>
+                ${botUsdt.toFixed(2)}
+              </td>
+            </tr>
+            <tr className="border-b border-gray-800/50">
+              <td className="py-1.5 text-gray-400">XLM</td>
+              <td className="py-1.5 text-right text-white">
+                {openPositions[0]?.quantity?.toFixed(0) ?? "0"}
+              </td>
+            </tr>
+            <tr>
+              <td className="py-1.5 text-gray-400">XLM price</td>
+              <td className="py-1.5 text-right text-yellow-400">
+                {latestPrice != null ? `$${latestPrice.toFixed(5)}` : "—"}
+              </td>
+            </tr>
+          </tbody>
+        </table>
       </div>
       <div>
         <p className="text-gray-500 text-xs uppercase tracking-wide mb-2">
