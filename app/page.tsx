@@ -352,9 +352,6 @@ function XlmLivePanel({
     return null;
   })();
 
-  const total     = botUsdt + baseline;
-  const allocated = botUsdt;
-
   return (
     <div className="bg-gray-900 rounded-xl p-5 space-y-5 flex flex-col">
       <div className="space-y-1.5">
@@ -398,19 +395,44 @@ function XlmLivePanel({
         </div>
       ) : (
         <>
-          <div className="grid grid-cols-3 gap-2 text-xs">
-            <div className="bg-gray-800/60 rounded-lg p-2">
-              <p className="text-gray-500 uppercase tracking-wide">Total USDT</p>
-              <p className="text-white font-bold mt-0.5">${total.toFixed(2)}</p>
-            </div>
-            <div className="bg-gray-800/60 rounded-lg p-2">
-              <p className="text-gray-500 uppercase tracking-wide">Protected</p>
-              <p className="text-gray-400 font-bold mt-0.5">${baseline.toFixed(2)}</p>
-            </div>
-            <div className="bg-gray-800/60 rounded-lg p-2">
-              <p className="text-gray-500 uppercase tracking-wide">Allocated</p>
-              <p className="text-blue-400 font-bold mt-0.5">${allocated.toFixed(2)}</p>
-            </div>
+          <div>
+            <p className="text-gray-500 text-xs uppercase tracking-wide mb-2">Allocation</p>
+            <table className="w-full text-sm font-mono">
+              <thead>
+                <tr className="text-gray-600 border-b border-gray-800">
+                  <th className="text-left pb-1 font-medium">Asset</th>
+                  <th className="text-right pb-1 font-medium">Amount</th>
+                </tr>
+              </thead>
+              <tbody>
+                <tr className="border-b border-gray-800/50">
+                  <td className="py-1.5 text-gray-400">Total USDT</td>
+                  <td className="py-1.5 text-right text-white">${(botUsdt + baseline).toFixed(2)}</td>
+                </tr>
+                <tr className="border-b border-gray-800/50">
+                  <td className="py-1.5 text-gray-400">Protected</td>
+                  <td className="py-1.5 text-right text-gray-400">${baseline.toFixed(2)}</td>
+                </tr>
+                <tr className="border-b border-gray-800/50">
+                  <td className="py-1.5 text-gray-500">Allocated</td>
+                  <td className={`py-1.5 text-right font-bold ${botUsdt >= 24 ? "text-green-400" : botUsdt > 0 ? "text-yellow-400" : "text-blue-400"}`}>
+                    ${botUsdt.toFixed(2)}
+                  </td>
+                </tr>
+                <tr className="border-b border-gray-800/50">
+                  <td className="py-1.5 text-gray-400">XLM</td>
+                  <td className="py-1.5 text-right text-white">
+                    {openPositions[0]?.quantity?.toFixed(0) ?? "0"}
+                  </td>
+                </tr>
+                <tr>
+                  <td className="py-1.5 text-gray-400">XLM price</td>
+                  <td className="py-1.5 text-right text-yellow-400">
+                    {latestPrice != null ? `$${latestPrice.toFixed(5)}` : "—"}
+                  </td>
+                </tr>
+              </tbody>
+            </table>
           </div>
           <div className="grid grid-cols-2 gap-2">
             <Stat label="PnL"          value={`${totalPnL >= 0 ? "+" : ""}$${totalPnL.toFixed(2)}`} sub={`of $${INITIAL} allocated`} color={totalPnL >= 0 ? "text-green-400" : "text-red-400"} />
