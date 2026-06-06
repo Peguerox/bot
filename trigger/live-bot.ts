@@ -7,6 +7,7 @@ import {
   getLivePosition, openLivePosition, incrementLiveHold,
   setLiveChasing, updateLiveChaseFloor, closeLivePosition,
   logLiveRun, getLiveSettings, setPendingSell, getLivePnLSum,
+  setBaseline, updateLiveBalance,
 } from "../lib/live-db";
 
 const SYMBOL       = "ATOMUSDT";
@@ -34,6 +35,22 @@ export const liveBot = schedules.task({
     }
     if (!settings?.enabled) return { ok: false, reason: "disabled" };
 
+    // Fetch real USDT balance and publish bot allocation
+    let usdtFree = 0;
+    try {
+      usdtFree = await getFreeBalance("USDT");
+      let baseline = settings.baseline_usdt ?? 0;
+      if (baseline === 0) {
+        baseline = usdtFree - ALLOCATION;
+        await setBaseline(baseline);
+      }
+      await updateLiveBalance(Math.max(0, usdtFree - baseline));
+    } catch (err) {
+      log.push({ action: "ERROR", stage: "balance", error: String(err) });
+      await logLiveRun({ actions: log });
+      return { ok: false };
+    }
+
     // Sell All — triggered by dashboard button
     if (settings.pending_sell) {
       try {
@@ -43,6 +60,10 @@ export const liveBot = schedules.task({
           await placeMarketSell(SYMBOL, qty);
           log.push({ action: "SELL_ALL", qty });
         }
+        // Recalibrate baseline so bot shows $50 again
+        const newUsdt = await getFreeBalance("USDT");
+        await setBaseline(newUsdt - ALLOCATION);
+        await updateLiveBalance(ALLOCATION);
         await setPendingSell(false);
       } catch (err) {
         log.push({ action: "ERROR", stage: "sell_all", error: String(err) });

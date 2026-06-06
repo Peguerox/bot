@@ -73,7 +73,19 @@ export async function getLiveSettings() {
     .from("live_settings")
     .select("*")
     .single();
-  return data as { id: string; enabled: boolean; pending_sell: boolean } | null;
+  return data as { id: string; enabled: boolean; pending_sell: boolean; baseline_usdt: number; usdt_balance: number } | null;
+}
+
+export async function setBaseline(baseline: number) {
+  const sb = getSupabaseAdmin();
+  const { data } = await sb.from("live_settings").select("id").single();
+  if (data) await sb.from("live_settings").update({ baseline_usdt: baseline }).eq("id", data.id);
+}
+
+export async function updateLiveBalance(usdtBalance: number) {
+  const sb = getSupabaseAdmin();
+  const { data } = await sb.from("live_settings").select("id").single();
+  if (data) await sb.from("live_settings").update({ usdt_balance: usdtBalance }).eq("id", data.id);
 }
 
 export async function setPendingSell(val: boolean) {

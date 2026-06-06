@@ -122,13 +122,14 @@ function PaperPanel({ trades, openPositions, loading }: {
 // ── Live bot panel ──────────────────────────────────────────────────────────
 
 function LivePanel({
-  trades, openPositions, loading,
+  trades, openPositions, loading, botUsdt,
   enabled, onToggle, toggling, onReset, resetting,
   onClearHistory, clearingHistory, runs,
 }: {
   trades:          any[];
   openPositions:   any[];
   loading:         boolean;
+  botUsdt:         number;
   enabled:         boolean;
   onToggle:        () => void;
   toggling:        boolean;
@@ -154,10 +155,6 @@ function LivePanel({
     if (dd < maxDD) maxDD = dd;
   });
   const balance = LIVE_INITIAL + totalPnL;
-  const openCost = openPositions[0]
-    ? openPositions[0].entry_price * openPositions[0].quantity
-    : 0;
-  const usdtDisplay = Math.max(0, balance - openCost);
 
   const latestPrice: number | null = (() => {
     const actions: any[] = runs[0]?.data?.actions ?? [];
@@ -243,7 +240,7 @@ function LivePanel({
           <tbody>
             <tr className="border-b border-gray-800/50">
               <td className="py-1.5 text-gray-400">USDT</td>
-              <td className="py-1.5 text-right text-white">${usdtDisplay.toFixed(2)}</td>
+              <td className="py-1.5 text-right text-white">${(botUsdt ?? 0).toFixed(2)}</td>
             </tr>
             <tr className="border-b border-gray-800/50">
               <td className="py-1.5 text-gray-400">ATOM</td>
@@ -395,6 +392,7 @@ export default function Dashboard() {
             trades={liveTrades}
             openPositions={liveOpen}
             loading={loading}
+            botUsdt={liveSettings?.usdt_balance ?? 0}
             enabled={liveSettings?.enabled ?? false}
             onToggle={handleToggle}
             toggling={toggling}
