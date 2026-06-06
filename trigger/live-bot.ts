@@ -1,17 +1,17 @@
 import { schedules } from "@trigger.dev/sdk/v3";
 import {
-  getKlines, getPrice, placeMarketBuy, placeMarketSell, getFreeBalance,
+  getKlines, placeMarketBuy, placeMarketSell, getFreeBalance,
 } from "../lib/binance";
 import { calcZScore, Z_THRESH, TP_PCT, SL_PCT, MAX_HOLD } from "../lib/strategy";
 import {
   getLivePosition, openLivePosition, incrementLiveHold,
   setLiveChasing, updateLiveChaseFloor, closeLivePosition,
-  logLiveRun, getLiveSettings,
+  logLiveRun, getLiveSettings, setPendingSell, getLivePnLSum,
 } from "../lib/live-db";
 
 const SYMBOL       = "ATOMUSDT";
 const ALLOCATION   = 50;
-const CHASE_OFFSET = 0.0005;   // 0.05% trailing floor
+const CHASE_OFFSET = 0.0005;
 const CANDLES      = 50;
 
 function roundPrice(p: number) { return Math.round(p * 1000) / 1000; }
@@ -25,7 +25,6 @@ export const liveBot = schedules.task({
   run: async () => {
     const log: object[] = [];
 
-    // Kill switch
     let settings;
     try {
       settings = await getLiveSettings();
@@ -35,15 +34,33 @@ export const liveBot = schedules.task({
     }
     if (!settings?.enabled) return { ok: false, reason: "disabled" };
 
+    // Sell All — triggered by dashboard button
+    if (settings.pending_sell) {
+      try {
+        const atomFree = await getFreeBalance("ATOM");
+        if (atomFree >= 0.01) {
+          const qty = floorQty(atomFree);
+          await placeMarketSell(SYMBOL, qty);
+          log.push({ action: "SELL_ALL", qty });
+        }
+        await setPendingSell(false);
+      } catch (err) {
+        log.push({ action: "ERROR", stage: "sell_all", error: String(err) });
+      }
+      await logLiveRun({ actions: log });
+      return { ok: true, actions: log };
+    }
+
     try {
-      const [btcCandles, altCandles, price] = await Promise.all([
+      const [btcCandles, altCandles] = await Promise.all([
         getKlines("BTCUSDT", "1m", CANDLES).then(c => c.slice(0, -1)),
         getKlines(SYMBOL,    "1m", CANDLES).then(c => c.slice(0, -1)),
-        getPrice(SYMBOL),
       ]);
 
-      const z   = calcZScore(btcCandles, altCandles);
-      const pos = await getLivePosition();
+      // Use last closed candle price — matches paper bot behavior
+      const price = altCandles[altCandles.length - 1].close;
+      const z     = calcZScore(btcCandles, altCandles);
+      const pos   = await getLivePosition();
 
       if (pos) {
 
@@ -95,7 +112,10 @@ export const liveBot = schedules.task({
 
       } else {
         if (z <= -Z_THRESH) {
-          const estQty = floorQty(ALLOCATION / price);
+          // Only spend what's left in the pool — never exceed initial $50
+          const pnlSum = await getLivePnLSum();
+          const availableCapital = Math.max(0, ALLOCATION + pnlSum);
+          const estQty = floorQty(availableCapital / price);
           if (estQty * price >= 1) {
             const buyOrder  = await placeMarketBuy(SYMBOL, estQty);
             const fillPrice = parseFloat(buyOrder.cummulativeQuoteQty) / parseFloat(buyOrder.executedQty);

@@ -157,7 +157,7 @@ function LivePanel({
   const openCost = openPositions[0]
     ? openPositions[0].entry_price * openPositions[0].quantity
     : 0;
-  const usdtDisplay = balance - openCost;
+  const usdtDisplay = Math.max(0, balance - openCost);
 
   const latestPrice: number | null = (() => {
     const actions: any[] = runs[0]?.data?.actions ?? [];

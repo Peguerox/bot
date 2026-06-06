@@ -73,7 +73,21 @@ export async function getLiveSettings() {
     .from("live_settings")
     .select("*")
     .single();
-  return data as { id: string; enabled: boolean } | null;
+  return data as { id: string; enabled: boolean; pending_sell: boolean } | null;
+}
+
+export async function setPendingSell(val: boolean) {
+  const sb = getSupabaseAdmin();
+  const { data } = await sb.from("live_settings").select("id").single();
+  if (data) await sb.from("live_settings").update({ pending_sell: val }).eq("id", data.id);
+}
+
+export async function getLivePnLSum(): Promise<number> {
+  const { data } = await getSupabaseAdmin()
+    .from("live_positions")
+    .select("pnl")
+    .eq("status", "closed");
+  return (data ?? []).reduce((sum: number, p: any) => sum + (p.pnl ?? 0), 0);
 }
 
 export async function setLiveEnabled(enabled: boolean) {
