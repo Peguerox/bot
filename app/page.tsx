@@ -610,44 +610,42 @@ export default function Dashboard() {
     <main className="min-h-screen bg-gray-950 text-white p-6">
       <div className="max-w-5xl mx-auto space-y-6">
         <h1 className="text-2xl font-bold text-white">TradeBot Dashboard</h1>
-        <div className="grid grid-cols-1 lg:grid-cols-2 gap-6 items-start">
+        <div className="grid grid-cols-1 lg:grid-cols-3 gap-6 items-start">
           <PaperPanel
             trades={trades}
             openPositions={open}
             loading={loading}
           />
-          <div className="space-y-6">
-            <LivePanel
-              trades={liveTrades}
-              openPositions={liveOpen}
-              loading={loading}
-              botUsdt={liveSettings?.usdt_balance ?? 0}
-              baseline={liveSettings?.baseline_usdt ?? 0}
-              enabled={liveSettings?.enabled ?? false}
-              onToggle={handleToggle}
-              toggling={toggling}
-              onReset={handleReset}
-              resetting={resetting}
-              onClearHistory={handleClearHistory}
-              clearingHistory={clearingHistory}
-              runs={liveRuns}
-            />
-            <XlmLivePanel
-              trades={xlmTrades}
-              openPositions={xlmOpen}
-              loading={loading}
-              botUsdt={xlmSettings?.usdt_balance ?? 0}
-              baseline={xlmSettings?.baseline_usdt ?? 0}
-              enabled={xlmSettings?.enabled ?? false}
-              onToggle={handleXlmToggle}
-              toggling={xlmToggling}
-              onReset={handleXlmReset}
-              resetting={xlmResetting}
-              onClearHistory={handleXlmClearHistory}
-              clearingHistory={xlmClearing}
-              runs={xlmRuns}
-            />
-          </div>
+          <LivePanel
+            trades={liveTrades}
+            openPositions={liveOpen}
+            loading={loading}
+            botUsdt={liveSettings?.usdt_balance ?? 0}
+            baseline={liveSettings?.baseline_usdt ?? 0}
+            enabled={liveSettings?.enabled ?? false}
+            onToggle={handleToggle}
+            toggling={toggling}
+            onReset={handleReset}
+            resetting={resetting}
+            onClearHistory={handleClearHistory}
+            clearingHistory={clearingHistory}
+            runs={liveRuns}
+          />
+          <XlmLivePanel
+            trades={xlmTrades}
+            openPositions={xlmOpen}
+            loading={loading}
+            botUsdt={xlmSettings?.usdt_balance ?? 0}
+            baseline={xlmSettings?.baseline_usdt ?? 0}
+            enabled={xlmSettings?.enabled ?? false}
+            onToggle={handleXlmToggle}
+            toggling={xlmToggling}
+            onReset={handleXlmReset}
+            resetting={xlmResetting}
+            onClearHistory={handleXlmClearHistory}
+            clearingHistory={xlmClearing}
+            runs={xlmRuns}
+          />
         </div>
       </div>
     </main>
