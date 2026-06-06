@@ -72,6 +72,8 @@ export const liveBot = schedules.task({
       return { ok: true, actions: log };
     }
 
+    const t0 = Date.now();
+
     try {
       const [btcCandles, altCandles] = await Promise.all([
         getKlines("BTCUSDT", "1m", CANDLES).then(c => c.slice(0, -1)),
@@ -144,7 +146,7 @@ export const liveBot = schedules.task({
             const tp        = roundPrice(fillPrice * (1 + TP_PCT));
             const sl        = roundPrice(fillPrice * (1 - SL_PCT));
             await openLivePosition({ symbol: SYMBOL, entry_price: fillPrice, sl, tp, quantity: filledQty, z_score: z });
-            log.push({ action: "OPEN", entry: fillPrice, qty: filledQty, tp, sl, z: z.toFixed(3) });
+            log.push({ action: "OPEN", entry: fillPrice, qty: filledQty, tp, sl, z: z.toFixed(3), elapsed_ms: Date.now() - t0 });
           }
         } else {
           log.push({ action: "WATCH", z: z.toFixed(3), price });

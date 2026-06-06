@@ -36,7 +36,7 @@ function actionColor(action: string) {
 
 function formatAction(a: any): string {
   if (a.action === "WATCH")        return `WATCH  z=${parseFloat(a.z).toFixed(2)}  $${a.price}`;
-  if (a.action === "OPEN")         return `OPEN  entry=$${a.entry}  tp=$${a.tp}  sl=$${a.sl}  z=${parseFloat(a.z).toFixed(2)}`;
+  if (a.action === "OPEN")         return `OPEN  entry=$${a.entry}  tp=$${a.tp}  sl=$${a.sl}  z=${parseFloat(a.z).toFixed(2)}  (${a.elapsed_ms}ms)`;
   if (a.action === "HOLD")         return `HOLD  [${a.hold}/${6}]  $${a.price}  tp=$${a.tp}  sl=$${a.sl}`;
   if (a.action === "TP")           return `TP HIT  exit=$${a.exit}  pnl=+$${parseFloat(a.pnl).toFixed(2)}`;
   if (a.action === "SL")           return `SL HIT  exit=$${a.exit}  pnl=$${parseFloat(a.pnl).toFixed(2)}`;
