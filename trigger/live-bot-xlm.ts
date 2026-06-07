@@ -207,7 +207,7 @@ export const xlmLiveBot = schedules.task({
         // ── No position: look for entry signal ────────────────────────────────
         if (z <= -Z_THRESH) {
           const pnlSum           = await getXlmPnLSum();
-          const availableCapital = Math.max(0, ALLOCATION + pnlSum);
+          const availableCapital = Math.min(Math.max(0, ALLOCATION + pnlSum), usdtFree);
           const qty              = floorQty(availableCapital / price);
           if (qty >= 1) {
             const limitOrder = await placeLimitBuyXlm(SYMBOL, qty, roundPrice(price));
