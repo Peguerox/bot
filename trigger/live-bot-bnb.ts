@@ -9,7 +9,7 @@ import { TP_PCT, SL_PCT, MAX_HOLD } from "../lib/strategy";
 import {
   getBnbPosition, openBnbPendingEntry, setBnbEntryFilled,
   incrementBnbHold, setBnbChasing, updateBnbChaseFloor, closeBnbPosition,
-  logBnbRun, getBnbSettings, updateBnbBalance, updateBnbTotal, setBnbPendingSell, addBnbPnl,
+  logBnbRun, getBnbSettings, setBnbBaseline, updateBnbBalance, updateBnbTotal, setBnbPendingSell, addBnbPnl,
 } from "../lib/bnb-live-db";
 
 const SYMBOL       = "BNBUSDT";
