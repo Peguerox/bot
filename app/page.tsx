@@ -246,15 +246,25 @@ function XlmLivePanel({
               <td className="py-1.5 text-right text-gray-400">${baseline.toFixed(2)}</td>
             </tr>
             <tr className="border-b border-gray-800/50">
-              <td className="py-1.5 text-gray-500">Allocated</td>
-              <td className={`py-1.5 text-right font-bold ${botUsdt >= 24 ? "text-green-400" : botUsdt > 0 ? "text-yellow-400" : "text-blue-400"}`}>
-                ${botUsdt.toFixed(2)}
+              <td className="py-1.5 text-gray-500">
+                {openPositions[0]?.status === "pending_entry" ? "In Order (USDT)" : "Allocated"}
+              </td>
+              <td className={`py-1.5 text-right font-bold ${
+                openPositions[0]?.status === "pending_entry"
+                  ? "text-yellow-400"
+                  : botUsdt >= 24 ? "text-green-400" : botUsdt > 0 ? "text-yellow-400" : "text-blue-400"
+              }`}>
+                {openPositions[0]?.status === "pending_entry"
+                  ? `≈$${((openPositions[0].quantity ?? 0) * (latestPrice ?? 0)).toFixed(2)}`
+                  : `$${botUsdt.toFixed(2)}`}
               </td>
             </tr>
             <tr className="border-b border-gray-800/50">
               <td className="py-1.5 text-gray-400">XLM</td>
               <td className="py-1.5 text-right text-white">
-                {openPositions[0]?.quantity?.toFixed(0) ?? "0"}
+                {openPositions[0]?.status === "pending_entry"
+                  ? "—"
+                  : openPositions[0]?.quantity?.toFixed(0) ?? "0"}
               </td>
             </tr>
             <tr>
