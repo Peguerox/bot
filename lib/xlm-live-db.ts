@@ -130,6 +130,15 @@ export async function getXlmPnLSum(): Promise<number> {
   return (data ?? []).reduce((sum: number, p: any) => sum + (p.pnl ?? 0), 0);
 }
 
+export async function addXlmPnl(pnl: number) {
+  const sb = getSupabaseAdmin();
+  const { data } = await sb.from("xlm_live_settings").select("id, usdt_balance").single();
+  if (data) {
+    const newBalance = Math.max(0, (data.usdt_balance ?? 0) + pnl);
+    await sb.from("xlm_live_settings").update({ usdt_balance: newBalance }).eq("id", data.id);
+  }
+}
+
 export async function setXlmEnabled(enabled: boolean) {
   const sb = getSupabaseAdmin();
   const { data } = await sb.from("xlm_live_settings").select("id").single();

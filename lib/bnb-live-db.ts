@@ -113,6 +113,15 @@ export async function getBnbPnLSum(): Promise<number> {
   return (data ?? []).reduce((sum: number, p: any) => sum + (p.pnl ?? 0), 0);
 }
 
+export async function addBnbPnl(pnl: number) {
+  const sb = getSupabaseAdmin();
+  const { data } = await sb.from("bnb_live_settings").select("id, usdt_balance").single();
+  if (data) {
+    const newBalance = Math.max(0, (data.usdt_balance ?? 0) + pnl);
+    await sb.from("bnb_live_settings").update({ usdt_balance: newBalance }).eq("id", data.id);
+  }
+}
+
 export async function setBnbEnabled(enabled: boolean) {
   const sb = getSupabaseAdmin();
   const { data } = await sb.from("bnb_live_settings").select("id").single();

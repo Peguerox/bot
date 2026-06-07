@@ -10,7 +10,7 @@ import { TP_PCT, SL_PCT, MAX_HOLD } from "../lib/strategy";
 import {
   getBnbPosition, openBnbPendingEntry, setBnbEntryFilled,
   incrementBnbHold, setBnbChasing, updateBnbChaseFloor, closeBnbPosition,
-  logBnbRun, getBnbSettings, setBnbBaseline, updateBnbBalance, setBnbPendingSell,
+  logBnbRun, getBnbSettings, updateBnbBalance, setBnbPendingSell, addBnbPnl,
 } from "../lib/bnb-live-db";
 
 const SYMBOL       = "BNBUSDT";
@@ -45,12 +45,10 @@ export const bnbLiveBot = schedules.task({
     let usdtFree = 0;
     try {
       usdtFree = await getFreeBalance("USDT");
-      let baseline = settings.baseline_usdt ?? 0;
-      if (baseline === 0) {
-        baseline = usdtFree - ALLOCATION;
-        await setBnbBaseline(baseline);
+      // Init balance once if never set
+      if (!settings.usdt_balance || settings.usdt_balance === 0) {
+        await updateBnbBalance(ALLOCATION);
       }
-      await updateBnbBalance(Math.max(0, usdtFree - baseline));
     } catch (err) {
       log.push({ action: "ERROR", stage: "balance", error: String(err) });
       await logBnbRun({ actions: log });
@@ -143,6 +141,7 @@ export const bnbLiveBot = schedules.task({
             const exitPrice = parseFloat(tpOrder.cummulativeQuoteQty) / parseFloat(tpOrder.executedQty);
             const pnl = (exitPrice - pos.entry_price) * pos.quantity;
             await closeBnbPosition(pos.id, { exit_price: exitPrice, pnl, result: "TP" });
+            await addBnbPnl(pnl);
             log.push({ action: "TP", exit: exitPrice, pnl: pnl.toFixed(4) });
 
           } else if (slOrder.status === "FILLED") {
@@ -150,6 +149,7 @@ export const bnbLiveBot = schedules.task({
             const exitPrice = parseFloat(slOrder.cummulativeQuoteQty) / parseFloat(slOrder.executedQty);
             const pnl = (exitPrice - pos.entry_price) * pos.quantity;
             await closeBnbPosition(pos.id, { exit_price: exitPrice, pnl, result: "SL" });
+            await addBnbPnl(pnl);
             log.push({ action: "SL", exit: exitPrice, pnl: pnl.toFixed(4) });
 
           } else if (livePrice < pos.sl) {
@@ -183,6 +183,7 @@ export const bnbLiveBot = schedules.task({
             const exitPrice = parseFloat(slOrder.cummulativeQuoteQty) / parseFloat(slOrder.executedQty);
             const pnl = (exitPrice - pos.entry_price) * pos.quantity;
             await closeBnbPosition(pos.id, { exit_price: exitPrice, pnl, result: "CHASE_EXIT" });
+            await addBnbPnl(pnl);
             log.push({ action: "CHASE_EXIT", exit: exitPrice, pnl: pnl.toFixed(4) });
 
           } else {
@@ -207,6 +208,7 @@ export const bnbLiveBot = schedules.task({
                     const exitPrice = parseFloat(slCheck.cummulativeQuoteQty) / parseFloat(slCheck.executedQty);
                     const pnl = (exitPrice - pos.entry_price) * pos.quantity;
                     await closeBnbPosition(pos.id, { exit_price: exitPrice, pnl, result: "CHASE_EXIT" });
+                    await addBnbPnl(pnl);
                     log.push({ action: "CHASE_EXIT", exit: exitPrice, pnl: pnl.toFixed(4) });
                     cancelOk = false;
                   }
@@ -228,8 +230,8 @@ export const bnbLiveBot = schedules.task({
       } else {
         // ── No position: look for entry signal ────────────────────────────────
         if (signal) {
-          const availableCapital = Math.max(0, usdtFree - (settings.baseline_usdt ?? 0));
-          const qty              = floorQty(availableCapital / price);
+          const botBalance       = settings.usdt_balance ?? ALLOCATION;
+          const qty              = floorQty(Math.min(botBalance, usdtFree) / price);
           if (qty >= 0.001 && qty * price >= 1.1) {
             const limitOrder = await placeLimitBuyBnb(SYMBOL, qty, roundPrice(price));
             await openBnbPendingEntry({ symbol: SYMBOL, entry_order_id: limitOrder.orderId, quantity: qty });

@@ -8,12 +8,12 @@ import {
   getXlmPosition, openXlmPendingEntry, setXlmEntryFilled,
   incrementXlmHold, setXlmChasing, updateXlmChaseFloor, closeXlmPosition,
   logXlmRun, getXlmSettings, setXlmPendingSell,
-  setXlmBaseline, updateXlmBalance,
+  setXlmBaseline, updateXlmBalance, addXlmPnl,
 } from "../lib/xlm-live-db";
 
 const SYMBOL       = "XLMUSDT";
 const ALLOCATION   = 25;
-const CHASE_OFFSET = 0.0005;
+const CHASE_OFFSET = 0.001;
 const CANDLES      = 50;
 const Z_THRESH     = 1.5;
 const SL_SLIP      = 0.002;   // limit price 0.2% below stop to ensure fill
@@ -44,12 +44,10 @@ export const xlmLiveBot = schedules.task({
     let usdtFree = 0;
     try {
       usdtFree = await getFreeBalance("USDT");
-      let baseline = settings.baseline_usdt ?? 0;
-      if (baseline === 0) {
-        baseline = usdtFree - ALLOCATION;
-        await setXlmBaseline(baseline);
+      // Init balance once if never set
+      if (!settings.usdt_balance || settings.usdt_balance === 0) {
+        await updateXlmBalance(ALLOCATION);
       }
-      await updateXlmBalance(Math.max(0, usdtFree - baseline));
     } catch (err) {
       log.push({ action: "ERROR", stage: "balance", error: String(err) });
       await logXlmRun({ actions: log });
@@ -141,6 +139,7 @@ export const xlmLiveBot = schedules.task({
             const exitPrice = parseFloat(tpOrder.cummulativeQuoteQty) / parseFloat(tpOrder.executedQty);
             const pnl = (exitPrice - pos.entry_price) * pos.quantity;
             await closeXlmPosition(pos.id, { exit_price: exitPrice, pnl, result: "TP" });
+            await addXlmPnl(pnl);
             log.push({ action: "TP", exit: exitPrice, pnl: pnl.toFixed(4) });
 
           } else if (slOrder.status === "FILLED") {
@@ -148,6 +147,7 @@ export const xlmLiveBot = schedules.task({
             const exitPrice = parseFloat(slOrder.cummulativeQuoteQty) / parseFloat(slOrder.executedQty);
             const pnl = (exitPrice - pos.entry_price) * pos.quantity;
             await closeXlmPosition(pos.id, { exit_price: exitPrice, pnl, result: "SL" });
+            await addXlmPnl(pnl);
             log.push({ action: "SL", exit: exitPrice, pnl: pnl.toFixed(4) });
 
           } else if (livePrice < pos.sl) {
@@ -181,6 +181,7 @@ export const xlmLiveBot = schedules.task({
             const exitPrice = parseFloat(slOrder.cummulativeQuoteQty) / parseFloat(slOrder.executedQty);
             const pnl = (exitPrice - pos.entry_price) * pos.quantity;
             await closeXlmPosition(pos.id, { exit_price: exitPrice, pnl, result: "CHASE_EXIT" });
+            await addXlmPnl(pnl);
             log.push({ action: "CHASE_EXIT", exit: exitPrice, pnl: pnl.toFixed(4) });
 
           } else {
@@ -206,6 +207,7 @@ export const xlmLiveBot = schedules.task({
                     const exitPrice = parseFloat(slCheck.cummulativeQuoteQty) / parseFloat(slCheck.executedQty);
                     const pnl = (exitPrice - pos.entry_price) * pos.quantity;
                     await closeXlmPosition(pos.id, { exit_price: exitPrice, pnl, result: "CHASE_EXIT" });
+                    await addXlmPnl(pnl);
                     log.push({ action: "CHASE_EXIT", exit: exitPrice, pnl: pnl.toFixed(4) });
                     cancelOk = false;
                   }
@@ -227,8 +229,8 @@ export const xlmLiveBot = schedules.task({
       } else {
         // ── No position: look for entry signal ────────────────────────────────
         if (z <= -Z_THRESH) {
-          const availableCapital = Math.max(0, usdtFree - (settings.baseline_usdt ?? 0));
-          const qty              = floorQty(availableCapital / price);
+          const botBalance       = settings.usdt_balance ?? ALLOCATION;
+          const qty              = floorQty(Math.min(botBalance, usdtFree) / price);
           if (qty >= 1) {
             const limitOrder = await placeLimitBuyXlm(SYMBOL, qty, roundPrice(price));
             await openXlmPendingEntry({ symbol: SYMBOL, entry_order_id: limitOrder.orderId, quantity: qty, z_score: z });
