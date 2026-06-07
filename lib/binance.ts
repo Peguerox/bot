@@ -168,6 +168,44 @@ export async function getOrder(symbol: string, orderId: number): Promise<OrderRe
   return signedGet("/order", { symbol, orderId });
 }
 
+// XLM-specific: qty as whole number, price at 5 decimal places
+export async function placeLimitBuyXlm(symbol: string, qty: number, price: number): Promise<OrderResponse> {
+  return signedPost("/order", {
+    symbol,
+    side:        "BUY",
+    type:        "LIMIT",
+    timeInForce: "GTC",
+    quantity:    Math.floor(qty).toString(),
+    price:       price.toFixed(5),
+  });
+}
+
+export async function placeLimitSellXlm(symbol: string, qty: number, price: number): Promise<OrderResponse> {
+  return signedPost("/order", {
+    symbol,
+    side:        "SELL",
+    type:        "LIMIT",
+    timeInForce: "GTC",
+    quantity:    Math.floor(qty).toString(),
+    price:       price.toFixed(5),
+  });
+}
+
+export async function placeStopLimitSellXlm(
+  symbol: string, qty: number,
+  stopPrice: number, limitPrice: number,
+): Promise<OrderResponse> {
+  return signedPost("/order", {
+    symbol,
+    side:        "SELL",
+    type:        "STOP_LOSS_LIMIT",
+    timeInForce: "GTC",
+    quantity:    Math.floor(qty).toString(),
+    stopPrice:   stopPrice.toFixed(5),
+    price:       limitPrice.toFixed(5),
+  });
+}
+
 // Cancel ALL open orders for a symbol at once
 export async function cancelAllOrders(symbol: string) {
   return signedDelete("/openOrders", { symbol });

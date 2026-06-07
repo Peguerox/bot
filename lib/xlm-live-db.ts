@@ -4,9 +4,37 @@ export async function getXlmPosition() {
   const { data } = await getSupabaseAdmin()
     .from("xlm_live_positions")
     .select("*")
-    .in("status", ["open", "chasing"])
+    .in("status", ["pending_entry", "open", "chasing"])
     .single();
   return data;
+}
+
+export async function openXlmPendingEntry(params: {
+  symbol:         string;
+  entry_order_id: number;
+  quantity:       number;
+  z_score:        number;
+}) {
+  await getSupabaseAdmin().from("xlm_live_positions").insert({
+    ...params,
+    status:     "pending_entry",
+    hold_count: 0,
+    entry_time: new Date().toISOString(),
+  });
+}
+
+export async function setXlmEntryFilled(id: string, params: {
+  entry_price: number;
+  quantity:    number;
+  tp:          number;
+  sl:          number;
+  tp_order_id: number;
+  sl_order_id: number;
+}) {
+  await getSupabaseAdmin()
+    .from("xlm_live_positions")
+    .update({ status: "open", ...params })
+    .eq("id", id);
 }
 
 export async function openXlmPosition(params: {
@@ -32,17 +60,17 @@ export async function incrementXlmHold(id: string, currentHold: number) {
     .eq("id", id);
 }
 
-export async function setXlmChasing(id: string, chaseFloor: number) {
+export async function setXlmChasing(id: string, chaseFloor: number, slOrderId: number) {
   await getSupabaseAdmin()
     .from("xlm_live_positions")
-    .update({ status: "chasing", chase_price: chaseFloor })
+    .update({ status: "chasing", chase_price: chaseFloor, sl_order_id: slOrderId, tp_order_id: null })
     .eq("id", id);
 }
 
-export async function updateXlmChaseFloor(id: string, chaseFloor: number) {
+export async function updateXlmChaseFloor(id: string, chaseFloor: number, slOrderId: number) {
   await getSupabaseAdmin()
     .from("xlm_live_positions")
-    .update({ chase_price: chaseFloor })
+    .update({ chase_price: chaseFloor, sl_order_id: slOrderId })
     .eq("id", id);
 }
 

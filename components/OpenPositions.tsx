@@ -9,9 +9,9 @@ export default function OpenPositions({ positions, loading }: {
 
   useEffect(() => {
     async function fetchPrices() {
-      const syms = [...new Set(positions.map(p =>
-        p.pair === "BNB" ? "BNBUSDT" : "ATOMUSDT"
-      ))];
+      const pairToSym = (pair: string) =>
+        pair === "BNB" ? "BNBUSDT" : pair === "XLM" ? "XLMUSDT" : "ATOMUSDT";
+      const syms = [...new Set(positions.map(p => pairToSym(p.pair)))];
       const updated: Record<string, number> = {};
       await Promise.all(syms.map(async sym => {
         const r = await fetch(`https://api.binance.us/api/v3/ticker/price?symbol=${sym}`);
@@ -23,7 +23,7 @@ export default function OpenPositions({ positions, loading }: {
     }
     if (positions.length > 0) {
       fetchPrices();
-      const id = setInterval(fetchPrices, 10000); // refresh every 10s
+      const id = setInterval(fetchPrices, 10000);
       return () => clearInterval(id);
     }
   }, [positions]);
@@ -39,11 +39,12 @@ export default function OpenPositions({ positions, loading }: {
   return (
     <div className="space-y-3">
       {positions.map(pos => {
-        const price    = prices[pos.pair] ?? pos.entry_price;
+        const isPending = pos.status === "pending_entry";
+        const price     = prices[pos.pair] ?? pos.entry_price ?? 0;
         const exitPrice = pos.status === "chasing" ? pos.chase_price : price;
-        const livePnL  = (exitPrice - pos.entry_price) * pos.quantity;
-        const pct      = ((exitPrice - pos.entry_price) / pos.entry_price * 100).toFixed(2);
-        const isUp    = livePnL >= 0;
+        const livePnL   = pos.entry_price != null ? (exitPrice - pos.entry_price) * (pos.quantity ?? 0) : null;
+        const pct       = pos.entry_price != null ? ((exitPrice - pos.entry_price) / pos.entry_price * 100).toFixed(2) : null;
+        const isUp      = livePnL == null ? true : livePnL >= 0;
 
         return (
           <div key={pos.id} className="bg-gray-800 rounded-lg p-4 flex items-center justify-between">
@@ -53,24 +54,35 @@ export default function OpenPositions({ positions, loading }: {
                 <span className="text-xs bg-blue-500/20 text-blue-400 px-2 py-0.5 rounded-full">
                   LONG
                 </span>
-                {pos.status === "chasing"
-                  ? <span className="text-xs bg-yellow-500/20 text-yellow-400 px-2 py-0.5 rounded-full">
-                      CHASING {pos.chase_price?.toFixed(4)}
-                    </span>
-                  : <span className="text-xs text-gray-500">Hold {pos.hold_count}/{6}</span>
+                {isPending
+                  ? <span className="text-xs bg-blue-500/20 text-blue-400 px-2 py-0.5 rounded-full">PENDING FILL</span>
+                  : pos.status === "chasing"
+                    ? <span className="text-xs bg-yellow-500/20 text-yellow-400 px-2 py-0.5 rounded-full">
+                        CHASING {pos.chase_price?.toFixed(4)}
+                      </span>
+                    : <span className="text-xs text-gray-500">Hold {pos.hold_count}/{6}</span>
                 }
               </div>
               <div className="text-gray-500 text-xs mt-1">
-                Entry ${pos.entry_price.toFixed(4)} · SL ${pos.sl.toFixed(4)} · TP ${pos.tp.toFixed(4)}
+                {isPending
+                  ? `Limit buy placed · qty ${pos.quantity ?? "?"}`
+                  : `Entry $${pos.entry_price?.toFixed(4)} · SL $${pos.sl?.toFixed(4)} · TP $${pos.tp?.toFixed(4)}`
+                }
               </div>
             </div>
             <div className="text-right">
-              <p className={`font-semibold ${isUp ? "text-green-400" : "text-red-400"}`}>
-                {isUp ? "+" : ""}{livePnL.toFixed(2)} USDT
-              </p>
-              <p className={`text-xs ${isUp ? "text-green-500" : "text-red-500"}`}>
-                {isUp ? "+" : ""}{pct}%
-              </p>
+              {livePnL != null ? (
+                <>
+                  <p className={`font-semibold ${isUp ? "text-green-400" : "text-red-400"}`}>
+                    {isUp ? "+" : ""}{livePnL.toFixed(2)} USDT
+                  </p>
+                  <p className={`text-xs ${isUp ? "text-green-500" : "text-red-500"}`}>
+                    {isUp ? "+" : ""}{pct}%
+                  </p>
+                </>
+              ) : (
+                <p className="text-gray-500 text-sm">waiting…</p>
+              )}
             </div>
           </div>
         );
