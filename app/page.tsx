@@ -32,6 +32,7 @@ function actionColor(action: string) {
   if (action === "LIMIT_BUY_PLACED")  return "text-blue-400";
   if (action === "ENTRY_FILLED")      return "text-green-400";
   if (action === "PENDING_FILL")      return "text-yellow-400";
+  if (action === "MISSED")            return "text-orange-400";
   if (action === "STUCK_RESCUE")      return "text-orange-400";
   if (action === "STUCK_RESCUE_CHASE") return "text-orange-400";
   if (action === "ERROR")             return "text-red-400";
@@ -54,6 +55,7 @@ function formatAction(a: any): string {
     : `BUY LIMIT  qty=${a.qty}  @$${a.price}  btc=${(parseFloat(a.btcRet)*100).toFixed(3)}%`;
   if (a.action === "ENTRY_FILLED")        return `FILLED  entry=$${a.entry}  qty=${a.qty}  tp=$${a.tp}  sl=$${a.sl}`;
   if (a.action === "PENDING_FILL")        return `WAITING FILL  orderId=${a.orderId}`;
+  if (a.action === "MISSED")              return `MISSED  live=$${a.livePrice}  order=$${a.orderPrice}`;
   if (a.action === "STUCK_RESCUE")        return `STUCK RESCUE  live=$${a.livePrice}  sl=$${a.sl}  rescue=$${a.rescuePrice}`;
   if (a.action === "STUCK_RESCUE_CHASE")  return `STUCK RESCUE CHASE  live=$${a.livePrice}  floor=$${a.chaseFloor}  rescue=$${a.rescuePrice}`;
   if (a.action === "SKIP_NO_FUNDS")       return `NO FUNDS  $${parseFloat(a.balance).toFixed(2)} USDT`;

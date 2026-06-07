@@ -123,6 +123,15 @@ export const bnbLiveBot = schedules.task({
               await closeBnbPosition(pos.id, { exit_price: 0, pnl: 0, result: "CANCELED" });
               log.push({ action: "ENTRY_CANCELED", orderId: pos.entry_order_id });
               filled = true;
+            } else {
+              const livePrice  = await getPrice(SYMBOL);
+              const orderPrice = parseFloat(order.price);
+              if (livePrice > orderPrice) {
+                try { await cancelOrder(SYMBOL, pos.entry_order_id); } catch {}
+                await closeBnbPosition(pos.id, { exit_price: 0, pnl: 0, result: "MISSED" });
+                log.push({ action: "MISSED", livePrice, orderPrice });
+                filled = true;
+              }
             }
           }
           if (!filled) log.push({ action: "PENDING_FILL", orderId: pos.entry_order_id });
