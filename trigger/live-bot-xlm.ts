@@ -1,7 +1,7 @@
 import { schedules } from "@trigger.dev/sdk/v3";
 import {
   getKlines, getFreeBalance, getOrder, getPrice, cancelOrder, cancelAllOrders,
-  placeMarketSell, placeLimitBuyXlm, placeLimitSellXlm, placeStopLimitSellXlm, placeOcoSellXlm,
+  placeMarketSellXlm, placeLimitBuyXlm, placeLimitSellXlm, placeStopLimitSellXlm, placeOcoSellXlm,
 } from "../lib/binance";
 import { calcZScore, TP_PCT, SL_PCT, MAX_HOLD } from "../lib/strategy";
 import {
@@ -60,11 +60,14 @@ export const xlmLiveBot = schedules.task({
     if (settings.pending_sell) {
       try {
         try { await cancelAllOrders(SYMBOL); } catch {}
-        const xlmFree = await getFreeBalance("XLM");
-        if (xlmFree >= 1) {
-          const qty = floorQty(xlmFree);
-          await placeMarketSell(SYMBOL, qty);
+        const xlmFree  = await getFreeBalance("XLM");
+        const xlmPrice = await getPrice(SYMBOL);
+        const qty      = floorQty(xlmFree);
+        if (qty >= 1 && qty * xlmPrice >= 1.1) {
+          await placeMarketSellXlm(SYMBOL, qty);
           log.push({ action: "SELL_ALL", qty });
+        } else {
+          log.push({ action: "SELL_ALL_SKIP", xlmFree, reason: "below MIN_NOTIONAL" });
         }
         const newUsdt = await getFreeBalance("USDT");
         await setXlmBaseline(newUsdt - ALLOCATION);
@@ -102,9 +105,11 @@ export const xlmLiveBot = schedules.task({
               const tp           = roundPrice(currentPrice * (1 + TP_PCT));
               const sl           = roundPrice(currentPrice * (1 - SL_PCT));
               const slLimit  = roundPrice(sl * (1 - SL_SLIP));
+              try { await cancelAllOrders(SYMBOL); } catch {}
               const oco      = await placeOcoSellXlm(SYMBOL, filledQty, tp, sl, slLimit);
-              const tpReport = oco.orderReports.find(r => r.type === "LIMIT_MAKER" || r.type === "LIMIT");
-              const slReport = oco.orderReports.find(r => r.type === "STOP_LOSS_LIMIT");
+              // SL = the stop-type order; TP = everything else (LIMIT_MAKER or TAKE_PROFIT_LIMIT)
+              const slReport = oco.orderReports.find(r => r.type === "STOP_LOSS_LIMIT" || r.type === "STOP_LOSS");
+              const tpReport = oco.orderReports.find(r => r !== slReport);
               await setXlmEntryFilled(pos.id, {
                 entry_price: fillPrice,
                 quantity:    filledQty,

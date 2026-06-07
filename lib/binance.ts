@@ -115,6 +115,15 @@ export async function placeMarketSell(symbol: string, qty: number): Promise<Orde
   });
 }
 
+export async function placeMarketSellXlm(symbol: string, qty: number): Promise<OrderResponse> {
+  return signedPost("/order", {
+    symbol,
+    side:     "SELL",
+    type:     "MARKET",
+    quantity: Math.floor(qty).toString(),
+  });
+}
+
 export async function placeStopMarket(symbol: string, qty: number, stopPrice: number): Promise<OrderResponse> {
   return signedPost("/order", {
     symbol,
