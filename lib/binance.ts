@@ -206,6 +206,22 @@ export async function placeStopLimitSellXlm(
   });
 }
 
+// XLM OCO: TP limit sell + SL stop-limit sell in one linked order
+export async function placeOcoSellXlm(
+  symbol: string, qty: number,
+  tpPrice: number, slStopPrice: number, slLimitPrice: number,
+): Promise<OCOResponse> {
+  return signedPost("/order/oco", {
+    symbol,
+    side:                 "SELL",
+    quantity:             Math.floor(qty).toString(),
+    price:                tpPrice.toFixed(5),
+    stopPrice:            slStopPrice.toFixed(5),
+    stopLimitPrice:       slLimitPrice.toFixed(5),
+    stopLimitTimeInForce: "GTC",
+  });
+}
+
 // Cancel ALL open orders for a symbol at once
 export async function cancelAllOrders(symbol: string) {
   return signedDelete("/openOrders", { symbol });

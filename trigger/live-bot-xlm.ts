@@ -1,7 +1,7 @@
 import { schedules } from "@trigger.dev/sdk/v3";
 import {
   getKlines, getFreeBalance, getOrder, getPrice, cancelOrder, cancelAllOrders,
-  placeMarketSell, placeLimitBuyXlm, placeLimitSellXlm, placeStopLimitSellXlm,
+  placeMarketSell, placeLimitBuyXlm, placeLimitSellXlm, placeStopLimitSellXlm, placeOcoSellXlm,
 } from "../lib/binance";
 import { calcZScore, TP_PCT, SL_PCT, MAX_HOLD } from "../lib/strategy";
 import {
@@ -101,18 +101,17 @@ export const xlmLiveBot = schedules.task({
               const currentPrice = await getPrice(SYMBOL);
               const tp           = roundPrice(currentPrice * (1 + TP_PCT));
               const sl           = roundPrice(currentPrice * (1 - SL_PCT));
-              const slLimit   = roundPrice(sl * (1 - SL_SLIP));
-              const [tpOrder, slOrder] = await Promise.all([
-                placeLimitSellXlm(SYMBOL, filledQty, tp),
-                placeStopLimitSellXlm(SYMBOL, filledQty, sl, slLimit),
-              ]);
+              const slLimit  = roundPrice(sl * (1 - SL_SLIP));
+              const oco      = await placeOcoSellXlm(SYMBOL, filledQty, tp, sl, slLimit);
+              const tpReport = oco.orderReports.find(r => r.type === "LIMIT_MAKER" || r.type === "LIMIT");
+              const slReport = oco.orderReports.find(r => r.type === "STOP_LOSS_LIMIT");
               await setXlmEntryFilled(pos.id, {
                 entry_price: fillPrice,
                 quantity:    filledQty,
                 tp,
                 sl,
-                tp_order_id: tpOrder.orderId,
-                sl_order_id: slOrder.orderId,
+                tp_order_id: tpReport!.orderId,
+                sl_order_id: slReport!.orderId,
               });
               log.push({ action: "ENTRY_FILLED", entry: fillPrice, qty: filledQty, tp, sl });
               filled = true;
