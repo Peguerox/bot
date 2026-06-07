@@ -116,6 +116,12 @@ export async function updateXlmBalance(usdtBalance: number) {
   if (data) await sb.from("xlm_live_settings").update({ usdt_balance: usdtBalance }).eq("id", data.id);
 }
 
+export async function updateXlmTotal(totalUsdt: number) {
+  const sb = getSupabaseAdmin();
+  const { data } = await sb.from("xlm_live_settings").select("id").single();
+  if (data) await sb.from("xlm_live_settings").update({ total_usdt: totalUsdt }).eq("id", data.id);
+}
+
 export async function setXlmPendingSell(val: boolean) {
   const sb = getSupabaseAdmin();
   const { data } = await sb.from("xlm_live_settings").select("id").single();

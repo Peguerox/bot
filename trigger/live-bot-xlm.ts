@@ -8,7 +8,7 @@ import {
   getXlmPosition, openXlmPendingEntry, setXlmEntryFilled,
   incrementXlmHold, setXlmChasing, updateXlmChaseFloor, closeXlmPosition,
   logXlmRun, getXlmSettings, setXlmPendingSell,
-  setXlmBaseline, updateXlmBalance, addXlmPnl,
+  setXlmBaseline, updateXlmBalance, updateXlmTotal, addXlmPnl,
 } from "../lib/xlm-live-db";
 
 const SYMBOL       = "XLMUSDT";
@@ -44,6 +44,7 @@ export const xlmLiveBot = schedules.task({
     let usdtFree = 0;
     try {
       usdtFree = await getFreeBalance("USDT");
+      await updateXlmTotal(usdtFree);
       // Init balance once if never set
       if (!settings.usdt_balance || settings.usdt_balance === 0) {
         await updateXlmBalance(ALLOCATION);

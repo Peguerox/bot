@@ -99,6 +99,12 @@ export async function updateBnbBalance(usdtBalance: number) {
   if (data) await sb.from("bnb_live_settings").update({ usdt_balance: usdtBalance }).eq("id", data.id);
 }
 
+export async function updateBnbTotal(totalUsdt: number) {
+  const sb = getSupabaseAdmin();
+  const { data } = await sb.from("bnb_live_settings").select("id").single();
+  if (data) await sb.from("bnb_live_settings").update({ total_usdt: totalUsdt }).eq("id", data.id);
+}
+
 export async function setBnbPendingSell(val: boolean) {
   const sb = getSupabaseAdmin();
   const { data } = await sb.from("bnb_live_settings").select("id").single();

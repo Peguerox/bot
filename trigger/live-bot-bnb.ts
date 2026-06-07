@@ -10,7 +10,7 @@ import { TP_PCT, SL_PCT, MAX_HOLD } from "../lib/strategy";
 import {
   getBnbPosition, openBnbPendingEntry, setBnbEntryFilled,
   incrementBnbHold, setBnbChasing, updateBnbChaseFloor, closeBnbPosition,
-  logBnbRun, getBnbSettings, updateBnbBalance, setBnbPendingSell, addBnbPnl,
+  logBnbRun, getBnbSettings, updateBnbBalance, updateBnbTotal, setBnbPendingSell, addBnbPnl,
 } from "../lib/bnb-live-db";
 
 const SYMBOL       = "BNBUSDT";
@@ -45,6 +45,7 @@ export const bnbLiveBot = schedules.task({
     let usdtFree = 0;
     try {
       usdtFree = await getFreeBalance("USDT");
+      await updateBnbTotal(usdtFree);
       // Init balance once if never set
       if (!settings.usdt_balance || settings.usdt_balance === 0) {
         await updateBnbBalance(ALLOCATION);
