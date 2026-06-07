@@ -1,14 +1,17 @@
 /**
- * Test OCO order placement — prints exchange filters and attempts a real OCO.
+ * Test XLM OCO order: TP +20%, SL -20% from live price.
+ * Places and immediately cancels so no real trade happens.
  * Run: npx ts-node --transpile-only backtest/test-oco.ts
  */
 
 import crypto from "crypto";
+import dotenv from "dotenv";
+dotenv.config({ path: ".env.local" });
 
-const BASE    = "https://api.binance.us/api/v3";
-const KEY     = process.env.BINANCE_API_KEY!;
-const SECRET  = process.env.BINANCE_API_SECRET!;
-const SYMBOL  = "ATOMUSDT";
+const BASE   = "https://api.binance.us/api/v3";
+const KEY    = process.env.BINANCE_API_KEY!;
+const SECRET = process.env.BINANCE_API_SECRET!;
+const SYMBOL = "XLMUSDT";
 
 function sign(payload: string) {
   return crypto.createHmac("sha256", SECRET).update(payload).digest("hex");
@@ -29,6 +32,19 @@ async function signedPost(path: string, params: Record<string, string | number>)
   return { ok: res.ok, status: res.status, body: text };
 }
 
+async function signedDelete(path: string, params: Record<string, string | number>) {
+  const qs = new URLSearchParams(
+    Object.entries({ ...params, timestamp: Date.now() }).map(([k, v]) => [k, String(v)])
+  );
+  qs.append("signature", sign(qs.toString()));
+  const res = await fetch(`${BASE}${path}?${qs}`, {
+    method: "DELETE",
+    headers: { "X-MBX-APIKEY": KEY },
+    cache: "no-store",
+  });
+  return res.json();
+}
+
 async function get(path: string, params: Record<string, string | number> = {}) {
   const qs = new URLSearchParams(Object.entries(params).map(([k, v]) => [k, String(v)]));
   const res = await fetch(`${BASE}${path}${qs.toString() ? "?" + qs : ""}`, {
@@ -38,68 +54,65 @@ async function get(path: string, params: Record<string, string | number> = {}) {
   return res.json();
 }
 
-function roundPrice(p: number) { return Math.round(p * 10000) / 10000; }
-function floorQty(q: number)   { return Math.floor(q * 100) / 100; }
+function roundPrice(p: number) { return Math.round(p * 100000) / 100000; }
 
 async function main() {
-  // 1. Exchange filters for ATOMUSDT
-  console.log("\n=== ATOMUSDT Exchange Filters ===");
-  const info    = await get("/exchangeInfo", { symbol: SYMBOL });
-  const symInfo = info.symbols?.[0];
-  if (symInfo) {
-    for (const f of symInfo.filters) {
-      console.log(" ", f.filterType, JSON.stringify(f));
-    }
+  // Get live price and free XLM balance
+  const [ticker, account] = await Promise.all([
+    get("/ticker/price", { symbol: SYMBOL }),
+    get("/account", { timestamp: Date.now(), recvWindow: 5000 }),
+  ]);
+
+  // account needs signature
+  const qs = new URLSearchParams({ timestamp: String(Date.now()), recvWindow: "5000" });
+  qs.append("signature", sign(qs.toString()));
+  const acct = await fetch(`${BASE}/account?${qs}`, { headers: { "X-MBX-APIKEY": KEY }, cache: "no-store" }).then(r => r.json());
+  const xlmBalance = acct.balances?.find((b: any) => b.asset === "XLM");
+  const xlmFree = parseFloat(xlmBalance?.free ?? "0");
+
+  const price = parseFloat(ticker.price);
+  const qty   = Math.max(1, Math.floor(xlmFree)); // use 1 XLM minimum for the test
+  const tp    = roundPrice(price * 1.20);   // +20%
+  const sl    = roundPrice(price * 0.80);   // -20%
+  const slL   = roundPrice(sl * 0.998);     // SL limit 0.2% below stop
+
+  console.log(`\nXLM price : $${price}`);
+  console.log(`XLM free  : ${xlmFree}  →  using qty ${qty} for test`);
+  console.log(`TP (+20%) : $${tp}`);
+  console.log(`SL (-20%) : $${sl}  (limit $${slL})`);
+
+  if (xlmFree < 1) {
+    console.log("\nWarning: no free XLM — OCO will likely fail with insufficient balance.");
+    console.log("Buy at least 1 XLM on Binance.US first, then re-run.\n");
   }
 
-  // 2. Current price
-  const ticker  = await get("/ticker/price", { symbol: SYMBOL });
-  const price   = parseFloat(ticker.price);
-  console.log(`\nCurrent ATOM price: ${price}`);
-
-  // 3. Simulate fill price — pretend we filled at current price
-  const fillPrice = price;
-  const qty       = floorQty(200 / fillPrice);
-  const tp        = roundPrice(fillPrice * 1.008);
-  const sl        = roundPrice(fillPrice * 0.997);
-  const slLimit   = roundPrice(sl - 0.0001);
-
-  console.log(`\nSimulated OCO params:`);
-  console.log(`  qty      = ${qty.toFixed(2)}`);
-  console.log(`  tp price = ${tp.toFixed(4)}  (must be > ${price})`);
-  console.log(`  sl stop  = ${sl.toFixed(4)}  (must be < ${price})`);
-  console.log(`  sl limit = ${slLimit.toFixed(4)}  (must be <= sl stop)`);
-
-  // 4. Attempt the OCO
-  console.log(`\n=== Attempting OCO on /order/oco ===`);
-  const r1 = await signedPost("/order/oco", {
+  console.log(`\n--- Placing OCO on /order/oco ---`);
+  const r = await signedPost("/order/oco", {
     symbol:               SYMBOL,
     side:                 "SELL",
-    quantity:             qty.toFixed(2),
-    price:                tp.toFixed(4),
-    stopPrice:            sl.toFixed(4),
-    stopLimitPrice:       slLimit.toFixed(4),
+    quantity:             qty.toString(),
+    price:                tp.toFixed(5),
+    stopPrice:            sl.toFixed(5),
+    stopLimitPrice:       slL.toFixed(5),
     stopLimitTimeInForce: "GTC",
   });
-  console.log(`  Status: ${r1.status}  ok: ${r1.ok}`);
-  console.log(`  Response: ${r1.body}`);
 
-  // 5. Also try the newer /orderList/oco endpoint if the first fails
-  if (!r1.ok) {
-    console.log(`\n=== Trying newer /orderList/oco endpoint ===`);
-    const r2 = await signedPost("/orderList/oco", {
-      symbol:               SYMBOL,
-      side:                 "SELL",
-      quantity:             qty.toFixed(2),
-      aboveType:            "LIMIT_MAKER",
-      abovePrice:           tp.toFixed(4),
-      belowType:            "STOP_LOSS_LIMIT",
-      belowStopPrice:       sl.toFixed(4),
-      belowPrice:           slLimit.toFixed(4),
-      belowTimeInForce:     "GTC",
-    });
-    console.log(`  Status: ${r2.status}  ok: ${r2.ok}`);
-    console.log(`  Response: ${r2.body}`);
+  console.log(`Status : ${r.status}  ok: ${r.ok}`);
+
+  if (r.ok) {
+    const parsed = JSON.parse(r.body);
+    console.log(`orderListId : ${parsed.orderListId}`);
+    for (const report of parsed.orderReports ?? []) {
+      console.log(`  orderId ${report.orderId}  type=${report.type}  price=${report.price}  stop=${report.stopPrice ?? "-"}`);
+    }
+
+    console.log(`\n--- Cancelling OCO (cleanup) ---`);
+    const cancel = await signedDelete("/orderList", { symbol: SYMBOL, orderListId: parsed.orderListId });
+    console.log("Cancel result:", JSON.stringify(cancel).slice(0, 120));
+    console.log("\nOCO test PASSED ✓");
+  } else {
+    console.log(`Response: ${r.body}`);
+    console.log("\nOCO test FAILED ✗ — check error above");
   }
 }
 

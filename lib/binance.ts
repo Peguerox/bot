@@ -231,6 +231,68 @@ export async function placeOcoSellXlm(
   });
 }
 
+// BNB-specific: qty to 3 decimal places (step 0.001), price to 2 decimal places (tick 0.01)
+export async function placeLimitBuyBnb(symbol: string, qty: number, price: number): Promise<OrderResponse> {
+  return signedPost("/order", {
+    symbol,
+    side:        "BUY",
+    type:        "LIMIT",
+    timeInForce: "GTC",
+    quantity:    (Math.floor(qty * 1000) / 1000).toFixed(3),
+    price:       price.toFixed(2),
+  });
+}
+
+export async function placeLimitSellBnb(symbol: string, qty: number, price: number): Promise<OrderResponse> {
+  return signedPost("/order", {
+    symbol,
+    side:        "SELL",
+    type:        "LIMIT",
+    timeInForce: "GTC",
+    quantity:    (Math.floor(qty * 1000) / 1000).toFixed(3),
+    price:       price.toFixed(2),
+  });
+}
+
+export async function placeMarketSellBnb(symbol: string, qty: number): Promise<OrderResponse> {
+  return signedPost("/order", {
+    symbol,
+    side:     "SELL",
+    type:     "MARKET",
+    quantity: (Math.floor(qty * 1000) / 1000).toFixed(3),
+  });
+}
+
+export async function placeStopLimitSellBnb(
+  symbol: string, qty: number,
+  stopPrice: number, limitPrice: number,
+): Promise<OrderResponse> {
+  return signedPost("/order", {
+    symbol,
+    side:        "SELL",
+    type:        "STOP_LOSS_LIMIT",
+    timeInForce: "GTC",
+    quantity:    (Math.floor(qty * 1000) / 1000).toFixed(3),
+    stopPrice:   stopPrice.toFixed(2),
+    price:       limitPrice.toFixed(2),
+  });
+}
+
+export async function placeOcoSellBnb(
+  symbol: string, qty: number,
+  tpPrice: number, slStopPrice: number, slLimitPrice: number,
+): Promise<OCOResponse> {
+  return signedPost("/order/oco", {
+    symbol,
+    side:                 "SELL",
+    quantity:             (Math.floor(qty * 1000) / 1000).toFixed(3),
+    price:                tpPrice.toFixed(2),
+    stopPrice:            slStopPrice.toFixed(2),
+    stopLimitPrice:       slLimitPrice.toFixed(2),
+    stopLimitTimeInForce: "GTC",
+  });
+}
+
 // Cancel ALL open orders for a symbol at once
 export async function cancelAllOrders(symbol: string) {
   return signedDelete("/openOrders", { symbol });

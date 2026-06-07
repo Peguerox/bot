@@ -4,7 +4,7 @@
 const CORR_WINDOW = 20;
 const Z_THRESH    = 2.0;
 const TP_PCT      = 0.008;  // 0.8% take profit
-const SL_PCT      = 0.003;  // 0.3% stop loss
+const SL_PCT      = 0.0015;  // 0.15% stop loss
 const MAX_HOLD    = 6;      // 6 candles = 6 minutes on 1m
 
 export type Candle = { close: number };
