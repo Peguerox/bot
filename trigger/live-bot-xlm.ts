@@ -161,68 +161,53 @@ export const xlmLiveBot = schedules.task({
           } else if (pos.hold_count + 1 >= MAX_HOLD) {
             try { await cancelOrder(SYMBOL, pos.tp_order_id); } catch {}
             try { await cancelOrder(SYMBOL, pos.sl_order_id); } catch {}
-            const livePrice   = await getPrice(SYMBOL);
-            const chaseFloor  = roundPrice(livePrice * (1 - CHASE_OFFSET));
-            const chaseSlOrder = await placeStopLimitSellXlm(
-              SYMBOL, pos.quantity, chaseFloor, roundPrice(chaseFloor * (1 - SL_SLIP))
-            );
-            await setXlmChasing(pos.id, chaseFloor, chaseSlOrder.orderId);
-            log.push({ action: "START_CHASE", livePrice, chaseFloor });
+            const exitPrice  = roundPrice(await getPrice(SYMBOL));
+            const exitOrder  = await placeLimitSellXlm(SYMBOL, pos.quantity, exitPrice);
+            await setXlmChasing(pos.id, exitPrice, exitOrder.orderId);
+            log.push({ action: "START_EXIT", exitPrice });
 
           } else {
             await incrementXlmHold(pos.id, pos.hold_count);
             log.push({ action: "HOLD", hold: pos.hold_count + 1, price, tp: pos.tp, sl: pos.sl });
           }
 
-        // ── Chase phase: trailing stop-loss-limit ──────────────────────────────
+        // ── Exit phase: limit sell at current price, reprice each candle ────────
         } else if (pos.status === "chasing") {
-          const slOrder = await getOrder(SYMBOL, pos.sl_order_id);
+          const exitOrder = await getOrder(SYMBOL, pos.sl_order_id);
 
-          if (slOrder.status === "FILLED") {
-            const exitPrice = parseFloat(slOrder.cummulativeQuoteQty) / parseFloat(slOrder.executedQty);
+          if (exitOrder.status === "FILLED") {
+            const exitPrice = parseFloat(exitOrder.cummulativeQuoteQty) / parseFloat(exitOrder.executedQty);
             const pnl = (exitPrice - pos.entry_price) * pos.quantity;
             await closeXlmPosition(pos.id, { exit_price: exitPrice, pnl, result: "CHASE_EXIT" });
             await addXlmPnl(pnl);
             log.push({ action: "CHASE_EXIT", exit: exitPrice, pnl: pnl.toFixed(4) });
 
           } else {
-            const livePrice = await getPrice(SYMBOL);
+            const livePrice  = await getPrice(SYMBOL);
+            const newPrice   = roundPrice(livePrice);
 
-            if (livePrice < pos.chase_price) {
-              try { await cancelAllOrders(SYMBOL); } catch {}
-              const rescuePrice = roundPrice(livePrice * (1 - RESCUE_SLIP));
-              const rescueOrder = await placeLimitSellXlm(SYMBOL, pos.quantity, rescuePrice);
-              await updateXlmChaseFloor(pos.id, rescuePrice, rescueOrder.orderId);
-              log.push({ action: "STUCK_RESCUE_CHASE", livePrice, chaseFloor: pos.chase_price, rescuePrice });
-
-            } else {
-              const newFloor = roundPrice(livePrice * (1 - CHASE_OFFSET));
-              if (newFloor > pos.chase_price) {
-                let cancelOk = true;
-                try {
-                  await cancelOrder(SYMBOL, pos.sl_order_id);
-                } catch {
-                  // Order may have just triggered — check if filled
-                  const slCheck = await getOrder(SYMBOL, pos.sl_order_id);
-                  if (slCheck.status === "FILLED") {
-                    const exitPrice = parseFloat(slCheck.cummulativeQuoteQty) / parseFloat(slCheck.executedQty);
-                    const pnl = (exitPrice - pos.entry_price) * pos.quantity;
-                    await closeXlmPosition(pos.id, { exit_price: exitPrice, pnl, result: "CHASE_EXIT" });
-                    await addXlmPnl(pnl);
-                    log.push({ action: "CHASE_EXIT", exit: exitPrice, pnl: pnl.toFixed(4) });
-                    cancelOk = false;
-                  }
+            if (newPrice !== pos.chase_price) {
+              let cancelOk = true;
+              try {
+                await cancelOrder(SYMBOL, pos.sl_order_id);
+              } catch {
+                const check = await getOrder(SYMBOL, pos.sl_order_id);
+                if (check.status === "FILLED") {
+                  const exitPrice = parseFloat(check.cummulativeQuoteQty) / parseFloat(check.executedQty);
+                  const pnl = (exitPrice - pos.entry_price) * pos.quantity;
+                  await closeXlmPosition(pos.id, { exit_price: exitPrice, pnl, result: "CHASE_EXIT" });
+                  await addXlmPnl(pnl);
+                  log.push({ action: "CHASE_EXIT", exit: exitPrice, pnl: pnl.toFixed(4) });
+                  cancelOk = false;
                 }
-                if (cancelOk) {
-                  const newSlOrder = await placeStopLimitSellXlm(
-                    SYMBOL, pos.quantity, newFloor, roundPrice(newFloor * (1 - SL_SLIP))
-                  );
-                  await updateXlmChaseFloor(pos.id, newFloor, newSlOrder.orderId);
-                  log.push({ action: "CHASE_UP", livePrice, newFloor });
-                }
-              } else {
-                log.push({ action: "CHASE_HOLD", livePrice, chaseFloor: pos.chase_price });
               }
+              if (cancelOk) {
+                const newOrder = await placeLimitSellXlm(SYMBOL, pos.quantity, newPrice);
+                await updateXlmChaseFloor(pos.id, newPrice, newOrder.orderId);
+                log.push({ action: "EXIT_REPRICE", from: pos.chase_price, to: newPrice });
+              }
+            } else {
+              log.push({ action: "EXIT_HOLD", price: livePrice });
             }
           }
         }

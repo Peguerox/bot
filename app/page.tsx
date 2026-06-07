@@ -23,9 +23,9 @@ function actionColor(action: string) {
   if (action === "TP")                return "text-green-400";
   if (action === "SL")                return "text-red-400";
   if (action === "CHASE_EXIT")        return "text-yellow-400";
-  if (action === "START_CHASE")       return "text-yellow-400";
-  if (action === "CHASE_UP")          return "text-yellow-400";
-  if (action === "CHASE_HOLD")        return "text-gray-500";
+  if (action === "START_EXIT")        return "text-yellow-400";
+  if (action === "EXIT_REPRICE")      return "text-yellow-400";
+  if (action === "EXIT_HOLD")         return "text-gray-500";
   if (action === "HOLD")              return "text-gray-500";
   if (action === "SKIP_NO_FUNDS")     return "text-orange-400";
   if (action === "WATCH")             return "text-gray-500";
@@ -45,10 +45,10 @@ function formatAction(a: any): string {
   if (a.action === "HOLD")                return `HOLD  [${a.hold}/${6}]  tp=$${a.tp}  sl=$${a.sl}`;
   if (a.action === "TP")                  return `TP HIT  exit=$${a.exit}  pnl=+$${parseFloat(a.pnl).toFixed(2)}`;
   if (a.action === "SL")                  return `SL HIT  exit=$${a.exit}  pnl=$${parseFloat(a.pnl).toFixed(2)}`;
-  if (a.action === "START_CHASE")         return `CHASE START  floor=$${a.chaseFloor}`;
-  if (a.action === "CHASE_UP")            return `CHASE UP  floor=$${a.newFloor}`;
-  if (a.action === "CHASE_HOLD")          return `CHASE HOLD  floor=$${a.chaseFloor}`;
-  if (a.action === "CHASE_EXIT")          return `CHASE EXIT  exit=$${a.exit}  pnl=$${parseFloat(a.pnl).toFixed(2)}`;
+  if (a.action === "START_EXIT")          return `EXIT START  @$${a.exitPrice}`;
+  if (a.action === "EXIT_REPRICE")        return `EXIT REPRICE  $${a.from} → $${a.to}`;
+  if (a.action === "EXIT_HOLD")           return `EXIT HOLD  @$${a.price}`;
+  if (a.action === "CHASE_EXIT")          return `EXIT FILLED  exit=$${a.exit}  pnl=$${parseFloat(a.pnl).toFixed(2)}`;
   if (a.action === "LIMIT_BUY_PLACED")    return a.z != null
     ? `BUY LIMIT  qty=${a.qty}  @$${a.price}  z=${parseFloat(a.z).toFixed(2)}`
     : `BUY LIMIT  qty=${a.qty}  @$${a.price}  btc=${(parseFloat(a.btcRet)*100).toFixed(3)}%`;

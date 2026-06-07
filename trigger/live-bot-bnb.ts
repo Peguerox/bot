@@ -3,8 +3,7 @@
 import { schedules } from "@trigger.dev/sdk/v3";
 import {
   getKlines, getFreeBalance, getOrder, getPrice, cancelOrder, cancelAllOrders,
-  placeLimitBuyBnb, placeLimitSellBnb, placeMarketSellBnb,
-  placeStopLimitSellBnb, placeOcoSellBnb,
+  placeLimitBuyBnb, placeLimitSellBnb, placeMarketSellBnb, placeOcoSellBnb,
 } from "../lib/binance";
 import { TP_PCT, SL_PCT, MAX_HOLD } from "../lib/strategy";
 import {
@@ -15,7 +14,6 @@ import {
 
 const SYMBOL       = "BNBUSDT";
 const ALLOCATION   = 25;
-const CHASE_OFFSET = 0.001;   // 0.1% trailing offset
 const BTC_THRESH   = 0.003;   // BTC must pump >= 0.3%
 const COIN_MAX     = 0.001;   // BNB must have moved < 0.1%
 const SL_SLIP      = 0.002;   // SL limit 0.2% below stop to ensure fill
@@ -163,25 +161,22 @@ export const bnbLiveBot = schedules.task({
           } else if (pos.hold_count + 1 >= MAX_HOLD) {
             try { await cancelOrder(SYMBOL, pos.tp_order_id); } catch {}
             try { await cancelOrder(SYMBOL, pos.sl_order_id); } catch {}
-            const chasePrice  = await getPrice(SYMBOL);
-            const chaseFloor  = roundPrice(chasePrice * (1 - CHASE_OFFSET));
-            const chaseSlOrder = await placeStopLimitSellBnb(
-              SYMBOL, pos.quantity, chaseFloor, roundPrice(chaseFloor * (1 - SL_SLIP))
-            );
-            await setBnbChasing(pos.id, chaseFloor, chaseSlOrder.orderId);
-            log.push({ action: "START_CHASE", livePrice: chasePrice, chaseFloor });
+            const exitPrice   = roundPrice(await getPrice(SYMBOL));
+            const exitOrder   = await placeLimitSellBnb(SYMBOL, pos.quantity, exitPrice);
+            await setBnbChasing(pos.id, exitPrice, exitOrder.orderId);
+            log.push({ action: "START_EXIT", exitPrice });
 
           } else {
             await incrementBnbHold(pos.id, pos.hold_count);
             log.push({ action: "HOLD", hold: pos.hold_count + 1, price, tp: pos.tp, sl: pos.sl });
           }
 
-        // ── Chase phase: trailing stop-loss-limit ──────────────────────────────
+        // ── Exit phase: limit sell at current price, reprice each candle ─────────
         } else if (pos.status === "chasing") {
-          const slOrder = await getOrder(SYMBOL, pos.sl_order_id);
+          const exitOrder = await getOrder(SYMBOL, pos.sl_order_id);
 
-          if (slOrder.status === "FILLED") {
-            const exitPrice = parseFloat(slOrder.cummulativeQuoteQty) / parseFloat(slOrder.executedQty);
+          if (exitOrder.status === "FILLED") {
+            const exitPrice = parseFloat(exitOrder.cummulativeQuoteQty) / parseFloat(exitOrder.executedQty);
             const pnl = (exitPrice - pos.entry_price) * pos.quantity;
             await closeBnbPosition(pos.id, { exit_price: exitPrice, pnl, result: "CHASE_EXIT" });
             await addBnbPnl(pnl);
@@ -189,41 +184,30 @@ export const bnbLiveBot = schedules.task({
 
           } else {
             const livePrice = await getPrice(SYMBOL);
+            const newPrice  = roundPrice(livePrice);
 
-            if (livePrice < pos.chase_price) {
-              try { await cancelAllOrders(SYMBOL); } catch {}
-              const rescuePrice = roundPrice(livePrice * (1 - RESCUE_SLIP));
-              const rescueOrder = await placeLimitSellBnb(SYMBOL, pos.quantity, rescuePrice);
-              await updateBnbChaseFloor(pos.id, rescuePrice, rescueOrder.orderId);
-              log.push({ action: "STUCK_RESCUE_CHASE", livePrice, chaseFloor: pos.chase_price, rescuePrice });
-
-            } else {
-              const newFloor = roundPrice(livePrice * (1 - CHASE_OFFSET));
-              if (newFloor > pos.chase_price) {
-                let cancelOk = true;
-                try {
-                  await cancelOrder(SYMBOL, pos.sl_order_id);
-                } catch {
-                  const slCheck = await getOrder(SYMBOL, pos.sl_order_id);
-                  if (slCheck.status === "FILLED") {
-                    const exitPrice = parseFloat(slCheck.cummulativeQuoteQty) / parseFloat(slCheck.executedQty);
-                    const pnl = (exitPrice - pos.entry_price) * pos.quantity;
-                    await closeBnbPosition(pos.id, { exit_price: exitPrice, pnl, result: "CHASE_EXIT" });
-                    await addBnbPnl(pnl);
-                    log.push({ action: "CHASE_EXIT", exit: exitPrice, pnl: pnl.toFixed(4) });
-                    cancelOk = false;
-                  }
+            if (newPrice !== pos.chase_price) {
+              let cancelOk = true;
+              try {
+                await cancelOrder(SYMBOL, pos.sl_order_id);
+              } catch {
+                const check = await getOrder(SYMBOL, pos.sl_order_id);
+                if (check.status === "FILLED") {
+                  const exitPrice = parseFloat(check.cummulativeQuoteQty) / parseFloat(check.executedQty);
+                  const pnl = (exitPrice - pos.entry_price) * pos.quantity;
+                  await closeBnbPosition(pos.id, { exit_price: exitPrice, pnl, result: "CHASE_EXIT" });
+                  await addBnbPnl(pnl);
+                  log.push({ action: "CHASE_EXIT", exit: exitPrice, pnl: pnl.toFixed(4) });
+                  cancelOk = false;
                 }
-                if (cancelOk) {
-                  const newSlOrder = await placeStopLimitSellBnb(
-                    SYMBOL, pos.quantity, newFloor, roundPrice(newFloor * (1 - SL_SLIP))
-                  );
-                  await updateBnbChaseFloor(pos.id, newFloor, newSlOrder.orderId);
-                  log.push({ action: "CHASE_UP", livePrice, newFloor });
-                }
-              } else {
-                log.push({ action: "CHASE_HOLD", livePrice, chaseFloor: pos.chase_price });
               }
+              if (cancelOk) {
+                const newOrder = await placeLimitSellBnb(SYMBOL, pos.quantity, newPrice);
+                await updateBnbChaseFloor(pos.id, newPrice, newOrder.orderId);
+                log.push({ action: "EXIT_REPRICE", from: pos.chase_price, to: newPrice });
+              }
+            } else {
+              log.push({ action: "EXIT_HOLD", price: livePrice });
             }
           }
         }
