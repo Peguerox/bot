@@ -7,7 +7,7 @@ import { calcZScore, TP_PCT, SL_PCT, MAX_HOLD } from "../lib/strategy";
 import {
   getXlmPosition, openXlmPendingEntry, setXlmEntryFilled,
   incrementXlmHold, setXlmChasing, updateXlmChaseFloor, closeXlmPosition,
-  logXlmRun, getXlmSettings, setXlmPendingSell, getXlmPnLSum,
+  logXlmRun, getXlmSettings, setXlmPendingSell,
   setXlmBaseline, updateXlmBalance,
 } from "../lib/xlm-live-db";
 
@@ -206,8 +206,7 @@ export const xlmLiveBot = schedules.task({
       } else {
         // ── No position: look for entry signal ────────────────────────────────
         if (z <= -Z_THRESH) {
-          const pnlSum           = await getXlmPnLSum();
-          const availableCapital = Math.min(Math.max(0, ALLOCATION + pnlSum), usdtFree);
+          const availableCapital = Math.max(0, usdtFree - (settings.baseline_usdt ?? 0));
           const qty              = floorQty(availableCapital / price);
           if (qty >= 1) {
             const limitOrder = await placeLimitBuyXlm(SYMBOL, qty, roundPrice(price));
