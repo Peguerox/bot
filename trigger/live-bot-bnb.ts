@@ -127,10 +127,34 @@ export const bnbLiveBot = schedules.task({
               const livePrice  = await getPrice(SYMBOL);
               const orderPrice = parseFloat(order.price);
               if (livePrice > orderPrice) {
-                try { await cancelOrder(SYMBOL, pos.entry_order_id); } catch {}
-                await closeBnbPosition(pos.id, { exit_price: 0, pnl: 0, result: "MISSED" });
-                log.push({ action: "MISSED", livePrice, orderPrice });
-                filled = true;
+                const freshOrder = await getOrder(SYMBOL, pos.entry_order_id);
+                if (freshOrder.status === "FILLED") {
+                  const fillPrice    = parseFloat(freshOrder.cummulativeQuoteQty) / parseFloat(freshOrder.executedQty);
+                  const filledQty    = floorQty(parseFloat(freshOrder.executedQty));
+                  const currentPrice = await getPrice(SYMBOL);
+                  const tp           = roundPrice(currentPrice * (1 + TP_PCT));
+                  const sl           = roundPrice(currentPrice * (1 - SL_PCT));
+                  const slLimit      = roundPrice(sl * (1 - SL_SLIP));
+                  try { await cancelAllOrders(SYMBOL); } catch {}
+                  const oco      = await placeOcoSellBnb(SYMBOL, filledQty, tp, sl, slLimit);
+                  const slReport = oco.orderReports.find(r => r.type === "STOP_LOSS_LIMIT" || r.type === "STOP_LOSS");
+                  const tpReport = oco.orderReports.find(r => r !== slReport);
+                  await setBnbEntryFilled(pos.id, {
+                    entry_price: fillPrice,
+                    quantity:    filledQty,
+                    tp,
+                    sl,
+                    tp_order_id: tpReport!.orderId,
+                    sl_order_id: slReport!.orderId,
+                  });
+                  log.push({ action: "ENTRY_FILLED", entry: fillPrice, qty: filledQty, tp, sl });
+                  filled = true;
+                } else {
+                  try { await cancelOrder(SYMBOL, pos.entry_order_id); } catch {}
+                  await closeBnbPosition(pos.id, { exit_price: 0, pnl: 0, result: "MISSED" });
+                  log.push({ action: "MISSED", livePrice, orderPrice });
+                  filled = true;
+                }
               }
             }
           }
