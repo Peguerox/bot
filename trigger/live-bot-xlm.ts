@@ -170,10 +170,21 @@ export const xlmLiveBot = schedules.task({
           } else if (pos.hold_count + 1 >= MAX_HOLD) {
             try { await cancelOrder(SYMBOL, pos.tp_order_id); } catch {}
             try { await cancelOrder(SYMBOL, pos.sl_order_id); } catch {}
-            const exitPrice  = roundPrice(await getPrice(SYMBOL));
-            const exitOrder  = await placeLimitSellXlm(SYMBOL, pos.quantity, exitPrice);
-            await setXlmChasing(pos.id, exitPrice, exitOrder.orderId);
-            log.push({ action: "START_EXIT", exitPrice });
+            const xlmFree = await getFreeBalance("XLM");
+            if (floorQty(xlmFree) < 1) {
+              // SL fired between our check and cancellation — recover fill from order
+              const slOrder   = await getOrder(SYMBOL, pos.sl_order_id);
+              const exitPrice = parseFloat(slOrder.cummulativeQuoteQty) / parseFloat(slOrder.executedQty);
+              const pnl       = (exitPrice - pos.entry_price) * pos.quantity;
+              await closeXlmPosition(pos.id, { exit_price: exitPrice, pnl, result: "SL" });
+              await addXlmPnl(pnl);
+              log.push({ action: "SL_RACE_RECOVERED", exit: exitPrice, pnl: pnl.toFixed(4) });
+            } else {
+              const exitPrice = roundPrice(await getPrice(SYMBOL));
+              const exitOrder = await placeLimitSellXlm(SYMBOL, pos.quantity, exitPrice);
+              await setXlmChasing(pos.id, exitPrice, exitOrder.orderId);
+              log.push({ action: "START_EXIT", exitPrice });
+            }
 
           } else {
             await incrementXlmHold(pos.id, pos.hold_count);

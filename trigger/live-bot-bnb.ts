@@ -170,10 +170,21 @@ export const bnbLiveBot = schedules.task({
           } else if (pos.hold_count + 1 >= MAX_HOLD) {
             try { await cancelOrder(SYMBOL, pos.tp_order_id); } catch {}
             try { await cancelOrder(SYMBOL, pos.sl_order_id); } catch {}
-            const exitPrice   = roundPrice(await getPrice(SYMBOL));
-            const exitOrder   = await placeLimitSellBnb(SYMBOL, pos.quantity, exitPrice);
-            await setBnbChasing(pos.id, exitPrice, exitOrder.orderId);
-            log.push({ action: "START_EXIT", exitPrice });
+            const bnbFree = await getFreeBalance("BNB");
+            if (floorQty(bnbFree) < 0.001) {
+              // SL fired between our check and cancellation — recover fill from order
+              const slOrder   = await getOrder(SYMBOL, pos.sl_order_id);
+              const exitPrice = parseFloat(slOrder.cummulativeQuoteQty) / parseFloat(slOrder.executedQty);
+              const pnl       = (exitPrice - pos.entry_price) * pos.quantity;
+              await closeBnbPosition(pos.id, { exit_price: exitPrice, pnl, result: "SL" });
+              await addBnbPnl(pnl);
+              log.push({ action: "SL_RACE_RECOVERED", exit: exitPrice, pnl: pnl.toFixed(4) });
+            } else {
+              const exitPrice  = roundPrice(await getPrice(SYMBOL));
+              const exitOrder  = await placeLimitSellBnb(SYMBOL, pos.quantity, exitPrice);
+              await setBnbChasing(pos.id, exitPrice, exitOrder.orderId);
+              log.push({ action: "START_EXIT", exitPrice });
+            }
 
           } else {
             await incrementBnbHold(pos.id, pos.hold_count);
