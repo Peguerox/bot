@@ -136,12 +136,12 @@ function PaperPanel({ trades, openPositions, loading }: {
 // ── XLM Live bot panel ──────────────────────────────────────────────────────
 
 function XlmLivePanel({
-  trades, openPositions, loading, botUsdt, totalUsdt,
+  trades, openPositions, loading, botUsdt, totalUsdt, allBotsUsdt,
   enabled, onToggle, toggling, onReset, resetting,
   onClearHistory, clearingHistory, runs,
 }: {
   trades: any[]; openPositions: any[]; loading: boolean;
-  botUsdt: number; totalUsdt: number; enabled: boolean;
+  botUsdt: number; totalUsdt: number; allBotsUsdt: number; enabled: boolean;
   onToggle: () => void; toggling: boolean;
   onReset: () => void; resetting: boolean;
   onClearHistory: () => void; clearingHistory: boolean;
@@ -249,7 +249,7 @@ function XlmLivePanel({
             </tr>
             <tr className="border-b border-gray-800/50">
               <td className="py-1.5 text-gray-400">Protected</td>
-              <td className="py-1.5 text-right text-gray-400">${totalUsdt > 0 ? Math.max(0, totalUsdt - botUsdt).toFixed(2) : "—"}</td>
+              <td className="py-1.5 text-right text-gray-400">${totalUsdt > 0 ? Math.max(0, totalUsdt - allBotsUsdt).toFixed(2) : "—"}</td>
             </tr>
             <tr className="border-b border-gray-800/50">
               <td className="py-1.5 text-gray-500">
@@ -325,12 +325,12 @@ function XlmLivePanel({
 // ── BNB Live bot panel ──────────────────────────────────────────────────────
 
 function BnbLivePanel({
-  trades, openPositions, loading, botUsdt, totalUsdt,
+  trades, openPositions, loading, botUsdt, totalUsdt, allBotsUsdt,
   enabled, onToggle, toggling, onReset, resetting,
   onClearHistory, clearingHistory, runs,
 }: {
   trades: any[]; openPositions: any[]; loading: boolean;
-  botUsdt: number; totalUsdt: number; enabled: boolean;
+  botUsdt: number; totalUsdt: number; allBotsUsdt: number; enabled: boolean;
   onToggle: () => void; toggling: boolean;
   onReset: () => void; resetting: boolean;
   onClearHistory: () => void; clearingHistory: boolean;
@@ -438,7 +438,7 @@ function BnbLivePanel({
             </tr>
             <tr className="border-b border-gray-800/50">
               <td className="py-1.5 text-gray-400">Protected</td>
-              <td className="py-1.5 text-right text-gray-400">${totalUsdt > 0 ? Math.max(0, totalUsdt - botUsdt).toFixed(2) : "—"}</td>
+              <td className="py-1.5 text-right text-gray-400">${totalUsdt > 0 ? Math.max(0, totalUsdt - allBotsUsdt).toFixed(2) : "—"}</td>
             </tr>
             <tr className="border-b border-gray-800/50">
               <td className="py-1.5 text-gray-500">
@@ -514,12 +514,12 @@ function BnbLivePanel({
 // ── XRP Live bot panel ──────────────────────────────────────────────────────
 
 function XrpLivePanel({
-  trades, openPositions, loading, botUsdt, totalUsdt,
+  trades, openPositions, loading, botUsdt, totalUsdt, allBotsUsdt,
   enabled, onToggle, toggling, onReset, resetting,
   onClearHistory, clearingHistory, runs,
 }: {
   trades: any[]; openPositions: any[]; loading: boolean;
-  botUsdt: number; totalUsdt: number; enabled: boolean;
+  botUsdt: number; totalUsdt: number; allBotsUsdt: number; enabled: boolean;
   onToggle: () => void; toggling: boolean;
   onReset: () => void; resetting: boolean;
   onClearHistory: () => void; clearingHistory: boolean;
@@ -627,7 +627,7 @@ function XrpLivePanel({
             </tr>
             <tr className="border-b border-gray-800/50">
               <td className="py-1.5 text-gray-400">Protected</td>
-              <td className="py-1.5 text-right text-gray-400">${totalUsdt > 0 ? Math.max(0, totalUsdt - botUsdt).toFixed(2) : "—"}</td>
+              <td className="py-1.5 text-right text-gray-400">${totalUsdt > 0 ? Math.max(0, totalUsdt - allBotsUsdt).toFixed(2) : "—"}</td>
             </tr>
             <tr className="border-b border-gray-800/50">
               <td className="py-1.5 text-gray-500">
@@ -881,6 +881,7 @@ export default function Dashboard() {
             loading={loading}
             botUsdt={xlmSettings?.usdt_balance ?? 0}
             totalUsdt={xlmSettings?.total_usdt ?? 0}
+            allBotsUsdt={(xlmSettings?.usdt_balance ?? 0) + (bnbSettings?.usdt_balance ?? 0)}
             enabled={xlmSettings?.enabled ?? false}
             onToggle={handleXlmToggle}
             toggling={xlmToggling}
@@ -896,6 +897,7 @@ export default function Dashboard() {
             loading={loading}
             botUsdt={bnbSettings?.usdt_balance ?? 0}
             totalUsdt={bnbSettings?.total_usdt ?? 0}
+            allBotsUsdt={(xlmSettings?.usdt_balance ?? 0) + (bnbSettings?.usdt_balance ?? 0)}
             enabled={bnbSettings?.enabled ?? false}
             onToggle={handleBnbToggle}
             toggling={bnbToggling}
@@ -911,6 +913,7 @@ export default function Dashboard() {
             loading={loading}
             botUsdt={xrpSettings?.usdt_balance ?? 0}
             totalUsdt={xrpSettings?.total_usdt ?? 0}
+            allBotsUsdt={xrpSettings?.usdt_balance ?? 0}
             enabled={xrpSettings?.enabled ?? false}
             onToggle={handleXrpToggle}
             toggling={xrpToggling}
