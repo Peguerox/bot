@@ -100,12 +100,12 @@ export const bnbLiveBot = schedules.task({
             const order = await getOrder(SYMBOL, pos.entry_order_id);
             if (order.status === "FILLED") {
               const fillPrice    = parseFloat(order.cummulativeQuoteQty) / parseFloat(order.executedQty);
-              const filledQty    = floorQty(parseFloat(order.executedQty));
               const currentPrice = await getPrice(SYMBOL);
               const tp           = roundPrice(currentPrice * (1 + TP_PCT));
               const sl           = roundPrice(currentPrice * (1 - SL_PCT));
               const slLimit      = roundPrice(sl * (1 - SL_SLIP));
               try { await cancelAllOrders(SYMBOL); } catch {}
+              const filledQty    = floorQty(await getFreeBalance("BNB"));
               const oco      = await placeOcoSellBnb(SYMBOL, filledQty, tp, sl, slLimit);
               const slReport = oco.orderReports.find(r => r.type === "STOP_LOSS_LIMIT" || r.type === "STOP_LOSS");
               const tpReport = oco.orderReports.find(r => r !== slReport);
@@ -130,12 +130,12 @@ export const bnbLiveBot = schedules.task({
                 const freshOrder = await getOrder(SYMBOL, pos.entry_order_id);
                 if (freshOrder.status === "FILLED") {
                   const fillPrice    = parseFloat(freshOrder.cummulativeQuoteQty) / parseFloat(freshOrder.executedQty);
-                  const filledQty    = floorQty(parseFloat(freshOrder.executedQty));
                   const currentPrice = await getPrice(SYMBOL);
                   const tp           = roundPrice(currentPrice * (1 + TP_PCT));
                   const sl           = roundPrice(currentPrice * (1 - SL_PCT));
                   const slLimit      = roundPrice(sl * (1 - SL_SLIP));
                   try { await cancelAllOrders(SYMBOL); } catch {}
+                  const filledQty    = floorQty(await getFreeBalance("BNB"));
                   const oco      = await placeOcoSellBnb(SYMBOL, filledQty, tp, sl, slLimit);
                   const slReport = oco.orderReports.find(r => r.type === "STOP_LOSS_LIMIT" || r.type === "STOP_LOSS");
                   const tpReport = oco.orderReports.find(r => r !== slReport);
