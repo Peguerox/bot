@@ -79,7 +79,7 @@ export async function closeXlmPosition(id: string, params: {
   pnl:        number;
   result:     string;
 }) {
-  await getSupabaseAdmin()
+  const { error } = await getSupabaseAdmin()
     .from("xlm_live_positions")
     .update({
       status:    "closed",
@@ -87,6 +87,7 @@ export async function closeXlmPosition(id: string, params: {
       ...params,
     })
     .eq("id", id);
+  if (error) throw new Error(`closeXlmPosition failed: ${error.message}`);
 }
 
 export async function logXlmRun(data: object) {
