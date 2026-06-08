@@ -14,7 +14,7 @@ import {
 
 const SYMBOL       = "BNBUSDT";
 const ALLOCATION   = 25;
-const BTC_THRESH   = 0.003;   // BTC must pump >= 0.3%
+const BTC_THRESH   = 0.001;   // BTC must pump >= 0.1%
 const COIN_MAX     = 0.001;   // BNB must have moved < 0.1%
 const SL_SLIP      = 0.002;   // SL limit 0.2% below stop to ensure fill
 const RESCUE_SLIP  = 0.0001;  // rescue limit 0.01% below live price
