@@ -262,7 +262,7 @@ export const xlmLiveBot = schedules.task({
           const botBalance       = settings.usdt_balance ?? ALLOCATION;
           const qty              = floorQty(Math.min(botBalance, usdtFree) / price);
           if (qty >= 1) {
-            const limitOrder = await placeLimitBuyXlm(SYMBOL, qty, roundPrice(price));
+            const limitOrder = await placeLimitBuyXlm(SYMBOL, qty, roundPrice(price * 1.0002));
             await openXlmPendingEntry({ symbol: SYMBOL, entry_order_id: limitOrder.orderId, quantity: qty, z_score: z });
             log.push({ action: "LIMIT_BUY_PLACED", qty, price: roundPrice(price), orderId: limitOrder.orderId, z: z.toFixed(3) });
           }
