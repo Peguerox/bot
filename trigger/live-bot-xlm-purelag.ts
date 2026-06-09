@@ -1,8 +1,9 @@
 // Pure Lag · XLM
-// Signal: XLM global 1m candle up >= 0.1% AND XLM.US up < 0.1% → buy XLM.US expecting snap-up
+// Signal: XLM global UP >= 0.05% from last close AND XLM.US lagging → buy expecting snap-up
 import { schedules } from "@trigger.dev/sdk/v3";
 import {
-  getPriceGlobal, getFreeBalance, getOrder, getPrice, cancelOrder, cancelAllOrders,
+  getPriceGlobal, getKlinesGlobal, getFreeBalance, getOrder, getPrice, getKlines,
+  cancelOrder, cancelAllOrders,
   placeLimitBuyXlm, placeLimitSellXlm, placeMarketSellXlm, placeOcoSellXlm,
 } from "../lib/binance";
 import { TP_PCT, SL_PCT, MAX_HOLD } from "../lib/strategy";
@@ -16,7 +17,7 @@ import {
 
 const SYMBOL       = "XLMUSDT";
 const ALLOCATION   = 25;
-const GL_THRESH    = 0.001;   // XLM global live price must be >= 0.1% above XLM.US
+const GL_THRESH    = 0.0005;  // global must be up >= 0.05% from last close AND ahead of US
 const SL_SLIP      = 0.002;   // SL limit 0.2% below stop to ensure fill
 const RESCUE_SLIP  = 0.0001;  // rescue limit 0.01% below live price
 
@@ -80,13 +81,20 @@ export const xlmPureLagBot = schedules.task({
 
     let hadPosition = false;
     try {
-      const [liveGLPrice, price] = await Promise.all([
+      const [liveGLPrice, price, glCandles, usCandles] = await Promise.all([
         getPriceGlobal(SYMBOL),
         getPrice(SYMBOL),
+        getKlinesGlobal(SYMBOL, "1m", 2),
+        getKlines(SYMBOL, "1m", 2),
       ]);
 
-      const xlmGLRet = (liveGLPrice - price) / price;
-      const signal   = xlmGLRet >= GL_THRESH;
+      const prevGL   = glCandles[0].close;  // last closed candle
+      const prevUS   = usCandles[0].close;
+      const spread   = (liveGLPrice - price) / price;
+      const glRet    = (liveGLPrice - prevGL) / prevGL;  // global up from last close
+      const usRet    = (price - prevUS) / prevUS;         // US movement from last close
+      const xlmGLRet = spread;
+      const signal   = spread >= GL_THRESH && glRet > 0 && usRet < glRet;
       const pos        = await getPosition();
       if (pos) hadPosition = true;
 
@@ -291,12 +299,19 @@ export const xlmPureLagBot = schedules.task({
     try {
       const pos2 = await getPosition();
       if (!pos2) {
-        const [liveGLPrice2, price2] = await Promise.all([
+        const [liveGLPrice2, price2, glCandles2, usCandles2] = await Promise.all([
           getPriceGlobal(SYMBOL),
           getPrice(SYMBOL),
+          getKlinesGlobal(SYMBOL, "1m", 2),
+          getKlines(SYMBOL, "1m", 2),
         ]);
-        const xlmGLRet2 = (liveGLPrice2 - price2) / price2;
-        if (xlmGLRet2 >= GL_THRESH) {
+        const prevGL2  = glCandles2[0].close;
+        const prevUS2  = usCandles2[0].close;
+        const spread2  = (liveGLPrice2 - price2) / price2;
+        const glRet2   = (liveGLPrice2 - prevGL2) / prevGL2;
+        const usRet2   = (price2 - prevUS2) / prevUS2;
+        const xlmGLRet2 = spread2;
+        if (spread2 >= GL_THRESH && glRet2 > 0 && usRet2 < glRet2) {
           const botBalance = settings.usdt_balance ?? ALLOCATION;
           const qty        = floorQty(Math.min(botBalance, usdtFree) / price2);
           if (qty >= 1) {

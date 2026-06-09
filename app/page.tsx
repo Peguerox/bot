@@ -259,22 +259,20 @@ function XlmLivePanel({
               <td className="py-1.5 text-right text-white">${totalUsdt > 0 ? totalUsdt.toFixed(2) : "—"}</td>
             </tr>
             <tr className="border-b border-gray-800/50">
-              <td className="py-1.5 text-gray-400">Protected</td>
-              <td className="py-1.5 text-right text-gray-400">${totalUsdt > 0 ? Math.max(0, totalUsdt - allBotsUsdt).toFixed(2) : "—"}</td>
-            </tr>
-            <tr className="border-b border-gray-800/50">
-              <td className="py-1.5 text-gray-500">
-                {openPositions[0]?.status === "pending_entry" ? "In Order (USDT)" : "Allocated"}
-              </td>
+              <td className="py-1.5 text-gray-400">Bot Balance</td>
               <td className={`py-1.5 text-right font-bold ${
                 openPositions[0]?.status === "pending_entry"
                   ? "text-yellow-400"
                   : botUsdt >= 24 ? "text-green-400" : botUsdt > 0 ? "text-yellow-400" : "text-blue-400"
               }`}>
                 {openPositions[0]?.status === "pending_entry"
-                  ? `≈$${((openPositions[0].quantity ?? 0) * (latestPrice ?? 0)).toFixed(2)}`
+                  ? `≈$${((openPositions[0].quantity ?? 0) * (latestPrice ?? 0)).toFixed(2)} in order`
                   : `$${botUsdt.toFixed(2)}`}
               </td>
+            </tr>
+            <tr className="border-b border-gray-800/50">
+              <td className="py-1.5 text-gray-400">Free USDT</td>
+              <td className="py-1.5 text-right text-gray-400">${totalUsdt > 0 ? Math.max(0, totalUsdt - allBotsUsdt).toFixed(2) : "—"}</td>
             </tr>
             <tr className="border-b border-gray-800/50">
               <td className="py-1.5 text-gray-400">XLM</td>
@@ -448,22 +446,20 @@ function BnbLivePanel({
               <td className="py-1.5 text-right text-white">${totalUsdt > 0 ? totalUsdt.toFixed(2) : "—"}</td>
             </tr>
             <tr className="border-b border-gray-800/50">
-              <td className="py-1.5 text-gray-400">Protected</td>
-              <td className="py-1.5 text-right text-gray-400">${totalUsdt > 0 ? Math.max(0, totalUsdt - allBotsUsdt).toFixed(2) : "—"}</td>
-            </tr>
-            <tr className="border-b border-gray-800/50">
-              <td className="py-1.5 text-gray-500">
-                {openPositions[0]?.status === "pending_entry" ? "In Order (USDT)" : "Allocated"}
-              </td>
+              <td className="py-1.5 text-gray-400">Bot Balance</td>
               <td className={`py-1.5 text-right font-bold ${
                 openPositions[0]?.status === "pending_entry"
                   ? "text-yellow-400"
                   : botUsdt >= 24 ? "text-green-400" : botUsdt > 0 ? "text-yellow-400" : "text-blue-400"
               }`}>
                 {openPositions[0]?.status === "pending_entry"
-                  ? `≈$${((openPositions[0].quantity ?? 0) * (latestPrice ?? 0)).toFixed(2)}`
+                  ? `≈$${((openPositions[0].quantity ?? 0) * (latestPrice ?? 0)).toFixed(2)} in order`
                   : `$${botUsdt.toFixed(2)}`}
               </td>
+            </tr>
+            <tr className="border-b border-gray-800/50">
+              <td className="py-1.5 text-gray-400">Free USDT</td>
+              <td className="py-1.5 text-right text-gray-400">${totalUsdt > 0 ? Math.max(0, totalUsdt - allBotsUsdt).toFixed(2) : "—"}</td>
             </tr>
             <tr className="border-b border-gray-800/50">
               <td className="py-1.5 text-gray-400">XLM</td>
