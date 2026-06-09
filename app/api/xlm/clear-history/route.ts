@@ -25,7 +25,7 @@ export async function POST() {
   const { data: st } = await sb.from("xlm_live_settings").select("id").single();
   if (st) {
     await sb.from("xlm_live_settings")
-      .update({ baseline_usdt: 0, usdt_balance: 0, pending_sell: true })
+      .update({ baseline_usdt: 0, usdt_balance: 25, pending_sell: false })
       .eq("id", st.id);
   }
 
