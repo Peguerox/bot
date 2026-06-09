@@ -345,11 +345,15 @@ export async function getPrice(symbol: string): Promise<number> {
     cache: "no-store",
   });
   const data = await res.json();
-  return parseFloat(data.price);
+  const p = parseFloat(data.price);
+  if (!res.ok || isNaN(p)) throw new Error(`getPrice failed: ${JSON.stringify(data)}`);
+  return p;
 }
 
 export async function getPriceGlobal(symbol: string): Promise<number> {
   const res = await fetch(`${BASE_GL}/ticker/price?symbol=${symbol}`, { cache: "no-store" });
   const data = await res.json();
-  return parseFloat(data.price);
+  const p = parseFloat(data.price);
+  if (!res.ok || isNaN(p)) throw new Error(`getPriceGlobal failed: ${JSON.stringify(data)}`);
+  return p;
 }

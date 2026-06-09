@@ -43,7 +43,7 @@ function formatAction(a: any): string {
   if (a.action === "WATCH")               return a.z != null
     ? `WATCH  z=${parseFloat(a.z).toFixed(2)}  $${a.price}`
     : a.xlmGLRet != null
-    ? `WATCH  spread=${(parseFloat(a.xlmGLRet)*100).toFixed(3)}%  $${a.price}`
+    ? `WATCH  spread=${isNaN(parseFloat(a.xlmGLRet)) ? "N/A" : (parseFloat(a.xlmGLRet)*100).toFixed(3)+"%"}  $${a.price}`
     : `WATCH  btc=${(parseFloat(a.btcRet)*100).toFixed(3)}%  bnb=${(parseFloat(a.bnbRet)*100).toFixed(3)}%  $${a.price}`;
   if (a.action === "HOLD")                return `HOLD  [${a.hold}/${6}]  tp=$${a.tp}  sl=$${a.sl}`;
   if (a.action === "TP")                  return `TP HIT  exit=$${a.exit}  pnl=+$${parseFloat(a.pnl).toFixed(2)}`;
