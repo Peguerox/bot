@@ -1,5 +1,6 @@
 import { NextResponse } from "next/server";
 import { getSupabaseAdmin } from "@/lib/supabase-admin";
+import { getFreeBalance, getPrice } from "@/lib/binance";
 
 export async function POST() {
   const sb = getSupabaseAdmin();
@@ -22,12 +23,31 @@ export async function POST() {
 
   if (runsErr) errors.push(`runs: ${runsErr.message}`);
 
+  // Fetch real balances from Binance so the dashboard shows correct values immediately
+  let totalUsdt = 0;
+  let xlmPrice  = 0;
+  try { totalUsdt = await getFreeBalance("USDT"); } catch {}
+  try { xlmPrice  = await getPrice("XLMUSDT");    } catch {}
+
   const { data: st } = await sb.from("xlm_live_settings").select("id").single();
   if (st) {
     await sb.from("xlm_live_settings")
-      .update({ baseline_usdt: 0, usdt_balance: 25, pending_sell: false })
+      .update({
+        baseline_usdt: 0,
+        usdt_balance:  25,
+        pending_sell:  false,
+        total_usdt:    totalUsdt,
+      })
       .eq("id", st.id);
   }
 
-  return NextResponse.json({ ok: errors.length === 0, errors });
+  // Write a synthetic run log so the dashboard shows the current XLM price right away
+  if (xlmPrice > 0) {
+    await sb.from("xlm_live_runs").insert({
+      run_at: new Date().toISOString(),
+      data:   { actions: [{ action: "WATCH", xlmGLRet: "0.0000", price: xlmPrice }] },
+    });
+  }
+
+  return NextResponse.json({ ok: errors.length === 0, errors, totalUsdt, xlmPrice });
 }
