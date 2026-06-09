@@ -223,7 +223,7 @@ function XlmLivePanel({
             </button>
           </div>
         </div>
-        <p className="text-gray-500 text-xs">XLM/USDT · $25 · 1m · XLM global≥0.1% live · TP 0.8% · SL 0.15% · limit +0.02%</p>
+        <p className="text-gray-500 text-xs">XLM/USDT · $25 · 1m · XLM global≥0.05% · TP 0.8% · SL 0.15% · limit +0.02%</p>
       </div>
 
       {loading ? (
@@ -261,18 +261,26 @@ function XlmLivePanel({
             <tr className="border-b border-gray-800/50">
               <td className="py-1.5 text-gray-400">Bot Balance</td>
               <td className={`py-1.5 text-right font-bold ${
-                openPositions[0]?.status === "pending_entry"
-                  ? "text-yellow-400"
-                  : botUsdt >= 24 ? "text-green-400" : botUsdt > 0 ? "text-yellow-400" : "text-blue-400"
+                openPositions[0]?.status === "pending_entry" ? "text-yellow-400"
+                : openPositions[0]?.status === "open" || openPositions[0]?.status === "chasing" ? "text-blue-400"
+                : botUsdt >= 24 ? "text-green-400" : botUsdt > 0 ? "text-yellow-400" : "text-red-400"
               }`}>
                 {openPositions[0]?.status === "pending_entry"
                   ? `≈$${((openPositions[0].quantity ?? 0) * (latestPrice ?? 0)).toFixed(2)} in order`
+                  : openPositions[0]?.status === "open" || openPositions[0]?.status === "chasing"
+                  ? `≈$${((openPositions[0].quantity ?? 0) * (latestPrice ?? 0)).toFixed(2)} in XLM`
                   : `$${botUsdt.toFixed(2)}`}
               </td>
             </tr>
             <tr className="border-b border-gray-800/50">
               <td className="py-1.5 text-gray-400">Free USDT</td>
-              <td className="py-1.5 text-right text-gray-400">${totalUsdt > 0 ? Math.max(0, totalUsdt - allBotsUsdt).toFixed(2) : "—"}</td>
+              <td className="py-1.5 text-right text-gray-400">
+                {totalUsdt > 0
+                  ? openPositions.length > 0
+                    ? `$${totalUsdt.toFixed(2)}`
+                    : `$${Math.max(0, totalUsdt - allBotsUsdt).toFixed(2)}`
+                  : "—"}
+              </td>
             </tr>
             <tr className="border-b border-gray-800/50">
               <td className="py-1.5 text-gray-400">XLM</td>
