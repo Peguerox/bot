@@ -273,12 +273,15 @@ export const xlmPureLagBot = schedules.task({
       log.push({ action: "ERROR", stage: "trading", error: String(err) });
     }
 
-    // ── Second signal check at 30s (only when no position is open) ────────────
+    // ── Log first check immediately so dashboard updates at 0s ────────────────
+    await logRun({ actions: log });
     if (hadPosition) {
-      await logRun({ actions: log });
       console.log("XLM pure-lag bot run:", JSON.stringify(log, null, 2));
       return { ok: true, actions: log };
     }
+
+    // ── Second signal check at 30s (only when no position is open) ────────────
+    const log2: object[] = [];
     await sleep(30000);
     try {
       const pos2 = await getPosition();
@@ -294,18 +297,18 @@ export const xlmPureLagBot = schedules.task({
           if (qty >= 1) {
             const limitOrder = await placeLimitBuyXlm(SYMBOL, qty, roundPrice(price2 * 1.0002));
             await openPendingEntry({ symbol: SYMBOL, entry_order_id: limitOrder.orderId, quantity: qty, z_score: 0 });
-            log.push({ action: "LIMIT_BUY_PLACED_30S", qty, price: roundPrice(price2), orderId: limitOrder.orderId, xlmGLRet: xlmGLRet2.toFixed(4) });
+            log2.push({ action: "LIMIT_BUY_PLACED_30S", qty, price: roundPrice(price2), orderId: limitOrder.orderId, xlmGLRet: xlmGLRet2.toFixed(4) });
           }
         } else {
-          log.push({ action: "WATCH_30S", xlmGLRet: xlmGLRet2.toFixed(4), price: price2 });
+          log2.push({ action: "WATCH_30S", xlmGLRet: xlmGLRet2.toFixed(4), price: price2 });
         }
       }
     } catch (err) {
-      log.push({ action: "ERROR", stage: "trading_30s", error: String(err) });
+      log2.push({ action: "ERROR", stage: "trading_30s", error: String(err) });
     }
 
-    await logRun({ actions: log });
-    console.log("XLM pure-lag bot run:", JSON.stringify(log, null, 2));
-    return { ok: true, actions: log };
+    await logRun({ actions: log2 });
+    console.log("XLM pure-lag bot run 30s:", JSON.stringify(log2, null, 2));
+    return { ok: true, actions: [...log, ...log2] };
   },
 });
