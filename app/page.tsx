@@ -267,7 +267,7 @@ function XlmLivePanel({
                 : botUsdt >= 24 ? "text-green-400" : botUsdt > 0 ? "text-yellow-400" : "text-red-400"
               }`}>
                 {openPositions[0]?.status === "pending_entry"
-                  ? `≈$${((openPositions[0].quantity ?? 0) * (latestPrice ?? 0)).toFixed(2)} in order`
+                  ? `$${botUsdt.toFixed(2)} in order`
                   : openPositions[0]?.status === "open" || openPositions[0]?.status === "chasing"
                   ? `≈$${((openPositions[0].quantity ?? 0) * (latestPrice ?? 0)).toFixed(2)} in XLM`
                   : `$${botUsdt.toFixed(2)}`}
