@@ -3,11 +3,14 @@ import crypto from "crypto";
 const BASE    = "https://api.binance.us/api/v3";
 const BASE_GL = "https://api.binance.com/api/v3";
 
+const API_KEY    = process.env.BINANCE_API_KEY_EU ?? process.env.BINANCE_API_KEY ?? "";
+const API_SECRET = process.env.BINANCE_API_SECRET_EU ?? process.env.BINANCE_API_SECRET ?? "";
+
 // ── Signed request helpers (live bot order placement) ─────────────────────────
 
 function sign(payload: string): string {
   return crypto
-    .createHmac("sha256", process.env.BINANCE_API_SECRET!)
+    .createHmac("sha256", API_SECRET)
     .update(payload)
     .digest("hex");
 }
@@ -20,7 +23,7 @@ async function signedPost(path: string, params: Record<string, string | number>)
   const res = await fetch(`${BASE}${path}`, {
     method: "POST",
     headers: {
-      "X-MBX-APIKEY": process.env.BINANCE_API_KEY!,
+      "X-MBX-APIKEY": API_KEY,
       "Content-Type": "application/x-www-form-urlencoded",
     },
     body: body.toString(),
@@ -37,7 +40,7 @@ async function signedDelete(path: string, params: Record<string, string | number
   qs.append("signature", sign(qs.toString()));
   const res = await fetch(`${BASE}${path}?${qs}`, {
     method: "DELETE",
-    headers: { "X-MBX-APIKEY": process.env.BINANCE_API_KEY! },
+    headers: { "X-MBX-APIKEY": API_KEY },
     cache: "no-store",
   });
   if (!res.ok) throw new Error(`Binance DELETE ${path}: ${res.status} ${await res.text()}`);
@@ -50,7 +53,7 @@ async function signedGet(path: string, params: Record<string, string | number>) 
   );
   qs.append("signature", sign(qs.toString()));
   const res = await fetch(`${BASE}${path}?${qs}`, {
-    headers: { "X-MBX-APIKEY": process.env.BINANCE_API_KEY! },
+    headers: { "X-MBX-APIKEY": API_KEY },
     cache: "no-store",
   });
   if (!res.ok) throw new Error(`Binance GET ${path}: ${res.status} ${await res.text()}`);
@@ -310,7 +313,7 @@ export async function getFreeBalance(asset: string): Promise<number> {
 export async function getKlines(symbol: string, interval: string, limit: number) {
   const url = `${BASE}/klines?symbol=${symbol}&interval=${interval}&limit=${limit}`;
   const res = await fetch(url, {
-    headers: { "X-MBX-APIKEY": process.env.BINANCE_API_KEY! },
+    headers: { "X-MBX-APIKEY": API_KEY },
     cache: "no-store",
   });
   if (!res.ok) throw new Error(`Binance API error: ${res.status}`);
