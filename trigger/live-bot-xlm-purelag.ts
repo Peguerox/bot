@@ -20,6 +20,7 @@ const ALLOCATION   = 25;
 const GL_THRESH    = 0.0005;  // global must be up >= 0.05% from last close AND ahead of US
 const SL_SLIP      = 0.002;   // SL limit 0.2% below stop to ensure fill
 const RESCUE_SLIP  = 0.0001;  // rescue limit 0.01% below live price
+const CANCEL_DROP  = 0.0015;  // cancel pending limit buy if price drops 0.15% below order price
 
 function roundPrice(p: number) { return Math.round(p * 100000) / 100000; }
 function floorQty(q: number)   { return Math.floor(q); }
@@ -133,7 +134,13 @@ export const xlmPureLagBot = schedules.task({
             } else {
               const livePrice  = await getPrice(SYMBOL);
               const orderPrice = parseFloat(order.price);
-              if (livePrice > orderPrice) {
+              if (livePrice < orderPrice * (1 - CANCEL_DROP)) {
+                // Price dropped 0.15% below order — signal reversed, cancel
+                try { await cancelOrder(SYMBOL, pos.entry_order_id); } catch {}
+                await closePosition(pos.id, { exit_price: 0, pnl: 0, result: "CANCELED_DROP" });
+                log.push({ action: "CANCELED_DROP", livePrice, orderPrice });
+                filled = true;
+              } else if (livePrice > orderPrice) {
                 const freshOrder = await getOrder(SYMBOL, pos.entry_order_id);
                 if (freshOrder.status === "FILLED") {
                   const fillPrice = parseFloat(freshOrder.cummulativeQuoteQty) / parseFloat(freshOrder.executedQty);
@@ -269,13 +276,25 @@ export const xlmPureLagBot = schedules.task({
       } else {
         // ── No position: look for entry signal ────────────────────────────────
         if (signal) {
-          const botBalance = settings.usdt_balance ?? ALLOCATION;
-          const qty        = floorQty(Math.min(botBalance, usdtFree) / price);
-          if (qty >= 1) {
-            const limitOrder = await placeLimitBuyXlm(SYMBOL, qty, roundPrice(price * 1.0002));
-            await openPendingEntry({ symbol: SYMBOL, entry_order_id: limitOrder.orderId, quantity: qty, z_score: 0 });
-            hadPosition = true;
-            log.push({ action: "LIMIT_BUY_PLACED", qty, price: roundPrice(price), orderId: limitOrder.orderId, xlmGLRet: xlmGLRet.toFixed(4) });
+          const xlmHeld = await getFreeBalance("XLM");
+          if (xlmHeld >= 1) {
+            // Exchange says we hold XLM but DB has no record — skip, don't double-buy
+            log.push({ action: "SKIP_HAVE_XLM", xlmHeld });
+          } else {
+            const botBalance = settings.usdt_balance ?? ALLOCATION;
+            const qty        = floorQty(Math.min(botBalance, usdtFree) / price);
+            if (qty >= 1) {
+              const limitOrder = await placeLimitBuyXlm(SYMBOL, qty, roundPrice(price * 1.0002));
+              try {
+                await openPendingEntry({ symbol: SYMBOL, entry_order_id: limitOrder.orderId, quantity: qty, z_score: 0 });
+              } catch (dbErr) {
+                // DB write failed — cancel the order so we don't have an orphaned open order
+                try { await cancelOrder(SYMBOL, limitOrder.orderId); } catch {}
+                throw dbErr;
+              }
+              hadPosition = true;
+              log.push({ action: "LIMIT_BUY_PLACED", qty, price: roundPrice(price), orderId: limitOrder.orderId, xlmGLRet: xlmGLRet.toFixed(4) });
+            }
           }
         } else {
           log.push({ action: "WATCH", xlmGLRet: xlmGLRet.toFixed(4), price });
@@ -312,12 +331,22 @@ export const xlmPureLagBot = schedules.task({
         const usRet2   = (price2 - prevUS2) / prevUS2;
         const xlmGLRet2 = spread2;
         if (spread2 >= GL_THRESH && glRet2 > 0 && usRet2 < glRet2) {
-          const botBalance = settings.usdt_balance ?? ALLOCATION;
-          const qty        = floorQty(Math.min(botBalance, usdtFree) / price2);
-          if (qty >= 1) {
-            const limitOrder = await placeLimitBuyXlm(SYMBOL, qty, roundPrice(price2 * 1.0002));
-            await openPendingEntry({ symbol: SYMBOL, entry_order_id: limitOrder.orderId, quantity: qty, z_score: 0 });
-            log2.push({ action: "LIMIT_BUY_PLACED_30S", qty, price: roundPrice(price2), orderId: limitOrder.orderId, xlmGLRet: xlmGLRet2.toFixed(4) });
+          const xlmHeld2 = await getFreeBalance("XLM");
+          if (xlmHeld2 >= 1) {
+            log2.push({ action: "SKIP_HAVE_XLM_30S", xlmHeld: xlmHeld2 });
+          } else {
+            const botBalance = settings.usdt_balance ?? ALLOCATION;
+            const qty        = floorQty(Math.min(botBalance, usdtFree) / price2);
+            if (qty >= 1) {
+              const limitOrder = await placeLimitBuyXlm(SYMBOL, qty, roundPrice(price2 * 1.0002));
+              try {
+                await openPendingEntry({ symbol: SYMBOL, entry_order_id: limitOrder.orderId, quantity: qty, z_score: 0 });
+              } catch (dbErr) {
+                try { await cancelOrder(SYMBOL, limitOrder.orderId); } catch {}
+                throw dbErr;
+              }
+              log2.push({ action: "LIMIT_BUY_PLACED_30S", qty, price: roundPrice(price2), orderId: limitOrder.orderId, xlmGLRet: xlmGLRet2.toFixed(4) });
+            }
           }
         } else {
           log2.push({ action: "WATCH_30S", xlmGLRet: xlmGLRet2.toFixed(4), price: price2 });
