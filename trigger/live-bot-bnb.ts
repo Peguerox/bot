@@ -262,7 +262,7 @@ export const bnbLiveBot = schedules.task({
           const botBalance       = settings.usdt_balance ?? ALLOCATION;
           const qty              = floorQty(Math.min(botBalance, usdtFree) / price);
           if (qty >= 0.001 && qty * price >= 1.1) {
-            const limitOrder = await placeLimitBuyBnb(SYMBOL, qty, roundPrice(price));
+            const limitOrder = await placeLimitBuyBnb(SYMBOL, qty, roundPrice(price * 1.0002));
             await openBnbPendingEntry({ symbol: SYMBOL, entry_order_id: limitOrder.orderId, quantity: qty });
             log.push({ action: "LIMIT_BUY_PLACED", qty, price: roundPrice(price), orderId: limitOrder.orderId, btcRet: btcRet.toFixed(4), bnbRet: bnbRet.toFixed(4) });
           }
