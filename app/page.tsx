@@ -28,7 +28,7 @@ function actionColor(action: string) {
   if (action === "EXIT_HOLD")         return "text-gray-500";
   if (action === "HOLD")              return "text-gray-500";
   if (action === "SKIP_NO_FUNDS")     return "text-orange-400";
-  if (action === "WATCH")             return "text-gray-500";
+  if (action === "WATCH" || action === "WATCH_30S") return "text-gray-500";
   if (action === "LIMIT_BUY_PLACED")  return "text-blue-400";
   if (action === "ENTRY_FILLED")      return "text-green-400";
   if (action === "PENDING_FILL")      return "text-yellow-400";
@@ -40,11 +40,15 @@ function actionColor(action: string) {
 }
 
 function formatAction(a: any): string {
-  if (a.action === "WATCH")               return a.z != null
-    ? `WATCH  z=${parseFloat(a.z).toFixed(2)}  $${a.price}`
-    : a.xlmGLRet != null
-    ? `WATCH  spread=${isNaN(parseFloat(a.xlmGLRet)) ? "N/A" : (parseFloat(a.xlmGLRet)*100).toFixed(3)+"%"}  $${a.price}`
-    : `WATCH  btc=${(parseFloat(a.btcRet)*100).toFixed(3)}%  bnb=${(parseFloat(a.bnbRet)*100).toFixed(3)}%  $${a.price}`;
+  if (a.action === "WATCH" || a.action === "WATCH_30S") {
+    const tag = a.action === "WATCH_30S" ? "WATCH 30s" : "WATCH";
+    const spread = isNaN(parseFloat(a.xlmGLRet)) ? "N/A" : (parseFloat(a.xlmGLRet)*100).toFixed(3)+"%";
+    return a.z != null
+      ? `${tag}  z=${parseFloat(a.z).toFixed(2)}  $${a.price}`
+      : a.xlmGLRet != null
+      ? `${tag}  spread=${spread}  $${a.price}`
+      : `${tag}  btc=${(parseFloat(a.btcRet)*100).toFixed(3)}%  bnb=${(parseFloat(a.bnbRet)*100).toFixed(3)}%  $${a.price}`;
+  }
   if (a.action === "HOLD")                return `HOLD  [${a.hold}/${6}]  tp=$${a.tp}  sl=$${a.sl}`;
   if (a.action === "TP")                  return `TP HIT  exit=$${a.exit}  pnl=+$${parseFloat(a.pnl).toFixed(2)}`;
   if (a.action === "SL")                  return `SL HIT  exit=$${a.exit}  pnl=$${parseFloat(a.pnl).toFixed(2)}`;
@@ -52,11 +56,14 @@ function formatAction(a: any): string {
   if (a.action === "EXIT_REPRICE")        return `EXIT REPRICE  $${a.from} → $${a.to}`;
   if (a.action === "EXIT_HOLD")           return `EXIT HOLD  @$${a.price}`;
   if (a.action === "CHASE_EXIT")          return `EXIT FILLED  exit=$${a.exit}  pnl=$${parseFloat(a.pnl).toFixed(2)}`;
-  if (a.action === "LIMIT_BUY_PLACED")    return a.z != null
-    ? `BUY LIMIT  qty=${a.qty}  @$${a.price}  z=${parseFloat(a.z).toFixed(2)}`
-    : a.xlmGLRet != null
-    ? `BUY LIMIT  qty=${a.qty}  @$${a.price}  gl=${(parseFloat(a.xlmGLRet)*100).toFixed(3)}%`
-    : `BUY LIMIT  qty=${a.qty}  @$${a.price}  btc=${(parseFloat(a.btcRet)*100).toFixed(3)}%`;
+  if (a.action === "LIMIT_BUY_PLACED" || a.action === "LIMIT_BUY_PLACED_30S") {
+    const tag = a.action === "LIMIT_BUY_PLACED_30S" ? "BUY LIMIT 30s" : "BUY LIMIT";
+    return a.z != null
+      ? `${tag}  qty=${a.qty}  @$${a.price}  z=${parseFloat(a.z).toFixed(2)}`
+      : a.xlmGLRet != null
+      ? `${tag}  qty=${a.qty}  @$${a.price}  spread=${(parseFloat(a.xlmGLRet)*100).toFixed(3)}%`
+      : `${tag}  qty=${a.qty}  @$${a.price}  btc=${(parseFloat(a.btcRet)*100).toFixed(3)}%`;
+  }
   if (a.action === "ENTRY_FILLED")        return `FILLED  entry=$${a.entry}  qty=${a.qty}  tp=$${a.tp}  sl=$${a.sl}`;
   if (a.action === "PENDING_FILL")        return `WAITING FILL  orderId=${a.orderId}`;
   if (a.action === "MISSED")              return `MISSED  live=$${a.livePrice}  order=$${a.orderPrice}`;
