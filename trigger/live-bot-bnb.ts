@@ -95,8 +95,8 @@ export const bnbLiveBot = schedules.task({
         // ── Waiting for limit buy to fill ──────────────────────────────────────
         if (pos.status === "pending_entry") {
           let filled = false;
-          for (let attempt = 0; attempt < 4 && !filled; attempt++) {
-            if (attempt > 0) await sleep(10000);
+          for (let attempt = 0; attempt < 10 && !filled; attempt++) {
+            if (attempt > 0) await sleep(5000);
             const order = await getOrder(SYMBOL, pos.entry_order_id);
             if (order.status === "FILLED") {
               const fillPrice    = parseFloat(order.cummulativeQuoteQty) / parseFloat(order.executedQty);
