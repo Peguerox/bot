@@ -78,6 +78,7 @@ export const xlmPureLagBot = schedules.task({
       return { ok: true, actions: log };
     }
 
+    let hadPosition = false;
     try {
       const [liveGLPrice, price] = await Promise.all([
         getPriceGlobal(SYMBOL),
@@ -87,6 +88,7 @@ export const xlmPureLagBot = schedules.task({
       const xlmGLRet = (liveGLPrice - price) / price;
       const signal   = xlmGLRet >= GL_THRESH;
       const pos        = await getPosition();
+      if (pos) hadPosition = true;
 
       if (pos) {
 
@@ -258,7 +260,8 @@ export const xlmPureLagBot = schedules.task({
           const qty        = floorQty(Math.min(botBalance, usdtFree) / price);
           if (qty >= 1) {
             const limitOrder = await placeLimitBuyXlm(SYMBOL, qty, roundPrice(price * 1.0002));
-            await openPendingEntry({ symbol: SYMBOL, entry_order_id: limitOrder.orderId, quantity: qty, z_score: 0 });
+            await openPendingEntry({ symbol: SYMBOL, entry_order_id: limitOrder.orderId, quantity: qty });
+            hadPosition = true;
             log.push({ action: "LIMIT_BUY_PLACED", qty, price: roundPrice(price), orderId: limitOrder.orderId, xlmGLRet: xlmGLRet.toFixed(4) });
           }
         } else {
@@ -270,7 +273,12 @@ export const xlmPureLagBot = schedules.task({
       log.push({ action: "ERROR", stage: "trading", error: String(err) });
     }
 
-    // ── Second signal check at 30s ─────────────────────────────────────────────
+    // ── Second signal check at 30s (only when no position is open) ────────────
+    if (hadPosition) {
+      await logRun({ actions: log });
+      console.log("XLM pure-lag bot run:", JSON.stringify(log, null, 2));
+      return { ok: true, actions: log };
+    }
     await sleep(30000);
     try {
       const pos2 = await getPosition();
@@ -285,7 +293,7 @@ export const xlmPureLagBot = schedules.task({
           const qty        = floorQty(Math.min(botBalance, usdtFree) / price2);
           if (qty >= 1) {
             const limitOrder = await placeLimitBuyXlm(SYMBOL, qty, roundPrice(price2 * 1.0002));
-            await openPendingEntry({ symbol: SYMBOL, entry_order_id: limitOrder.orderId, quantity: qty, z_score: 0 });
+            await openPendingEntry({ symbol: SYMBOL, entry_order_id: limitOrder.orderId, quantity: qty });
             log.push({ action: "LIMIT_BUY_PLACED_30S", qty, price: roundPrice(price2), orderId: limitOrder.orderId, xlmGLRet: xlmGLRet2.toFixed(4) });
           }
         } else {
