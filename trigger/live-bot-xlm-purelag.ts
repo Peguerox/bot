@@ -172,6 +172,7 @@ export const xlmPureLagBot = schedules.task({
             const pnl = (exitPrice - pos.entry_price) * pos.quantity;
             await closePosition(pos.id, { exit_price: exitPrice, pnl, result: "TP" });
             await addPnl(pnl);
+            await updateBalance((settings.usdt_balance ?? ALLOCATION) + pnl);
             log.push({ action: "TP", exit: exitPrice, pnl: pnl.toFixed(4) });
 
           } else if (slOrder.status === "FILLED") {
@@ -180,6 +181,7 @@ export const xlmPureLagBot = schedules.task({
             const pnl = (exitPrice - pos.entry_price) * pos.quantity;
             await closePosition(pos.id, { exit_price: exitPrice, pnl, result: "SL" });
             await addPnl(pnl);
+            await updateBalance((settings.usdt_balance ?? ALLOCATION) + pnl);
             log.push({ action: "SL", exit: exitPrice, pnl: pnl.toFixed(4) });
 
           } else if (livePrice < pos.sl) {
@@ -199,6 +201,7 @@ export const xlmPureLagBot = schedules.task({
               const pnl       = (exitPrice - pos.entry_price) * pos.quantity;
               await closePosition(pos.id, { exit_price: exitPrice, pnl, result: "SL" });
               await addPnl(pnl);
+              await updateBalance((settings.usdt_balance ?? ALLOCATION) + pnl);
               log.push({ action: "SL_RACE_RECOVERED", exit: exitPrice, pnl: pnl.toFixed(4) });
             } else {
               const exitPrice = roundPrice(await getPrice(SYMBOL));
@@ -221,6 +224,7 @@ export const xlmPureLagBot = schedules.task({
             const pnl = (exitPrice - pos.entry_price) * pos.quantity;
             await closePosition(pos.id, { exit_price: exitPrice, pnl, result: "CHASE_EXIT" });
             await addPnl(pnl);
+            await updateBalance((settings.usdt_balance ?? ALLOCATION) + pnl);
             log.push({ action: "CHASE_EXIT", exit: exitPrice, pnl: pnl.toFixed(4) });
 
           } else {
@@ -238,6 +242,7 @@ export const xlmPureLagBot = schedules.task({
                   const pnl = (exitPrice - pos.entry_price) * pos.quantity;
                   await closePosition(pos.id, { exit_price: exitPrice, pnl, result: "CHASE_EXIT" });
                   await addPnl(pnl);
+                  await updateBalance((settings.usdt_balance ?? ALLOCATION) + pnl);
                   log.push({ action: "CHASE_EXIT", exit: exitPrice, pnl: pnl.toFixed(4) });
                   cancelOk = false;
                 }
