@@ -182,7 +182,7 @@ function XlmLivePanel({
       <div className="space-y-1.5">
         <div className="flex items-center justify-between gap-2">
           <div className="flex items-center gap-2">
-            <h2 className="text-white font-bold text-lg">Pure Lag · XLM</h2>
+            <h2 className="text-white font-bold text-lg">Z-Lag · XLM</h2>
             <span className="text-xs font-bold px-2 py-0.5 rounded-full bg-green-500/20 text-green-400">LIVE</span>
           </div>
           <div className="flex items-center gap-1.5 shrink-0">
@@ -216,7 +216,7 @@ function XlmLivePanel({
             </button>
           </div>
         </div>
-        <p className="text-gray-500 text-xs">XLM/USDT · $25 · 1m · XLM global≥0.1% · TP 0.8% · SL 0.15% · limit orders</p>
+        <p className="text-gray-500 text-xs">XLM/USDT · $25 · 1m · Z=1.5 · TP 0.8% · SL 0.15% · limit orders</p>
       </div>
 
       {loading ? (
@@ -371,7 +371,7 @@ function BnbLivePanel({
       <div className="space-y-1.5">
         <div className="flex items-center justify-between gap-2">
           <div className="flex items-center gap-2">
-            <h2 className="text-white font-bold text-lg">Pure Lag · BNB</h2>
+            <h2 className="text-white font-bold text-lg">Pure Lag · XLM</h2>
             <span className="text-xs font-bold px-2 py-0.5 rounded-full bg-green-500/20 text-green-400">LIVE</span>
           </div>
           <div className="flex items-center gap-1.5 shrink-0">
@@ -387,7 +387,7 @@ function BnbLivePanel({
               onClick={onReset}
               disabled={resetting || enabled}
               className="text-xs font-medium px-2.5 py-1.5 rounded-md bg-gray-800 text-red-400/70 hover:bg-red-950/60 hover:text-red-400 transition-all disabled:opacity-30 disabled:cursor-not-allowed"
-              title={enabled ? "Pause bot before selling" : "Sell all BNB & clear position"}
+              title={enabled ? "Pause bot before selling" : "Sell all XLM & clear position"}
             >
               {resetting ? "Selling…" : "Sell All"}
             </button>
@@ -405,7 +405,7 @@ function BnbLivePanel({
             </button>
           </div>
         </div>
-        <p className="text-gray-500 text-xs">BNB/USDT · $25 · 1m · BTC≥0.1% · Coin&lt;0.1% · TP 0.8% · SL 0.15% · limit orders</p>
+        <p className="text-gray-500 text-xs">XLM/USDT · $25 · 1m · XLM global≥0.1% live · TP 0.8% · SL 0.15% · limit orders</p>
       </div>
 
       {loading ? (
@@ -459,17 +459,17 @@ function BnbLivePanel({
               </td>
             </tr>
             <tr className="border-b border-gray-800/50">
-              <td className="py-1.5 text-gray-400">BNB</td>
+              <td className="py-1.5 text-gray-400">XLM</td>
               <td className="py-1.5 text-right text-white">
                 {openPositions[0]?.status === "pending_entry"
                   ? "—"
-                  : openPositions[0]?.quantity?.toFixed(3) ?? "0"}
+                  : openPositions[0]?.quantity?.toFixed(0) ?? "0"}
               </td>
             </tr>
             <tr>
-              <td className="py-1.5 text-gray-400">BNB price</td>
+              <td className="py-1.5 text-gray-400">XLM price</td>
               <td className="py-1.5 text-right text-yellow-400">
-                {latestPrice != null ? `$${latestPrice.toFixed(2)}` : "—"}
+                {latestPrice != null ? `$${latestPrice.toFixed(5)}` : "—"}
               </td>
             </tr>
           </tbody>

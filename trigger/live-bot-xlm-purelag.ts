@@ -7,10 +7,12 @@ import {
 } from "../lib/binance";
 import { TP_PCT, SL_PCT, MAX_HOLD } from "../lib/strategy";
 import {
-  getXlmPosition, openXlmPendingEntry, setXlmEntryFilled,
-  incrementXlmHold, setXlmChasing, updateXlmChaseFloor, closeXlmPosition,
-  logXlmRun, getXlmSettings, setXlmBaseline, updateXlmBalance, updateXlmTotal, setXlmPendingSell, addXlmPnl,
-} from "../lib/xlm-live-db";
+  getBnbPosition as getPosition, openBnbPendingEntry as openPendingEntry, setBnbEntryFilled as setEntryFilled,
+  incrementBnbHold as incrementHold, setBnbChasing as setChasing, updateBnbChaseFloor as updateChaseFloor,
+  closeBnbPosition as closePosition, logBnbRun as logRun, getBnbSettings as getSettings,
+  setBnbBaseline as setBaseline, updateBnbBalance as updateBalance, updateBnbTotal as updateTotal,
+  setBnbPendingSell as setPendingSell, addBnbPnl as addPnl,
+} from "../lib/bnb-live-db";
 
 const SYMBOL       = "XLMUSDT";
 const ALLOCATION   = 25;
@@ -32,9 +34,9 @@ export const xlmPureLagBot = schedules.task({
 
     let settings;
     try {
-      settings = await getXlmSettings();
+      settings = await getSettings();
     } catch (err) {
-      await logXlmRun({ actions: [{ action: "ERROR", stage: "settings", error: String(err) }] });
+      await logRun({ actions: [{ action: "ERROR", stage: "settings", error: String(err) }] });
       return { ok: false };
     }
     if (!settings?.enabled) return { ok: false, reason: "disabled" };
@@ -42,13 +44,13 @@ export const xlmPureLagBot = schedules.task({
     let usdtFree = 0;
     try {
       usdtFree = await getFreeBalance("USDT");
-      await updateXlmTotal(usdtFree);
+      await updateTotal(usdtFree);
       if (!settings.usdt_balance || settings.usdt_balance === 0) {
-        await updateXlmBalance(ALLOCATION);
+        await updateBalance(ALLOCATION);
       }
     } catch (err) {
       log.push({ action: "ERROR", stage: "balance", error: String(err) });
-      await logXlmRun({ actions: log });
+      await logRun({ actions: log });
       return { ok: false };
     }
 
@@ -66,13 +68,13 @@ export const xlmPureLagBot = schedules.task({
           log.push({ action: "SELL_ALL_SKIP", xlmFree, reason: "below MIN_NOTIONAL" });
         }
         const newUsdt = await getFreeBalance("USDT");
-        await setXlmBaseline(newUsdt - ALLOCATION);
-        await updateXlmBalance(ALLOCATION);
-        await setXlmPendingSell(false);
+        await setBaseline(newUsdt - ALLOCATION);
+        await updateBalance(ALLOCATION);
+        await setPendingSell(false);
       } catch (err) {
         log.push({ action: "ERROR", stage: "sell_all", error: String(err) });
       }
-      await logXlmRun({ actions: log });
+      await logRun({ actions: log });
       return { ok: true, actions: log };
     }
 
@@ -84,7 +86,7 @@ export const xlmPureLagBot = schedules.task({
 
       const xlmGLRet = (liveGLPrice - price) / price;
       const signal   = xlmGLRet >= GL_THRESH;
-      const pos        = await getXlmPosition();
+      const pos        = await getPosition();
 
       if (pos) {
 
@@ -104,7 +106,7 @@ export const xlmPureLagBot = schedules.task({
               const oco      = await placeOcoSellXlm(SYMBOL, filledQty, tp, sl, slLimit);
               const slReport = oco.orderReports.find(r => r.type === "STOP_LOSS_LIMIT" || r.type === "STOP_LOSS");
               const tpReport = oco.orderReports.find(r => r !== slReport);
-              await setXlmEntryFilled(pos.id, {
+              await setEntryFilled(pos.id, {
                 entry_price: fillPrice,
                 quantity:    filledQty,
                 tp,
@@ -115,7 +117,7 @@ export const xlmPureLagBot = schedules.task({
               log.push({ action: "ENTRY_FILLED", entry: fillPrice, qty: filledQty, tp, sl });
               filled = true;
             } else if (order.status === "CANCELED" || order.status === "EXPIRED") {
-              await closeXlmPosition(pos.id, { exit_price: 0, pnl: 0, result: "CANCELED" });
+              await closePosition(pos.id, { exit_price: 0, pnl: 0, result: "CANCELED" });
               log.push({ action: "ENTRY_CANCELED", orderId: pos.entry_order_id });
               filled = true;
             } else {
@@ -133,7 +135,7 @@ export const xlmPureLagBot = schedules.task({
                   const oco      = await placeOcoSellXlm(SYMBOL, filledQty, tp, sl, slLimit);
                   const slReport = oco.orderReports.find(r => r.type === "STOP_LOSS_LIMIT" || r.type === "STOP_LOSS");
                   const tpReport = oco.orderReports.find(r => r !== slReport);
-                  await setXlmEntryFilled(pos.id, {
+                  await setEntryFilled(pos.id, {
                     entry_price: fillPrice,
                     quantity:    filledQty,
                     tp,
@@ -145,7 +147,7 @@ export const xlmPureLagBot = schedules.task({
                   filled = true;
                 } else {
                   try { await cancelOrder(SYMBOL, pos.entry_order_id); } catch {}
-                  await closeXlmPosition(pos.id, { exit_price: 0, pnl: 0, result: "MISSED" });
+                  await closePosition(pos.id, { exit_price: 0, pnl: 0, result: "MISSED" });
                   log.push({ action: "MISSED", livePrice, orderPrice });
                   filled = true;
                 }
@@ -166,23 +168,23 @@ export const xlmPureLagBot = schedules.task({
             try { await cancelOrder(SYMBOL, pos.sl_order_id); } catch {}
             const exitPrice = parseFloat(tpOrder.cummulativeQuoteQty) / parseFloat(tpOrder.executedQty);
             const pnl = (exitPrice - pos.entry_price) * pos.quantity;
-            await closeXlmPosition(pos.id, { exit_price: exitPrice, pnl, result: "TP" });
-            await addXlmPnl(pnl);
+            await closePosition(pos.id, { exit_price: exitPrice, pnl, result: "TP" });
+            await addPnl(pnl);
             log.push({ action: "TP", exit: exitPrice, pnl: pnl.toFixed(4) });
 
           } else if (slOrder.status === "FILLED") {
             try { await cancelOrder(SYMBOL, pos.tp_order_id); } catch {}
             const exitPrice = parseFloat(slOrder.cummulativeQuoteQty) / parseFloat(slOrder.executedQty);
             const pnl = (exitPrice - pos.entry_price) * pos.quantity;
-            await closeXlmPosition(pos.id, { exit_price: exitPrice, pnl, result: "SL" });
-            await addXlmPnl(pnl);
+            await closePosition(pos.id, { exit_price: exitPrice, pnl, result: "SL" });
+            await addPnl(pnl);
             log.push({ action: "SL", exit: exitPrice, pnl: pnl.toFixed(4) });
 
           } else if (livePrice < pos.sl) {
             try { await cancelAllOrders(SYMBOL); } catch {}
             const rescuePrice = roundPrice(livePrice * (1 - RESCUE_SLIP));
             const rescueOrder = await placeLimitSellXlm(SYMBOL, pos.quantity, rescuePrice);
-            await setXlmChasing(pos.id, rescuePrice, rescueOrder.orderId);
+            await setChasing(pos.id, rescuePrice, rescueOrder.orderId);
             log.push({ action: "STUCK_RESCUE", livePrice, sl: pos.sl, rescuePrice });
 
           } else if (pos.hold_count + 1 >= MAX_HOLD) {
@@ -193,18 +195,18 @@ export const xlmPureLagBot = schedules.task({
               const slOrder   = await getOrder(SYMBOL, pos.sl_order_id);
               const exitPrice = parseFloat(slOrder.cummulativeQuoteQty) / parseFloat(slOrder.executedQty);
               const pnl       = (exitPrice - pos.entry_price) * pos.quantity;
-              await closeXlmPosition(pos.id, { exit_price: exitPrice, pnl, result: "SL" });
-              await addXlmPnl(pnl);
+              await closePosition(pos.id, { exit_price: exitPrice, pnl, result: "SL" });
+              await addPnl(pnl);
               log.push({ action: "SL_RACE_RECOVERED", exit: exitPrice, pnl: pnl.toFixed(4) });
             } else {
               const exitPrice = roundPrice(await getPrice(SYMBOL));
               const exitOrder = await placeLimitSellXlm(SYMBOL, pos.quantity, exitPrice);
-              await setXlmChasing(pos.id, exitPrice, exitOrder.orderId);
+              await setChasing(pos.id, exitPrice, exitOrder.orderId);
               log.push({ action: "START_EXIT", exitPrice });
             }
 
           } else {
-            await incrementXlmHold(pos.id, pos.hold_count);
+            await incrementHold(pos.id, pos.hold_count);
             log.push({ action: "HOLD", hold: pos.hold_count + 1, price, tp: pos.tp, sl: pos.sl });
           }
 
@@ -215,8 +217,8 @@ export const xlmPureLagBot = schedules.task({
           if (exitOrder.status === "FILLED") {
             const exitPrice = parseFloat(exitOrder.cummulativeQuoteQty) / parseFloat(exitOrder.executedQty);
             const pnl = (exitPrice - pos.entry_price) * pos.quantity;
-            await closeXlmPosition(pos.id, { exit_price: exitPrice, pnl, result: "CHASE_EXIT" });
-            await addXlmPnl(pnl);
+            await closePosition(pos.id, { exit_price: exitPrice, pnl, result: "CHASE_EXIT" });
+            await addPnl(pnl);
             log.push({ action: "CHASE_EXIT", exit: exitPrice, pnl: pnl.toFixed(4) });
 
           } else {
@@ -232,15 +234,15 @@ export const xlmPureLagBot = schedules.task({
                 if (check.status === "FILLED") {
                   const exitPrice = parseFloat(check.cummulativeQuoteQty) / parseFloat(check.executedQty);
                   const pnl = (exitPrice - pos.entry_price) * pos.quantity;
-                  await closeXlmPosition(pos.id, { exit_price: exitPrice, pnl, result: "CHASE_EXIT" });
-                  await addXlmPnl(pnl);
+                  await closePosition(pos.id, { exit_price: exitPrice, pnl, result: "CHASE_EXIT" });
+                  await addPnl(pnl);
                   log.push({ action: "CHASE_EXIT", exit: exitPrice, pnl: pnl.toFixed(4) });
                   cancelOk = false;
                 }
               }
               if (cancelOk) {
                 const newOrder = await placeLimitSellXlm(SYMBOL, pos.quantity, newPrice);
-                await updateXlmChaseFloor(pos.id, newPrice, newOrder.orderId);
+                await updateChaseFloor(pos.id, newPrice, newOrder.orderId);
                 log.push({ action: "EXIT_REPRICE", from: pos.chase_price, to: newPrice });
               }
             } else {
@@ -256,7 +258,7 @@ export const xlmPureLagBot = schedules.task({
           const qty        = floorQty(Math.min(botBalance, usdtFree) / price);
           if (qty >= 1) {
             const limitOrder = await placeLimitBuyXlm(SYMBOL, qty, roundPrice(price * 1.0002));
-            await openXlmPendingEntry({ symbol: SYMBOL, entry_order_id: limitOrder.orderId, quantity: qty, z_score: 0 });
+            await openPendingEntry({ symbol: SYMBOL, entry_order_id: limitOrder.orderId, quantity: qty, z_score: 0 });
             log.push({ action: "LIMIT_BUY_PLACED", qty, price: roundPrice(price), orderId: limitOrder.orderId, xlmGLRet: xlmGLRet.toFixed(4) });
           }
         } else {
@@ -271,7 +273,7 @@ export const xlmPureLagBot = schedules.task({
     // ── Second signal check at 30s ─────────────────────────────────────────────
     await sleep(30000);
     try {
-      const pos2 = await getXlmPosition();
+      const pos2 = await getPosition();
       if (!pos2) {
         const [liveGLPrice2, price2] = await Promise.all([
           getPriceGlobal(SYMBOL),
@@ -283,7 +285,7 @@ export const xlmPureLagBot = schedules.task({
           const qty        = floorQty(Math.min(botBalance, usdtFree) / price2);
           if (qty >= 1) {
             const limitOrder = await placeLimitBuyXlm(SYMBOL, qty, roundPrice(price2 * 1.0002));
-            await openXlmPendingEntry({ symbol: SYMBOL, entry_order_id: limitOrder.orderId, quantity: qty, z_score: 0 });
+            await openPendingEntry({ symbol: SYMBOL, entry_order_id: limitOrder.orderId, quantity: qty, z_score: 0 });
             log.push({ action: "LIMIT_BUY_PLACED_30S", qty, price: roundPrice(price2), orderId: limitOrder.orderId, xlmGLRet: xlmGLRet2.toFixed(4) });
           }
         } else {
@@ -294,7 +296,7 @@ export const xlmPureLagBot = schedules.task({
       log.push({ action: "ERROR", stage: "trading_30s", error: String(err) });
     }
 
-    await logXlmRun({ actions: log });
+    await logRun({ actions: log });
     console.log("XLM pure-lag bot run:", JSON.stringify(log, null, 2));
     return { ok: true, actions: log };
   },
