@@ -100,9 +100,8 @@ export const xlmLiveBot = schedules.task({
             if (order.status === "FILLED") {
               const fillPrice    = parseFloat(order.cummulativeQuoteQty) / parseFloat(order.executedQty);
               const filledQty    = floorQty(parseFloat(order.executedQty));
-              const currentPrice = await getPrice(SYMBOL);
-              const tp           = roundPrice(currentPrice * (1 + TP_PCT));
-              const sl           = roundPrice(currentPrice * (1 - SL_PCT));
+              const tp           = roundPrice(fillPrice * (1 + TP_PCT));
+              const sl           = roundPrice(fillPrice * (1 - SL_PCT));
               const slLimit  = roundPrice(sl * (1 - SL_SLIP));
               try { await cancelAllOrders(SYMBOL); } catch {}
               const oco      = await placeOcoSellXlm(SYMBOL, filledQty, tp, sl, slLimit);
@@ -131,9 +130,8 @@ export const xlmLiveBot = schedules.task({
                 if (freshOrder.status === "FILLED") {
                   const fillPrice    = parseFloat(freshOrder.cummulativeQuoteQty) / parseFloat(freshOrder.executedQty);
                   const filledQty    = floorQty(parseFloat(freshOrder.executedQty));
-                  const currentPrice = await getPrice(SYMBOL);
-                  const tp           = roundPrice(currentPrice * (1 + TP_PCT));
-                  const sl           = roundPrice(currentPrice * (1 - SL_PCT));
+                  const tp           = roundPrice(fillPrice * (1 + TP_PCT));
+                  const sl           = roundPrice(fillPrice * (1 - SL_PCT));
                   const slLimit      = roundPrice(sl * (1 - SL_SLIP));
                   try { await cancelAllOrders(SYMBOL); } catch {}
                   const oco      = await placeOcoSellXlm(SYMBOL, filledQty, tp, sl, slLimit);

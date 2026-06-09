@@ -100,9 +100,8 @@ export const bnbLiveBot = schedules.task({
             const order = await getOrder(SYMBOL, pos.entry_order_id);
             if (order.status === "FILLED") {
               const fillPrice    = parseFloat(order.cummulativeQuoteQty) / parseFloat(order.executedQty);
-              const currentPrice = await getPrice(SYMBOL);
-              const tp           = roundPrice(currentPrice * (1 + TP_PCT));
-              const sl           = roundPrice(currentPrice * (1 - SL_PCT));
+              const tp           = roundPrice(fillPrice * (1 + TP_PCT));
+              const sl           = roundPrice(fillPrice * (1 - SL_PCT));
               const slLimit      = roundPrice(sl * (1 - SL_SLIP));
               try { await cancelAllOrders(SYMBOL); } catch {}
               const filledQty    = floorQty(await getFreeBalance("BNB"));
@@ -130,9 +129,8 @@ export const bnbLiveBot = schedules.task({
                 const freshOrder = await getOrder(SYMBOL, pos.entry_order_id);
                 if (freshOrder.status === "FILLED") {
                   const fillPrice    = parseFloat(freshOrder.cummulativeQuoteQty) / parseFloat(freshOrder.executedQty);
-                  const currentPrice = await getPrice(SYMBOL);
-                  const tp           = roundPrice(currentPrice * (1 + TP_PCT));
-                  const sl           = roundPrice(currentPrice * (1 - SL_PCT));
+                  const tp           = roundPrice(fillPrice * (1 + TP_PCT));
+                  const sl           = roundPrice(fillPrice * (1 - SL_PCT));
                   const slLimit      = roundPrice(sl * (1 - SL_SLIP));
                   try { await cancelAllOrders(SYMBOL); } catch {}
                   const filledQty    = floorQty(await getFreeBalance("BNB"));
