@@ -182,7 +182,7 @@ function XlmLivePanel({
       <div className="space-y-1.5">
         <div className="flex items-center justify-between gap-2">
           <div className="flex items-center gap-2">
-            <h2 className="text-white font-bold text-lg">Z-Lag · XLM</h2>
+            <h2 className="text-white font-bold text-lg">Pure Lag · XLM</h2>
             <span className="text-xs font-bold px-2 py-0.5 rounded-full bg-green-500/20 text-green-400">LIVE</span>
           </div>
           <div className="flex items-center gap-1.5 shrink-0">
@@ -216,7 +216,7 @@ function XlmLivePanel({
             </button>
           </div>
         </div>
-        <p className="text-gray-500 text-xs">XLM/USDT · $25 · 1m · Z=1.5 · TP 0.8% · SL 0.15% · limit orders</p>
+        <p className="text-gray-500 text-xs">XLM/USDT · $25 · 1m · XLM global≥0.1% live · TP 0.8% · SL 0.15% · limit +0.02%</p>
       </div>
 
       {loading ? (
@@ -707,30 +707,16 @@ function XrpLivePanel({
 // ── Dashboard ───────────────────────────────────────────────────────────────
 
 export default function Dashboard() {
-  const [trades, setTrades]                   = useState<any[]>([]);
-  const [open, setOpen]                       = useState<any[]>([]);
-  const [xlmSettings, setXlmSettings]         = useState<any>(null);
-  const [xlmOpen, setXlmOpen]                 = useState<any[]>([]);
-  const [xlmTrades, setXlmTrades]             = useState<any[]>([]);
-  const [xlmRuns, setXlmRuns]                 = useState<any[]>([]);
-  const [bnbSettings, setBnbSettings]         = useState<any>(null);
-  const [bnbOpen, setBnbOpen]                 = useState<any[]>([]);
-  const [bnbTrades, setBnbTrades]             = useState<any[]>([]);
-  const [bnbRuns, setBnbRuns]                 = useState<any[]>([]);
-  const [xrpSettings, setXrpSettings]         = useState<any>(null);
-  const [xrpOpen, setXrpOpen]                 = useState<any[]>([]);
-  const [xrpTrades, setXrpTrades]             = useState<any[]>([]);
-  const [xrpRuns, setXrpRuns]                 = useState<any[]>([]);
-  const [loading, setLoading]                 = useState(true);
-  const [xlmToggling, setXlmToggling]         = useState(false);
-  const [xlmResetting, setXlmResetting]       = useState(false);
-  const [xlmClearing, setXlmClearing]         = useState(false);
-  const [bnbToggling, setBnbToggling]         = useState(false);
-  const [bnbResetting, setBnbResetting]       = useState(false);
-  const [bnbClearing, setBnbClearing]         = useState(false);
-  const [xrpToggling, setXrpToggling]         = useState(false);
-  const [xrpResetting, setXrpResetting]       = useState(false);
-  const [xrpClearing, setXrpClearing]         = useState(false);
+  const [trades, setTrades]       = useState<any[]>([]);
+  const [open, setOpen]           = useState<any[]>([]);
+  const [xlmSettings, setXlmSettings] = useState<any>(null);
+  const [xlmOpen, setXlmOpen]     = useState<any[]>([]);
+  const [xlmTrades, setXlmTrades] = useState<any[]>([]);
+  const [xlmRuns, setXlmRuns]     = useState<any[]>([]);
+  const [loading, setLoading]     = useState(true);
+  const [xlmToggling, setXlmToggling]   = useState(false);
+  const [xlmResetting, setXlmResetting] = useState(false);
+  const [xlmClearing, setXlmClearing]   = useState(false);
 
   async function load() {
     const [
@@ -740,14 +726,6 @@ export default function Dashboard() {
       { data: xlmOp },
       { data: xlmCl },
       { data: xlmRs },
-      { data: bnbSt },
-      { data: bnbOp },
-      { data: bnbCl },
-      { data: bnbRs },
-      { data: xrpSt },
-      { data: xrpOp },
-      { data: xrpCl },
-      { data: xrpRs },
     ] = await Promise.all([
       getSupabase().from("positions").select("*").eq("status", "closed").order("exit_time", { ascending: false }),
       getSupabase().from("positions").select("*").in("status", ["open", "chasing"]),
@@ -755,14 +733,6 @@ export default function Dashboard() {
       getSupabase().from("xlm_live_positions").select("*").in("status", ["open", "chasing", "pending_entry"]),
       getSupabase().from("xlm_live_positions").select("*").eq("status", "closed").order("exit_time", { ascending: false }).limit(20),
       getSupabase().from("xlm_live_runs").select("id,run_at,data").order("run_at", { ascending: false }).limit(120),
-      getSupabase().from("bnb_live_settings").select("*").single(),
-      getSupabase().from("bnb_live_positions").select("*").in("status", ["open", "chasing", "pending_entry"]),
-      getSupabase().from("bnb_live_positions").select("*").eq("status", "closed").order("exit_time", { ascending: false }).limit(20),
-      getSupabase().from("bnb_live_runs").select("id,run_at,data").order("run_at", { ascending: false }).limit(120),
-      getSupabase().from("xrp_live_settings").select("*").single(),
-      getSupabase().from("xrp_live_positions").select("*").in("status", ["open", "chasing", "pending_entry"]),
-      getSupabase().from("xrp_live_positions").select("*").eq("status", "closed").order("exit_time", { ascending: false }).limit(20),
-      getSupabase().from("xrp_live_runs").select("id,run_at,data").order("run_at", { ascending: false }).limit(120),
     ]);
     setTrades(closed ?? []);
     setOpen(openPos ?? []);
@@ -770,14 +740,6 @@ export default function Dashboard() {
     setXlmOpen((xlmOp ?? []).map((p: any) => ({ ...p, pair: "XLM" })));
     setXlmTrades(xlmCl ?? []);
     setXlmRuns(xlmRs ?? []);
-    setBnbSettings(bnbSt ?? null);
-    setBnbOpen((bnbOp ?? []).map((p: any) => ({ ...p, pair: "BNB" })));
-    setBnbTrades(bnbCl ?? []);
-    setBnbRuns(bnbRs ?? []);
-    setXrpSettings(xrpSt ?? null);
-    setXrpOpen((xrpOp ?? []).map((p: any) => ({ ...p, pair: "XRP" })));
-    setXrpTrades(xrpCl ?? []);
-    setXrpRuns(xrpRs ?? []);
     setLoading(false);
   }
 
@@ -804,52 +766,6 @@ export default function Dashboard() {
     setXlmClearing(false);
   }
 
-  async function handleBnbToggle() {
-    setBnbToggling(true);
-    await fetch("/api/bnb/toggle", { method: "POST" });
-    await load();
-    setBnbToggling(false);
-  }
-
-  async function handleBnbReset() {
-    if (!confirm("Market sell all BNB and clear position?")) return;
-    setBnbResetting(true);
-    await fetch("/api/bnb/reset", { method: "POST" });
-    await load();
-    setBnbResetting(false);
-  }
-
-  async function handleBnbClearHistory() {
-    if (!confirm("Delete all BNB closed trade history and run logs?")) return;
-    setBnbClearing(true);
-    await fetch("/api/bnb/clear-history", { method: "POST" });
-    await load();
-    setBnbClearing(false);
-  }
-
-  async function handleXrpToggle() {
-    setXrpToggling(true);
-    await fetch("/api/xrp/toggle", { method: "POST" });
-    await load();
-    setXrpToggling(false);
-  }
-
-  async function handleXrpReset() {
-    if (!confirm("Market sell all XRP and clear position?")) return;
-    setXrpResetting(true);
-    await fetch("/api/xrp/reset", { method: "POST" });
-    await load();
-    setXrpResetting(false);
-  }
-
-  async function handleXrpClearHistory() {
-    if (!confirm("Delete all XRP closed trade history and run logs?")) return;
-    setXrpClearing(true);
-    await fetch("/api/xrp/clear-history", { method: "POST" });
-    await load();
-    setXrpClearing(false);
-  }
-
   useEffect(() => {
     load();
     const sb = getSupabase();
@@ -861,31 +777,21 @@ export default function Dashboard() {
       .on("postgres_changes", { event: "*", schema: "public", table: "xlm_live_settings" }, load)
       .on("postgres_changes", { event: "*", schema: "public", table: "xlm_live_runs" }, load)
       .subscribe();
-    const ch3 = sb.channel("bnb")
-      .on("postgres_changes", { event: "*", schema: "public", table: "bnb_live_positions" }, load)
-      .on("postgres_changes", { event: "*", schema: "public", table: "bnb_live_settings" }, load)
-      .on("postgres_changes", { event: "*", schema: "public", table: "bnb_live_runs" }, load)
-      .subscribe();
-    const ch4 = sb.channel("xrp")
-      .on("postgres_changes", { event: "*", schema: "public", table: "xrp_live_positions" }, load)
-      .on("postgres_changes", { event: "*", schema: "public", table: "xrp_live_settings" }, load)
-      .on("postgres_changes", { event: "*", schema: "public", table: "xrp_live_runs" }, load)
-      .subscribe();
-    return () => { sb.removeChannel(ch1); sb.removeChannel(ch2); sb.removeChannel(ch3); sb.removeChannel(ch4); };
+    return () => { sb.removeChannel(ch1); sb.removeChannel(ch2); };
   }, []);
 
   return (
     <main className="min-h-screen bg-gray-950 text-white p-6">
       <div className="max-w-6xl mx-auto space-y-6">
         <h1 className="text-2xl font-bold text-white">TradeBot Dashboard</h1>
-        <div className="grid grid-cols-1 lg:grid-cols-3 gap-6 items-start">
+        <div className="grid grid-cols-1 lg:grid-cols-2 gap-6 items-start">
           <XlmLivePanel
             trades={xlmTrades}
             openPositions={xlmOpen}
             loading={loading}
             botUsdt={xlmSettings?.usdt_balance ?? 0}
             totalUsdt={xlmSettings?.total_usdt ?? 0}
-            allBotsUsdt={(xlmSettings?.usdt_balance ?? 0) + (bnbSettings?.usdt_balance ?? 0)}
+            allBotsUsdt={xlmSettings?.usdt_balance ?? 0}
             enabled={xlmSettings?.enabled ?? false}
             onToggle={handleXlmToggle}
             toggling={xlmToggling}
@@ -895,44 +801,12 @@ export default function Dashboard() {
             clearingHistory={xlmClearing}
             runs={xlmRuns}
           />
-          <BnbLivePanel
-            trades={bnbTrades}
-            openPositions={bnbOpen}
+          <PaperPanel
+            trades={trades}
+            openPositions={open}
             loading={loading}
-            botUsdt={bnbSettings?.usdt_balance ?? 0}
-            totalUsdt={bnbSettings?.total_usdt ?? 0}
-            allBotsUsdt={(xlmSettings?.usdt_balance ?? 0) + (bnbSettings?.usdt_balance ?? 0)}
-            enabled={bnbSettings?.enabled ?? false}
-            onToggle={handleBnbToggle}
-            toggling={bnbToggling}
-            onReset={handleBnbReset}
-            resetting={bnbResetting}
-            onClearHistory={handleBnbClearHistory}
-            clearingHistory={bnbClearing}
-            runs={bnbRuns}
-          />
-          <XrpLivePanel
-            trades={xrpTrades}
-            openPositions={xrpOpen}
-            loading={loading}
-            botUsdt={xrpSettings?.usdt_balance ?? 0}
-            totalUsdt={xrpSettings?.total_usdt ?? 0}
-            allBotsUsdt={xrpSettings?.usdt_balance ?? 0}
-            enabled={xrpSettings?.enabled ?? false}
-            onToggle={handleXrpToggle}
-            toggling={xrpToggling}
-            onReset={handleXrpReset}
-            resetting={xrpResetting}
-            onClearHistory={handleXrpClearHistory}
-            clearingHistory={xrpClearing}
-            runs={xrpRuns}
           />
         </div>
-        <PaperPanel
-          trades={trades}
-          openPositions={open}
-          loading={loading}
-        />
       </div>
     </main>
   );

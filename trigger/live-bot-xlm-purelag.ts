@@ -7,12 +7,12 @@ import {
 } from "../lib/binance";
 import { TP_PCT, SL_PCT, MAX_HOLD } from "../lib/strategy";
 import {
-  getBnbPosition as getPosition, openBnbPendingEntry as openPendingEntry, setBnbEntryFilled as setEntryFilled,
-  incrementBnbHold as incrementHold, setBnbChasing as setChasing, updateBnbChaseFloor as updateChaseFloor,
-  closeBnbPosition as closePosition, logBnbRun as logRun, getBnbSettings as getSettings,
-  setBnbBaseline as setBaseline, updateBnbBalance as updateBalance, updateBnbTotal as updateTotal,
-  setBnbPendingSell as setPendingSell, addBnbPnl as addPnl,
-} from "../lib/bnb-live-db";
+  getXlmPosition as getPosition, openXlmPendingEntry as openPendingEntry, setXlmEntryFilled as setEntryFilled,
+  incrementXlmHold as incrementHold, setXlmChasing as setChasing, updateXlmChaseFloor as updateChaseFloor,
+  closeXlmPosition as closePosition, logXlmRun as logRun, getXlmSettings as getSettings,
+  setXlmBaseline as setBaseline, updateXlmBalance as updateBalance, updateXlmTotal as updateTotal,
+  setXlmPendingSell as setPendingSell, addXlmPnl as addPnl,
+} from "../lib/xlm-live-db";
 
 const SYMBOL       = "XLMUSDT";
 const ALLOCATION   = 25;
@@ -260,7 +260,7 @@ export const xlmPureLagBot = schedules.task({
           const qty        = floorQty(Math.min(botBalance, usdtFree) / price);
           if (qty >= 1) {
             const limitOrder = await placeLimitBuyXlm(SYMBOL, qty, roundPrice(price * 1.0002));
-            await openPendingEntry({ symbol: SYMBOL, entry_order_id: limitOrder.orderId, quantity: qty });
+            await openPendingEntry({ symbol: SYMBOL, entry_order_id: limitOrder.orderId, quantity: qty, z_score: 0 });
             hadPosition = true;
             log.push({ action: "LIMIT_BUY_PLACED", qty, price: roundPrice(price), orderId: limitOrder.orderId, xlmGLRet: xlmGLRet.toFixed(4) });
           }
@@ -293,7 +293,7 @@ export const xlmPureLagBot = schedules.task({
           const qty        = floorQty(Math.min(botBalance, usdtFree) / price2);
           if (qty >= 1) {
             const limitOrder = await placeLimitBuyXlm(SYMBOL, qty, roundPrice(price2 * 1.0002));
-            await openPendingEntry({ symbol: SYMBOL, entry_order_id: limitOrder.orderId, quantity: qty });
+            await openPendingEntry({ symbol: SYMBOL, entry_order_id: limitOrder.orderId, quantity: qty, z_score: 0 });
             log.push({ action: "LIMIT_BUY_PLACED_30S", qty, price: roundPrice(price2), orderId: limitOrder.orderId, xlmGLRet: xlmGLRet2.toFixed(4) });
           }
         } else {

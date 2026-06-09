@@ -29,6 +29,7 @@ export const xrpLiveBot = schedules.task({
   maxDuration: 55,
 
   run: async () => {
+    return { ok: false, reason: "deprecated" };
     const log: object[] = [];
 
     let settings;
