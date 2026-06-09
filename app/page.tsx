@@ -42,6 +42,8 @@ function actionColor(action: string) {
 function formatAction(a: any): string {
   if (a.action === "WATCH")               return a.z != null
     ? `WATCH  z=${parseFloat(a.z).toFixed(2)}  $${a.price}`
+    : a.xlmGLRet != null
+    ? `WATCH  gl=${(parseFloat(a.xlmGLRet)*100).toFixed(3)}%  us=${(parseFloat(a.xlmUSRet)*100).toFixed(3)}%  $${a.price}`
     : `WATCH  btc=${(parseFloat(a.btcRet)*100).toFixed(3)}%  bnb=${(parseFloat(a.bnbRet)*100).toFixed(3)}%  $${a.price}`;
   if (a.action === "HOLD")                return `HOLD  [${a.hold}/${6}]  tp=$${a.tp}  sl=$${a.sl}`;
   if (a.action === "TP")                  return `TP HIT  exit=$${a.exit}  pnl=+$${parseFloat(a.pnl).toFixed(2)}`;
@@ -52,6 +54,8 @@ function formatAction(a: any): string {
   if (a.action === "CHASE_EXIT")          return `EXIT FILLED  exit=$${a.exit}  pnl=$${parseFloat(a.pnl).toFixed(2)}`;
   if (a.action === "LIMIT_BUY_PLACED")    return a.z != null
     ? `BUY LIMIT  qty=${a.qty}  @$${a.price}  z=${parseFloat(a.z).toFixed(2)}`
+    : a.xlmGLRet != null
+    ? `BUY LIMIT  qty=${a.qty}  @$${a.price}  gl=${(parseFloat(a.xlmGLRet)*100).toFixed(3)}%`
     : `BUY LIMIT  qty=${a.qty}  @$${a.price}  btc=${(parseFloat(a.btcRet)*100).toFixed(3)}%`;
   if (a.action === "ENTRY_FILLED")        return `FILLED  entry=$${a.entry}  qty=${a.qty}  tp=$${a.tp}  sl=$${a.sl}`;
   if (a.action === "PENDING_FILL")        return `WAITING FILL  orderId=${a.orderId}`;
@@ -178,7 +182,7 @@ function XlmLivePanel({
       <div className="space-y-1.5">
         <div className="flex items-center justify-between gap-2">
           <div className="flex items-center gap-2">
-            <h2 className="text-white font-bold text-lg">Z-Lag · XLM</h2>
+            <h2 className="text-white font-bold text-lg">Pure Lag · XLM</h2>
             <span className="text-xs font-bold px-2 py-0.5 rounded-full bg-green-500/20 text-green-400">LIVE</span>
           </div>
           <div className="flex items-center gap-1.5 shrink-0">
@@ -212,7 +216,7 @@ function XlmLivePanel({
             </button>
           </div>
         </div>
-        <p className="text-gray-500 text-xs">XLM/USDT · $25 · 1m · Z=1.5 · TP 0.8% · SL 0.15% · limit orders</p>
+        <p className="text-gray-500 text-xs">XLM/USDT · $25 · 1m · XLM global≥0.1% · TP 0.8% · SL 0.15% · limit orders</p>
       </div>
 
       {loading ? (
@@ -401,7 +405,7 @@ function BnbLivePanel({
             </button>
           </div>
         </div>
-        <p className="text-gray-500 text-xs">BNB/USDT · $25 · 1m · BTC≥0.3% · Coin&lt;0.1% · TP 0.8% · SL 0.15% · limit orders</p>
+        <p className="text-gray-500 text-xs">BNB/USDT · $25 · 1m · BTC≥0.1% · Coin&lt;0.1% · TP 0.8% · SL 0.15% · limit orders</p>
       </div>
 
       {loading ? (
