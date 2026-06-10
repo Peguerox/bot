@@ -146,7 +146,7 @@ function PaperPanel({ trades, openPositions, loading }: {
   );
 }
 
-// ── XLM Live bot panel ──────────────────────────────────────────────────────
+// ── XLM→BTC Live bot panel ───────────────────────────────────────────────────
 
 function XlmLivePanel({
   trades, openPositions, loading, botUsdt, totalUsdt, allBotsUsdt,
@@ -225,7 +225,7 @@ function XlmLivePanel({
             </button>
           </div>
         </div>
-        <p className="text-gray-500 text-xs">XLM/USDT · $25 · 1m · XLM global≥0.05% · TP 0.8% · SL 0.15% · limit +0.02%</p>
+        <p className="text-gray-500 text-xs">BTC/USDT · $25 · 1m · BTC global≥0.05% · TP 0.8% · SL 0.15% · limit +0.02%</p>
       </div>
 
       {loading ? (
@@ -270,7 +270,7 @@ function XlmLivePanel({
                 {openPositions[0]?.status === "pending_entry"
                   ? `$${botUsdt.toFixed(2)} in order`
                   : openPositions[0]?.status === "open" || openPositions[0]?.status === "chasing"
-                  ? `≈$${((openPositions[0].quantity ?? 0) * (latestPrice ?? 0)).toFixed(2)} in XLM`
+                  ? `≈$${((openPositions[0].quantity ?? 0) * (latestPrice ?? 0)).toFixed(2)} in BTC`
                   : `$${botUsdt.toFixed(2)}`}
               </td>
             </tr>
@@ -285,17 +285,17 @@ function XlmLivePanel({
               </td>
             </tr>
             <tr className="border-b border-gray-800/50">
-              <td className="py-1.5 text-gray-400">XLM</td>
+              <td className="py-1.5 text-gray-400">BTC</td>
               <td className="py-1.5 text-right text-white">
                 {openPositions[0]?.status === "pending_entry"
                   ? "—"
-                  : openPositions[0]?.quantity?.toFixed(0) ?? "0"}
+                  : openPositions[0]?.quantity?.toFixed(5) ?? "0"}
               </td>
             </tr>
             <tr>
-              <td className="py-1.5 text-gray-400">XLM price</td>
+              <td className="py-1.5 text-gray-400">BTC price</td>
               <td className="py-1.5 text-right text-yellow-400">
-                {latestPrice != null ? `$${latestPrice.toFixed(5)}` : "—"}
+                {latestPrice != null ? `$${latestPrice.toFixed(2)}` : "—"}
               </td>
             </tr>
           </tbody>
@@ -615,7 +615,7 @@ function BnbLivePanel({
             </button>
           </div>
         </div>
-        <p className="text-gray-500 text-xs">XLM/USDT · $25 · 1m · XLM global≥0.1% live · TP 0.8% · SL 0.15% · limit orders</p>
+        <p className="text-gray-500 text-xs">BTC/USDT · $25 · 1m · BTC global≥0.05% · TP 0.8% · SL 0.15% · limit +0.02%</p>
       </div>
 
       {loading ? (
@@ -941,10 +941,6 @@ export default function Dashboard() {
       { data: xlmOp },
       { data: xlmCl },
       { data: xlmRs },
-      { data: btcSt },
-      { data: btcOp },
-      { data: btcCl },
-      { data: btcRs },
     ] = await Promise.all([
       getSupabase().from("positions").select("*").eq("status", "closed").order("exit_time", { ascending: false }),
       getSupabase().from("positions").select("*").in("status", ["open", "chasing"]),
@@ -952,10 +948,6 @@ export default function Dashboard() {
       getSupabase().from("xlm_live_positions").select("*").in("status", ["open", "chasing", "pending_entry"]),
       getSupabase().from("xlm_live_positions").select("*").eq("status", "closed").order("exit_time", { ascending: false }).limit(20),
       getSupabase().from("xlm_live_runs").select("id,run_at,data").order("run_at", { ascending: false }).limit(120),
-      getSupabase().from("btc_live_settings").select("*").single(),
-      getSupabase().from("btc_live_positions").select("*").in("status", ["open", "chasing", "pending_entry"]),
-      getSupabase().from("btc_live_positions").select("*").eq("status", "closed").order("exit_time", { ascending: false }).limit(20),
-      getSupabase().from("btc_live_runs").select("id,run_at,data").order("run_at", { ascending: false }).limit(120),
     ]);
     setTrades(closed ?? []);
     setOpen(openPos ?? []);
@@ -963,10 +955,6 @@ export default function Dashboard() {
     setXlmOpen((xlmOp ?? []).map((p: any) => ({ ...p, pair: "XLM" })));
     setXlmTrades(xlmCl ?? []);
     setXlmRuns(xlmRs ?? []);
-    setBtcSettings(btcSt ?? null);
-    setBtcOpen((btcOp ?? []).map((p: any) => ({ ...p, pair: "BTC" })));
-    setBtcTrades(btcCl ?? []);
-    setBtcRuns(btcRs ?? []);
     setLoading(false);
   }
 
@@ -1040,22 +1028,6 @@ export default function Dashboard() {
       <div className="max-w-6xl mx-auto space-y-6">
         <h1 className="text-2xl font-bold text-white">TradeBot Dashboard</h1>
         <div className="grid grid-cols-1 lg:grid-cols-2 gap-6 items-start">
-          <BtcLivePanel
-            trades={btcTrades}
-            openPositions={btcOpen}
-            loading={loading}
-            botUsdt={btcSettings?.usdt_balance ?? 0}
-            totalUsdt={btcSettings?.total_usdt ?? 0}
-            allBotsUsdt={btcSettings?.usdt_balance ?? 0}
-            enabled={btcSettings?.enabled ?? false}
-            onToggle={handleBtcToggle}
-            toggling={btcToggling}
-            onReset={handleBtcReset}
-            resetting={btcResetting}
-            onClearHistory={handleBtcClearHistory}
-            clearingHistory={btcClearing}
-            runs={btcRuns}
-          />
           <XlmLivePanel
             trades={xlmTrades}
             openPositions={xlmOpen}
