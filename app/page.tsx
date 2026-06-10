@@ -191,7 +191,7 @@ function XlmLivePanel({
       <div className="space-y-1.5">
         <div className="flex items-center justify-between gap-2">
           <div className="flex items-center gap-2">
-            <h2 className="text-white font-bold text-lg">Pure Lag · XLM</h2>
+            <h2 className="text-white font-bold text-lg">Pure Lag · BTC</h2>
             <span className="text-xs font-bold px-2 py-0.5 rounded-full bg-green-500/20 text-green-400">LIVE</span>
           </div>
           <div className="flex items-center gap-1.5 shrink-0">
@@ -581,7 +581,7 @@ function BnbLivePanel({
       <div className="space-y-1.5">
         <div className="flex items-center justify-between gap-2">
           <div className="flex items-center gap-2">
-            <h2 className="text-white font-bold text-lg">Pure Lag · XLM</h2>
+            <h2 className="text-white font-bold text-lg">Pure Lag · BTC</h2>
             <span className="text-xs font-bold px-2 py-0.5 rounded-full bg-green-500/20 text-green-400">LIVE</span>
           </div>
           <div className="flex items-center gap-1.5 shrink-0">
