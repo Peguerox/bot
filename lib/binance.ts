@@ -297,6 +297,53 @@ export async function placeOcoSellBnb(
   });
 }
 
+// BTC-specific: qty to 5 decimal places (step 0.00001), price to 2 decimal places (tick 0.01)
+export async function placeLimitBuyBtc(symbol: string, qty: number, price: number): Promise<OrderResponse> {
+  return signedPost("/order", {
+    symbol,
+    side:        "BUY",
+    type:        "LIMIT",
+    timeInForce: "GTC",
+    quantity:    (Math.floor(qty * 100000) / 100000).toFixed(5),
+    price:       price.toFixed(2),
+  });
+}
+
+export async function placeLimitSellBtc(symbol: string, qty: number, price: number): Promise<OrderResponse> {
+  return signedPost("/order", {
+    symbol,
+    side:        "SELL",
+    type:        "LIMIT",
+    timeInForce: "GTC",
+    quantity:    (Math.floor(qty * 100000) / 100000).toFixed(5),
+    price:       price.toFixed(2),
+  });
+}
+
+export async function placeMarketSellBtc(symbol: string, qty: number): Promise<OrderResponse> {
+  return signedPost("/order", {
+    symbol,
+    side:     "SELL",
+    type:     "MARKET",
+    quantity: (Math.floor(qty * 100000) / 100000).toFixed(5),
+  });
+}
+
+export async function placeOcoSellBtc(
+  symbol: string, qty: number,
+  tpPrice: number, slStopPrice: number, slLimitPrice: number,
+): Promise<OCOResponse> {
+  return signedPost("/order/oco", {
+    symbol,
+    side:                 "SELL",
+    quantity:             (Math.floor(qty * 100000) / 100000).toFixed(5),
+    price:                tpPrice.toFixed(2),
+    stopPrice:            slStopPrice.toFixed(2),
+    stopLimitPrice:       slLimitPrice.toFixed(2),
+    stopLimitTimeInForce: "GTC",
+  });
+}
+
 // Cancel ALL open orders for a symbol at once
 export async function cancelAllOrders(symbol: string) {
   return signedDelete("/openOrders", { symbol });
