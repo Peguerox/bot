@@ -207,7 +207,7 @@ function XlmLivePanel({
               onClick={onReset}
               disabled={resetting || enabled}
               className="text-xs font-medium px-2.5 py-1.5 rounded-md bg-gray-800 text-red-400/70 hover:bg-red-950/60 hover:text-red-400 transition-all disabled:opacity-30 disabled:cursor-not-allowed"
-              title={enabled ? "Pause bot before selling" : "Sell all XLM & clear position"}
+              title={enabled ? "Pause bot before selling" : "Sell all BTC & clear position"}
             >
               {resetting ? "Selling…" : "Sell All"}
             </button>
@@ -597,7 +597,7 @@ function BnbLivePanel({
               onClick={onReset}
               disabled={resetting || enabled}
               className="text-xs font-medium px-2.5 py-1.5 rounded-md bg-gray-800 text-red-400/70 hover:bg-red-950/60 hover:text-red-400 transition-all disabled:opacity-30 disabled:cursor-not-allowed"
-              title={enabled ? "Pause bot before selling" : "Sell all XLM & clear position"}
+              title={enabled ? "Pause bot before selling" : "Sell all BTC & clear position"}
             >
               {resetting ? "Selling…" : "Sell All"}
             </button>
@@ -667,7 +667,7 @@ function BnbLivePanel({
               <td className="py-1.5 text-right text-gray-400">${totalUsdt > 0 ? Math.max(0, totalUsdt - allBotsUsdt).toFixed(2) : "—"}</td>
             </tr>
             <tr className="border-b border-gray-800/50">
-              <td className="py-1.5 text-gray-400">XLM</td>
+              <td className="py-1.5 text-gray-400">BTC</td>
               <td className="py-1.5 text-right text-white">
                 {openPositions[0]?.status === "pending_entry"
                   ? "—"
@@ -675,7 +675,7 @@ function BnbLivePanel({
               </td>
             </tr>
             <tr>
-              <td className="py-1.5 text-gray-400">XLM price</td>
+              <td className="py-1.5 text-gray-400">BTC price</td>
               <td className="py-1.5 text-right text-yellow-400">
                 {latestPrice != null ? `$${latestPrice.toFixed(5)}` : "—"}
               </td>
@@ -952,7 +952,7 @@ export default function Dashboard() {
     setTrades(closed ?? []);
     setOpen(openPos ?? []);
     setXlmSettings(xlmSt ?? null);
-    setXlmOpen((xlmOp ?? []).map((p: any) => ({ ...p, pair: "XLM" })));
+    setXlmOpen((xlmOp ?? []).map((p: any) => ({ ...p, pair: "BTC" })));
     setXlmTrades(xlmCl ?? []);
     setXlmRuns(xlmRs ?? []);
     setLoading(false);
@@ -966,7 +966,7 @@ export default function Dashboard() {
   }
 
   async function handleXlmReset() {
-    if (!confirm("Market sell all XLM and clear position?")) return;
+    if (!confirm("Market sell all BTC and clear position?")) return;
     setXlmResetting(true);
     await fetch("/api/xlm/reset", { method: "POST" });
     await load();
@@ -974,7 +974,7 @@ export default function Dashboard() {
   }
 
   async function handleXlmClearHistory() {
-    if (!confirm("Delete all XLM closed trade history and run logs?")) return;
+    if (!confirm("Delete all BTC closed trade history and run logs?")) return;
     setXlmClearing(true);
     await fetch("/api/xlm/clear-history", { method: "POST" });
     await load();

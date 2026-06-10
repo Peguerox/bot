@@ -2,6 +2,22 @@
 
 import { useEffect, useState } from "react";
 
+function pairToSym(pair: string) {
+  if (pair === "BTC")  return "BTCUSDT";
+  if (pair === "BNB")  return "BNBUSDT";
+  if (pair === "XLM")  return "XLMUSDT";
+  if (pair === "SOL")  return "SOLUSDT";
+  if (pair === "XRP")  return "XRPUSDT";
+  return "ATOMUSDT";
+}
+
+function fmtPrice(price: number, pair: string) {
+  if (pair === "BTC") return price.toFixed(2);
+  if (pair === "BNB" || pair === "SOL") return price.toFixed(2);
+  if (pair === "XRP") return price.toFixed(4);
+  return price.toFixed(5);
+}
+
 export default function OpenPositions({ positions, loading }: {
   positions: any[]; loading: boolean;
 }) {
@@ -9,15 +25,12 @@ export default function OpenPositions({ positions, loading }: {
 
   useEffect(() => {
     async function fetchPrices() {
-      const pairToSym = (pair: string) =>
-        pair === "BNB" ? "BNBUSDT" : pair === "XLM" ? "XLMUSDT" : "ATOMUSDT";
       const syms = [...new Set(positions.map(p => pairToSym(p.pair)))];
       const updated: Record<string, number> = {};
       await Promise.all(syms.map(async sym => {
         const r = await fetch(`https://api.binance.us/api/v3/ticker/price?symbol=${sym}`);
         const d = await r.json();
-        const key = sym.replace("USDT", "");
-        updated[key] = parseFloat(d.price);
+        updated[sym.replace("USDT", "")] = parseFloat(d.price);
       }));
       setPrices(updated);
     }
@@ -58,7 +71,7 @@ export default function OpenPositions({ positions, loading }: {
                   ? <span className="text-xs bg-blue-500/20 text-blue-400 px-2 py-0.5 rounded-full">PENDING FILL</span>
                   : pos.status === "chasing"
                     ? <span className="text-xs bg-yellow-500/20 text-yellow-400 px-2 py-0.5 rounded-full">
-                        CHASING {pos.chase_price?.toFixed(4)}
+                        CHASING ${fmtPrice(pos.chase_price ?? 0, pos.pair)}
                       </span>
                     : <span className="text-xs text-gray-500">Hold {pos.hold_count}/{6}</span>
                 }
@@ -66,7 +79,7 @@ export default function OpenPositions({ positions, loading }: {
               <div className="text-gray-500 text-xs mt-1">
                 {isPending
                   ? `Limit buy placed · qty ${pos.quantity ?? "?"}`
-                  : `Entry $${pos.entry_price?.toFixed(4)} · SL $${pos.sl?.toFixed(4)} · TP $${pos.tp?.toFixed(4)}`
+                  : `Entry $${fmtPrice(pos.entry_price ?? 0, pos.pair)} · SL $${fmtPrice(pos.sl ?? 0, pos.pair)} · TP $${fmtPrice(pos.tp ?? 0, pos.pair)}`
                 }
               </div>
             </div>
