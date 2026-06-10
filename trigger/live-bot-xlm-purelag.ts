@@ -110,22 +110,36 @@ export const xlmPureLagBot = schedules.task({
             if (order.status === "FILLED") {
               const fillPrice = parseFloat(order.cummulativeQuoteQty) / parseFloat(order.executedQty);
               const filledQty = floorQty(parseFloat(order.executedQty));
-              const tp        = roundPrice(fillPrice * (1 + TP_PCT));
-              const sl        = roundPrice(fillPrice * (1 - SL_PCT));
-              const slLimit   = roundPrice(sl * (1 - SL_SLIP));
               try { await cancelAllOrders(SYMBOL); } catch {}
-              const oco      = await placeOcoSellXlm(SYMBOL, filledQty, tp, sl, slLimit);
-              const slReport = oco.orderReports.find(r => r.type === "STOP_LOSS_LIMIT" || r.type === "STOP_LOSS");
-              const tpReport = oco.orderReports.find(r => r !== slReport);
+              // Retry OCO up to 3 times — price may have moved making TP/SL invalid (-2010)
+              let oco: Awaited<ReturnType<typeof placeOcoSellXlm>> | null = null;
+              let ocoTp = roundPrice(fillPrice * (1 + TP_PCT));
+              let ocoSl = roundPrice(fillPrice * (1 - SL_PCT));
+              for (let ocoTry = 0; ocoTry < 3; ocoTry++) {
+                try {
+                  oco = await placeOcoSellXlm(SYMBOL, filledQty, ocoTp, ocoSl, roundPrice(ocoSl * (1 - SL_SLIP)));
+                  break;
+                } catch (ocoErr: any) {
+                  if (ocoTry < 2 && String(ocoErr).includes("-2010")) {
+                    // Price moved — recalculate TP/SL from current live price
+                    await sleep(500);
+                    const liveNow = await getPrice(SYMBOL);
+                    ocoTp = roundPrice(liveNow * (1 + TP_PCT));
+                    ocoSl = roundPrice(liveNow * (1 - SL_PCT));
+                  } else throw ocoErr;
+                }
+              }
+              const slReport = oco!.orderReports.find(r => r.type === "STOP_LOSS_LIMIT" || r.type === "STOP_LOSS");
+              const tpReport = oco!.orderReports.find(r => r !== slReport);
               await setEntryFilled(pos.id, {
                 entry_price: fillPrice,
                 quantity:    filledQty,
-                tp,
-                sl,
+                tp:          ocoTp,
+                sl:          ocoSl,
                 tp_order_id: tpReport!.orderId,
                 sl_order_id: slReport!.orderId,
               });
-              log.push({ action: "ENTRY_FILLED", entry: fillPrice, qty: filledQty, tp, sl });
+              log.push({ action: "ENTRY_FILLED", entry: fillPrice, qty: filledQty, tp: ocoTp, sl: ocoSl });
               filled = true;
             } else if (order.status === "CANCELED" || order.status === "EXPIRED") {
               await closePosition(pos.id, { exit_price: 0, pnl: 0, result: "CANCELED" });
@@ -145,22 +159,34 @@ export const xlmPureLagBot = schedules.task({
                 if (freshOrder.status === "FILLED") {
                   const fillPrice = parseFloat(freshOrder.cummulativeQuoteQty) / parseFloat(freshOrder.executedQty);
                   const filledQty = floorQty(parseFloat(freshOrder.executedQty));
-                  const tp        = roundPrice(fillPrice * (1 + TP_PCT));
-                  const sl        = roundPrice(fillPrice * (1 - SL_PCT));
-                  const slLimit   = roundPrice(sl * (1 - SL_SLIP));
                   try { await cancelAllOrders(SYMBOL); } catch {}
-                  const oco      = await placeOcoSellXlm(SYMBOL, filledQty, tp, sl, slLimit);
-                  const slReport = oco.orderReports.find(r => r.type === "STOP_LOSS_LIMIT" || r.type === "STOP_LOSS");
-                  const tpReport = oco.orderReports.find(r => r !== slReport);
+                  let oco2: Awaited<ReturnType<typeof placeOcoSellXlm>> | null = null;
+                  let ocoTp2 = roundPrice(fillPrice * (1 + TP_PCT));
+                  let ocoSl2 = roundPrice(fillPrice * (1 - SL_PCT));
+                  for (let ocoTry = 0; ocoTry < 3; ocoTry++) {
+                    try {
+                      oco2 = await placeOcoSellXlm(SYMBOL, filledQty, ocoTp2, ocoSl2, roundPrice(ocoSl2 * (1 - SL_SLIP)));
+                      break;
+                    } catch (ocoErr: any) {
+                      if (ocoTry < 2 && String(ocoErr).includes("-2010")) {
+                        await sleep(500);
+                        const liveNow = await getPrice(SYMBOL);
+                        ocoTp2 = roundPrice(liveNow * (1 + TP_PCT));
+                        ocoSl2 = roundPrice(liveNow * (1 - SL_PCT));
+                      } else throw ocoErr;
+                    }
+                  }
+                  const slReport = oco2!.orderReports.find(r => r.type === "STOP_LOSS_LIMIT" || r.type === "STOP_LOSS");
+                  const tpReport = oco2!.orderReports.find(r => r !== slReport);
                   await setEntryFilled(pos.id, {
                     entry_price: fillPrice,
                     quantity:    filledQty,
-                    tp,
-                    sl,
+                    tp:          ocoTp2,
+                    sl:          ocoSl2,
                     tp_order_id: tpReport!.orderId,
                     sl_order_id: slReport!.orderId,
                   });
-                  log.push({ action: "ENTRY_FILLED", entry: fillPrice, qty: filledQty, tp, sl });
+                  log.push({ action: "ENTRY_FILLED", entry: fillPrice, qty: filledQty, tp: ocoTp2, sl: ocoSl2 });
                   filled = true;
                 } else {
                   try { await cancelOrder(SYMBOL, pos.entry_order_id); } catch {}
