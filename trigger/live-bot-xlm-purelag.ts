@@ -171,7 +171,17 @@ export const xlmPureLagBot = schedules.task({
               }
             }
           }
-          if (!filled) log.push({ action: "PENDING_FILL", orderId: pos.entry_order_id });
+          if (!filled) {
+            if (pos.hold_count + 1 >= MAX_HOLD) {
+              // Stuck too long — cancel and move on
+              try { await cancelOrder(SYMBOL, pos.entry_order_id); } catch {}
+              await closePosition(pos.id, { exit_price: 0, pnl: 0, result: "ENTRY_TIMEOUT" });
+              log.push({ action: "ENTRY_TIMEOUT", holdCount: pos.hold_count + 1, orderId: pos.entry_order_id });
+            } else {
+              await incrementHold(pos.id, pos.hold_count);
+              log.push({ action: "PENDING_FILL", orderId: pos.entry_order_id, hold: pos.hold_count + 1 });
+            }
+          }
 
         // ── Hold phase: check if TP or SL filled ──────────────────────────────
         } else if (pos.status === "open") {
