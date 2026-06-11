@@ -18,7 +18,7 @@ import {
 const SYMBOL       = "BTCUSDT";
 const ALLOCATION   = 25;
 const GL_THRESH    = 0.001;   // global must be up >= 0.10% from last close AND ahead of US
-const SL_SLIP      = 0.002;   // SL limit 0.2% below stop to ensure fill
+const SL_SLIP      = 0.0005;  // SL limit 0.05% below stop to ensure fill
 const RESCUE_SLIP  = 0.0001;  // rescue limit 0.01% below live price
 const CANCEL_DROP  = 0.0015;  // cancel pending limit buy if price drops 0.15% below order price
 
