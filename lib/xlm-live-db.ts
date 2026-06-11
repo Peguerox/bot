@@ -90,6 +90,14 @@ export async function closeXlmPosition(id: string, params: {
   if (error) throw new Error(`closeXlmPosition failed: ${error.message}`);
 }
 
+export async function logBtcPrice(usPrice: number, glPrice: number) {
+  await getSupabaseAdmin().from("btc_price_log").insert({
+    us_price:   usPrice,
+    gl_price:   glPrice,
+    spread_pct: (glPrice - usPrice) / usPrice,
+  });
+}
+
 export async function logXlmRun(data: object) {
   await getSupabaseAdmin().from("xlm_live_runs").insert({
     run_at: new Date().toISOString(),

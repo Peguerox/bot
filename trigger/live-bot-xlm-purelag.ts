@@ -12,7 +12,7 @@ import {
   incrementXlmHold as incrementHold, setXlmChasing as setChasing, updateXlmChaseFloor as updateChaseFloor,
   closeXlmPosition as closePosition, logXlmRun as logRun, getXlmSettings as getSettings,
   setXlmBaseline as setBaseline, updateXlmBalance as updateBalance, updateXlmTotal as updateTotal,
-  setXlmPendingSell as setPendingSell, addXlmPnl as addPnl,
+  setXlmPendingSell as setPendingSell, addXlmPnl as addPnl, logBtcPrice,
 } from "../lib/xlm-live-db";
 
 const SYMBOL       = "BTCUSDT";
@@ -94,6 +94,7 @@ export const xlmPureLagBot = schedules.task({
       const spread   = (liveGLPrice - price) / price;
       const glRet    = (liveGLPrice - prevGL) / prevGL;  // global up from last close
       const usRet    = (price - prevUS) / prevUS;         // US movement from last close
+      logBtcPrice(price, liveGLPrice).catch(() => {});   // fire-and-forget, never block the run
       const xlmGLRet = spread;
       const signal   = spread >= GL_THRESH && glRet > 0 && usRet < glRet;
       const pos        = await getPosition();
@@ -386,6 +387,7 @@ export const xlmPureLagBot = schedules.task({
         const spread2  = (liveGLPrice2 - price2) / price2;
         const glRet2   = (liveGLPrice2 - prevGL2) / prevGL2;
         const usRet2   = (price2 - prevUS2) / prevUS2;
+        logBtcPrice(price2, liveGLPrice2).catch(() => {});  // fire-and-forget
         const xlmGLRet2 = spread2;
         if (spread2 >= GL_THRESH && glRet2 > 0 && usRet2 < glRet2) {
           const btcHeld2 = await getFreeBalance("BTC");
