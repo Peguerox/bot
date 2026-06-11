@@ -79,7 +79,16 @@ export default function OpenPositions({ positions, loading }: {
               <div className="text-gray-500 text-xs mt-1">
                 {isPending
                   ? `Limit buy placed · qty ${pos.quantity ?? "?"}`
-                  : `Entry $${fmtPrice(pos.entry_price ?? 0, pos.pair)} · SL $${fmtPrice(pos.sl ?? 0, pos.pair)} · TP $${fmtPrice(pos.tp ?? 0, pos.pair)}`
+                  : <>
+                      {pos.z_score != null && pos.z_score > 0 && (
+                        <span className="text-blue-400 font-medium mr-2">
+                          Signal +{(pos.z_score * 100).toFixed(3)}% spread
+                        </span>
+                      )}
+                      <span>
+                        Entry ${fmtPrice(pos.entry_price ?? 0, pos.pair)} · SL ${fmtPrice(pos.sl ?? 0, pos.pair)} · TP ${fmtPrice(pos.tp ?? 0, pos.pair)}
+                      </span>
+                    </>
                 }
               </div>
             </div>

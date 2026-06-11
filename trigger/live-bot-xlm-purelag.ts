@@ -324,7 +324,7 @@ export const xlmPureLagBot = schedules.task({
               const fillPrice = parseFloat(mktOrder.cummulativeQuoteQty) / parseFloat(mktOrder.executedQty);
               const filledQty = floorQty(parseFloat(mktOrder.executedQty));
               // Save to DB before OCO — if OCO fails, pending_entry handler retries next run
-              await openPendingEntry({ symbol: SYMBOL, entry_order_id: mktOrder.orderId, quantity: filledQty, z_score: 0 });
+              await openPendingEntry({ symbol: SYMBOL, entry_order_id: mktOrder.orderId, quantity: filledQty, z_score: spread });
               const newPos = await getPosition();
               let oco: Awaited<ReturnType<typeof placeOcoSellBtc>> | null = null;
               let ocoTp = roundPrice(fillPrice * (1 + TP_PCT));
@@ -398,7 +398,7 @@ export const xlmPureLagBot = schedules.task({
               const mktOrder2  = await placeMarketBuyBtc(SYMBOL, qty);
               const fillPrice2 = parseFloat(mktOrder2.cummulativeQuoteQty) / parseFloat(mktOrder2.executedQty);
               const filledQty2 = floorQty(parseFloat(mktOrder2.executedQty));
-              await openPendingEntry({ symbol: SYMBOL, entry_order_id: mktOrder2.orderId, quantity: filledQty2, z_score: 0 });
+              await openPendingEntry({ symbol: SYMBOL, entry_order_id: mktOrder2.orderId, quantity: filledQty2, z_score: spread2 });
               const newPos2 = await getPosition();
               let oco2: Awaited<ReturnType<typeof placeOcoSellBtc>> | null = null;
               let ocoTp2 = roundPrice(fillPrice2 * (1 + TP_PCT));
