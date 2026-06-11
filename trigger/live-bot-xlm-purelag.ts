@@ -4,7 +4,7 @@ import { schedules } from "@trigger.dev/sdk/v3";
 import {
   getPriceGlobal, getKlinesGlobal, getFreeBalance, getOrder, getPrice, getKlines,
   cancelOrder, cancelAllOrders,
-  placeLimitBuyBtc, placeLimitSellBtc, placeMarketSellBtc, placeOcoSellBtc,
+  placeLimitSellBtc, placeMarketBuyBtc, placeMarketSellBtc, placeOcoSellBtc,
 } from "../lib/binance";
 import { TP_PCT, SL_PCT, MAX_HOLD } from "../lib/strategy";
 import {
@@ -17,7 +17,7 @@ import {
 
 const SYMBOL       = "BTCUSDT";
 const ALLOCATION   = 25;
-const GL_THRESH    = 0.0005;  // global must be up >= 0.05% from last close AND ahead of US
+const GL_THRESH    = 0.001;   // global must be up >= 0.10% from last close AND ahead of US
 const SL_SLIP      = 0.002;   // SL limit 0.2% below stop to ensure fill
 const RESCUE_SLIP  = 0.0001;  // rescue limit 0.01% below live price
 const CANCEL_DROP  = 0.0015;  // cancel pending limit buy if price drops 0.15% below order price
@@ -320,16 +320,37 @@ export const xlmPureLagBot = schedules.task({
             const botBalance = settings.usdt_balance ?? ALLOCATION;
             const qty        = floorQty(Math.min(botBalance, usdtFree) / price);
             if (qty >= 0.00001 && qty * price >= 10) {
-              const limitOrder = await placeLimitBuyBtc(SYMBOL, qty, roundPrice(price * 1.0002));
-              try {
-                await openPendingEntry({ symbol: SYMBOL, entry_order_id: limitOrder.orderId, quantity: qty, z_score: 0 });
-              } catch (dbErr) {
-                // DB write failed — cancel the order so we don't have an orphaned open order
-                try { await cancelOrder(SYMBOL, limitOrder.orderId); } catch {}
-                throw dbErr;
+              const mktOrder  = await placeMarketBuyBtc(SYMBOL, qty);
+              const fillPrice = parseFloat(mktOrder.cummulativeQuoteQty) / parseFloat(mktOrder.executedQty);
+              const filledQty = floorQty(parseFloat(mktOrder.executedQty));
+              // Save to DB before OCO — if OCO fails, pending_entry handler retries next run
+              await openPendingEntry({ symbol: SYMBOL, entry_order_id: mktOrder.orderId, quantity: filledQty, z_score: 0 });
+              const newPos = await getPosition();
+              let oco: Awaited<ReturnType<typeof placeOcoSellBtc>> | null = null;
+              let ocoTp = roundPrice(fillPrice * (1 + TP_PCT));
+              let ocoSl = roundPrice(fillPrice * (1 - SL_PCT));
+              for (let ocoTry = 0; ocoTry < 3; ocoTry++) {
+                try {
+                  oco = await placeOcoSellBtc(SYMBOL, filledQty, ocoTp, ocoSl, roundPrice(ocoSl * (1 - SL_SLIP)));
+                  break;
+                } catch (ocoErr: any) {
+                  if (ocoTry < 2 && String(ocoErr).includes("-2010")) {
+                    await sleep(500);
+                    const liveNow = await getPrice(SYMBOL);
+                    ocoTp = roundPrice(liveNow * (1 + TP_PCT));
+                    ocoSl = roundPrice(liveNow * (1 - SL_PCT));
+                  } else throw ocoErr;
+                }
               }
+              const slReport = oco!.orderReports.find(r => r.type === "STOP_LOSS_LIMIT" || r.type === "STOP_LOSS");
+              const tpReport = oco!.orderReports.find(r => r !== slReport);
+              await setEntryFilled(newPos!.id, {
+                entry_price: fillPrice, quantity: filledQty,
+                tp: ocoTp, sl: ocoSl,
+                tp_order_id: tpReport!.orderId, sl_order_id: slReport!.orderId,
+              });
               hadPosition = true;
-              log.push({ action: "LIMIT_BUY_PLACED", qty, price: roundPrice(price), orderId: limitOrder.orderId, xlmGLRet: xlmGLRet.toFixed(4) });
+              log.push({ action: "MARKET_BUY_FILLED", entry: roundPrice(fillPrice), qty: filledQty, tp: ocoTp, sl: ocoSl });
             }
           }
         } else {
@@ -374,14 +395,35 @@ export const xlmPureLagBot = schedules.task({
             const botBalance = settings.usdt_balance ?? ALLOCATION;
             const qty        = floorQty(Math.min(botBalance, usdtFree) / price2);
             if (qty >= 0.00001 && qty * price2 >= 10) {
-              const limitOrder = await placeLimitBuyBtc(SYMBOL, qty, roundPrice(price2 * 1.0002));
-              try {
-                await openPendingEntry({ symbol: SYMBOL, entry_order_id: limitOrder.orderId, quantity: qty, z_score: 0 });
-              } catch (dbErr) {
-                try { await cancelOrder(SYMBOL, limitOrder.orderId); } catch {}
-                throw dbErr;
+              const mktOrder2  = await placeMarketBuyBtc(SYMBOL, qty);
+              const fillPrice2 = parseFloat(mktOrder2.cummulativeQuoteQty) / parseFloat(mktOrder2.executedQty);
+              const filledQty2 = floorQty(parseFloat(mktOrder2.executedQty));
+              await openPendingEntry({ symbol: SYMBOL, entry_order_id: mktOrder2.orderId, quantity: filledQty2, z_score: 0 });
+              const newPos2 = await getPosition();
+              let oco2: Awaited<ReturnType<typeof placeOcoSellBtc>> | null = null;
+              let ocoTp2 = roundPrice(fillPrice2 * (1 + TP_PCT));
+              let ocoSl2 = roundPrice(fillPrice2 * (1 - SL_PCT));
+              for (let ocoTry = 0; ocoTry < 3; ocoTry++) {
+                try {
+                  oco2 = await placeOcoSellBtc(SYMBOL, filledQty2, ocoTp2, ocoSl2, roundPrice(ocoSl2 * (1 - SL_SLIP)));
+                  break;
+                } catch (ocoErr: any) {
+                  if (ocoTry < 2 && String(ocoErr).includes("-2010")) {
+                    await sleep(500);
+                    const liveNow2 = await getPrice(SYMBOL);
+                    ocoTp2 = roundPrice(liveNow2 * (1 + TP_PCT));
+                    ocoSl2 = roundPrice(liveNow2 * (1 - SL_PCT));
+                  } else throw ocoErr;
+                }
               }
-              log2.push({ action: "LIMIT_BUY_PLACED_30S", qty, price: roundPrice(price2), orderId: limitOrder.orderId, xlmGLRet: xlmGLRet2.toFixed(4) });
+              const slReport2 = oco2!.orderReports.find(r => r.type === "STOP_LOSS_LIMIT" || r.type === "STOP_LOSS");
+              const tpReport2 = oco2!.orderReports.find(r => r !== slReport2);
+              await setEntryFilled(newPos2!.id, {
+                entry_price: fillPrice2, quantity: filledQty2,
+                tp: ocoTp2, sl: ocoSl2,
+                tp_order_id: tpReport2!.orderId, sl_order_id: slReport2!.orderId,
+              });
+              log2.push({ action: "MARKET_BUY_FILLED_30S", entry: roundPrice(fillPrice2), qty: filledQty2, tp: ocoTp2, sl: ocoSl2 });
             }
           }
         } else {
