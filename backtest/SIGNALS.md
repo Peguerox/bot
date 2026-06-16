@@ -51,6 +51,32 @@ Timeframe: May–Jun 2026. Exchange: Binance US (spot, 0% maker fee).
 
 ---
 
+## Validated, On Deck (Profitable, Waiting to Deploy)
+
+### Flush Bounce (1m liquidation overshoot)
+**Concept:** A single 1m candle dropping ≥0.5% is usually a liquidation cascade/panic dump that overshoots fair value. Buy the close, ride the snap-back.
+
+**Parameters (best):** drop ≥0.5% in one 1m candle → market buy next candle, TP +0.4%, SL -0.3%, max hold 20 min.
+
+**Backtest (30d, 6 coins, $25/trade, market entry +0.02%):**
+| Coin | Trades | WR | PF | PnL |
+|------|--------|-----|------|------|
+| DOGE | 20 | 75% | 3.95 | +$1.11 |
+| ADA  | 27 | 63% | 2.21 | +$0.90 |
+| SOL  | 32 | 59% | 1.84 | +$0.81 |
+| XRP  | 10 | 50% | 1.33 | +$0.13 |
+| BTC  | 8  | 50% | 2.11 | +$0.21 |
+| ETH  | 23 | 35% | 0.53 | -$0.51 |
+| **Total** | 120 (4/day) | | | **+$2.65 (+10.6%)** |
+
+**Out-of-sample (days 30–60 back, same config):** +$0.87, 5 of 6 coins positive, 52 trades. Edge confirmed in two separate months.
+
+**Best coins:** DOGE + ADA + SOL (retail panic coins overshoot most). BTC too efficient, ETH weakest — skip both.
+
+**Why not deployed yet:** low frequency (~4 trades/day across 6 coins); user wants higher-frequency strategy first. Script: `flush-bounce-sweep.ts`, `flush-bounce-oos.ts`.
+
+---
+
 ## Soft Signals (Real Edge, Not Standalone Bots)
 
 ### Liquidation Bounce

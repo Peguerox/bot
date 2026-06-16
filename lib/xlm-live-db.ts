@@ -90,11 +90,18 @@ export async function closeXlmPosition(id: string, params: {
   if (error) throw new Error(`closeXlmPosition failed: ${error.message}`);
 }
 
-export async function logBtcPrice(usPrice: number, glPrice: number) {
+export async function logBtcPrice(
+  usPrice: number, glPrice: number,
+  book?: { bid: number; ask: number; bidQty: number; askQty: number },
+) {
   await getSupabaseAdmin().from("btc_price_log").insert({
     us_price:   usPrice,
     gl_price:   glPrice,
     spread_pct: (glPrice - usPrice) / usPrice,
+    us_ask:     book?.ask ?? null,
+    us_ask_qty: book?.askQty ?? null,
+    us_bid:     book?.bid ?? null,
+    us_bid_qty: book?.bidQty ?? null,
   });
 }
 

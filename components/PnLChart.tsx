@@ -2,7 +2,7 @@
 
 import { LineChart, Line, XAxis, YAxis, Tooltip, ResponsiveContainer, ReferenceLine } from "recharts";
 
-export default function PnLChart({ trades, initial = 2000 }: { trades: any[]; initial?: number }) {
+export default function PnLChart({ trades, initial = 2000, unit = "$" }: { trades: any[]; initial?: number; unit?: string }) {
   if (trades.length === 0) return (
     <div className="h-48 flex items-center justify-center text-gray-600 text-sm">
       No trades yet — watching for signals
@@ -37,14 +37,14 @@ export default function PnLChart({ trades, initial = 2000 }: { trades: any[]; in
           tick={{ fill: "#6b7280", fontSize: 11 }}
           tickLine={false}
           axisLine={false}
-          tickFormatter={v => `$${v.toLocaleString()}`}
+          tickFormatter={v => `${unit}${v.toLocaleString()}`}
           width={80}
         />
         <Tooltip
           contentStyle={{ backgroundColor: "#111827", border: "1px solid #374151", borderRadius: 8 }}
           labelStyle={{ color: "#9ca3af" }}
           labelFormatter={(_: any, payload: readonly any[]) => payload?.[0]?.payload?.label ?? ""}
-          formatter={(v: any) => [`$${Number(v).toFixed(2)}`, "Balance"]}
+          formatter={(v: any) => [`${unit}${Number(v).toFixed(6)}`, "Balance"]}
         />
         <ReferenceLine y={initial} stroke="#374151" strokeDasharray="4 4" />
         <Line

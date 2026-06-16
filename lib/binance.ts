@@ -320,6 +320,15 @@ export async function placeLimitSellBtc(symbol: string, qty: number, price: numb
   });
 }
 
+export async function placeMarketBuyBtc(symbol: string, qty: number): Promise<OrderResponse> {
+  return signedPost("/order", {
+    symbol,
+    side:     "BUY",
+    type:     "MARKET",
+    quantity: (Math.floor(qty * 100000) / 100000).toFixed(5),
+  });
+}
+
 export async function placeMarketSellBtc(symbol: string, qty: number): Promise<OrderResponse> {
   return signedPost("/order", {
     symbol,
@@ -341,6 +350,29 @@ export async function placeOcoSellBtc(
     stopPrice:            slStopPrice.toFixed(2),
     stopLimitPrice:       slLimitPrice.toFixed(2),
     stopLimitTimeInForce: "GTC",
+  });
+}
+
+// SOL-specific: qty step 0.01 (2 decimals), price tick 0.0000001 (8 decimals)
+export async function placeLimitBuySol(symbol: string, qty: number, price: number): Promise<OrderResponse> {
+  return signedPost("/order", {
+    symbol,
+    side:        "BUY",
+    type:        "LIMIT",
+    timeInForce: "GTC",
+    quantity:    (Math.floor(qty * 100) / 100).toFixed(2),
+    price:       (Math.round(price * 1e7) / 1e7).toFixed(8),
+  });
+}
+
+export async function placeLimitSellSol(symbol: string, qty: number, price: number): Promise<OrderResponse> {
+  return signedPost("/order", {
+    symbol,
+    side:        "SELL",
+    type:        "LIMIT",
+    timeInForce: "GTC",
+    quantity:    (Math.floor(qty * 100) / 100).toFixed(2),
+    price:       (Math.round(price * 1e7) / 1e7).toFixed(8),
   });
 }
 
@@ -398,6 +430,14 @@ export async function getPrice(symbol: string): Promise<number> {
   const p = parseFloat(data.price);
   if (!res.ok || isNaN(p)) throw new Error(`getPrice failed: ${JSON.stringify(data)}`);
   return p;
+}
+
+export async function getBookTicker(symbol: string): Promise<{ bid: number; ask: number; bidQty: number; askQty: number }> {
+  const res = await fetch(`${BASE}/ticker/bookTicker?symbol=${symbol}`, { cache: "no-store" });
+  const data = await res.json();
+  const ask = parseFloat(data.askPrice);
+  if (!res.ok || isNaN(ask)) throw new Error(`getBookTicker failed: ${JSON.stringify(data)}`);
+  return { bid: parseFloat(data.bidPrice), ask, bidQty: parseFloat(data.bidQty), askQty: parseFloat(data.askQty) };
 }
 
 export async function getPriceGlobal(symbol: string): Promise<number> {

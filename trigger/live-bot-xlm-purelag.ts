@@ -3,7 +3,7 @@
 import { schedules } from "@trigger.dev/sdk/v3";
 import {
   getPriceGlobal, getKlinesGlobal, getFreeBalance, getOrder, getPrice, getKlines,
-  cancelOrder, cancelAllOrders,
+  getBookTicker, cancelOrder, cancelAllOrders,
   placeLimitSellBtc, placeMarketBuyBtc, placeMarketSellBtc, placeOcoSellBtc,
 } from "../lib/binance";
 import { TP_PCT, SL_PCT, MAX_HOLD } from "../lib/strategy";
@@ -82,9 +82,10 @@ export const xlmPureLagBot = schedules.task({
 
     let hadPosition = false;
     try {
-      const [liveGLPrice, price, glCandles, usCandles] = await Promise.all([
+      const [liveGLPrice, price, book, glCandles, usCandles] = await Promise.all([
         getPriceGlobal(SYMBOL),
         getPrice(SYMBOL),
+        getBookTicker(SYMBOL),
         getKlinesGlobal(SYMBOL, "1m", 2),
         getKlines(SYMBOL, "1m", 2),
       ]);
@@ -94,9 +95,13 @@ export const xlmPureLagBot = schedules.task({
       const spread   = (liveGLPrice - price) / price;
       const glRet    = (liveGLPrice - prevGL) / prevGL;  // global up from last close
       const usRet    = (price - prevUS) / prevUS;         // US movement from last close
-      logBtcPrice(price, liveGLPrice).catch(() => {});   // fire-and-forget, never block the run
+      logBtcPrice(price, liveGLPrice, book).catch(() => {});   // fire-and-forget, never block the run
       const xlmGLRet = spread;
-      const signal   = spread >= GL_THRESH && glRet > 0 && usRet < glRet;
+      const investment = Math.min(settings.usdt_balance ?? ALLOCATION, usdtFree);
+      // entries only during US working hours 9am–4pm ET (13:00–20:00 UTC) — all 3 live days lost money outside this window
+      const hourUTC  = new Date().getUTCHours();
+      const inWindow = hourUTC >= 13 && hourUTC < 20;
+      const signal   = spread >= GL_THRESH && glRet > 0 && usRet < glRet && inWindow;
       const pos        = await getPosition();
       if (pos) hadPosition = true;
 
@@ -318,9 +323,8 @@ export const xlmPureLagBot = schedules.task({
             // Exchange says we hold BTC but DB has no record — skip, don't double-buy
             log.push({ action: "SKIP_HAVE_BTC", btcHeld });
           } else {
-            const botBalance = settings.usdt_balance ?? ALLOCATION;
-            const qty        = floorQty(Math.min(botBalance, usdtFree) / price);
-            if (qty >= 0.00001 && qty * price >= 10) {
+            const qty = floorQty(investment / book.ask);
+            if (qty >= 0.00001 && qty * book.ask >= 10) {
               const mktOrder  = await placeMarketBuyBtc(SYMBOL, qty);
               const fillPrice = parseFloat(mktOrder.cummulativeQuoteQty) / parseFloat(mktOrder.executedQty);
               const filledQty = floorQty(parseFloat(mktOrder.executedQty));
@@ -376,9 +380,10 @@ export const xlmPureLagBot = schedules.task({
     try {
       const pos2 = await getPosition();
       if (!pos2) {
-        const [liveGLPrice2, price2, glCandles2, usCandles2] = await Promise.all([
+        const [liveGLPrice2, price2, book2, glCandles2, usCandles2] = await Promise.all([
           getPriceGlobal(SYMBOL),
           getPrice(SYMBOL),
+          getBookTicker(SYMBOL),
           getKlinesGlobal(SYMBOL, "1m", 2),
           getKlines(SYMBOL, "1m", 2),
         ]);
@@ -387,16 +392,18 @@ export const xlmPureLagBot = schedules.task({
         const spread2  = (liveGLPrice2 - price2) / price2;
         const glRet2   = (liveGLPrice2 - prevGL2) / prevGL2;
         const usRet2   = (price2 - prevUS2) / prevUS2;
-        logBtcPrice(price2, liveGLPrice2).catch(() => {});  // fire-and-forget
+        logBtcPrice(price2, liveGLPrice2, book2).catch(() => {});  // fire-and-forget
         const xlmGLRet2 = spread2;
-        if (spread2 >= GL_THRESH && glRet2 > 0 && usRet2 < glRet2) {
+        const investment2 = Math.min(settings.usdt_balance ?? ALLOCATION, usdtFree);
+        const hourUTC2  = new Date().getUTCHours();
+        const inWindow2 = hourUTC2 >= 13 && hourUTC2 < 20;
+        if (spread2 >= GL_THRESH && glRet2 > 0 && usRet2 < glRet2 && inWindow2) {
           const btcHeld2 = await getFreeBalance("BTC");
           if (btcHeld2 >= 0.00001) {
             log2.push({ action: "SKIP_HAVE_BTC_30S", btcHeld: btcHeld2 });
           } else {
-            const botBalance = settings.usdt_balance ?? ALLOCATION;
-            const qty        = floorQty(Math.min(botBalance, usdtFree) / price2);
-            if (qty >= 0.00001 && qty * price2 >= 10) {
+            const qty = floorQty(investment2 / book2.ask);
+            if (qty >= 0.00001 && qty * book2.ask >= 10) {
               const mktOrder2  = await placeMarketBuyBtc(SYMBOL, qty);
               const fillPrice2 = parseFloat(mktOrder2.cummulativeQuoteQty) / parseFloat(mktOrder2.executedQty);
               const filledQty2 = floorQty(parseFloat(mktOrder2.executedQty));

@@ -3,7 +3,7 @@
 import { schedules } from "@trigger.dev/sdk/v3";
 import {
   getPriceGlobal, getKlinesGlobal, getFreeBalance, getOrder, getPrice, getKlines,
-  cancelOrder, cancelAllOrders,
+  getBookTicker, cancelOrder, cancelAllOrders,
   placeLimitBuyBtc, placeLimitSellBtc, placeMarketSellBtc, placeOcoSellBtc,
 } from "../lib/binance";
 import { TP_PCT, SL_PCT, MAX_HOLD } from "../lib/strategy";
@@ -82,19 +82,23 @@ export const btcPureLagBot = schedules.task({
 
     let hadPosition = false;
     try {
-      const [liveGLPrice, price, glCandles, usCandles] = await Promise.all([
+      const [liveGLPrice, price, book, glCandles, usCandles] = await Promise.all([
         getPriceGlobal(SYMBOL),
         getPrice(SYMBOL),
+        getBookTicker(SYMBOL),
         getKlinesGlobal(SYMBOL, "1m", 2),
         getKlines(SYMBOL, "1m", 2),
       ]);
 
       const prevGL  = glCandles[0].close;
       const prevUS  = usCandles[0].close;
-      const spread  = (liveGLPrice - price) / price;
+      // spread vs the US ask (what we'd actually pay), not last trade — last print can be stale on a thin book
+      const spread  = (liveGLPrice - book.ask) / book.ask;
       const glRet   = (liveGLPrice - prevGL) / prevGL;
       const usRet   = (price - prevUS) / prevUS;
-      const signal  = spread >= GL_THRESH && glRet > 0 && usRet < glRet;
+      const investment = Math.min(settings.usdt_balance ?? ALLOCATION, usdtFree);
+      const askDepthOk = book.askQty * book.ask >= investment;
+      const signal  = spread >= GL_THRESH && glRet > 0 && usRet < glRet && askDepthOk;
       const pos     = await getPosition();
       if (pos) hadPosition = true;
 
@@ -312,10 +316,9 @@ export const btcPureLagBot = schedules.task({
             // Exchange says we hold BTC but DB has no record — skip, don't double-buy
             log.push({ action: "SKIP_HAVE_BTC", btcHeld });
           } else {
-            const botBalance = settings.usdt_balance ?? ALLOCATION;
-            const qty        = floorQty(Math.min(botBalance, usdtFree) / price);
-            if (qty >= 0.00001 && qty * price >= 10) {
-              const limitOrder = await placeLimitBuyBtc(SYMBOL, qty, roundPrice(price * 1.0002));
+            const qty = floorQty(investment / book.ask);
+            if (qty >= 0.00001 && qty * book.ask >= 10) {
+              const limitOrder = await placeLimitBuyBtc(SYMBOL, qty, roundPrice(book.ask * 1.0002));
               try {
                 await openPendingEntry({ symbol: SYMBOL, entry_order_id: limitOrder.orderId, quantity: qty, z_score: 0 });
               } catch (dbErr) {
@@ -323,7 +326,7 @@ export const btcPureLagBot = schedules.task({
                 throw dbErr;
               }
               hadPosition = true;
-              log.push({ action: "LIMIT_BUY_PLACED", qty, price: roundPrice(price), orderId: limitOrder.orderId, xlmGLRet: spread.toFixed(4) });
+              log.push({ action: "LIMIT_BUY_PLACED", qty, ask: book.ask, askQty: book.askQty, orderId: limitOrder.orderId, xlmGLRet: spread.toFixed(4) });
             }
           }
         } else {
@@ -347,33 +350,35 @@ export const btcPureLagBot = schedules.task({
     try {
       const pos2 = await getPosition();
       if (!pos2) {
-        const [liveGLPrice2, price2, glCandles2, usCandles2] = await Promise.all([
+        const [liveGLPrice2, price2, book2, glCandles2, usCandles2] = await Promise.all([
           getPriceGlobal(SYMBOL),
           getPrice(SYMBOL),
+          getBookTicker(SYMBOL),
           getKlinesGlobal(SYMBOL, "1m", 2),
           getKlines(SYMBOL, "1m", 2),
         ]);
         const prevGL2  = glCandles2[0].close;
         const prevUS2  = usCandles2[0].close;
-        const spread2  = (liveGLPrice2 - price2) / price2;
+        const spread2  = (liveGLPrice2 - book2.ask) / book2.ask;
         const glRet2   = (liveGLPrice2 - prevGL2) / prevGL2;
         const usRet2   = (price2 - prevUS2) / prevUS2;
-        if (spread2 >= GL_THRESH && glRet2 > 0 && usRet2 < glRet2) {
+        const investment2 = Math.min(settings.usdt_balance ?? ALLOCATION, usdtFree);
+        const askDepthOk2 = book2.askQty * book2.ask >= investment2;
+        if (spread2 >= GL_THRESH && glRet2 > 0 && usRet2 < glRet2 && askDepthOk2) {
           const btcHeld2 = await getFreeBalance("BTC");
           if (btcHeld2 >= 0.00001) {
             log2.push({ action: "SKIP_HAVE_BTC_30S", btcHeld: btcHeld2 });
           } else {
-            const botBalance = settings.usdt_balance ?? ALLOCATION;
-            const qty        = floorQty(Math.min(botBalance, usdtFree) / price2);
-            if (qty >= 0.00001 && qty * price2 >= 10) {
-              const limitOrder = await placeLimitBuyBtc(SYMBOL, qty, roundPrice(price2 * 1.0002));
+            const qty = floorQty(investment2 / book2.ask);
+            if (qty >= 0.00001 && qty * book2.ask >= 10) {
+              const limitOrder = await placeLimitBuyBtc(SYMBOL, qty, roundPrice(book2.ask * 1.0002));
               try {
                 await openPendingEntry({ symbol: SYMBOL, entry_order_id: limitOrder.orderId, quantity: qty, z_score: 0 });
               } catch (dbErr) {
                 try { await cancelOrder(SYMBOL, limitOrder.orderId); } catch {}
                 throw dbErr;
               }
-              log2.push({ action: "LIMIT_BUY_PLACED_30S", qty, price: roundPrice(price2), orderId: limitOrder.orderId, xlmGLRet: spread2.toFixed(4) });
+              log2.push({ action: "LIMIT_BUY_PLACED_30S", qty, ask: book2.ask, askQty: book2.askQty, orderId: limitOrder.orderId, xlmGLRet: spread2.toFixed(4) });
             }
           }
         } else {
