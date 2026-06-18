@@ -152,6 +152,43 @@ export default function TvSignalPanel() {
     return () => clearInterval(id);
   }, [exchange, symbol, timeframe, poll]);
 
+  // React immediately when signal/price/running changes — don't wait for next 60s poll.
+  useEffect(() => {
+    if (!running || !price || raw == null) return;
+    const signal = toSignal(raw);
+    const state  = botRef.current;
+    const now    = new Date().toLocaleTimeString();
+    const wantBuy  = buyOnRef.current  === "strong" ? signal === "STRONG_BUY" : signal === "STRONG_BUY" || signal === "BUY";
+    const wantSell = sellOnRef.current === "strong" ? signal === "STRONG_SELL" : signal === "STRONG_SELL" || signal === "SELL";
+
+    if (state.pos === "flat" && wantBuy) {
+      const qty  = state.usdt / price;
+      const next: BotState = {
+        ...state, pos: "long", usdt: 0, solQty: qty,
+        entryPrice: price, entrySignal: signal,
+        tradeLog: [{ time: now, side: "BUY" as const, price, qty, signal }, ...state.tradeLog].slice(0, 50),
+      };
+      botRef.current = next;
+      setBot(next);
+    } else if (state.pos === "long" && wantSell) {
+      const out    = state.solQty * price;
+      const pnlPct = (out / (state.entryPrice * state.solQty) - 1) * 100;
+      const isWin  = pnlPct > 0;
+      const newRoundTrips = state.roundTrips + 1;
+      const newWins       = state.wins + (isWin ? 1 : 0);
+      const newPeak       = Math.max(state.peak, out);
+      const dd            = (newPeak - out) / newPeak * 100;
+      const newMaxDD      = Math.max(state.maxDD, dd);
+      const next: BotState = {
+        ...state, pos: "flat", usdt: out, solQty: 0,
+        roundTrips: newRoundTrips, wins: newWins, peak: newPeak, maxDD: newMaxDD,
+        tradeLog: [{ time: now, side: "SELL" as const, price, qty: state.solQty, signal, pnlPct }, ...state.tradeLog].slice(0, 50),
+      };
+      botRef.current = next;
+      setBot(next);
+    }
+  }, [raw, price, running]); // eslint-disable-line react-hooks/exhaustive-deps
+
   function handleStart() {
     let state: BotState = {
       pos: "flat", usdt: capital, solQty: 0, entryPrice: 0,
