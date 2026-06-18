@@ -31,5 +31,5 @@
     "**/*.mts",
     "trigger.config.ts"
   ],
-  "exclude": ["node_modules", "backtest", "bank", "trigger"]
+  "exclude": ["node_modules", "backtest", "bank", "trigger", "scripts"]
 }

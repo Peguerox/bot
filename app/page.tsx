@@ -5,6 +5,7 @@ import { getSupabase } from "@/lib/supabase";
 import PnLChart from "@/components/PnLChart";
 import TradeHistory from "@/components/TradeHistory";
 import OpenPositions from "@/components/OpenPositions";
+import TvSignalPanel from "@/components/TvSignalPanel";
 
 
 function Stat({ label, value, sub, color }: { label: string; value: string; sub: string; color: string }) {
@@ -1595,7 +1596,8 @@ export default function Dashboard() {
     <main className="min-h-screen bg-gray-950 text-white p-6">
       <div className="max-w-6xl mx-auto space-y-6">
         <h1 className="text-2xl font-bold text-white">TradeBot Dashboard</h1>
-        <div className="grid grid-cols-1 lg:grid-cols-3 gap-6 items-start">
+        <div className="grid grid-cols-1 md:grid-cols-2 xl:grid-cols-4 gap-6 items-start">
+          <TvSignalPanel />
           <XlmLivePanel
             trades={xlmTrades}
             openPositions={xlmOpen}
