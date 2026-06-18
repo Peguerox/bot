@@ -303,16 +303,15 @@ export default function TvSignalPanel() {
 
       {/* ── Signal ──────────────────────────────────────────────────────── */}
       <div className="space-y-2">
-        <p className="text-gray-500 text-xs uppercase tracking-wide">
-          TradingView Signal
-          {raw != null && <span className="ml-1 font-mono normal-case text-gray-600">({raw >= 0 ? "+" : ""}{raw.toFixed(4)})</span>}
-        </p>
-        <div className="grid grid-cols-3 gap-2">
+        <p className="text-gray-500 text-xs uppercase tracking-wide">TradingView Signal</p>
+        <div className="bg-gray-800/50 rounded-lg divide-y divide-gray-700/50">
           {([["Overall", signal, raw], ["MA", toSignal(ma), ma], ["Oscillators", toSignal(osc), osc]] as [string, Signal, number | null][]).map(([label, sig, val]) => (
-            <div key={label} className="bg-gray-800/50 rounded-lg p-2 space-y-1.5 text-center">
-              <p className="text-gray-600 text-xs">{label}</p>
+            <div key={label} className="flex items-center justify-between px-3 py-2">
+              <span className="text-gray-500 text-xs w-20 shrink-0">{label}</span>
               <SignalBadge signal={sig} />
-              {val != null && <p className="text-gray-600 text-xs font-mono">{val >= 0 ? "+" : ""}{val.toFixed(3)}</p>}
+              <span className="text-gray-600 text-xs font-mono w-14 text-right shrink-0">
+                {val != null ? `${val >= 0 ? "+" : ""}${val.toFixed(3)}` : "—"}
+              </span>
             </div>
           ))}
         </div>

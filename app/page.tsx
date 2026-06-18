@@ -746,8 +746,9 @@ export default function Dashboard() {
     <main className="min-h-screen bg-gray-950 text-white p-6">
       <div className="max-w-6xl mx-auto space-y-6">
         <h1 className="text-2xl font-bold text-white">TradeBot Dashboard</h1>
-        <div className="grid grid-cols-1 md:grid-cols-2 xl:grid-cols-3 gap-6 items-start">
-          <TvSignalPanel />
+
+        {/* ── Live bots ── */}
+        <div className="grid grid-cols-1 md:grid-cols-2 gap-6 items-start">
           <SurferUsdtPanel
             trades={surferUsdtTrades}
             surferState={surferUsdtState}
@@ -774,6 +775,12 @@ export default function Dashboard() {
             onClearHistory={handleSurferClearHistory}
             clearingHistory={surferClearing}
           />
+        </div>
+
+        {/* ── Paper bots ── */}
+        <div className="grid grid-cols-1 md:grid-cols-2 gap-6 items-start">
+          <TvSignalPanel />
+          <TvSignalPanel />
         </div>
       </div>
     </main>
