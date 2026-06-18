@@ -6,7 +6,6 @@ import PnLChart from "@/components/PnLChart";
 import TradeHistory from "@/components/TradeHistory";
 import OpenPositions from "@/components/OpenPositions";
 
-const PAPER_INITIAL = 2000;
 
 function Stat({ label, value, sub, color }: { label: string; value: string; sub: string; color: string }) {
   return (
@@ -87,63 +86,144 @@ function formatAction(a: any): string {
   if (a.action === "STUCK_RESCUE_CHASE")  return `STUCK RESCUE CHASE  live=$${a.livePrice}  floor=$${a.chaseFloor}  rescue=$${a.rescuePrice}`;
   if (a.action === "SKIP_NO_FUNDS")       return `NO FUNDS  $${parseFloat(a.balance).toFixed(2)} USDT`;
   if (a.action === "ERROR")               return `ERROR (${a.stage}): ${a.error}`;
-  // Surfer-specific
-  if (a.action === "CHECK")              return `WATCH  rsi=${a.rsi}  ${a.emaBullish ? "bullish" : "bearish"}  ${a.mode}  ${a.status}`;
-  if (a.action === "ARM_BUY")            return `ARM BUY  RSI↑${a.curRSI} (was ${a.prevRSI})`;
-  if (a.action === "ARM_SELL")           return `ARM SELL  RSI↓${a.curRSI} (was ${a.prevRSI})`;
-  if (a.action === "START_BUY")          return `START BUY  ${a.qty} SOL @ ${parseFloat(a.price).toFixed(8)}`;
-  if (a.action === "START_SELL")         return `START SELL  ${a.qty} SOL @ ${parseFloat(a.price).toFixed(8)}`;
-  if (a.action === "BUY_FILLED")         return `BUY FILLED  ${a.qty} SOL @ ${parseFloat(a.price).toFixed(8)}  spent ${parseFloat(a.btcSpent).toFixed(8)} BTC`;
-  if (a.action === "SELL_FILLED")        return `SELL FILLED  @ ${parseFloat(a.price).toFixed(8)}  pnl ${parseFloat(a.pnlBtc) >= 0 ? "+" : ""}${parseFloat(a.pnlBtc).toFixed(8)} BTC`;
-  if (a.action === "BUY_REPRICE")        return `BUY REPRICE  ${a.from} → ${a.to}`;
-  if (a.action === "SELL_REPRICE")       return `SELL REPRICE  ${a.from} → ${a.to}`;
-  if (a.action === "BUY_WAIT")           return `BUY WAIT  @ ${parseFloat(a.price).toFixed(8)}`;
-  if (a.action === "SELL_WAIT")          return `SELL WAIT  @ ${parseFloat(a.price).toFixed(8)}`;
-  if (a.action === "BUY_CANCELED")       return `BUY CANCELED`;
-  if (a.action === "SELL_CANCELED")      return `SELL CANCELED`;
-  if (a.action === "BUY_FILLED_ON_CANCEL")  return `BUY FILLED (on cancel)  ${a.qty} SOL @ ${parseFloat(a.price).toFixed(8)}`;
-  if (a.action === "SELL_FILLED_ON_CANCEL") return `SELL FILLED (on cancel)  @ ${parseFloat(a.price).toFixed(8)}  pnl ${parseFloat(a.pnlBtc) >= 0 ? "+" : ""}${parseFloat(a.pnlBtc).toFixed(8)} BTC`;
-  if (a.action === "SKIP_BUY")           return `SKIP BUY  ${a.reason}`;
-  if (a.action === "SKIP_SELL")          return `SKIP SELL  ${a.reason}`;
+  // Surfer-specific (both SOLBTC and SOLUSDT bots)
+  if (a.action === "CHECK")             return `WATCH  rsi=${a.rsi}  ${a.emaBullish ? "bullish" : "bearish"}  ${a.mode}  ${a.status}`;
+  if (a.action === "ARM_BUY")           return `ARM BUY  RSI↑${a.curRSI} (was ${a.prevRSI})`;
+  if (a.action === "ARM_SELL")          return `ARM SELL  RSI↓${a.curRSI} (was ${a.prevRSI})`;
+  if (a.action === "START_BUY") {
+    const pStr = a.usdtFree != null ? `$${parseFloat(a.price).toFixed(2)}` : parseFloat(a.price).toFixed(8);
+    return `START BUY  ${a.qty} SOL @ ${pStr}`;
+  }
+  if (a.action === "START_SELL") {
+    const pStr = parseFloat(a.price) > 1 ? `$${parseFloat(a.price).toFixed(2)}` : parseFloat(a.price).toFixed(8);
+    return `START SELL  ${a.qty} SOL @ ${pStr}`;
+  }
+  if (a.action === "BUY_FILLED") {
+    if (a.usdtSpent != null) return `BUY FILLED  ${a.qty} SOL @ $${parseFloat(a.price).toFixed(2)}  spent $${parseFloat(a.usdtSpent).toFixed(2)}`;
+    return `BUY FILLED  ${a.qty} SOL @ ${parseFloat(a.price).toFixed(8)}  spent ${parseFloat(a.btcSpent).toFixed(8)} BTC`;
+  }
+  if (a.action === "SELL_FILLED") {
+    if (a.pnlUsdt != null) return `SELL FILLED  @ $${parseFloat(a.price).toFixed(2)}  pnl ${parseFloat(a.pnlUsdt) >= 0 ? "+" : ""}$${parseFloat(a.pnlUsdt).toFixed(2)}`;
+    return `SELL FILLED  @ ${parseFloat(a.price).toFixed(8)}  pnl ${parseFloat(a.pnlBtc) >= 0 ? "+" : ""}${parseFloat(a.pnlBtc).toFixed(8)} BTC`;
+  }
+  if (a.action === "BUY_REPRICE")       return `BUY REPRICE  ${a.from} → ${a.to}`;
+  if (a.action === "SELL_REPRICE")      return `SELL REPRICE  ${a.from} → ${a.to}`;
+  if (a.action === "BUY_WAIT") {
+    const pStr = parseFloat(a.price) > 1 ? `$${parseFloat(a.price).toFixed(2)}` : parseFloat(a.price).toFixed(8);
+    return `BUY WAIT  @ ${pStr}`;
+  }
+  if (a.action === "SELL_WAIT") {
+    const pStr = parseFloat(a.price) > 1 ? `$${parseFloat(a.price).toFixed(2)}` : parseFloat(a.price).toFixed(8);
+    return `SELL WAIT  @ ${pStr}`;
+  }
+  if (a.action === "BUY_CANCELED")      return `BUY CANCELED`;
+  if (a.action === "SELL_CANCELED")     return `SELL CANCELED`;
+  if (a.action === "BUY_FILLED_ON_CANCEL") {
+    const pStr = parseFloat(a.price) > 1 ? `$${parseFloat(a.price).toFixed(2)}` : parseFloat(a.price).toFixed(8);
+    return `BUY FILLED (on cancel)  ${a.qty} SOL @ ${pStr}`;
+  }
+  if (a.action === "SELL_FILLED_ON_CANCEL") {
+    if (a.pnlUsdt != null) return `SELL FILLED (on cancel)  @ $${parseFloat(a.price).toFixed(2)}  pnl ${parseFloat(a.pnlUsdt) >= 0 ? "+" : ""}$${parseFloat(a.pnlUsdt).toFixed(2)}`;
+    return `SELL FILLED (on cancel)  @ ${parseFloat(a.price).toFixed(8)}  pnl ${parseFloat(a.pnlBtc) >= 0 ? "+" : ""}${parseFloat(a.pnlBtc).toFixed(8)} BTC`;
+  }
+  if (a.action === "SKIP_BUY")          return `SKIP BUY  ${a.reason}`;
+  if (a.action === "SKIP_SELL")         return `SKIP SELL  ${a.reason}`;
   return a.action;
 }
 
-// ── Paper bot panel ─────────────────────────────────────────────────────────
+// ── Surfer USDT panel ────────────────────────────────────────────────────────
 
-function PaperPanel({ trades, openPositions, loading }: {
-  trades: any[]; openPositions: any[]; loading: boolean;
+function SurferUsdtPanel({
+  trades, surferState, runs, loading,
+  enabled, onToggle, toggling,
+  onSellAll, sellingAll,
+  onClearHistory, clearingHistory,
+}: {
+  trades: any[]; surferState: any; runs: any[]; loading: boolean;
+  enabled: boolean; onToggle: () => void; toggling: boolean;
+  onSellAll: () => void; sellingAll: boolean;
+  onClearHistory: () => void; clearingHistory: boolean;
 }) {
-  const totalPnL  = trades.reduce((s, t) => s + (t.pnl ?? 0), 0);
-  const decided   = trades.filter(t => t.result !== "EXPIRE" && t.result !== "MISSED");
-  const wins      = decided.filter(t => t.pnl > 0);
-  const losses    = decided.filter(t => t.pnl < 0);
-  const winRate   = decided.length > 0 ? (wins.length / decided.length * 100).toFixed(1) : "—";
-  const grossWin  = wins.reduce((s, t) => s + t.pnl, 0);
-  const grossLoss = Math.abs(losses.reduce((s, t) => s + t.pnl, 0));
-  const pf        = grossLoss > 0 ? (grossWin / grossLoss).toFixed(2) : "∞";
-  let peak = PAPER_INITIAL, maxDD = 0, runBal = PAPER_INITIAL;
-  [...trades].reverse().forEach(t => {
-    runBal += t.pnl ?? 0;
-    if (runBal > peak) peak = runBal;
-    const dd = (runBal - peak) / peak * 100;
-    if (dd < maxDD) maxDD = dd;
-  });
-  const balance = PAPER_INITIAL + totalPnL;
+  const INITIAL   = 50;
+  const totalPnl  = trades.reduce((s: number, t: any) => s + (t.pnl_usdt ?? 0), 0);
+  const wins      = trades.filter((t: any) => (t.pnl_usdt ?? 0) > 0);
+  const losses    = trades.filter((t: any) => (t.pnl_usdt ?? 0) < 0);
+  const winRate   = trades.length > 0 ? (wins.length / trades.length * 100).toFixed(1) : "—";
+
+  const st        = surferState;
+  const mode      = st?.mode ?? "USDT";
+  const status    = st?.status ?? "idle";
+  const armedSol  = st?.armed_for_sol ?? false;
+
+  const latestPrice: number | null = (() => {
+    for (const r of runs) {
+      const actions: any[] = r.data?.actions ?? [];
+      for (let i = actions.length - 1; i >= 0; i--) {
+        const p = actions[i].price;
+        if (p != null) return parseFloat(p);
+      }
+    }
+    return null;
+  })();
+
+  const statusLabel = () => {
+    if (status === "chasing_buy")  return { text: "Buying SOL…",  color: "text-blue-400" };
+    if (status === "chasing_sell") return { text: "Selling SOL…", color: "text-yellow-400" };
+    if (mode === "SOL") {
+      return { text: "Holding SOL", color: "text-green-400" };
+    }
+    if (armedSol) return { text: "Armed — buy SOL", color: "text-blue-400" };
+    return { text: "Holding USDT", color: "text-gray-400" };
+  };
+
+  const { text: statusText, color: statusColor } = statusLabel();
+  const chartTrades = trades.map((t: any) => ({ ...t, pnl: t.pnl_usdt, exit_time: t.exit_time }));
+
+  const entryValue   = mode === "SOL" && st?.entry_usdt  ? parseFloat(st.entry_usdt) : null;
+  const currentValue = mode === "SOL" && latestPrice && st?.sol_quantity
+    ? parseFloat(st.sol_quantity) * latestPrice : null;
+  const openPnl      = entryValue != null && currentValue != null ? currentValue - entryValue : null;
 
   return (
     <div className="bg-gray-900 rounded-xl p-5 space-y-5 flex flex-col">
       <div className="space-y-1.5">
         <div className="flex items-center justify-between gap-2">
           <div className="flex items-center gap-2">
-            <h2 className="text-white font-bold text-lg">Lag Bot</h2>
-            <span className="text-xs font-bold px-2 py-0.5 rounded-full bg-blue-500/20 text-blue-400">PAPER</span>
+            <h2 className="text-white font-bold text-lg">Surfer USDT</h2>
+            <span className="text-xs font-bold px-2 py-0.5 rounded-full bg-green-500/20 text-green-400">LIVE</span>
           </div>
-          <span className="flex items-center gap-1.5">
-            <span className="w-2 h-2 rounded-full bg-green-400 animate-pulse" />
-            <span className="text-green-400 text-xs font-medium">Running</span>
-          </span>
+          <div className="flex items-center gap-1.5 shrink-0">
+            <button
+              onClick={onClearHistory}
+              disabled={clearingHistory || enabled}
+              className="text-xs font-medium px-2.5 py-1.5 rounded-md bg-gray-800 text-gray-400 hover:bg-gray-700 hover:text-gray-200 transition-all disabled:opacity-30 disabled:cursor-not-allowed"
+              title={enabled ? "Pause bot before clearing" : "Delete all trade history and run logs"}
+            >
+              {clearingHistory ? "Clearing…" : "Clear"}
+            </button>
+            <button
+              onClick={onSellAll}
+              disabled={sellingAll || enabled}
+              className="text-xs font-medium px-2.5 py-1.5 rounded-md bg-gray-800 text-red-400/70 hover:bg-red-950/60 hover:text-red-400 transition-all disabled:opacity-30 disabled:cursor-not-allowed"
+              title={enabled ? "Pause bot before selling" : "Sell all SOL back to USDT"}
+            >
+              {sellingAll ? "Selling…" : "Sell All"}
+            </button>
+            <button
+              onClick={onToggle}
+              disabled={toggling}
+              className={`flex items-center gap-2 text-xs font-semibold px-3 py-1.5 rounded-md transition-all disabled:opacity-50 disabled:cursor-not-allowed ${
+                enabled
+                  ? "bg-green-500/20 text-green-400 hover:bg-green-500/30"
+                  : "bg-gray-800 text-gray-400 hover:bg-gray-700 hover:text-gray-200"
+              }`}
+            >
+              <span className={`w-1.5 h-1.5 rounded-full ${enabled ? "bg-green-400" : "bg-gray-600"}`} />
+              {toggling ? "…" : enabled ? "Running" : "Paused"}
+            </button>
+          </div>
         </div>
-        <p className="text-gray-500 text-xs">BNB + ATOM · $2,000 · 1m · Z=2.0 · TP 0.8% · SL 0.3%</p>
+        <p className="text-gray-500 text-xs">SOL/USDT · $50 · 1m · RSI(14) 15m · 12h EMA(7/25) · Filter #3</p>
       </div>
 
       {loading ? (
@@ -152,27 +232,145 @@ function PaperPanel({ trades, openPositions, loading }: {
         </div>
       ) : (
         <div className="grid grid-cols-2 gap-2">
-          <Stat label="Balance"       value={`$${balance.toFixed(2)}`}   sub={`${totalPnL >= 0 ? "+" : ""}$${totalPnL.toFixed(2)} paper PnL`} color={balance >= PAPER_INITIAL ? "text-green-400" : "text-red-400"} />
-          <Stat label="Win Rate"      value={`${winRate}%`}              sub={`${wins.length}W / ${losses.length}L of ${decided.length}`}       color="text-blue-400" />
-          <Stat label="Profit Factor" value={pf}                         sub={openPositions.length > 0 ? `${openPositions.length} open` : "No open positions"} color="text-purple-400" />
-          <Stat label="Max Drawdown"  value={`${maxDD.toFixed(1)}%`}     sub={`${trades.length} total trades`}                                  color={maxDD < -10 ? "text-red-400" : "text-yellow-400"} />
+          <Stat
+            label="PnL (USDT)"
+            value={`${totalPnl >= 0 ? "+" : ""}$${totalPnl.toFixed(2)}`}
+            sub={`balance $${(INITIAL + totalPnl).toFixed(2)}`}
+            color={totalPnl >= 0 ? "text-green-400" : "text-red-400"}
+          />
+          <Stat
+            label="Win Rate"
+            value={`${winRate}%`}
+            sub={`${wins.length}W / ${losses.length}L`}
+            color="text-blue-400"
+          />
+          <Stat
+            label="Status"
+            value={statusText}
+            sub={mode === "SOL" && st?.entry_price ? `entry $${parseFloat(st.entry_price).toFixed(2)}` : "watching signal"}
+            color={statusColor}
+          />
+          <Stat
+            label="SOL/USDT"
+            value={latestPrice != null ? `$${latestPrice.toFixed(2)}` : "—"}
+            sub={mode === "SOL" && st?.sol_quantity ? `${parseFloat(st.sol_quantity).toFixed(2)} SOL held` : "no position"}
+            color="text-yellow-400"
+          />
         </div>
       )}
 
       <div>
-        <p className="text-gray-500 text-xs uppercase tracking-wide mb-2">Cumulative PnL</p>
-        <PnLChart trades={trades} initial={PAPER_INITIAL} />
+        <p className="text-gray-500 text-xs uppercase tracking-wide mb-2">Cumulative PnL (USDT)</p>
+        <PnLChart trades={chartTrades} initial={INITIAL} />
       </div>
+
       <div>
-        <p className="text-gray-500 text-xs uppercase tracking-wide mb-2">
-          Open Positions
-          {openPositions.length > 0 && <span className="ml-1 bg-blue-500/20 text-blue-400 px-1.5 py-0.5 rounded-full text-xs">{openPositions.length}</span>}
-        </p>
-        <OpenPositions positions={openPositions} loading={loading} />
+        <p className="text-gray-500 text-xs uppercase tracking-wide mb-2">Position</p>
+        <table className="w-full text-sm font-mono">
+          <thead>
+            <tr className="text-gray-600 border-b border-gray-800">
+              <th className="text-left pb-1 font-medium">Field</th>
+              <th className="text-right pb-1 font-medium">Value</th>
+            </tr>
+          </thead>
+          <tbody>
+            <tr className="border-b border-gray-800/50">
+              <td className="py-1.5 text-gray-400">Mode</td>
+              <td className={`py-1.5 text-right font-bold ${statusColor}`}>{statusText}</td>
+            </tr>
+            <tr className="border-b border-gray-800/50">
+              <td className="py-1.5 text-gray-400">SOL held</td>
+              <td className="py-1.5 text-right text-white">
+                {mode === "SOL" && st?.sol_quantity ? `${parseFloat(st.sol_quantity).toFixed(2)} SOL` : "—"}
+              </td>
+            </tr>
+            <tr className="border-b border-gray-800/50">
+              <td className="py-1.5 text-gray-400">Entry price</td>
+              <td className="py-1.5 text-right text-white">
+                {mode === "SOL" && st?.entry_price ? `$${parseFloat(st.entry_price).toFixed(2)}` : "—"}
+              </td>
+            </tr>
+            <tr className="border-b border-gray-800/50">
+              <td className="py-1.5 text-gray-400">USDT in</td>
+              <td className="py-1.5 text-right text-white">
+                {mode === "SOL" && st?.entry_usdt ? `$${parseFloat(st.entry_usdt).toFixed(2)}` : "—"}
+              </td>
+            </tr>
+            <tr>
+              <td className="py-1.5 text-gray-400">Open PnL</td>
+              <td className={`py-1.5 text-right font-bold ${
+                openPnl == null ? "text-gray-600"
+                : openPnl >= 0 ? "text-green-400" : "text-red-400"
+              }`}>
+                {openPnl != null ? `${openPnl >= 0 ? "+" : ""}$${openPnl.toFixed(2)}` : "—"}
+              </td>
+            </tr>
+          </tbody>
+        </table>
       </div>
-      <div className="flex-1">
+
+      <div>
         <p className="text-gray-500 text-xs uppercase tracking-wide mb-2">Recent Trades</p>
-        <TradeHistory trades={trades.slice(0, 10)} loading={loading} />
+        {loading ? (
+          <div className="animate-pulse space-y-2">
+            {[...Array(3)].map((_, i) => <div key={i} className="h-8 bg-gray-800 rounded" />)}
+          </div>
+        ) : trades.length === 0 ? (
+          <p className="text-gray-600 text-sm">No completed round trips yet</p>
+        ) : (
+          <div className="overflow-auto">
+            <table className="w-full text-xs font-mono">
+              <thead>
+                <tr className="text-gray-500 border-b border-gray-800">
+                  <th className="text-left pb-1">Buy</th>
+                  <th className="text-left pb-1">Sell</th>
+                  <th className="text-right pb-1">PnL</th>
+                  <th className="text-right pb-1">%</th>
+                </tr>
+              </thead>
+              <tbody className="divide-y divide-gray-800/50">
+                {trades.slice(0, 8).map((t: any) => {
+                  const isWin = (t.pnl_usdt ?? 0) > 0;
+                  return (
+                    <tr key={t.id} className="hover:bg-gray-800/30">
+                      <td className="py-1.5 text-gray-300">${t.entry_price ? parseFloat(t.entry_price).toFixed(2) : "—"}</td>
+                      <td className="py-1.5 text-gray-300">${t.exit_price  ? parseFloat(t.exit_price).toFixed(2)  : "—"}</td>
+                      <td className={`py-1.5 text-right ${isWin ? "text-green-400" : "text-red-400"}`}>
+                        {isWin ? "+" : ""}${(t.pnl_usdt ?? 0).toFixed(2)}
+                      </td>
+                      <td className={`py-1.5 text-right ${isWin ? "text-green-400" : "text-red-400"}`}>
+                        {isWin ? "+" : ""}{(t.pnl_pct ?? 0).toFixed(2)}%
+                      </td>
+                    </tr>
+                  );
+                })}
+              </tbody>
+            </table>
+          </div>
+        )}
+      </div>
+
+      <div>
+        <p className="text-gray-500 text-xs uppercase tracking-wide mb-2">Activity</p>
+        <div className="h-56 overflow-y-auto space-y-0.5 font-mono text-sm pr-1">
+          {runs.length === 0 && <p className="text-gray-600">No runs yet.</p>}
+          {runs.map((r: any) => {
+            const actions: any[] = r.data?.actions ?? [];
+            const time = r.run_at
+              ? new Date(r.run_at).toLocaleTimeString([], { hour: "2-digit", minute: "2-digit", second: "2-digit", hour12: false })
+              : "";
+            return (
+              <div key={r.id} className="flex gap-2 items-start">
+                <span className="text-gray-600 shrink-0">{time}</span>
+                <div className="flex flex-col gap-0">
+                  {actions.map((a: any, i: number) => (
+                    <span key={i} className={actionColor(a.action)}>{formatAction(a)}</span>
+                  ))}
+                </div>
+              </div>
+            );
+          })}
+        </div>
       </div>
     </div>
   );
@@ -1210,8 +1408,6 @@ function SurferPanel({
 // ── Dashboard ───────────────────────────────────────────────────────────────
 
 export default function Dashboard() {
-  const [trades, setTrades]       = useState<any[]>([]);
-  const [open, setOpen]           = useState<any[]>([]);
   const [xlmSettings, setXlmSettings] = useState<any>(null);
   const [xlmOpen, setXlmOpen]     = useState<any[]>([]);
   const [xlmTrades, setXlmTrades] = useState<any[]>([]);
@@ -1233,11 +1429,15 @@ export default function Dashboard() {
   const [surferToggling, setSurferToggling]   = useState(false);
   const [surferSellingAll, setSurferSellingAll] = useState(false);
   const [surferClearing, setSurferClearing]   = useState(false);
+  const [surferUsdtState, setSurferUsdtState]   = useState<any>(null);
+  const [surferUsdtTrades, setSurferUsdtTrades] = useState<any[]>([]);
+  const [surferUsdtRuns, setSurferUsdtRuns]     = useState<any[]>([]);
+  const [surferUsdtToggling, setSurferUsdtToggling]     = useState(false);
+  const [surferUsdtSellingAll, setSurferUsdtSellingAll] = useState(false);
+  const [surferUsdtClearing, setSurferUsdtClearing]     = useState(false);
 
   async function load() {
     const [
-      { data: closed },
-      { data: openPos },
       { data: xlmSt },
       { data: xlmOp },
       { data: xlmCl },
@@ -1245,9 +1445,10 @@ export default function Dashboard() {
       { data: surferSt },
       { data: surferTr },
       { data: surferRs },
+      { data: surferUsdtSt },
+      { data: surferUsdtTr },
+      { data: surferUsdtRs },
     ] = await Promise.all([
-      getSupabase().from("positions").select("*").eq("status", "closed").order("exit_time", { ascending: false }),
-      getSupabase().from("positions").select("*").in("status", ["open", "chasing"]),
       getSupabase().from("xlm_live_settings").select("*").single(),
       getSupabase().from("xlm_live_positions").select("*").in("status", ["open", "chasing", "pending_entry"]),
       getSupabase().from("xlm_live_positions").select("*").eq("status", "closed").order("exit_time", { ascending: false }).limit(20),
@@ -1255,9 +1456,10 @@ export default function Dashboard() {
       getSupabase().from("surfer_state").select("*").eq("id", 1).single(),
       getSupabase().from("surfer_trades").select("*").order("exit_time", { ascending: false }).limit(20),
       getSupabase().from("surfer_runs").select("id,run_at,data").order("run_at", { ascending: false }).limit(120),
+      getSupabase().from("surfer_usdt_state").select("*").eq("id", 1).single(),
+      getSupabase().from("surfer_usdt_trades").select("*").order("exit_time", { ascending: false }).limit(20),
+      getSupabase().from("surfer_usdt_runs").select("id,run_at,data").order("run_at", { ascending: false }).limit(120),
     ]);
-    setTrades(closed ?? []);
-    setOpen(openPos ?? []);
     setXlmSettings(xlmSt ?? null);
     setXlmOpen((xlmOp ?? []).map((p: any) => ({ ...p, pair: "BTC" })));
     setXlmTrades(xlmCl ?? []);
@@ -1265,6 +1467,9 @@ export default function Dashboard() {
     setSurferState(surferSt ?? null);
     setSurferTrades(surferTr ?? []);
     setSurferRuns(surferRs ?? []);
+    setSurferUsdtState(surferUsdtSt ?? null);
+    setSurferUsdtTrades(surferUsdtTr ?? []);
+    setSurferUsdtRuns(surferUsdtRs ?? []);
     setLoading(false);
   }
 
@@ -1337,12 +1542,32 @@ export default function Dashboard() {
     setSurferClearing(false);
   }
 
+  async function handleSurferUsdtToggle() {
+    setSurferUsdtToggling(true);
+    await fetch("/api/surfer-usdt/toggle", { method: "POST" });
+    await load();
+    setSurferUsdtToggling(false);
+  }
+
+  async function handleSurferUsdtSellAll() {
+    if (!confirm("Sell all SOL back to USDT and return to idle?")) return;
+    setSurferUsdtSellingAll(true);
+    await fetch("/api/surfer-usdt/sell-all", { method: "POST" });
+    await load();
+    setSurferUsdtSellingAll(false);
+  }
+
+  async function handleSurferUsdtClearHistory() {
+    if (!confirm("Delete all Surfer USDT trade history and run logs?")) return;
+    setSurferUsdtClearing(true);
+    await fetch("/api/surfer-usdt/clear-history", { method: "POST" });
+    await load();
+    setSurferUsdtClearing(false);
+  }
+
   useEffect(() => {
     load();
     const sb = getSupabase();
-    const ch1 = sb.channel("positions")
-      .on("postgres_changes", { event: "*", schema: "public", table: "positions" }, load)
-      .subscribe();
     const ch2 = sb.channel("xlm")
       .on("postgres_changes", { event: "*", schema: "public", table: "xlm_live_positions" }, load)
       .on("postgres_changes", { event: "*", schema: "public", table: "xlm_live_settings" }, load)
@@ -1358,7 +1583,12 @@ export default function Dashboard() {
       .on("postgres_changes", { event: "*", schema: "public", table: "surfer_trades" }, load)
       .on("postgres_changes", { event: "*", schema: "public", table: "surfer_runs" }, load)
       .subscribe();
-    return () => { sb.removeChannel(ch1); sb.removeChannel(ch2); sb.removeChannel(ch3); sb.removeChannel(ch4); };
+    const ch5 = sb.channel("surfer-usdt")
+      .on("postgres_changes", { event: "*", schema: "public", table: "surfer_usdt_state" }, load)
+      .on("postgres_changes", { event: "*", schema: "public", table: "surfer_usdt_trades" }, load)
+      .on("postgres_changes", { event: "*", schema: "public", table: "surfer_usdt_runs" }, load)
+      .subscribe();
+    return () => { sb.removeChannel(ch2); sb.removeChannel(ch3); sb.removeChannel(ch4); sb.removeChannel(ch5); };
   }, []);
 
   return (
@@ -1382,10 +1612,18 @@ export default function Dashboard() {
             clearingHistory={xlmClearing}
             runs={xlmRuns}
           />
-          <PaperPanel
-            trades={trades}
-            openPositions={open}
+          <SurferUsdtPanel
+            trades={surferUsdtTrades}
+            surferState={surferUsdtState}
+            runs={surferUsdtRuns}
             loading={loading}
+            enabled={surferUsdtState?.enabled ?? false}
+            onToggle={handleSurferUsdtToggle}
+            toggling={surferUsdtToggling}
+            onSellAll={handleSurferUsdtSellAll}
+            sellingAll={surferUsdtSellingAll}
+            onClearHistory={handleSurferUsdtClearHistory}
+            clearingHistory={surferUsdtClearing}
           />
           <SurferPanel
             trades={surferTrades}

@@ -376,6 +376,29 @@ export async function placeLimitSellSol(symbol: string, qty: number, price: numb
   });
 }
 
+// SOL/USDT-specific: qty step 0.01 (2 decimals), price tick 0.01 (2 decimals)
+export async function placeLimitBuySolUsdt(symbol: string, qty: number, price: number): Promise<OrderResponse> {
+  return signedPost("/order", {
+    symbol,
+    side:        "BUY",
+    type:        "LIMIT",
+    timeInForce: "GTC",
+    quantity:    (Math.floor(qty * 100) / 100).toFixed(2),
+    price:       (Math.round(price * 100) / 100).toFixed(2),
+  });
+}
+
+export async function placeLimitSellSolUsdt(symbol: string, qty: number, price: number): Promise<OrderResponse> {
+  return signedPost("/order", {
+    symbol,
+    side:        "SELL",
+    type:        "LIMIT",
+    timeInForce: "GTC",
+    quantity:    (Math.floor(qty * 100) / 100).toFixed(2),
+    price:       (Math.round(price * 100) / 100).toFixed(2),
+  });
+}
+
 // Cancel ALL open orders for a symbol at once
 export async function cancelAllOrders(symbol: string) {
   return signedDelete("/openOrders", { symbol });

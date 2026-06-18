@@ -98,9 +98,9 @@ export const xlmPureLagBot = schedules.task({
       logBtcPrice(price, liveGLPrice, book).catch(() => {});   // fire-and-forget, never block the run
       const xlmGLRet = spread;
       const investment = Math.min(settings.usdt_balance ?? ALLOCATION, usdtFree);
-      // entries only during US working hours 9am–4pm ET (13:00–20:00 UTC) — all 3 live days lost money outside this window
+      // entries only during 11am–12pm ET (15:00–16:00 UTC) — only profitable hour in live data
       const hourUTC  = new Date().getUTCHours();
-      const inWindow = hourUTC >= 13 && hourUTC < 20;
+      const inWindow = hourUTC >= 15 && hourUTC < 16;
       const signal   = spread >= GL_THRESH && glRet > 0 && usRet < glRet && inWindow;
       const pos        = await getPosition();
       if (pos) hadPosition = true;
@@ -396,7 +396,7 @@ export const xlmPureLagBot = schedules.task({
         const xlmGLRet2 = spread2;
         const investment2 = Math.min(settings.usdt_balance ?? ALLOCATION, usdtFree);
         const hourUTC2  = new Date().getUTCHours();
-        const inWindow2 = hourUTC2 >= 13 && hourUTC2 < 20;
+        const inWindow2 = hourUTC2 >= 15 && hourUTC2 < 16;
         if (spread2 >= GL_THRESH && glRet2 > 0 && usRet2 < glRet2 && inWindow2) {
           const btcHeld2 = await getFreeBalance("BTC");
           if (btcHeld2 >= 0.00001) {
