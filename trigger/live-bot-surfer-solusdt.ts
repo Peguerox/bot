@@ -13,14 +13,15 @@ import {
   getSurferUsdtState, updateSurferUsdtState, recordSurferUsdtTrade, logSurferUsdtRun,
 } from "../lib/surfer-usdt-db";
 
-const SYMBOL         = "SOLUSDT";
-const RSI_LOW        = 30;
-const MA_FAST        = 7;
-const MA_SLOW        = 25;
-const TREND_INTERVAL = "12h";
-const C15_LIMIT      = 110;
-const C12H_LIMIT     = 30;
-const MIN_NOTIONAL   = 10;   // SOLUSDT min notional in USD
+const SYMBOL           = "SOLUSDT";
+const RSI_LOW          = 30;
+const MA_FAST          = 7;
+const MA_SLOW          = 25;
+const TREND_INTERVAL   = "12h";
+const C15_LIMIT        = 110;
+const C12H_LIMIT       = 30;
+const MIN_NOTIONAL     = 10;   // SOLUSDT min notional in USD
+const USDT_ALLOCATION  = 50;   // max USDT to deploy per trade
 
 type Candle = { time: number; close: number };
 
@@ -138,8 +139,9 @@ export const surferSolUsdtBot = schedules.task({
 
       // ── Fire buy: armed + EMA bullish + EMA7 sloping up (Filter #3) ───────
       if (state.status === "idle" && state.mode === "USDT" && armedForSol && emaBullish && emaSloping) {
-        const usdtFree = await getFreeBalance("USDT");
-        const solQty   = floorQty(usdtFree / livePrice);
+        const usdtFree  = await getFreeBalance("USDT");
+        const usdtToUse = Math.min(usdtFree, USDT_ALLOCATION);
+        const solQty    = floorQty(usdtToUse / livePrice);
         if (solQty >= 0.01 && solQty * livePrice >= MIN_NOTIONAL) {
           const order = await placeLimitBuySolUsdt(SYMBOL, solQty, livePrice);
           await updateSurferUsdtState({
@@ -147,13 +149,13 @@ export const surferSolUsdtBot = schedules.task({
             armed_for_sol:  false,
             chase_order_id: order.orderId,
             chase_price:    roundPrice(livePrice),
-            entry_usdt:     usdtFree,
+            entry_usdt:     usdtToUse,
             entry_time:     new Date().toISOString(),
           });
-          log.push({ action: "START_BUY", price: livePrice, qty: solQty, usdtFree });
+          log.push({ action: "START_BUY", price: livePrice, qty: solQty, usdtFree: usdtToUse });
           armedForSol = false;
         } else {
-          log.push({ action: "SKIP_BUY", reason: "below_min", usdtFree, solQty });
+          log.push({ action: "SKIP_BUY", reason: "below_min", usdtFree: usdtToUse, solQty });
         }
       }
 
@@ -218,9 +220,10 @@ export const surferSolUsdtBot = schedules.task({
               }
             }
             if (cancelOk) {
-              const usdtFree = await getFreeBalance("USDT");
-              const solQty   = floorQty(usdtFree / newPrice);
-              const newOrder = await placeLimitBuySolUsdt(SYMBOL, solQty, newPrice);
+              const usdtFree  = await getFreeBalance("USDT");
+              const usdtToUse = Math.min(usdtFree, USDT_ALLOCATION);
+              const solQty    = floorQty(usdtToUse / newPrice);
+              const newOrder  = await placeLimitBuySolUsdt(SYMBOL, solQty, newPrice);
               await updateSurferUsdtState({ chase_order_id: newOrder.orderId, chase_price: newPrice });
               log.push({ action: "BUY_REPRICE", from: state.chase_price, to: newPrice });
             }
