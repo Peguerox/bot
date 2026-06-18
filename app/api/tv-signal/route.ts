@@ -1,5 +1,7 @@
 import { NextRequest, NextResponse } from "next/server";
 
+export const dynamic = "force-dynamic";
+
 const PRICE_BASE: Record<string, string> = {
   BINANCE:   "https://api.binance.com/api/v3/ticker/price?symbol=",
   BINANCEUS: "https://api.binance.us/api/v3/ticker/price?symbol=",

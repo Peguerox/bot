@@ -153,12 +153,26 @@ export default function TvSignalPanel() {
   }, [exchange, symbol, timeframe, poll]);
 
   function handleStart() {
-    const initialState: BotState = {
+    let state: BotState = {
       pos: "flat", usdt: capital, solQty: 0, entryPrice: 0,
       entrySignal: "NEUTRAL", roundTrips: 0, wins: 0, peak: capital, maxDD: 0, tradeLog: [],
     };
-    botRef.current = initialState;
-    setBot(initialState);
+
+    // Act immediately on the signal already displayed — don't wait for a new fetch
+    const currentSignal = toSignal(raw);
+    const currentPrice  = price;
+    if (currentPrice && (buyOn === "strong" ? currentSignal === "STRONG_BUY" : currentSignal === "STRONG_BUY" || currentSignal === "BUY")) {
+      const qty = state.usdt / currentPrice;
+      const now = new Date().toLocaleTimeString();
+      state = {
+        ...state, pos: "long", usdt: 0, solQty: qty,
+        entryPrice: currentPrice, entrySignal: currentSignal,
+        tradeLog: [{ time: now, side: "BUY" as const, price: currentPrice, qty, signal: currentSignal }],
+      };
+    }
+
+    botRef.current = state;
+    setBot(state);
     runningRef.current = true;
     setRunning(true);
     poll();
