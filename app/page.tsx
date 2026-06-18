@@ -779,8 +779,8 @@ export default function Dashboard() {
 
         {/* ── Paper bots ── */}
         <div className="grid grid-cols-1 md:grid-cols-2 gap-6 items-start">
-          <TvSignalPanel />
-          <TvSignalPanel />
+          <TvSignalPanel id={1} />
+          <TvSignalPanel id={2} />
         </div>
       </div>
     </main>
