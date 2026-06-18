@@ -13,6 +13,7 @@ export type SurferUsdtState = {
   entry_time: string | null;
   chase_order_id: number | null;
   chase_price: number | null;
+  usdt_balance: number;
 };
 
 export async function getSurferUsdtState(): Promise<SurferUsdtState> {

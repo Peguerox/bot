@@ -21,7 +21,6 @@ const TREND_INTERVAL   = "12h";
 const C15_LIMIT        = 110;
 const C12H_LIMIT       = 100;
 const MIN_NOTIONAL     = 10;   // SOLUSDT min notional in USD
-const USDT_ALLOCATION  = 50;   // max USDT to deploy per trade
 
 type Candle = { time: number; close: number };
 
@@ -140,7 +139,7 @@ export const surferSolUsdtBot = schedules.task({
       // ── Fire buy: armed + EMA bullish + EMA7 sloping up (Filter #3) ───────
       if (state.status === "idle" && state.mode === "USDT" && armedForSol && emaBullish && emaSloping) {
         const usdtFree  = await getFreeBalance("USDT");
-        const usdtToUse = Math.min(usdtFree, USDT_ALLOCATION);
+        const usdtToUse = Math.min(usdtFree, state.usdt_balance);  // compound: use bot's own tracked balance
         const solQty    = floorQty(usdtToUse / livePrice);
         if (solQty >= 0.01 && solQty * livePrice >= MIN_NOTIONAL) {
           const order = await placeLimitBuySolUsdt(SYMBOL, solQty, livePrice);
@@ -221,7 +220,7 @@ export const surferSolUsdtBot = schedules.task({
             }
             if (cancelOk) {
               const usdtFree  = await getFreeBalance("USDT");
-              const usdtToUse = Math.min(usdtFree, USDT_ALLOCATION);
+              const usdtToUse = Math.min(usdtFree, state.entry_usdt ?? state.usdt_balance);
               const solQty    = floorQty(usdtToUse / newPrice);
               const newOrder  = await placeLimitBuySolUsdt(SYMBOL, solQty, newPrice);
               await updateSurferUsdtState({ chase_order_id: newOrder.orderId, chase_price: newPrice });
@@ -251,6 +250,7 @@ export const surferSolUsdtBot = schedules.task({
             entry_time:     null,
             chase_order_id: null,
             chase_price:    null,
+            usdt_balance:   usdtOut,   // compound: next trade uses actual proceeds
           });
           await recordSurferUsdtTrade({
             entry_price:  state.entry_price!,
@@ -285,6 +285,7 @@ export const surferSolUsdtBot = schedules.task({
                   status: "idle", mode: "USDT", sol_quantity: null,
                   entry_price: null, entry_usdt: null, entry_time: null,
                   chase_order_id: null, chase_price: null,
+                  usdt_balance: usdtOut,   // compound: next trade uses actual proceeds
                 });
                 await recordSurferUsdtTrade({
                   entry_price: state.entry_price!, exit_price: exitPrice,
