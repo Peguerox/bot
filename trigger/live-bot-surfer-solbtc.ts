@@ -24,7 +24,7 @@ const MA_FAST        = 7;
 const MA_SLOW        = 25;
 const TREND_INTERVAL = "12h";
 const C15_LIMIT      = 110;   // fetch 110 15m candles; last one forming, use 109 closed
-const C12H_LIMIT     = 30;    // fetch 30 12h candles; last one forming, use 29 closed
+const C12H_LIMIT     = 100;   // fetch 100 12h candles; EMA(25) needs warmup (74 extra periods → seed weight ~0.2%)
 const MIN_NOTIONAL   = 0.0001; // SOLBTC min notional in BTC
 
 type Candle = { time: number; close: number };

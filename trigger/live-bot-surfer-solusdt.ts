@@ -19,7 +19,7 @@ const MA_FAST          = 7;
 const MA_SLOW          = 25;
 const TREND_INTERVAL   = "12h";
 const C15_LIMIT        = 110;
-const C12H_LIMIT       = 30;
+const C12H_LIMIT       = 100;
 const MIN_NOTIONAL     = 10;   // SOLUSDT min notional in USD
 const USDT_ALLOCATION  = 50;   // max USDT to deploy per trade
 
