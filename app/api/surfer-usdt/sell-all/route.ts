@@ -1,6 +1,6 @@
 import { NextResponse } from "next/server";
 import { getSupabaseAdmin } from "@/lib/supabase-admin";
-import { getFreeBalance, placeLimitSellSolUsdt, cancelAllOrders } from "@/lib/binance";
+import { placeLimitSellSolUsdt, cancelAllOrders } from "@/lib/binance";
 
 export async function POST() {
   const sb = getSupabaseAdmin();
@@ -8,8 +8,10 @@ export async function POST() {
   try {
     try { await cancelAllOrders("SOLUSDT"); } catch {}
 
-    const solFree = await getFreeBalance("SOL");
-    const solQty  = Math.floor(solFree * 100) / 100;
+    // Use tracked quantity — not getFreeBalance — so we don't accidentally
+    // sell SOL that belongs to the SOLBTC surfer bot running on the same account
+    const { data: st } = await sb.from("surfer_usdt_state").select("sol_quantity").eq("id", 1).single();
+    const solQty = Math.floor((parseFloat(st?.sol_quantity ?? "0")) * 100) / 100;
 
     let orderId: number | null = null;
     if (solQty >= 0.01) {
