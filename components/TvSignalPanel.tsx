@@ -173,21 +173,19 @@ export default function TvSignalPanel({ id }: { id: number }) {
   }, []);
 
   useEffect(() => {
-    load();
+    let active = true;
+    // Load DB config first, THEN poll — prevents fetching SOL price before config is ready
+    load().then(() => { if (active) poll(); });
+    const timer = setInterval(poll, 60_000);
+
     const sb = getSupabase();
     const ch = sb.channel(`tv-bot-${id}`)
       .on("postgres_changes", { event: "*", schema: "public", table: "tv_bot_state",  filter: `id=eq.${id}` },     load)
       .on("postgres_changes", { event: "*", schema: "public", table: "tv_bot_trades", filter: `bot_id=eq.${id}` }, load)
       .on("postgres_changes", { event: "*", schema: "public", table: "tv_bot_runs",   filter: `bot_id=eq.${id}` }, load)
       .subscribe();
-    return () => { sb.removeChannel(ch); };
-  }, [id]); // eslint-disable-line react-hooks/exhaustive-deps
-
-  useEffect(() => {
-    poll();
-    const timer = setInterval(poll, 60_000);
-    return () => clearInterval(timer);
-  }, [poll]);
+    return () => { active = false; clearInterval(timer); sb.removeChannel(ch); };
+  }, [id, poll]); // eslint-disable-line react-hooks/exhaustive-deps
 
   useEffect(() => {
     configRef.current = { exchange, symbol, timeframe };
