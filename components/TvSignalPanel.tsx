@@ -110,7 +110,8 @@ export default function TvSignalPanel({ id }: { id: number }) {
   const [sellOn,    setSellOn]    = useState<"sell" | "strong">("sell");
   const [capital,   setCapital]   = useState(1000);
 
-  const configRef = useRef({ exchange, symbol, timeframe });
+  const configRef      = useRef({ exchange, symbol, timeframe });
+  const initialLoaded  = useRef(false);
 
   async function load() {
     const sb = getSupabase();
@@ -121,13 +122,17 @@ export default function TvSignalPanel({ id }: { id: number }) {
     ]);
     if (st) {
       setState(st as BotState);
-      setExchange(st.exchange);
-      setSymbol(st.symbol);
-      setTimeframe(st.timeframe);
-      setBuyOn(st.buy_on);
-      setSellOn(st.sell_on);
-      setCapital(Number(st.capital));
-      configRef.current = { exchange: st.exchange, symbol: st.symbol, timeframe: st.timeframe };
+      // Only sync config fields on first load — after that the user owns those inputs
+      if (!initialLoaded.current) {
+        setExchange(st.exchange);
+        setSymbol(st.symbol);
+        setTimeframe(st.timeframe);
+        setBuyOn(st.buy_on);
+        setSellOn(st.sell_on);
+        setCapital(Number(st.capital));
+        configRef.current = { exchange: st.exchange, symbol: st.symbol, timeframe: st.timeframe };
+        initialLoaded.current = true;
+      }
     }
     setTrades((tr ?? []) as Trade[]);
     setRuns((ru ?? []) as Run[]);
