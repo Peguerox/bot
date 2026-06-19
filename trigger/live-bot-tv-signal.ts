@@ -3,6 +3,21 @@ import { getTvBotState, updateTvBotState, recordTvBotTrade, logTvBotRun } from "
 
 type Signal = "STRONG_BUY" | "BUY" | "NEUTRAL" | "SELL" | "STRONG_SELL";
 
+type SrcKey = "overall" | "ma" | "osc";
+type SignalConfig = {
+  sources: SrcKey[];
+  combo:   "any" | "all";
+  buy:     Partial<Record<SrcKey, "buy" | "strong">>;
+  sell:    Partial<Record<SrcKey, "sell" | "strong">>;
+};
+
+const DEFAULT_SIGNAL_CONFIG: SignalConfig = {
+  sources: ["overall"],
+  combo:   "all",
+  buy:     { overall: "buy" },
+  sell:    { overall: "sell" },
+};
+
 function toSignal(val: number | null): Signal {
   if (val == null) return "NEUTRAL";
   if (val >= 0.5)  return "STRONG_BUY";
@@ -10,6 +25,21 @@ function toSignal(val: number | null): Signal {
   if (val > -0.1)  return "NEUTRAL";
   if (val > -0.5)  return "SELL";
   return "STRONG_SELL";
+}
+
+function evalSignals(
+  cfg: SignalConfig,
+  raw: number | null, ma: number | null, osc: number | null,
+  dir: "buy" | "sell",
+): boolean {
+  const vals: Record<SrcKey, number | null> = { overall: raw, ma, osc };
+  const results = cfg.sources.map(src => {
+    const threshold = cfg[dir][src];
+    const sig = toSignal(vals[src]);
+    if (dir === "buy")  return threshold === "strong" ? sig === "STRONG_BUY"  : sig === "STRONG_BUY"  || sig === "BUY";
+    else                return threshold === "strong" ? sig === "STRONG_SELL" : sig === "STRONG_SELL" || sig === "SELL";
+  });
+  return cfg.combo === "all" ? results.every(Boolean) : results.some(Boolean);
 }
 
 const PRICE_BASE: Record<string, string> = {
@@ -56,11 +86,12 @@ async function runBot(id: number) {
 
   try {
     const { raw, ma, osc, price } = await fetchSignal(state.exchange, state.symbol, state.timeframe);
+    const cfg      = (state.signal_config as SignalConfig | null) ?? DEFAULT_SIGNAL_CONFIG;
     const signal   = toSignal(raw);
-    const wantBuy  = state.buy_on  === "strong" ? signal === "STRONG_BUY" : signal === "STRONG_BUY" || signal === "BUY";
-    const wantSell = state.sell_on === "strong" ? signal === "STRONG_SELL" : signal === "STRONG_SELL" || signal === "SELL";
+    const wantBuy  = evalSignals(cfg, raw, ma, osc, "buy");
+    const wantSell = evalSignals(cfg, raw, ma, osc, "sell");
 
-    log.push({ action: "CHECK", signal, raw, ma, osc, price, pos: state.pos });
+    log.push({ action: "CHECK", signal, raw, ma, osc, price, pos: state.pos, wantBuy, wantSell });
 
     if (state.mode === "paper") {
       if (state.pos === "flat" && wantBuy) {
@@ -111,7 +142,6 @@ export const tvSignalBot = schedules.task({
   maxDuration: 55,
 
   run: async () => {
-    // allSettled so one bot failing never kills the other
     await Promise.allSettled([runBot(1), runBot(2)]);
     return { ok: true };
   },

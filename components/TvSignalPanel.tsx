@@ -7,6 +7,27 @@ type Signal = "STRONG_BUY" | "BUY" | "NEUTRAL" | "SELL" | "STRONG_SELL";
 type Trade  = { id: string; side: "BUY" | "SELL"; price: number; qty: number; signal: string; pnl_pct?: number; created_at: string };
 type Run    = { id: string; run_at: string; data: { actions: any[] } };
 
+type SrcKey = "overall" | "ma" | "osc";
+type SignalConfig = {
+  sources: SrcKey[];
+  combo:   "any" | "all";
+  buy:     Partial<Record<SrcKey, "buy" | "strong">>;
+  sell:    Partial<Record<SrcKey, "sell" | "strong">>;
+};
+
+const DEFAULT_SIGNAL_CONFIG: SignalConfig = {
+  sources: ["overall"],
+  combo:   "all",
+  buy:     { overall: "buy" },
+  sell:    { overall: "sell" },
+};
+
+const SOURCE_LIST: { key: SrcKey; label: string }[] = [
+  { key: "overall", label: "Overall" },
+  { key: "ma",      label: "MA" },
+  { key: "osc",     label: "Oscillators" },
+];
+
 const TF_OPTIONS = ["1", "5", "15", "60", "240", "1D", "1W"];
 const TF_LABELS: Record<string, string> = {
   "1": "1m", "5": "5m", "15": "15m", "60": "1h", "240": "4h", "1D": "1D", "1W": "1W",
@@ -29,7 +50,6 @@ function toSignal(val: number | null): Signal {
   return "STRONG_SELL";
 }
 
-// Adaptive price formatting for any coin
 function fmtPrice(p: number | null | undefined): string {
   const n = Number(p);
   if (!n || isNaN(n)) return "—";
@@ -40,7 +60,6 @@ function fmtPrice(p: number | null | undefined): string {
   return `$${n.toFixed(8)}`;
 }
 
-// Extract coin ticker from symbol (PEPEUSDT → PEPE, SOLUSD → SOL)
 function coinFromSymbol(sym: string): string {
   return sym.replace(/USDT$/, "").replace(/USD$/, "").replace(/BTC$/, "").replace(/ETH$/, "");
 }
@@ -65,23 +84,22 @@ function Stat({ label, value, sub, color }: { label: string; value: string; sub:
 }
 
 interface BotState {
-  enabled:      boolean;
-  mode:         "paper" | "live";
-  exchange:     string;
-  symbol:       string;
-  timeframe:    string;
-  buy_on:       "buy" | "strong";
-  sell_on:      "sell" | "strong";
-  capital:      number;
-  pos:          "flat" | "long";
-  usdt:         number;
-  sol_qty:      number;
-  entry_price:  number;
-  entry_signal: string;
-  round_trips:  number;
-  wins:         number;
-  peak:         number;
-  max_dd:       number;
+  enabled:       boolean;
+  mode:          "paper" | "live";
+  exchange:      string;
+  symbol:        string;
+  timeframe:     string;
+  capital:       number;
+  pos:           "flat" | "long";
+  usdt:          number;
+  sol_qty:       number;
+  entry_price:   number;
+  entry_signal:  string;
+  round_trips:   number;
+  wins:          number;
+  peak:          number;
+  max_dd:        number;
+  signal_config: SignalConfig | null;
 }
 
 function formatRunAction(a: any): { text: string; color: string } {
@@ -110,7 +128,6 @@ export default function TvSignalPanel({ id }: { id: number }) {
   const [saving,    setSaving]    = useState(false);
   const [resetting, setResetting] = useState(false);
 
-  // Browser-side signal display (independent of Trigger.dev)
   const [raw,      setRaw]      = useState<number | null>(null);
   const [ma,       setMa]       = useState<number | null>(null);
   const [osc,      setOsc]      = useState<number | null>(null);
@@ -118,19 +135,31 @@ export default function TvSignalPanel({ id }: { id: number }) {
   const [lastPoll, setLastPoll] = useState<string | null>(null);
   const [polling,  setPolling]  = useState(false);
 
-  // Local config edits (only persisted on Save)
-  const [exchange,  setExchange]  = useState("BINANCEUS");
-  const [symbol,    setSymbol]    = useState("SOLUSD");
-  const [timeframe, setTimeframe] = useState("60");
-  const [buyOn,     setBuyOn]     = useState<"buy" | "strong">("buy");
-  const [sellOn,    setSellOn]    = useState<"sell" | "strong">("sell");
-  const [capital,   setCapital]   = useState(1000);
+  const [exchange,     setExchange]     = useState("BINANCEUS");
+  const [symbol,       setSymbol]       = useState("SOLUSD");
+  const [timeframe,    setTimeframe]    = useState("60");
+  const [capital,      setCapital]      = useState(1000);
+  const [signalConfig, setSignalConfig] = useState<SignalConfig>(DEFAULT_SIGNAL_CONFIG);
 
   const configRef     = useRef({ exchange, symbol, timeframe });
   const initialLoaded = useRef(false);
 
   function clearSignal() {
     setRaw(null); setMa(null); setOsc(null); setPrice(null); setLastPoll(null);
+  }
+
+  function toggleSource(src: SrcKey) {
+    setSignalConfig(prev => {
+      const next = prev.sources.includes(src)
+        ? prev.sources.filter(s => s !== src)
+        : [...prev.sources, src];
+      if (next.length === 0) return prev;
+      return { ...prev, sources: next };
+    });
+  }
+
+  function setThreshold(dir: "buy" | "sell", src: SrcKey, val: string) {
+    setSignalConfig(prev => ({ ...prev, [dir]: { ...prev[dir], [src]: val } }));
   }
 
   async function load() {
@@ -146,9 +175,8 @@ export default function TvSignalPanel({ id }: { id: number }) {
         setExchange(st.exchange);
         setSymbol(st.symbol);
         setTimeframe(st.timeframe);
-        setBuyOn(st.buy_on);
-        setSellOn(st.sell_on);
         setCapital(Number(st.capital));
+        setSignalConfig(st.signal_config ?? DEFAULT_SIGNAL_CONFIG);
         configRef.current = { exchange: st.exchange, symbol: st.symbol, timeframe: st.timeframe };
         initialLoaded.current = true;
       }
@@ -174,10 +202,8 @@ export default function TvSignalPanel({ id }: { id: number }) {
 
   useEffect(() => {
     let active = true;
-    // Load DB config first, THEN poll — prevents fetching SOL price before config is ready
     load().then(() => { if (active) poll(); });
     const timer = setInterval(poll, 60_000);
-
     const sb = getSupabase();
     const ch = sb.channel(`tv-bot-${id}`)
       .on("postgres_changes", { event: "*", schema: "public", table: "tv_bot_state",  filter: `id=eq.${id}` },     load)
@@ -215,14 +241,14 @@ export default function TvSignalPanel({ id }: { id: number }) {
 
   async function handleSaveConfig() {
     setSaving(true);
-    clearSignal(); // clear stale signal immediately while new coin fetches
+    clearSignal();
     await fetch("/api/tv-bot/config", {
       method: "POST", headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ id, exchange, symbol, timeframe, buy_on: buyOn, sell_on: sellOn, capital }),
+      body: JSON.stringify({ id, exchange, symbol, timeframe, capital, signal_config: signalConfig }),
     });
     configRef.current = { exchange, symbol, timeframe };
     await load();
-    poll(); // fetch signal for the new coin
+    poll();
     setSaving(false);
   }
 
@@ -234,17 +260,21 @@ export default function TvSignalPanel({ id }: { id: number }) {
     );
   }
 
-  const signal    = toSignal(raw);
-  const coin      = coinFromSymbol(state.symbol);
-  const solQty    = Number(state.sol_qty);
-  const entryP    = Number(state.entry_price);
-  const equity    = state.pos === "long" && price ? solQty * price : Number(state.usdt);
-  const pnlPct    = (equity / Number(state.capital) - 1) * 100;
-  const unreal    = state.pos === "long" && price && entryP ? (price / entryP - 1) * 100 : 0;
-  const winRate   = Number(state.round_trips) > 0 ? (Number(state.wins) / Number(state.round_trips) * 100).toFixed(1) : "—";
-  const buyLabel  = buyOn  === "strong" ? "Strong Buy only"  : "Buy or Strong Buy";
-  const sellLabel = sellOn === "strong" ? "Strong Sell only" : "Sell or Strong Sell";
-  const runBuyLabel = state.buy_on === "strong" ? "Strong Buy only" : "Buy or Strong Buy";
+  const signal  = toSignal(raw);
+  const coin    = coinFromSymbol(state.symbol);
+  const solQty  = Number(state.sol_qty);
+  const entryP  = Number(state.entry_price);
+  const equity  = state.pos === "long" && price ? solQty * price : Number(state.usdt);
+  const pnlPct  = (equity / Number(state.capital) - 1) * 100;
+  const unreal  = state.pos === "long" && price && entryP ? (price / entryP - 1) * 100 : 0;
+  const winRate = Number(state.round_trips) > 0 ? (Number(state.wins) / Number(state.round_trips) * 100).toFixed(1) : "—";
+
+  const activeCfg    = state.signal_config ?? DEFAULT_SIGNAL_CONFIG;
+  const srcLabel     = activeCfg.sources.map(s => SOURCE_LIST.find(x => x.key === s)?.label ?? s).join(" + ");
+  const comboLabel   = activeCfg.sources.length > 1 ? ` (${activeCfg.combo === "all" ? "all agree" : "any"})` : "";
+  const waitingLabel = activeCfg.sources.length === 1
+    ? (activeCfg.buy[activeCfg.sources[0]] === "strong" ? "Strong Buy" : "Buy signal")
+    : `${activeCfg.combo === "all" ? "all sources agree" : "any source"}`;
 
   return (
     <div className="bg-gray-900 rounded-xl p-5 space-y-5 flex flex-col">
@@ -281,15 +311,17 @@ export default function TvSignalPanel({ id }: { id: number }) {
           </div>
         </div>
         <p className="text-gray-500 text-xs">
-          {exchange}:{symbol} · {TF_LABELS[timeframe] ?? timeframe} · {buyLabel} → {sellLabel}
+          {exchange}:{symbol} · {TF_LABELS[timeframe] ?? timeframe} · {srcLabel}{comboLabel}
           {lastPoll && <span className="ml-2 text-gray-600">polled {lastPoll}</span>}
         </p>
       </div>
 
-      {/* Config (only when stopped) */}
+      {/* Config */}
       {!state.enabled && (
         <div className="bg-gray-800/50 rounded-lg p-3 space-y-3">
           <p className="text-gray-500 text-xs uppercase tracking-wide">Configuration</p>
+
+          {/* Exchange / Symbol / Timeframe / Capital */}
           <div className="grid grid-cols-2 gap-2">
             <div className="flex flex-col gap-1">
               <label className="text-gray-500 text-xs">Exchange</label>
@@ -330,29 +362,71 @@ export default function TvSignalPanel({ id }: { id: number }) {
                 className="bg-gray-700 text-white text-xs rounded px-2 py-1.5 border border-gray-600"
               />
             </div>
-            <div className="flex flex-col gap-1">
-              <label className="text-gray-500 text-xs">Enter on</label>
-              <select
-                value={buyOn}
-                onChange={e => setBuyOn(e.target.value as "buy" | "strong")}
-                className="bg-gray-700 text-white text-xs rounded px-2 py-1.5 border border-gray-600"
-              >
-                <option value="buy">Buy or Strong Buy</option>
-                <option value="strong">Strong Buy only</option>
-              </select>
-            </div>
-            <div className="flex flex-col gap-1">
-              <label className="text-gray-500 text-xs">Exit on</label>
-              <select
-                value={sellOn}
-                onChange={e => setSellOn(e.target.value as "sell" | "strong")}
-                className="bg-gray-700 text-white text-xs rounded px-2 py-1.5 border border-gray-600"
-              >
-                <option value="sell">Sell or Strong Sell</option>
-                <option value="strong">Strong Sell only</option>
-              </select>
-            </div>
           </div>
+
+          {/* Signal Sources */}
+          <div className="space-y-2 pt-1 border-t border-gray-700/50">
+            <div className="flex items-center justify-between">
+              <p className="text-gray-500 text-xs uppercase tracking-wide">Signal Sources</p>
+              <div className="flex gap-1 text-gray-600 text-xs pr-0.5">
+                <span className="w-[5.5rem] text-center">Enter on</span>
+                <span className="w-[5.5rem] text-center">Exit on</span>
+              </div>
+            </div>
+            {SOURCE_LIST.map(({ key, label }) => {
+              const enabled = signalConfig.sources.includes(key);
+              return (
+                <div key={key} className="flex items-center gap-2">
+                  <input
+                    type="checkbox"
+                    id={`src-${id}-${key}`}
+                    checked={enabled}
+                    onChange={() => toggleSource(key)}
+                    className="accent-blue-500 cursor-pointer shrink-0"
+                  />
+                  <label htmlFor={`src-${id}-${key}`} className="text-gray-400 text-xs w-20 cursor-pointer shrink-0">
+                    {label}
+                  </label>
+                  {enabled ? (
+                    <div className="flex gap-1 flex-1">
+                      <select
+                        value={signalConfig.buy[key] ?? "buy"}
+                        onChange={e => setThreshold("buy", key, e.target.value)}
+                        className="bg-gray-700 text-white text-xs rounded px-1 py-1 border border-gray-600 flex-1 min-w-0"
+                      >
+                        <option value="buy">Buy or Strong</option>
+                        <option value="strong">Strong only</option>
+                      </select>
+                      <select
+                        value={signalConfig.sell[key] ?? "sell"}
+                        onChange={e => setThreshold("sell", key, e.target.value)}
+                        className="bg-gray-700 text-white text-xs rounded px-1 py-1 border border-gray-600 flex-1 min-w-0"
+                      >
+                        <option value="sell">Sell or Strong</option>
+                        <option value="strong">Strong only</option>
+                      </select>
+                    </div>
+                  ) : (
+                    <span className="text-gray-700 text-xs">off</span>
+                  )}
+                </div>
+              );
+            })}
+            {signalConfig.sources.length > 1 && (
+              <div className="flex items-center gap-2 pt-1.5 border-t border-gray-700/40">
+                <span className="text-gray-500 text-xs w-20 shrink-0">Combo rule</span>
+                <select
+                  value={signalConfig.combo}
+                  onChange={e => setSignalConfig(prev => ({ ...prev, combo: e.target.value as "any" | "all" }))}
+                  className="bg-gray-700 text-white text-xs rounded px-2 py-1 border border-gray-600 flex-1"
+                >
+                  <option value="all">All must agree</option>
+                  <option value="any">Any signal triggers</option>
+                </select>
+              </div>
+            )}
+          </div>
+
           <button
             onClick={handleSaveConfig}
             disabled={saving}
@@ -426,7 +500,7 @@ export default function TvSignalPanel({ id }: { id: number }) {
         ) : (
           <div className="bg-gray-800/30 rounded-lg p-3 text-center">
             <p className="text-gray-500 text-sm">
-              {state.enabled ? `flat — waiting for ${runBuyLabel}` : "not started"}
+              {state.enabled ? `flat — waiting for ${waitingLabel}` : "not started"}
             </p>
           </div>
         )}
