@@ -38,6 +38,7 @@ async function fetchSignal(exchange: string, symbol: string, timeframe: string) 
   const priceJson = await priceRes.json();
   const [raw, ma, osc] = tvJson.data?.[0]?.d ?? [null, null, null];
   const price = parseFloat(priceJson.price ?? "0");
+  if (!price || price <= 0) throw new Error(`Invalid price for ${symbol}: ${JSON.stringify(priceJson)}`);
   return { raw, ma, osc, price };
 }
 
@@ -48,7 +49,7 @@ async function runBot(id: number) {
   try {
     state = await getTvBotState(id);
   } catch (err) {
-    await logTvBotRun(id, { actions: [{ action: "ERROR", stage: "state", error: String(err) }] });
+    try { await logTvBotRun(id, { actions: [{ action: "ERROR", stage: "state", error: String(err) }] }); } catch {}
     return;
   }
   if (!state.enabled) return;
@@ -62,7 +63,7 @@ async function runBot(id: number) {
     log.push({ action: "CHECK", signal, raw, ma, osc, price, pos: state.pos });
 
     if (state.mode === "paper") {
-      if (state.pos === "flat" && wantBuy && price > 0) {
+      if (state.pos === "flat" && wantBuy) {
         const qty = state.usdt / price;
         await updateTvBotState(id, {
           pos: "long", usdt: 0, sol_qty: qty,
@@ -71,21 +72,24 @@ async function runBot(id: number) {
         await recordTvBotTrade({ bot_id: id, side: "BUY", price, qty, signal });
         log.push({ action: "BUY", price, qty, signal });
 
-      } else if (state.pos === "long" && wantSell && price > 0) {
-        const out      = state.sol_qty * price;
-        const pnlPct   = (out / (state.entry_price * state.sol_qty) - 1) * 100;
-        const isWin    = pnlPct > 0;
-        const newPeak  = Math.max(state.peak, out);
-        const newMaxDD = Math.max(state.max_dd, (newPeak - out) / newPeak * 100);
+      } else if (state.pos === "long" && wantSell) {
+        const entryPrice = Number(state.entry_price);
+        const solQty     = Number(state.sol_qty);
+        const out        = solQty * price;
+        const cost       = entryPrice * solQty;
+        const pnlPct     = cost > 0 ? (out / cost - 1) * 100 : 0;
+        const isWin      = pnlPct > 0;
+        const newPeak    = Math.max(Number(state.peak), out);
+        const newMaxDD   = Math.max(Number(state.max_dd), newPeak > 0 ? (newPeak - out) / newPeak * 100 : 0);
         await updateTvBotState(id, {
           pos: "flat", usdt: out, sol_qty: 0,
           entry_price: 0, entry_signal: "NEUTRAL",
-          round_trips: state.round_trips + 1,
-          wins:        state.wins + (isWin ? 1 : 0),
+          round_trips: Number(state.round_trips) + 1,
+          wins:        Number(state.wins) + (isWin ? 1 : 0),
           peak:        newPeak,
           max_dd:      newMaxDD,
         });
-        await recordTvBotTrade({ bot_id: id, side: "SELL", price, qty: state.sol_qty, signal, pnl_pct: pnlPct });
+        await recordTvBotTrade({ bot_id: id, side: "SELL", price, qty: solQty, signal, pnl_pct: pnlPct });
         log.push({ action: "SELL", price, pnlPct, signal });
       }
     }
@@ -96,7 +100,9 @@ async function runBot(id: number) {
     log.push({ action: "ERROR", stage: "trading", error: String(err) });
   }
 
-  await logTvBotRun(id, { actions: log });
+  try {
+    await logTvBotRun(id, { actions: log });
+  } catch {}
 }
 
 export const tvSignalBot = schedules.task({
@@ -105,7 +111,8 @@ export const tvSignalBot = schedules.task({
   maxDuration: 55,
 
   run: async () => {
-    await Promise.all([runBot(1), runBot(2)]);
+    // allSettled so one bot failing never kills the other
+    await Promise.allSettled([runBot(1), runBot(2)]);
     return { ok: true };
   },
 });

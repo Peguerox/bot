@@ -29,6 +29,22 @@ function toSignal(val: number | null): Signal {
   return "STRONG_SELL";
 }
 
+// Adaptive price formatting for any coin
+function fmtPrice(p: number | null | undefined): string {
+  const n = Number(p);
+  if (!n || isNaN(n)) return "—";
+  if (n >= 1000)   return `$${n.toFixed(2)}`;
+  if (n >= 1)      return `$${n.toFixed(4)}`;
+  if (n >= 0.01)   return `$${n.toFixed(4)}`;
+  if (n >= 0.0001) return `$${n.toFixed(6)}`;
+  return `$${n.toFixed(8)}`;
+}
+
+// Extract coin ticker from symbol (PEPEUSDT → PEPE, SOLUSD → SOL)
+function coinFromSymbol(sym: string): string {
+  return sym.replace(/USDT$/, "").replace(/USD$/, "").replace(/BTC$/, "").replace(/ETH$/, "");
+}
+
 function SignalBadge({ signal }: { signal: string }) {
   const m = SIGNAL_META[signal as Signal] ?? SIGNAL_META.NEUTRAL;
   return (
@@ -70,18 +86,18 @@ interface BotState {
 
 function formatRunAction(a: any): { text: string; color: string } {
   if (a.action === "CHECK") return {
-    text:  `WATCH  signal=${a.signal}  price=$${Number(a.price).toFixed(2)}`,
+    text:  `WATCH  signal=${a.signal}  price=${fmtPrice(a.price)}`,
     color: "text-gray-500",
   };
   if (a.action === "BUY") return {
-    text:  `BUY  qty=${Number(a.qty).toFixed(4)}  @$${Number(a.price).toFixed(2)}  [${a.signal}]`,
+    text:  `BUY  qty=${Number(a.qty).toFixed(2)}  @${fmtPrice(a.price)}  [${a.signal}]`,
     color: "text-green-400",
   };
   if (a.action === "SELL") return {
-    text:  `SELL  @$${Number(a.price).toFixed(2)}  pnl=${Number(a.pnlPct).toFixed(3)}%  [${a.signal}]`,
+    text:  `SELL  @${fmtPrice(a.price)}  pnl=${Number(a.pnlPct).toFixed(3)}%  [${a.signal}]`,
     color: "text-red-400",
   };
-  if (a.action === "ERROR") return { text: `ERROR: ${a.error}`, color: "text-red-500" };
+  if (a.action === "ERROR") return { text: `ERROR (${a.stage}): ${a.error}`, color: "text-red-500" };
   return { text: JSON.stringify(a), color: "text-gray-600" };
 }
 
@@ -110,8 +126,12 @@ export default function TvSignalPanel({ id }: { id: number }) {
   const [sellOn,    setSellOn]    = useState<"sell" | "strong">("sell");
   const [capital,   setCapital]   = useState(1000);
 
-  const configRef      = useRef({ exchange, symbol, timeframe });
-  const initialLoaded  = useRef(false);
+  const configRef     = useRef({ exchange, symbol, timeframe });
+  const initialLoaded = useRef(false);
+
+  function clearSignal() {
+    setRaw(null); setMa(null); setOsc(null); setPrice(null); setLastPoll(null);
+  }
 
   async function load() {
     const sb = getSupabase();
@@ -122,7 +142,6 @@ export default function TvSignalPanel({ id }: { id: number }) {
     ]);
     if (st) {
       setState(st as BotState);
-      // Only sync config fields on first load — after that the user owns those inputs
       if (!initialLoaded.current) {
         setExchange(st.exchange);
         setSymbol(st.symbol);
@@ -157,9 +176,9 @@ export default function TvSignalPanel({ id }: { id: number }) {
     load();
     const sb = getSupabase();
     const ch = sb.channel(`tv-bot-${id}`)
-      .on("postgres_changes", { event: "*", schema: "public", table: "tv_bot_state",  filter: `id=eq.${id}` },       load)
-      .on("postgres_changes", { event: "*", schema: "public", table: "tv_bot_trades", filter: `bot_id=eq.${id}` },   load)
-      .on("postgres_changes", { event: "*", schema: "public", table: "tv_bot_runs",   filter: `bot_id=eq.${id}` },   load)
+      .on("postgres_changes", { event: "*", schema: "public", table: "tv_bot_state",  filter: `id=eq.${id}` },     load)
+      .on("postgres_changes", { event: "*", schema: "public", table: "tv_bot_trades", filter: `bot_id=eq.${id}` }, load)
+      .on("postgres_changes", { event: "*", schema: "public", table: "tv_bot_runs",   filter: `bot_id=eq.${id}` }, load)
       .subscribe();
     return () => { sb.removeChannel(ch); };
   }, [id]); // eslint-disable-line react-hooks/exhaustive-deps
@@ -191,19 +210,21 @@ export default function TvSignalPanel({ id }: { id: number }) {
       method: "POST", headers: { "Content-Type": "application/json" },
       body: JSON.stringify({ id }),
     });
+    clearSignal();
     await load();
     setResetting(false);
   }
 
   async function handleSaveConfig() {
     setSaving(true);
+    clearSignal(); // clear stale signal immediately while new coin fetches
     await fetch("/api/tv-bot/config", {
       method: "POST", headers: { "Content-Type": "application/json" },
       body: JSON.stringify({ id, exchange, symbol, timeframe, buy_on: buyOn, sell_on: sellOn, capital }),
     });
     configRef.current = { exchange, symbol, timeframe };
-    poll();
     await load();
+    poll(); // fetch signal for the new coin
     setSaving(false);
   }
 
@@ -216,12 +237,16 @@ export default function TvSignalPanel({ id }: { id: number }) {
   }
 
   const signal    = toSignal(raw);
-  const equity    = state.pos === "long" && price ? state.sol_qty * price : state.usdt;
-  const pnlPct    = (equity / state.capital - 1) * 100;
-  const unreal    = state.pos === "long" && price && state.entry_price ? (price / state.entry_price - 1) * 100 : 0;
-  const winRate   = state.round_trips > 0 ? (state.wins / state.round_trips * 100).toFixed(1) : "—";
-  const buyLabel  = state.buy_on  === "strong" ? "Strong Buy only"  : "Buy or Strong Buy";
-  const sellLabel = state.sell_on === "strong" ? "Strong Sell only" : "Sell or Strong Sell";
+  const coin      = coinFromSymbol(state.symbol);
+  const solQty    = Number(state.sol_qty);
+  const entryP    = Number(state.entry_price);
+  const equity    = state.pos === "long" && price ? solQty * price : Number(state.usdt);
+  const pnlPct    = (equity / Number(state.capital) - 1) * 100;
+  const unreal    = state.pos === "long" && price && entryP ? (price / entryP - 1) * 100 : 0;
+  const winRate   = Number(state.round_trips) > 0 ? (Number(state.wins) / Number(state.round_trips) * 100).toFixed(1) : "—";
+  const buyLabel  = buyOn  === "strong" ? "Strong Buy only"  : "Buy or Strong Buy";
+  const sellLabel = sellOn === "strong" ? "Strong Sell only" : "Sell or Strong Sell";
+  const runBuyLabel = state.buy_on === "strong" ? "Strong Buy only" : "Buy or Strong Buy";
 
   return (
     <div className="bg-gray-900 rounded-xl p-5 space-y-5 flex flex-col">
@@ -272,7 +297,7 @@ export default function TvSignalPanel({ id }: { id: number }) {
               <label className="text-gray-500 text-xs">Exchange</label>
               <select
                 value={exchange}
-                onChange={e => { const ex = e.target.value; setExchange(ex); setSymbol(ex === "BINANCE" ? "SOLUSDT" : "SOLUSD"); }}
+                onChange={e => setExchange(e.target.value)}
                 className="bg-gray-700 text-white text-xs rounded px-2 py-1.5 border border-gray-600"
               >
                 <option value="BINANCEUS">Binance US</option>
@@ -283,9 +308,9 @@ export default function TvSignalPanel({ id }: { id: number }) {
               <label className="text-gray-500 text-xs">Symbol</label>
               <input
                 value={symbol}
-                onChange={e => setSymbol(e.target.value.toUpperCase())}
+                onChange={e => { setSymbol(e.target.value.toUpperCase()); clearSignal(); }}
                 className="bg-gray-700 text-white text-xs rounded px-2 py-1.5 border border-gray-600 font-mono"
-                placeholder="SOLUSD"
+                placeholder="e.g. PEPEUSDT"
               />
             </div>
             <div className="flex flex-col gap-1">
@@ -361,13 +386,13 @@ export default function TvSignalPanel({ id }: { id: number }) {
         <Stat
           label="Equity"
           value={`$${equity.toFixed(2)}`}
-          sub={`${pnlPct >= 0 ? "+" : ""}${pnlPct.toFixed(3)}% vs $${state.capital}`}
+          sub={`${pnlPct >= 0 ? "+" : ""}${pnlPct.toFixed(3)}% vs $${Number(state.capital)}`}
           color={pnlPct >= 0 ? "text-green-400" : "text-red-400"}
         />
         <Stat
           label="Win Rate"
           value={winRate === "—" ? "—" : `${winRate}%`}
-          sub={`${state.wins}W / ${state.round_trips - state.wins}L · maxDD ${Number(state.max_dd).toFixed(2)}%`}
+          sub={`${Number(state.wins)}W / ${Number(state.round_trips) - Number(state.wins)}L · maxDD ${Number(state.max_dd).toFixed(2)}%`}
           color="text-blue-400"
         />
       </div>
@@ -378,12 +403,12 @@ export default function TvSignalPanel({ id }: { id: number }) {
         {state.pos === "long" ? (
           <div className="bg-green-500/10 border border-green-500/20 rounded-lg p-3 space-y-1.5">
             <div className="flex justify-between text-sm">
-              <span className="text-gray-400">SOL held</span>
-              <span className="text-white font-mono">{Number(state.sol_qty).toFixed(4)} SOL</span>
+              <span className="text-gray-400">{coin} held</span>
+              <span className="text-white font-mono">{solQty.toFixed(2)} {coin}</span>
             </div>
             <div className="flex justify-between text-sm">
               <span className="text-gray-400">Entry price</span>
-              <span className="text-white font-mono">${Number(state.entry_price).toFixed(2)}</span>
+              <span className="text-white font-mono">{fmtPrice(entryP)}</span>
             </div>
             <div className="flex justify-between text-sm">
               <span className="text-gray-400">Entry signal</span>
@@ -391,7 +416,7 @@ export default function TvSignalPanel({ id }: { id: number }) {
             </div>
             <div className="flex justify-between text-sm">
               <span className="text-gray-400">Current</span>
-              <span className="text-white font-mono">${price?.toFixed(2) ?? "—"}</span>
+              <span className="text-white font-mono">{fmtPrice(price)}</span>
             </div>
             <div className="flex justify-between text-sm">
               <span className="text-gray-400">Unrealized P&L</span>
@@ -403,7 +428,7 @@ export default function TvSignalPanel({ id }: { id: number }) {
         ) : (
           <div className="bg-gray-800/30 rounded-lg p-3 text-center">
             <p className="text-gray-500 text-sm">
-              {state.enabled ? `flat — waiting for ${buyLabel}` : "not started"}
+              {state.enabled ? `flat — waiting for ${runBuyLabel}` : "not started"}
             </p>
           </div>
         )}
@@ -438,7 +463,7 @@ export default function TvSignalPanel({ id }: { id: number }) {
                         [{SIGNAL_META[t.signal as Signal]?.label.trim() ?? t.signal}]
                       </span>
                     </td>
-                    <td className="py-1.5 text-right text-gray-300">${Number(t.price).toFixed(2)}</td>
+                    <td className="py-1.5 text-right text-gray-300">{fmtPrice(Number(t.price))}</td>
                     <td className={`py-1.5 text-right ${t.pnl_pct == null ? "text-gray-600" : Number(t.pnl_pct) >= 0 ? "text-green-400" : "text-red-400"}`}>
                       {t.pnl_pct != null ? `${Number(t.pnl_pct) >= 0 ? "+" : ""}${Number(t.pnl_pct).toFixed(3)}%` : "—"}
                     </td>
