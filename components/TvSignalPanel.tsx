@@ -258,7 +258,7 @@ export default function TvSignalPanel({ id }: { id: number }) {
           </div>
         </div>
         <p className="text-gray-500 text-xs">
-          {state.exchange}:{state.symbol} · {TF_LABELS[state.timeframe] ?? state.timeframe} · {buyLabel} → {sellLabel}
+          {exchange}:{symbol} · {TF_LABELS[timeframe] ?? timeframe} · {buyLabel} → {sellLabel}
           {lastPoll && <span className="ml-2 text-gray-600">polled {lastPoll}</span>}
         </p>
       </div>
