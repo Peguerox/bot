@@ -9,17 +9,17 @@ type Run    = { id: string; run_at: string; data: { actions: any[] } };
 
 type SrcKey = "overall" | "ma" | "osc";
 type SignalConfig = {
-  sources: SrcKey[];
-  combo:   "any" | "all";
-  buy:     Partial<Record<SrcKey, "buy" | "strong">>;
-  sell:    Partial<Record<SrcKey, "sell" | "strong">>;
+  sources:        SrcKey[];
+  combo:          "any" | "all";
+  buy_threshold:  Partial<Record<SrcKey, number>>;
+  sell_threshold: Partial<Record<SrcKey, number>>;
 };
 
 const DEFAULT_SIGNAL_CONFIG: SignalConfig = {
-  sources: ["overall"],
-  combo:   "all",
-  buy:     { overall: "buy" },
-  sell:    { overall: "sell" },
+  sources:        ["overall"],
+  combo:          "all",
+  buy_threshold:  { overall: 0.1 },
+  sell_threshold: { overall: -0.1 },
 };
 
 const SOURCE_LIST: { key: SrcKey; label: string }[] = [
@@ -158,7 +158,7 @@ export default function TvSignalPanel({ id }: { id: number }) {
     });
   }
 
-  function setThreshold(dir: "buy" | "sell", src: SrcKey, val: string) {
+  function setThreshold(dir: "buy_threshold" | "sell_threshold", src: SrcKey, val: number) {
     setSignalConfig(prev => ({ ...prev, [dir]: { ...prev[dir], [src]: val } }));
   }
 
@@ -270,11 +270,15 @@ export default function TvSignalPanel({ id }: { id: number }) {
   const winRate = Number(state.round_trips) > 0 ? (Number(state.wins) / Number(state.round_trips) * 100).toFixed(1) : "—";
 
   const activeCfg    = state.signal_config ?? DEFAULT_SIGNAL_CONFIG;
-  const srcLabel     = activeCfg.sources.map(s => SOURCE_LIST.find(x => x.key === s)?.label ?? s).join(" + ");
-  const comboLabel   = activeCfg.sources.length > 1 ? ` (${activeCfg.combo === "all" ? "all agree" : "any"})` : "";
+  const srcLabel     = activeCfg.sources.map(s => {
+    const lbl  = SOURCE_LIST.find(x => x.key === s)?.label ?? s;
+    const buyT = (activeCfg.buy_threshold?.[s] ?? 0.1).toFixed(2);
+    return `${lbl}≥${buyT}`;
+  }).join(" + ");
+  const comboLabel   = activeCfg.sources.length > 1 ? ` (${activeCfg.combo === "all" ? "all" : "any"})` : "";
   const waitingLabel = activeCfg.sources.length === 1
-    ? (activeCfg.buy[activeCfg.sources[0]] === "strong" ? "Strong Buy" : "Buy signal")
-    : `${activeCfg.combo === "all" ? "all sources agree" : "any source"}`;
+    ? `score ≥ ${(activeCfg.buy_threshold?.[activeCfg.sources[0]] ?? 0.1).toFixed(2)}`
+    : `${activeCfg.combo === "all" ? "all sources" : "any source"} to agree`;
 
   return (
     <div className="bg-gray-900 rounded-xl p-5 space-y-5 flex flex-col">
@@ -369,10 +373,11 @@ export default function TvSignalPanel({ id }: { id: number }) {
             <div className="flex items-center justify-between">
               <p className="text-gray-500 text-xs uppercase tracking-wide">Signal Sources</p>
               <div className="flex gap-1 text-gray-600 text-xs pr-0.5">
-                <span className="w-[5.5rem] text-center">Enter on</span>
-                <span className="w-[5.5rem] text-center">Exit on</span>
+                <span className="w-[5.5rem] text-center">Enter ≥</span>
+                <span className="w-[5.5rem] text-center">Exit ≤</span>
               </div>
             </div>
+            <p className="text-gray-700 text-xs">scale: 0.5=Strong Buy · 0.1=Buy · −0.1=Sell · −0.5=Strong Sell</p>
             {SOURCE_LIST.map(({ key, label }) => {
               const enabled = signalConfig.sources.includes(key);
               return (
@@ -389,22 +394,24 @@ export default function TvSignalPanel({ id }: { id: number }) {
                   </label>
                   {enabled ? (
                     <div className="flex gap-1 flex-1">
-                      <select
-                        value={signalConfig.buy[key] ?? "buy"}
-                        onChange={e => setThreshold("buy", key, e.target.value)}
-                        className="bg-gray-700 text-white text-xs rounded px-1 py-1 border border-gray-600 flex-1 min-w-0"
-                      >
-                        <option value="buy">Buy or Strong</option>
-                        <option value="strong">Strong only</option>
-                      </select>
-                      <select
-                        value={signalConfig.sell[key] ?? "sell"}
-                        onChange={e => setThreshold("sell", key, e.target.value)}
-                        className="bg-gray-700 text-white text-xs rounded px-1 py-1 border border-gray-600 flex-1 min-w-0"
-                      >
-                        <option value="sell">Sell or Strong</option>
-                        <option value="strong">Strong only</option>
-                      </select>
+                      <input
+                        type="number"
+                        step="0.05"
+                        min="-1"
+                        max="1"
+                        value={signalConfig.buy_threshold[key] ?? 0.1}
+                        onChange={e => setThreshold("buy_threshold", key, parseFloat(e.target.value))}
+                        className="bg-gray-700 text-white text-xs rounded px-2 py-1 border border-gray-600 flex-1 min-w-0 font-mono"
+                      />
+                      <input
+                        type="number"
+                        step="0.05"
+                        min="-1"
+                        max="1"
+                        value={signalConfig.sell_threshold[key] ?? -0.1}
+                        onChange={e => setThreshold("sell_threshold", key, parseFloat(e.target.value))}
+                        className="bg-gray-700 text-white text-xs rounded px-2 py-1 border border-gray-600 flex-1 min-w-0 font-mono"
+                      />
                     </div>
                   ) : (
                     <span className="text-gray-700 text-xs">off</span>

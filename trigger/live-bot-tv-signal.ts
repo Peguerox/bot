@@ -5,17 +5,17 @@ type Signal = "STRONG_BUY" | "BUY" | "NEUTRAL" | "SELL" | "STRONG_SELL";
 
 type SrcKey = "overall" | "ma" | "osc";
 type SignalConfig = {
-  sources: SrcKey[];
-  combo:   "any" | "all";
-  buy:     Partial<Record<SrcKey, "buy" | "strong">>;
-  sell:    Partial<Record<SrcKey, "sell" | "strong">>;
+  sources:        SrcKey[];
+  combo:          "any" | "all";
+  buy_threshold:  Partial<Record<SrcKey, number>>;
+  sell_threshold: Partial<Record<SrcKey, number>>;
 };
 
 const DEFAULT_SIGNAL_CONFIG: SignalConfig = {
-  sources: ["overall"],
-  combo:   "all",
-  buy:     { overall: "buy" },
-  sell:    { overall: "sell" },
+  sources:        ["overall"],
+  combo:          "all",
+  buy_threshold:  { overall: 0.1 },
+  sell_threshold: { overall: -0.1 },
 };
 
 function toSignal(val: number | null): Signal {
@@ -34,10 +34,10 @@ function evalSignals(
 ): boolean {
   const vals: Record<SrcKey, number | null> = { overall: raw, ma, osc };
   const results = cfg.sources.map(src => {
-    const threshold = cfg[dir][src];
-    const sig = toSignal(vals[src]);
-    if (dir === "buy")  return threshold === "strong" ? sig === "STRONG_BUY"  : sig === "STRONG_BUY"  || sig === "BUY";
-    else                return threshold === "strong" ? sig === "STRONG_SELL" : sig === "STRONG_SELL" || sig === "SELL";
+    const val = vals[src];
+    if (val == null) return false;
+    if (dir === "buy")  return val >= (cfg.buy_threshold?.[src]  ?? 0.1);
+    else                return val <= (cfg.sell_threshold?.[src] ?? -0.1);
   });
   return cfg.combo === "all" ? results.every(Boolean) : results.some(Boolean);
 }
