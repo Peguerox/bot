@@ -65,7 +65,7 @@ function calcRSI(candles: Candle[], period = 14): number[] {
 
 export const surferSolUsdtBot = schedules.task({
   id:          "live-bot-surfer-solusdt-1m",
-  cron:        "* * * * *",
+  cron:        "*/5 * * * *",
   maxDuration: 55,
 
   run: async () => {
