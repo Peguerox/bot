@@ -3,8 +3,6 @@
 import { useEffect, useState } from "react";
 import { getSupabase } from "@/lib/supabase";
 import PnLChart from "@/components/PnLChart";
-import TvSignalPanel from "@/components/TvSignalPanel";
-
 
 function Stat({ label, value, sub, color }: { label: string; value: string; sub: string; color: string }) {
   return (
@@ -777,11 +775,6 @@ export default function Dashboard() {
           />
         </div>
 
-        {/* ── Paper bots ── */}
-        <div className="grid grid-cols-1 md:grid-cols-2 gap-6 items-start">
-          <TvSignalPanel id={1} />
-          <TvSignalPanel id={2} />
-        </div>
       </div>
     </main>
   );
