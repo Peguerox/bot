@@ -103,6 +103,8 @@ async function onTick(price: number) {
     await updateSolTrailContinuousState(patch);
     lastDbWrite = Date.now();
     console.log(`BUY  price=${entryPrice.toFixed(4)} qty=${solQty.toFixed(4)}`);
+    await logSolTrailContinuousRun({ actions: [{ action: "BUY", price: entryPrice, qty: solQty }] });
+    lastRunLog = Date.now();
     return;
   }
 
@@ -133,6 +135,8 @@ async function onTick(price: number) {
     });
     lastDbWrite = Date.now();
     console.log(`STOP price=${exitPrice.toFixed(4)} pnlUsd=${pnlUsd.toFixed(4)} pnlPct=${pnlPct.toFixed(4)}`);
+    await logSolTrailContinuousRun({ actions: [{ action: "STOP_FILLED", price: exitPrice, pnlUsd, pnlPct }] });
+    lastRunLog = Date.now();
 
   } else if (effSell > peak) {
     state = { ...state, peak_price: effSell, stop_price: effSell * (1 - SL_PCT / 100) };
@@ -144,8 +148,7 @@ async function onTick(price: number) {
 
   if (Date.now() - lastRunLog > RUN_LOG_INTERVAL_MS) {
     await logSolTrailContinuousRun({
-      action: "STATUS", mode: state.mode, peak: state.peak_price, stop: state.stop_price,
-      ticksSinceLastLog, instance: INSTANCE_ID,
+      actions: [{ action: "STATUS", mode: state.mode, price, peak: state.peak_price, stop: state.stop_price, ticksSinceLastLog }],
     });
     lastRunLog = Date.now();
     ticksSinceLastLog = 0;
