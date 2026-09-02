@@ -1,7 +1,7 @@
 // Standalone always-on worker — watches Binance SOLUSDT for "jumps" (>=0.02% cumulative move
-// within a 2s rolling window) and, when flat, enters a Bitfinex tSOLUSD paper position in that
-// same direction (long on an up-jump, short on a down-jump). Position is then managed with a
-// 0.1% trailing stop on Bitfinex's own live ticks, worst-case-consistent spread throughout.
+// within a 2s rolling window) and, when flat, enters a Bitfinex tSOLUSD LONG paper position on
+// an up-jump (long-only — spot can't short without margin, out of scope for now). Position is
+// then managed with a 0.1% trailing stop on Bitfinex's own live ticks, worst-case spread.
 //
 // Session finding motivating this (2026-09-02): across two independent windows (10min + 5min,
 // 27 discrete jump events total), 20/27 (74.1%) of Binance jumps were followed by a
@@ -34,10 +34,8 @@ const RUN_LOG_INTERVAL_MS  = 5 * 60_000;
 
 const INSTANCE_ID = `${os.hostname()}-${process.pid}-${crypto.randomBytes(3).toString("hex")}`;
 
-function entryFillLong(p: number)  { return p * (1 + HALF_SPREAD_PCT / 100); }
-function exitFillLong(p: number)   { return p * (1 - HALF_SPREAD_PCT / 100); }
-function entryFillShort(p: number) { return p * (1 - HALF_SPREAD_PCT / 100); }
-function exitFillShort(p: number)  { return p * (1 + HALF_SPREAD_PCT / 100); }
+function entryFillLong(p: number) { return p * (1 + HALF_SPREAD_PCT / 100); }
+function exitFillLong(p: number)  { return p * (1 - HALF_SPREAD_PCT / 100); }
 
 let state: SolJumpTrailBitfinexState;
 let lastDbWrite = 0;
@@ -88,13 +86,13 @@ function checkJump(): "UP" | "DOWN" | null {
   return null;
 }
 
-async function enterPosition(dir: "LONG" | "SHORT") {
+async function enterPosition(dir: "LONG") {
   if (bfxLast === null) return;
   const targetPool = SEED_USD + (state.realized_pnl_usd ?? 0);
-  const entry = dir === "LONG" ? entryFillLong(bfxLast) : entryFillShort(bfxLast);
+  const entry = entryFillLong(bfxLast);
   const solQty = targetPool / entry;
-  const extreme = dir === "LONG" ? exitFillLong(bfxLast) : exitFillShort(bfxLast);
-  const stop = dir === "LONG" ? extreme * (1 - SL_PCT / 100) : extreme * (1 + SL_PCT / 100);
+  const extreme = exitFillLong(bfxLast);
+  const stop = extreme * (1 - SL_PCT / 100);
 
   const patch = {
     mode: dir, sol_quantity: solQty, entry_price: entry,
@@ -112,13 +110,13 @@ async function enterPosition(dir: "LONG" | "SHORT") {
 }
 
 async function exitPosition(fillPrice: number) {
-  const dir = state.mode as "LONG" | "SHORT";
+  const dir = state.mode as "LONG";
   const origEntry = state.entry_price!;
   const origQty = state.sol_quantity!;
   const origEntryTime = state.entry_time!;
 
   const usdIn = origEntry * origQty;
-  const usdOut = dir === "LONG" ? fillPrice * origQty : usdIn + (origEntry - fillPrice) * origQty;
+  const usdOut = fillPrice * origQty;
   const pnlUsd = usdOut - usdIn;
   const pnlPct = (pnlUsd / usdIn) * 100;
 
@@ -142,31 +140,17 @@ async function onBfxTick(price: number) {
   bfxLast = price;
   if (!state.enabled) return;
 
-  if (state.mode === "FLAT") return; // entries are driven by onBinTick, not here
+  if (state.mode !== "LONG") return; // entries are driven by onBinTick, not here
 
-  if (state.mode === "LONG") {
-    const effSell = exitFillLong(price);
-    const extreme = state.extreme_price ?? state.entry_price!;
-    const stop = state.stop_price ?? extreme * (1 - SL_PCT / 100);
-    if (effSell <= stop) { await exitPosition(stop); return; }
-    if (effSell > extreme) {
-      state = { ...state, extreme_price: effSell, stop_price: effSell * (1 - SL_PCT / 100) };
-      if (Date.now() - lastDbWrite > DB_WRITE_THROTTLE_MS) {
-        await updateSolJumpTrailBitfinexState({ extreme_price: state.extreme_price, stop_price: state.stop_price });
-        lastDbWrite = Date.now();
-      }
-    }
-  } else if (state.mode === "SHORT") {
-    const effBuy = exitFillShort(price); // cost to close a short
-    const extreme = state.extreme_price ?? state.entry_price!;
-    const stop = state.stop_price ?? extreme * (1 + SL_PCT / 100);
-    if (effBuy >= stop) { await exitPosition(stop); return; }
-    if (effBuy < extreme) {
-      state = { ...state, extreme_price: effBuy, stop_price: effBuy * (1 + SL_PCT / 100) };
-      if (Date.now() - lastDbWrite > DB_WRITE_THROTTLE_MS) {
-        await updateSolJumpTrailBitfinexState({ extreme_price: state.extreme_price, stop_price: state.stop_price });
-        lastDbWrite = Date.now();
-      }
+  const effSell = exitFillLong(price);
+  const extreme = state.extreme_price ?? state.entry_price!;
+  const stop = state.stop_price ?? extreme * (1 - SL_PCT / 100);
+  if (effSell <= stop) { await exitPosition(stop); return; }
+  if (effSell > extreme) {
+    state = { ...state, extreme_price: effSell, stop_price: effSell * (1 - SL_PCT / 100) };
+    if (Date.now() - lastDbWrite > DB_WRITE_THROTTLE_MS) {
+      await updateSolJumpTrailBitfinexState({ extreme_price: state.extreme_price, stop_price: state.stop_price });
+      lastDbWrite = Date.now();
     }
   }
 
@@ -183,7 +167,6 @@ async function onBinTick(price: number) {
   if (!state.enabled || state.mode !== "FLAT") return;
   const jump = checkJump();
   if (jump === "UP") await enterPosition("LONG");
-  else if (jump === "DOWN") await enterPosition("SHORT");
 }
 
 function connectBinance() {
