@@ -14,6 +14,10 @@ export type SurferState = {
   entry_time: string | null;
   chase_order_id: number | null;
   chase_price: number | null;
+  best_pct: number;
+  realized_pnl_btc: number;
+  total_trades: number;
+  total_wins: number;
 };
 
 export async function getSurferState(): Promise<SurferState> {
@@ -49,6 +53,13 @@ export async function recordSurferTrade(params: {
     .from("surfer_trades")
     .insert({ ...params, exit_time: new Date().toISOString() });
   if (error) throw new Error(`recordSurferTrade: ${error.message}`);
+
+  const state = await getSurferState();
+  await updateSurferState({
+    realized_pnl_btc: (state.realized_pnl_btc ?? 0) + params.pnl_btc,
+    total_trades:     (state.total_trades ?? 0) + 1,
+    total_wins:       (state.total_wins ?? 0) + (params.pnl_btc > 0 ? 1 : 0),
+  });
 }
 
 export async function logSurferRun(data: object) {

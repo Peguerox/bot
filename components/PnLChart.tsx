@@ -9,16 +9,22 @@ export default function PnLChart({ trades, initial = 2000, unit = "$" }: { trade
     </div>
   );
 
+  const decimals = unit === "₿" ? 8 : 2;
+
   let balance = initial;
-  const data = [...trades].reverse().map((t, i) => {
-    balance += t.pnl ?? 0;
-    return {
-      i,
-      label:   new Date(t.exit_time).toLocaleString("en-US", { month: "short", day: "numeric", hour: "2-digit", minute: "2-digit" }),
-      balance: parseFloat(balance.toFixed(2)),
-      pnl:     parseFloat((t.pnl ?? 0).toFixed(4)),
-    };
-  });
+  const sorted = [...trades].reverse();
+  const data = [
+    { i: 0, label: "Start", balance: parseFloat(balance.toFixed(decimals)), pnl: 0 },
+    ...sorted.map((t, i) => {
+      balance += t.pnl ?? 0;
+      return {
+        i: i + 1,
+        label:   new Date(t.exit_time).toLocaleString("en-US", { month: "short", day: "numeric", hour: "2-digit", minute: "2-digit" }),
+        balance: parseFloat(balance.toFixed(decimals)),
+        pnl:     parseFloat((t.pnl ?? 0).toFixed(decimals)),
+      };
+    }),
+  ];
 
   const min = Math.min(...data.map(d => d.balance));
   const max = Math.max(...data.map(d => d.balance));
@@ -37,7 +43,7 @@ export default function PnLChart({ trades, initial = 2000, unit = "$" }: { trade
           tick={{ fill: "#6b7280", fontSize: 11 }}
           tickLine={false}
           axisLine={false}
-          tickFormatter={v => `${unit}${v.toLocaleString()}`}
+          tickFormatter={v => `${unit}${v.toLocaleString(undefined, { minimumFractionDigits: decimals, maximumFractionDigits: decimals })}`}
           width={80}
         />
         <Tooltip

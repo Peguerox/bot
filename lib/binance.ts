@@ -68,6 +68,7 @@ export type OrderResponse = {
   orderId:             number;
   status:              OrderStatus;
   executedQty:         string;
+  origQty:             string;
   price:               string;
   cummulativeQuoteQty: string;
 };
@@ -176,6 +177,52 @@ export async function cancelOrder(symbol: string, orderId: number) {
 export async function cancelOCO(symbol: string, orderListId: number) {
   return signedDelete("/orderList", { symbol, orderListId });
 }
+
+// BTCUSDT-precision variants: LOT_SIZE stepSize=0.00001 (5dp qty), PRICE_FILTER
+// tickSize=0.01 (2dp price) — the generic placeLimitBuy/placeOCO above use 2dp qty /
+// 3dp price, which is wrong for BTC and silently produces invalid (zero-quantity or
+// bad-tick) orders. Verified against Binance.US exchangeInfo for BTCUSDT directly.
+export async function placeLimitMakerBuyBtc(symbol: string, qty: number, price: number): Promise<OrderResponse> {
+  return signedPost("/order", {
+    symbol,
+    side:     "BUY",
+    type:     "LIMIT_MAKER",
+    quantity: (Math.floor(qty * 100000) / 100000).toFixed(5),
+    price:    price.toFixed(2),
+  });
+}
+// Structurally maker-only sell (Binance rejects outright rather than letting it cross the book).
+// Used to chase a stuck stop down toward the market as an active resting order instead of a
+// dormant trigger — same "chase down as maker" pattern as the SOL Global bots.
+export async function placeLimitMakerSellBtc(symbol: string, qty: number, price: number): Promise<OrderResponse> {
+  return signedPost("/order", {
+    symbol,
+    side:     "SELL",
+    type:     "LIMIT_MAKER",
+    quantity: (Math.floor(qty * 100000) / 100000).toFixed(5),
+    price:    price.toFixed(2),
+  });
+}
+
+// Real incident 2026-09-01 (see lib/binance-global.ts getNetSellProceeds): order responses only
+// carry gross proceeds before commission — this nets out whatever was actually charged so tracked
+// PnL matches the real balance, not an idealized number.
+export async function getNetSellProceeds(
+  symbol: string, orderId: number, quoteAsset: string, grossQuoteQty: number,
+): Promise<{ netProceeds: number; feeInQuoteAsset: number; feeInOtherAsset: number }> {
+  const fills: { commission: string; commissionAsset: string }[] = await signedGet("/myTrades", { symbol, orderId });
+  let feeInQuoteAsset = 0;
+  let feeInOtherAsset = 0;
+  for (const f of fills) {
+    const amt = parseFloat(f.commission);
+    if (f.commissionAsset === quoteAsset) feeInQuoteAsset += amt;
+    else feeInOtherAsset += amt;
+  }
+  return { netProceeds: grossQuoteQty - feeInQuoteAsset, feeInQuoteAsset, feeInOtherAsset };
+}
+
+// Note: placeOcoSellBtc already exists further down this file (correct 5dp qty / 2dp price,
+// floor-rounded qty to avoid ever requesting more than what was actually bought) — reused as-is.
 
 export async function getOrder(symbol: string, orderId: number): Promise<OrderResponse> {
   return signedGet("/order", { symbol, orderId });
@@ -396,6 +443,66 @@ export async function placeLimitSellSolUsdt(symbol: string, qty: number, price: 
     timeInForce: "GTC",
     quantity:    (Math.floor(qty * 100) / 100).toFixed(2),
     price:       (Math.round(price * 100) / 100).toFixed(2),
+  });
+}
+
+export async function placeLimitMakerBuySolUsdt(symbol: string, qty: number, price: number): Promise<OrderResponse> {
+  return signedPost("/order", {
+    symbol,
+    side:     "BUY",
+    type:     "LIMIT_MAKER",
+    quantity: (Math.floor(qty * 100) / 100).toFixed(2),
+    price:    (Math.round(price * 100) / 100).toFixed(2),
+  });
+}
+
+// Structurally maker-only sell — used both for the TP leg and to chase a stuck stop down toward
+// the market (same "chase down as maker" pattern as the Global bots).
+export async function placeLimitMakerSellSolUsdt(symbol: string, qty: number, price: number): Promise<OrderResponse> {
+  return signedPost("/order", {
+    symbol,
+    side:     "SELL",
+    type:     "LIMIT_MAKER",
+    quantity: (Math.floor(qty * 100) / 100).toFixed(2),
+    price:    (Math.round(price * 100) / 100).toFixed(2),
+  });
+}
+
+export async function placeStopLimitSellSolUsdt(
+  symbol: string, qty: number, stopPrice: number, limitPrice: number,
+): Promise<OrderResponse> {
+  return signedPost("/order", {
+    symbol,
+    side:        "SELL",
+    type:        "STOP_LOSS_LIMIT",
+    timeInForce: "GTC",
+    quantity:    (Math.floor(qty * 100) / 100).toFixed(2),
+    stopPrice:   (Math.round(stopPrice * 100) / 100).toFixed(2),
+    price:       (Math.round(limitPrice * 100) / 100).toFixed(2),
+  });
+}
+
+export async function placeMarketSellSolUsdt(symbol: string, qty: number): Promise<OrderResponse> {
+  return signedPost("/order", {
+    symbol,
+    side:     "SELL",
+    type:     "MARKET",
+    quantity: (Math.floor(qty * 100) / 100).toFixed(2),
+  });
+}
+
+export async function placeOcoSellSolUsdt(
+  symbol: string, qty: number,
+  tpPrice: number, slStopPrice: number, slLimitPrice: number,
+): Promise<OCOResponse> {
+  return signedPost("/order/oco", {
+    symbol,
+    side:                 "SELL",
+    quantity:             (Math.floor(qty * 100) / 100).toFixed(2),
+    price:                (Math.round(tpPrice * 100) / 100).toFixed(2),
+    stopPrice:            (Math.round(slStopPrice * 100) / 100).toFixed(2),
+    stopLimitPrice:       (Math.round(slLimitPrice * 100) / 100).toFixed(2),
+    stopLimitTimeInForce: "GTC",
   });
 }
 

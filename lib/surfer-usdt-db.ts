@@ -14,6 +14,10 @@ export type SurferUsdtState = {
   chase_order_id: number | null;
   chase_price: number | null;
   usdt_balance: number;
+  best_pct: number;
+  realized_pnl_usdt: number;
+  total_trades: number;
+  total_wins: number;
 };
 
 export async function getSurferUsdtState(): Promise<SurferUsdtState> {
@@ -48,6 +52,13 @@ export async function recordSurferUsdtTrade(params: {
     .from("surfer_usdt_trades")
     .insert({ ...params, exit_time: new Date().toISOString() });
   if (error) throw new Error(`recordSurferUsdtTrade: ${error.message}`);
+
+  const state = await getSurferUsdtState();
+  await updateSurferUsdtState({
+    realized_pnl_usdt: (state.realized_pnl_usdt ?? 0) + params.pnl_usdt,
+    total_trades:      (state.total_trades ?? 0) + 1,
+    total_wins:        (state.total_wins ?? 0) + (params.pnl_usdt > 0 ? 1 : 0),
+  });
 }
 
 export async function logSurferUsdtRun(data: object) {

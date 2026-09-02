@@ -3,8 +3,11 @@
 //   cross UP through 30  → arm buy  SOL (BTC → SOL)
 //   cross DOWN through 70 → arm sell SOL (SOL → BTC)
 // Filter : 12h EMA(7/25) in live-mode (forming candle adjusted with current price)
-//   EMA7 > EMA25 = bullish  → confirm buy  when armed
+//   EMA7 > EMA25 = bullish  → confirm buy  when armed (also requires EMA7 sloping up — Filter #3)
 //   EMA7 < EMA25 = bearish  → confirm sell when armed
+// Exit   : trailing stop — once peak gain >= 6%, sell if price falls back 7.5pp from the
+//          peak — fires ahead of the RSI/EMA trend-reversal exit on winning trades.
+//          Backtested +666.7% vs +495.5% (slope filter alone) over ~5yr.
 // Execution: limit orders with price chasing every minute (maker, 0% fee)
 // Capital  : all free BTC in account; hold indefinitely between signals
 
@@ -26,6 +29,9 @@ const TREND_INTERVAL = "12h";
 const C15_LIMIT      = 110;   // fetch 110 15m candles; last one forming, use 109 closed
 const C12H_LIMIT     = 100;   // fetch 100 12h candles; EMA(25) needs warmup (74 extra periods → seed weight ~0.2%)
 const MIN_NOTIONAL   = 0.0001; // SOLBTC min notional in BTC
+
+const TRAIL_ARM_PCT  = 6;      // trailing stop only active once peak gain reaches this
+const TRAIL_PP        = 7.5;   // trail distance (percentage points from peak)
 
 type Candle = { time: number; close: number };
 
@@ -110,18 +116,34 @@ export const surferSolBtcBot = schedules.task({
       const ema7Arr     = calcEMA(c12h, MA_FAST);
       const ema25Arr    = calcEMA(c12h, MA_SLOW);
       const lastEma7    = ema7Arr[ema7Arr.length - 1];
+      const prevEma7    = ema7Arr[ema7Arr.length - 2];
       const lastEma25   = ema25Arr[ema25Arr.length - 1];
       const lastClose12h = c12h[c12h.length - 1].close;
       const delta        = livePrice - lastClose12h;
       const liveEma7     = lastEma7  + delta / MA_FAST;
       const liveEma25    = lastEma25 + delta / MA_SLOW;
       const emaBullish   = !isNaN(liveEma7) && !isNaN(liveEma25) && liveEma7 > liveEma25;
+      const emaSloping   = !isNaN(prevEma7)  && liveEma7 > prevEma7;  // Filter #3 — matches SOLUSDT bot; backtested +523% vs +381% over 5yr
+
+      // ── Track peak unrealized gain since entry (for the trailing stop) ────
+      let bestPct = state.best_pct ?? 0;
+      let curPct = 0;
+      let trailHit = false;
+      if (state.mode === "SOL" && state.entry_price) {
+        curPct = (livePrice - state.entry_price) / state.entry_price * 100;
+        if (curPct > bestPct) {
+          bestPct = curPct;
+          await updateSurferState({ best_pct: bestPct });
+        }
+        if (bestPct >= TRAIL_ARM_PCT && bestPct - curPct >= TRAIL_PP) trailHit = true;
+      }
 
       log.push({
         action: "CHECK",
         mode: state.mode, status: state.status,
-        rsi: curRSI?.toFixed(2), emaBullish, price: livePrice,
+        rsi: curRSI?.toFixed(2), emaBullish, emaSloping, price: livePrice,
         armed_sol: state.armed_for_sol, armed_btc: state.armed_for_btc,
+        curPct: curPct.toFixed(2), bestPct: bestPct.toFixed(2), trailHit,
       });
 
       // ── Local arm state — may be updated inline this run ──────────────────
@@ -152,7 +174,7 @@ export const surferSolBtcBot = schedules.task({
 
       // ── Signal fire: arm + trend confirmed → start limit chase ────────────
 
-      if (state.status === "idle" && state.mode === "BTC" && armedForSol && emaBullish) {
+      if (state.status === "idle" && state.mode === "BTC" && armedForSol && emaBullish && emaSloping) {
         const btcFree = await getFreeBalance("BTC");
         const solQty  = floorSolQty(btcFree / livePrice);
         if (solQty >= 0.01 && solQty * livePrice >= MIN_NOTIONAL) {
@@ -172,10 +194,12 @@ export const surferSolBtcBot = schedules.task({
         }
       }
 
-      if (state.status === "idle" && state.mode === "SOL" && armedForBtc && !emaBullish) {
+      const trendSellOk = armedForBtc && !emaBullish;
+      if (state.status === "idle" && state.mode === "SOL" && (trailHit || trendSellOk)) {
         const solQty = floorSolQty(state.sol_quantity ?? 0);
         if (solQty >= 0.01) {
           const order = await placeLimitSellSol(SYMBOL, solQty, livePrice);
+          log.push({ action: "SELL_TRIGGER", reason: trailHit ? "trail" : "trend" });
           await updateSurferState({
             status:        "chasing_sell",
             armed_for_btc: false,
@@ -205,6 +229,7 @@ export const surferSolBtcBot = schedules.task({
             entry_btc:     btcSpent,
             chase_order_id: null,
             chase_price:   null,
+            best_pct:      0,
           });
           log.push({ action: "BUY_FILLED", price: fillPrice, qty: solFilled, btcSpent });
 
@@ -228,7 +253,7 @@ export const surferSolBtcBot = schedules.task({
                 await updateSurferState({
                   status: "idle", mode: "SOL",
                   sol_quantity: solFilled, entry_price: fillPrice, entry_btc: btcSpent,
-                  chase_order_id: null, chase_price: null,
+                  chase_order_id: null, chase_price: null, best_pct: 0,
                 });
                 log.push({ action: "BUY_FILLED_ON_CANCEL", price: fillPrice, qty: solFilled });
                 cancelOk = false;

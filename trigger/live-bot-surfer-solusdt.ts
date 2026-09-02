@@ -1,8 +1,12 @@
 // Surfer USDT — SOL/USDT rotation on Binance.US
 // Entry : RSI(14) on 15m SOLUSDT crosses UP through 30 → arm
 //         EMA7 > EMA25 on 12h (liveMode) AND EMA7 sloping up → BUY
-// Exit  : EMA7 < EMA25 on 12h (liveMode) AND RSI(14) 15m < 50 → SELL
-// Capital: $50 USDT. No TP/SL. Holds indefinitely between signals.
+// Exit  : whichever fires first —
+//         (a) hard stop: unrealized pnl <= -6%
+//         (b) trailing stop: once peak gain >= 8%, exit if price falls back 10pp from
+//             the peak (tightens to 6pp once the peak has reached >= 30%)
+//         (c) trend exit: EMA7 < EMA25 on 12h (liveMode) AND RSI(14) 15m < 50
+// Capital: $50 USDT. Backtested +8,701.6% vs +3,443.9% (no exit management) over ~5yr.
 
 import { schedules } from "@trigger.dev/sdk/v3";
 import {
@@ -21,6 +25,12 @@ const TREND_INTERVAL   = "12h";
 const C15_LIMIT        = 110;
 const C12H_LIMIT       = 100;
 const MIN_NOTIONAL     = 10;   // SOLUSDT min notional in USD
+
+const HARD_STOP_PCT    = -6;   // sell immediately if unrealized pnl drops to this
+const TRAIL_ARM_PCT    = 8;    // trailing stop only active once peak gain reaches this
+const TRAIL_PP         = 10;   // trail distance (percentage points from peak) below STEP_THRESH
+const STEP_THRESH      = 30;   // once peak gain reaches this, tighten the trail
+const STEP_TRAIL_PP    = 6;    // tighter trail distance once peak gain >= STEP_THRESH
 
 type Candle = { time: number; close: number };
 
@@ -112,11 +122,31 @@ export const surferSolUsdtBot = schedules.task({
       const emaBullish   = !isNaN(liveEma7) && !isNaN(liveEma25) && liveEma7 > liveEma25;
       const emaSloping   = !isNaN(prevEma7)  && liveEma7 > prevEma7;  // Filter #3
 
+      // ── Track peak unrealized gain since entry (for the trailing stop) ────
+      let bestPct = state.best_pct ?? 0;
+      let curPct = 0;
+      let hardStopHit = false;
+      let trailHit = false;
+      if (state.mode === "SOL" && state.entry_price) {
+        curPct = (livePrice - state.entry_price) / state.entry_price * 100;
+        if (curPct > bestPct) {
+          bestPct = curPct;
+          await updateSurferUsdtState({ best_pct: bestPct });
+        }
+        if (curPct <= HARD_STOP_PCT) {
+          hardStopHit = true;
+        } else if (bestPct >= TRAIL_ARM_PCT) {
+          const trailPp = bestPct >= STEP_THRESH ? STEP_TRAIL_PP : TRAIL_PP;
+          if (bestPct - curPct >= trailPp) trailHit = true;
+        }
+      }
+
       log.push({
         action: "CHECK",
         mode: state.mode, status: state.status,
         rsi: curRSI?.toFixed(2), emaBullish, emaSloping, price: livePrice,
         armed_sol: state.armed_for_sol,
+        curPct: curPct.toFixed(2), bestPct: bestPct.toFixed(2), hardStopHit, trailHit,
       });
 
       let armedForSol = state.armed_for_sol;
@@ -158,11 +188,13 @@ export const surferSolUsdtBot = schedules.task({
         }
       }
 
-      // ── Fire sell: EMA bearish + RSI < 50 (no arming needed) ─────────────
-      if (state.status === "idle" && state.mode === "SOL" && !emaBullish && curRSI < 50) {
+      // ── Fire sell: hard stop, trailing stop, or trend exit (EMA bearish + RSI < 50) ──
+      const trendExit = !emaBullish && curRSI < 50;
+      if (state.status === "idle" && state.mode === "SOL" && (hardStopHit || trailHit || trendExit)) {
         const solQty = floorQty(state.sol_quantity ?? 0);
         if (solQty >= 0.01) {
           const order = await placeLimitSellSolUsdt(SYMBOL, solQty, livePrice);
+          log.push({ action: "SELL_TRIGGER", reason: hardStopHit ? "hardstop" : trailHit ? "trail" : "trend" });
           await updateSurferUsdtState({
             status:         "chasing_sell",
             chase_order_id: order.orderId,
@@ -190,6 +222,7 @@ export const surferSolUsdtBot = schedules.task({
             entry_usdt:     usdtSpent,
             chase_order_id: null,
             chase_price:    null,
+            best_pct:       0,
           });
           log.push({ action: "BUY_FILLED", price: fillPrice, qty: solFilled, usdtSpent });
 
@@ -212,7 +245,7 @@ export const surferSolUsdtBot = schedules.task({
                 await updateSurferUsdtState({
                   status: "idle", mode: "SOL",
                   sol_quantity: solFilled, entry_price: fillPrice, entry_usdt: usdtSpent,
-                  chase_order_id: null, chase_price: null,
+                  chase_order_id: null, chase_price: null, best_pct: 0,
                 });
                 log.push({ action: "BUY_FILLED_ON_CANCEL", price: fillPrice, qty: solFilled });
                 cancelOk = false;

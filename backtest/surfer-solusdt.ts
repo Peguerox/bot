@@ -234,24 +234,24 @@ function runSim(c15: C[], c12h: C[], label: string, trailingStopPct: number | nu
     { s: now - 5 * LOOKBACK, e: now - 4*LOOKBACK, label: "Jun 2021 – Jun 2022" },
   ];
 
-  const coins = ["ETHUSDT", "BNBUSDT", "SOLUSDT"];
-
-  const now1  = Date.now();
-  const start = now1 - LOOKBACK;
-
-  // ── Strategy confirmation: SOLUSDT · Filter #3 · last 12 months ──
+  // ── Strategy confirmation: SOLUSDT · Filter #3 · last 2 years ──
   // Entry : RSI(14) 15m crosses UP through 30 → arm
   //         EMA7 > EMA25 on 12h (liveMode adjusted) AND EMA7 sloping up → BUY
   // Exit  : EMA7 < EMA25 on 12h (liveMode adjusted) AND RSI(14) 15m < 50 → SELL
   // No TP/SL. Holds indefinitely between signals. $50 USDT allocation.
+  // Runs the two most recent 12-month windows from `starts` above (unchanged logic).
 
-  process.stdout.write("Fetching SOLUSDT 15m (last 12 months)... ");
-  const c15  = await fetchKlines("SOLUSDT", "15m", start, now1);
-  console.log(`${c15.length} candles`);
+  for (const period of [starts[0], starts[1]]) {
+    const dLabel = `${new Date(period.s).toISOString().slice(0,10)} – ${new Date(period.e).toISOString().slice(0,10)}`;
 
-  process.stdout.write("Fetching SOLUSDT 12h (last 12 months)... ");
-  const c12h = await fetchKlines("SOLUSDT", "12h", start, now1);
-  console.log(`${c12h.length} candles`);
+    process.stdout.write(`Fetching SOLUSDT 15m (${dLabel})... `);
+    const c15  = await fetchKlines("SOLUSDT", "15m", period.s, period.e);
+    console.log(`${c15.length} candles`);
 
-  runSim(c15, c12h, "SOLUSDT · Surfer · Filter #3 · Jun 2025 – Jun 2026", null, true);
+    process.stdout.write(`Fetching SOLUSDT 12h (${dLabel})... `);
+    const c12h = await fetchKlines("SOLUSDT", "12h", period.s, period.e);
+    console.log(`${c12h.length} candles`);
+
+    runSim(c15, c12h, `SOLUSDT · Surfer · Filter #3 · ${dLabel} (global data-api.binance.vision)`, null, true);
+  }
 })();
