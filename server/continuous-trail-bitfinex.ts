@@ -48,7 +48,7 @@ import { submitMarketOrder } from "../lib/bitfinex-auth";
 
 const BFX_SYMBOL       = "tSOLUSD";
 const BINANCE_WS       = "wss://stream.binance.com:9443/ws/solusdt@trade";
-const JUMP_PCT         = 0.01;   // lowered from 0.02% 2026-09-03 — testing a more sensitive single-venue Binance jump signal
+const JUMP_PCT         = 0.02;   // reverted from 0.01% 2026-09-03 — that was too sensitive, 23 trades/3 wins (13%)/-$0.46, clearly worse
 const ROLL_MS          = 2000;
 const SL_PCT           = 0.05;   // lowered from 0.1% 2026-09-03 — retesting now that entry/exit use real bid/ask (0.1% won the earlier comparison, but that was with the 0.02% cross-venue signal, not this 0.01% single-venue one)
 const SEED_USD         = 20;
