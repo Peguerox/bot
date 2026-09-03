@@ -828,7 +828,7 @@ function SolTrailContinuousPanel({
             </button>
           </div>
         </div>
-        <p className="text-gray-500 text-xs">Binance SOLUSDT jump-signal (≥0.05% in 2s) → Bitfinex tSOLUSD real buy · LIVE · REAL MONEY · $20 seed, compounds · long-only (no shorting on spot) · no TP · 0.2% trailing stop · NOT the Pure Trail strategy — converted from that to Jump Trail 2026-09-03</p>
+        <p className="text-gray-500 text-xs">Binance ask - Bitfinex ask == exactly 0 → Bitfinex tSOLUSD real buy · LIVE · REAL MONEY · $20 seed, compounds · long-only (no shorting on spot) · no TP · 0.1% trailing stop · converted 2026-09-03 from the single-venue jump signal to match the paper bot's exact-zero cross-venue gap signal</p>
       </div>
 
       {loading ? (

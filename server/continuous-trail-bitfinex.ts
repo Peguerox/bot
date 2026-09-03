@@ -1,39 +1,29 @@
-// REAL MONEY — Jump Trail strategy (NOT Pure Trail — this file used to run the always-re-enter
-// Pure Trail strategy, converted 2026-09-03 per explicit user instruction to the Jump strategy
-// instead). Watches Binance SOLUSDT for a "jump" (>=JUMP_PCT cumulative move within a 2s rolling
-// window, single-venue, no cross-venue comparison) and, when flat, buys SOL on Bitfinex. Manages
-// the position with a SL_PCT trailing stop on Bitfinex's real bid.
-// $20 seed, compounds. Same tables/dashboard panel as before (sol_trail_continuous_*) — schema
-// is compatible since both strategies are "flat vs holding SOL, entry/peak/stop" shaped, only
-// the entry TRIGGER differs (jump signal here, instant re-entry in the old Pure Trail version).
+// REAL MONEY — converted 2026-09-03 from the single-venue Binance-jump strategy to the
+// exact-zero cross-venue gap strategy (the one proven out on the paper bot,
+// server/jump-trail-bitfinex.ts). The single-venue jump signal (0.02→0.01→0.02→0.03% tried)
+// kept getting killed by real order slippage on Bitfinex's thin SOL/USD book — see the
+// -0.43% anomalous-fill investigation. Moving to the more promising paper result instead.
 //
-// PARAMETER HISTORY: was JUMP_PCT=0.02%/SL_PCT=0.1% (matching the paper bot's original,
-// most-tested setting). The paper bot was separately redesigned to a cross-venue ask-vs-ask gap
-// signal, but that research found the cross-venue thesis wasn't holding up in the specific
-// windows tested (see [[project_jump_trail_bot]] memory / research/lead-lag-findings.md) — so
-// this live bot was deliberately kept on the simpler single-venue jump signal instead, and on
-// 2026-09-03 lowered to JUMP_PCT=0.01%/SL_PCT=0.05% to retest a more sensitive combination now
-// that entry/exit use real bid/ask instead of an estimate.
+// SIGNAL: continuously compare Binance's real ask (bookTicker) to Bitfinex's real ask
+// (ticker channel). Enter LONG on Bitfinex the instant the gap is EXACTLY zero
+// (gapPct === 0, no tolerance band — confirmed via a real frequency check that the gap moves
+// in discrete steps, so exact equality is achievable, not absurdly strict). Long-only (spot
+// can't short without margin).
 //
-// REAL MONEY MECHANICS: entry/exit timing decisions use Bitfinex's real live ticker (true bid
-// and ask), not an estimate. Earlier version subscribed to the "trades" channel (last executed
-// price) and approximated bid/ask by subtracting/adding an assumed spread constant — but the
-// last trade price bounces between sitting near the real bid and near the real ask depending on
-// who was the aggressor, so a fixed offset from it isn't the same as the real bid. Found
-// 2026-09-03 after live P&L was running ~0.15 points worse than the paper bot over 11 matched
-// trades even after correcting the spread constant once already. Switched to the "ticker"
-// channel, which streams the real bid/ask directly — no more approximation needed. The
-// price/quantity actually recorded still comes from the real Bitfinex fill via
-// lib/bitfinex-auth.ts, not an estimate.
+// SETTINGS: same as the paper bot for a fair live comparison — SL_PCT=0.1% trailing stop on
+// Bitfinex's real bid, no TP. Seed $20 (real money; paper bot uses $100 for its own tracking).
+//
+// REAL MONEY MECHANICS: entry sizes off Bitfinex's real ask, exit/stop triggers off Bitfinex's
+// real bid — both via the "ticker" WS channel (true bid/ask), not an estimate. Actual
+// execution price/quantity always comes from the real Bitfinex fill via lib/bitfinex-auth.ts.
 //
 // SINGLE-INSTANCE GUARANTEE: critical with real orders — claims a lock row (lock_owner/
 // lock_heartbeat) on startup, refuses to trade if another instance's heartbeat is fresh, releases
 // the lock cleanly on shutdown.
 //
-// INFRA NOTE: this worker needs BOTH a Binance WS connection (jump signal) and a Bitfinex WS
-// connection (execution). Binance's global WS feed returns HTTP 451 from Render's US regions —
-// this service must run in a non-US region (Frankfurt/Singapore), same fix already applied to
-// the paper SOL Jump Trail worker.
+// INFRA NOTE: needs BOTH a Binance WS connection (signal) and a Bitfinex WS connection
+// (signal + execution). Binance's global WS feed returns HTTP 451 from Render's US regions —
+// this service must run in a non-US region (Frankfurt/Singapore).
 import dotenv from "dotenv";
 dotenv.config({ path: ".env.local" });
 
@@ -47,10 +37,7 @@ import {
 import { submitMarketOrder } from "../lib/bitfinex-auth";
 
 const BFX_SYMBOL       = "tSOLUSD";
-const BINANCE_WS       = "wss://stream.binance.com:9443/ws/solusdt@trade";
-const JUMP_PCT         = 0.05;   // raised from 0.03% 2026-09-03 — 0.03%/SL=0.05% kept getting killed by real slippage on real orders, widening both to reduce trade frequency and give the stop more room.
-const ROLL_MS          = 2000;
-const SL_PCT           = 0.2;    // widened from 0.05% 2026-09-03 — 0.05% was too tight for real market-order slippage (see the -0.43% anomalous-fill investigation), giving more room to survive normal noise.
+const SL_PCT           = 0.1;    // matches the paper bot's setting, for a fair live comparison
 const SEED_USD         = 20;
 const HEARTBEAT_MS     = 10_000;
 const LOCK_STALE_MS    = 30_000;
@@ -63,9 +50,10 @@ let state: SolTrailContinuousState;
 let lastDbWrite = 0;
 let lastRunLog = 0;
 let orderInFlight = false;
-let binBuf: { t: number; p: number }[] = [];
-let bidLast: number | null = null;
-let askLast: number | null = null;
+let binanceAsk: number | null = null;
+let bfxBid: number | null = null;
+let bfxAsk: number | null = null;
+let currentTradeGapPct: number | null = null;
 
 async function acquireLock(): Promise<boolean> {
   state = await getSolTrailContinuousState();
@@ -101,28 +89,18 @@ async function releaseLock() {
   }
 }
 
-function checkJump(): number | null {
-  if (binBuf.length < 2) return null;
-  const now = binBuf[binBuf.length - 1];
-  while (binBuf.length > 1 && now.t - binBuf[0].t > ROLL_MS) binBuf.shift();
-  const old = binBuf[0];
-  const pct = (now.p - old.p) / old.p * 100;
-  return pct >= JUMP_PCT ? pct : null; // long-only — spot can't short without margin
-}
-
-async function onBinTick(price: number) {
-  binBuf.push({ t: Date.now(), p: price });
-  if (!state.enabled || state.mode !== "USD" || orderInFlight || askLast === null) return;
-
-  const jumpPct = checkJump();
-  if (jumpPct === null) return;
+async function checkEntry() {
+  if (!state.enabled || state.mode !== "USD" || orderInFlight || binanceAsk === null || bfxAsk === null) return;
+  const gapPct = (binanceAsk - bfxAsk) / bfxAsk * 100;
+  if (gapPct !== 0) return;
 
   orderInFlight = true;
   try {
     const targetPool = SEED_USD + (state.realized_pnl_usd ?? 0);
-    const estQty = targetPool / askLast; // real live ask, no estimate
-    console.log(`BUY signal (jump=${jumpPct.toFixed(4)}%) @ ask=${askLast.toFixed(4)} qty~=${estQty.toFixed(4)} — submitting real order...`);
+    const estQty = targetPool / bfxAsk; // real live ask, no estimate
+    console.log(`BUY signal (gap=${gapPct.toFixed(4)}%) @ ask=${bfxAsk.toFixed(4)} qty~=${estQty.toFixed(4)} — submitting real order...`);
     const fill = await submitMarketOrder(BFX_SYMBOL, estQty);
+    currentTradeGapPct = gapPct;
     const patch = {
       mode: "SOL" as const, sol_quantity: fill.execAmount, entry_price: fill.execPrice,
       entry_time: new Date().toISOString(), usd_balance: 0,
@@ -132,9 +110,8 @@ async function onBinTick(price: number) {
     await updateSolTrailContinuousState(patch);
     lastDbWrite = Date.now();
     console.log(`BUY FILLED price=${fill.execPrice.toFixed(4)} qty=${fill.execAmount.toFixed(4)} fee=${fill.fee}`);
-    await logSolTrailContinuousRun({ actions: [{ action: "BUY", price: fill.execPrice, qty: fill.execAmount, orderId: fill.orderId, jumpPct }] });
+    await logSolTrailContinuousRun({ actions: [{ action: "BUY", price: fill.execPrice, qty: fill.execAmount, orderId: fill.orderId, gapPct }] });
     lastRunLog = Date.now();
-    binBuf = [binBuf[binBuf.length - 1]]; // reset jump window so we don't immediately re-trigger
   } catch (err) {
     console.error("BUY order failed:", err);
     await logSolTrailContinuousRun({ actions: [{ action: "ERROR", stage: "buy", error: String(err) }] });
@@ -144,9 +121,14 @@ async function onBinTick(price: number) {
 }
 
 async function onBfxTicker(bid: number, ask: number) {
-  bidLast = bid;
-  askLast = ask;
-  if (!state.enabled || orderInFlight || state.mode !== "SOL") return;
+  bfxBid = bid;
+  bfxAsk = ask;
+  if (!state.enabled || orderInFlight) return;
+
+  if (state.mode !== "SOL") {
+    await checkEntry();
+    return;
+  }
 
   const effSell = bid; // real live bid, no estimate — what a market sell would actually receive
   const peak = state.peak_price ?? state.entry_price!;
@@ -158,9 +140,11 @@ async function onBfxTicker(bid: number, ask: number) {
       const origEntryPrice = state.entry_price!;
       const origSolQty = state.sol_quantity!;
       const origEntryTime = state.entry_time!;
+      const gapPct = currentTradeGapPct ?? 0;
+      currentTradeGapPct = null;
       console.log(`STOP signal, selling ${origSolQty.toFixed(4)} SOL — submitting real order...`);
       const fill = await submitMarketOrder(BFX_SYMBOL, -origSolQty);
-      const usdOut = fill.execPrice * Math.abs(fill.execAmount); // execAmount is negative on a sell fill
+      const usdOut = fill.execPrice * Math.abs(fill.execAmount);
       const usdIn  = origEntryPrice * origSolQty;
       const pnlUsd = usdOut - usdIn;
       const pnlPct = (pnlUsd / usdIn) * 100;
@@ -177,7 +161,7 @@ async function onBfxTicker(bid: number, ask: number) {
       });
       lastDbWrite = Date.now();
       console.log(`STOP FILLED price=${fill.execPrice.toFixed(4)} pnlUsd=${pnlUsd.toFixed(4)} pnlPct=${pnlPct.toFixed(4)}`);
-      await logSolTrailContinuousRun({ actions: [{ action: "STOP_FILLED", price: fill.execPrice, pnlUsd, pnlPct, orderId: fill.orderId }] });
+      await logSolTrailContinuousRun({ actions: [{ action: "STOP_FILLED", price: fill.execPrice, pnlUsd, pnlPct, orderId: fill.orderId, gapPct }] });
       lastRunLog = Date.now();
     } catch (err) {
       console.error("SELL order failed:", err);
@@ -203,10 +187,14 @@ async function onBfxTicker(bid: number, ask: number) {
 }
 
 function connectBinance() {
-  const ws = new WebSocket(BINANCE_WS);
-  ws.on("open", () => console.log("Binance WS connected"));
+  const ws = new WebSocket("wss://stream.binance.com:9443/ws/solusdt@bookTicker");
+  ws.on("open", () => console.log("Binance bookTicker WS connected (real bid/ask)"));
   ws.on("message", (raw: Buffer) => {
-    try { const p = parseFloat(JSON.parse(raw.toString()).p); if (p) onBinTick(p).catch((err) => console.error("onBinTick error:", err)); } catch {}
+    try {
+      const msg = JSON.parse(raw.toString());
+      const ask = parseFloat(msg.a);
+      if (ask) { binanceAsk = ask; checkEntry().catch((err) => console.error("checkEntry error:", err)); }
+    } catch {}
   });
   ws.on("error", (e) => console.error("Binance WS error:", e));
   ws.on("close", () => { console.log("Binance WS closed, reconnecting in 2s..."); setTimeout(connectBinance, 2000); });
@@ -257,7 +245,7 @@ async function main() {
   process.on("SIGTERM", shutdown);
 
   console.log(`Starting LIVE Jump Trail worker (${INSTANCE_ID}), enabled=${state.enabled}, mode=${state.mode}`);
-  console.log(`REAL MONEY — jump>=${JUMP_PCT}% triggers a real buy on ${BFX_SYMBOL}. Seed $${SEED_USD}, compounding, SL=${SL_PCT}%.`);
+  console.log(`REAL MONEY — signal: Binance ask - Bitfinex ask == exactly 0. Seed $${SEED_USD}, compounding, SL=${SL_PCT}%.`);
   connectBinance();
   connectBitfinex();
 }
