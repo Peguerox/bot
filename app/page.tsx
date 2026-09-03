@@ -799,7 +799,7 @@ function SolTrailContinuousPanel({
       <div className="space-y-1.5">
         <div className="flex items-center justify-between gap-2">
           <div className="flex items-center gap-2">
-            <h2 className="text-white font-bold text-lg">SOL Jump Live</h2>
+            <h2 className="text-white font-bold text-lg">SOL Zero-Gap Live</h2>
             <span className="text-xs font-bold px-2 py-0.5 rounded-full bg-red-500/20 text-red-400">LIVE</span>
             <span className={`text-xs font-bold px-2 py-0.5 rounded-full ${workerAlive ? "bg-green-500/20 text-green-400" : "bg-gray-700/40 text-gray-500"}`}>
               {workerAlive ? "worker alive" : "worker offline"}
@@ -1370,7 +1370,7 @@ export default function Dashboard() {
   }
 
   async function handleSolTrailContinuousClearHistory() {
-    if (!confirm("Delete all SOL Jump Live trade history and run logs?")) return;
+    if (!confirm("Delete all SOL Zero-Gap Live trade history and run logs?")) return;
     setSolTrailContinuousClearing(true);
     await fetch("/api/sol-trail-continuous/clear-history", { method: "POST" });
     await load();
@@ -1415,7 +1415,7 @@ export default function Dashboard() {
     const bots = [
       { name: "Surfer SOLBTC",  badge: "LIVE",  state: surferState,     runsTable: "surfer_runs",         pnlField: "realized_pnl_btc",  initial: SURFER_BTC_INITIAL, unit: "₿", venue: "us" as const, symbol: "SOLBTC" },
       { name: "Surfer SOLUSDT", badge: "LIVE",  state: surferUsdtState, runsTable: "surfer_usdt_runs",    pnlField: "realized_pnl_usdt", initial: 50, unit: "$", venue: "us" as const,       symbol: "SOLUSDT" },
-      { name: "SOL Jump Live", badge: "LIVE", state: solTrailContinuousState, runsTable: "sol_trail_continuous_runs", pnlField: "realized_pnl_usd", initial: 20, unit: "$", venue: "bitfinex" as const, symbol: "tSOLUSD" },
+      { name: "SOL Zero-Gap Live", badge: "LIVE", state: solTrailContinuousState, runsTable: "sol_trail_continuous_runs", pnlField: "realized_pnl_usd", initial: 20, unit: "$", venue: "bitfinex" as const, symbol: "tSOLUSD" },
       { name: "SOL Jump Trail", badge: "PAPER", state: solJumpTrailState, runsTable: "sol_jump_trail_bitfinex_runs", pnlField: "realized_pnl_usd", initial: 100, unit: "$", venue: "bitfinex" as const, symbol: "tSOLUSD" },
     ];
 
