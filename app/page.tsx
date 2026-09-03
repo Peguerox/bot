@@ -855,9 +855,9 @@ function SolTrailContinuousPanel({
       ) : (
         <div className="grid grid-cols-2 gap-2">
           <Stat
-            label="PnL (USD)"
-            value={`${totalPnl >= 0 ? "+" : ""}$${totalPnl.toFixed(2)}`}
-            sub={`${totalTrades} trades (${wins}W/${losses}L)`}
+            label="PnL"
+            value={`${totalPnl >= 0 ? "+" : ""}${(totalPnl / INITIAL * 100).toFixed(2)}%`}
+            sub={`${totalPnl >= 0 ? "+" : ""}$${totalPnl.toFixed(2)} · ${totalTrades} trades (${wins}W/${losses}L)`}
             color={totalPnl >= 0 ? "text-green-400" : "text-red-400"}
           />
           <Stat
@@ -1002,7 +1002,7 @@ function SolTrailContinuousPanel({
                       : "text-gray-500";
                     const text = a.action === "BUY" ? `BUY  qty=${parseFloat(a.qty).toFixed(3)} @ $${parseFloat(a.price).toFixed(2)}`
                       : a.action === "STOP_FILLED" ? `STOP HIT  @ $${parseFloat(a.price).toFixed(2)}  pnl ${parseFloat(a.pnlUsd) >= 0 ? "+" : ""}$${parseFloat(a.pnlUsd).toFixed(4)} (${parseFloat(a.pnlPct).toFixed(4)}%)`
-                      : a.action === "STATUS" ? `watching  ${a.mode}  $${a.price != null ? parseFloat(a.price).toFixed(2) : "—"}  peak=${a.peak != null ? `$${parseFloat(a.peak).toFixed(2)}` : "—"}  stop=${a.stop != null ? `$${parseFloat(a.stop).toFixed(2)}` : "—"}  (${a.ticksSinceLastLog ?? 0} ticks)`
+                      : a.action === "STATUS" ? `watching  ${a.mode}  bid=${a.bid != null ? `$${parseFloat(a.bid).toFixed(2)}` : "—"}  ask=${a.ask != null ? `$${parseFloat(a.ask).toFixed(2)}` : "—"}  peak=${a.peak != null ? `$${parseFloat(a.peak).toFixed(2)}` : "—"}  stop=${a.stop != null ? `$${parseFloat(a.stop).toFixed(2)}` : "—"}`
                       : a.action;
                     return <span key={i} className={color}>{text}</span>;
                   })}
@@ -1106,9 +1106,9 @@ function SolJumpTrailBitfinexPanel({
       ) : (
         <div className="grid grid-cols-2 gap-2">
           <Stat
-            label="PnL (USD)"
-            value={`${totalPnl >= 0 ? "+" : ""}$${totalPnl.toFixed(2)}`}
-            sub={`${totalTrades} trades (${wins}W/${losses}L)`}
+            label="PnL"
+            value={`${totalPnl >= 0 ? "+" : ""}${(totalPnl / INITIAL * 100).toFixed(2)}%`}
+            sub={`${totalPnl >= 0 ? "+" : ""}$${totalPnl.toFixed(2)} · ${totalTrades} trades (${wins}W/${losses}L)`}
             color={totalPnl >= 0 ? "text-green-400" : "text-red-400"}
           />
           <Stat
