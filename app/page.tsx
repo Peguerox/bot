@@ -1252,7 +1252,7 @@ function SolTrailContinuousPanel({
   enabled: boolean; onToggle: () => void; toggling: boolean;
   onClearHistory: () => void; clearingHistory: boolean;
 }) {
-  const INITIAL  = 100;
+  const INITIAL  = 20;
   const st   = state;
   const totalPnl = st?.realized_pnl_usd ?? 0;
   const totalTrades = st?.total_trades ?? 0;
@@ -1294,7 +1294,7 @@ function SolTrailContinuousPanel({
         <div className="flex items-center justify-between gap-2">
           <div className="flex items-center gap-2">
             <h2 className="text-white font-bold text-lg">SOL Trail Continuous</h2>
-            <span className="text-xs font-bold px-2 py-0.5 rounded-full bg-blue-500/20 text-blue-400">PAPER</span>
+            <span className="text-xs font-bold px-2 py-0.5 rounded-full bg-red-500/20 text-red-400">LIVE</span>
             <span className={`text-xs font-bold px-2 py-0.5 rounded-full ${workerAlive ? "bg-green-500/20 text-green-400" : "bg-gray-700/40 text-gray-500"}`}>
               {workerAlive ? "worker alive" : "worker offline"}
             </span>
@@ -1322,7 +1322,7 @@ function SolTrailContinuousPanel({
             </button>
           </div>
         </div>
-        <p className="text-gray-500 text-xs">SOL/USD @ Bitfinex · PAPER · $100 seed, compounds · same Pure Trail strategy as SOL Trail Bitfinex, but run on an always-on Render worker instead of a 1-min-cron + 50s-burst — true continuous tick coverage, instant re-entry · no TP · 0.1% trailing stop</p>
+        <p className="text-gray-500 text-xs">SOL/USD @ Bitfinex · LIVE · REAL MONEY · $20 seed, compounds · same Pure Trail strategy as SOL Trail Bitfinex, but run on an always-on Render worker instead of a 1-min-cron + 50s-burst — true continuous tick coverage, instant re-entry · no TP · 0.1% trailing stop</p>
       </div>
 
       {loading ? (
@@ -1969,7 +1969,7 @@ export default function Dashboard() {
       { name: "Surfer SOLUSDT", badge: "LIVE",  state: surferUsdtState, runsTable: "surfer_usdt_runs",    pnlField: "realized_pnl_usdt", initial: 50, unit: "$", venue: "us" as const,       symbol: "SOLUSDT" },
       { name: "SOL Trail Chase", badge: "PAPER", state: solTrailChaseState, runsTable: "sol_trail_chase_runs", pnlField: "realized_pnl_usd", initial: 100, unit: "$", venue: "global" as const, symbol: "SOLFDUSD" },
       { name: "SOL Trail Bitfinex", badge: "PAPER", state: solTrailBitfinexState, runsTable: "sol_trail_bitfinex_runs", pnlField: "realized_pnl_usd", initial: 100, unit: "$", venue: "bitfinex" as const, symbol: "tSOLUSD" },
-      { name: "SOL Trail Continuous", badge: "PAPER", state: solTrailContinuousState, runsTable: "sol_trail_continuous_runs", pnlField: "realized_pnl_usd", initial: 100, unit: "$", venue: "bitfinex" as const, symbol: "tSOLUSD" },
+      { name: "SOL Trail Continuous", badge: "LIVE", state: solTrailContinuousState, runsTable: "sol_trail_continuous_runs", pnlField: "realized_pnl_usd", initial: 20, unit: "$", venue: "bitfinex" as const, symbol: "tSOLUSD" },
       { name: "SOL Jump Trail", badge: "PAPER", state: solJumpTrailState, runsTable: "sol_jump_trail_bitfinex_runs", pnlField: "realized_pnl_usd", initial: 100, unit: "$", venue: "bitfinex" as const, symbol: "tSOLUSD" },
     ];
 
