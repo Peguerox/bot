@@ -17,11 +17,19 @@ function signedHeaders(path: string, body: object): Record<string, string> {
   };
 }
 
+// FIX 2026-09-03: fetch() had no timeout — a hung request (network blip, Bitfinex slow to
+// respond) would never resolve or reject, leaving the live bot's orderInFlight flag stuck true
+// forever and freezing all further price reaction indefinitely. Found after two real positions
+// sat unmanaged with zero ticks recorded, while the paper bot (never calls this function, no
+// real orders) never showed the same issue on the identical WS feed. A bounded timeout ensures
+// a hang fails fast and lets the existing error handling (logs ERROR, resets orderInFlight) run
+// instead of hanging silently forever.
 async function bitfinexAuthPost(path: string, body: object = {}): Promise<any> {
   const res = await fetch(`https://api.bitfinex.com/v2/${path}`, {
     method: "POST",
     headers: signedHeaders(path, body),
     body: JSON.stringify(body),
+    signal: AbortSignal.timeout(10_000),
   });
   if (!res.ok) throw new Error(`Bitfinex auth ${path} error: ${res.status}`);
   return res.json();
