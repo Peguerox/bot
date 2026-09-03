@@ -22,15 +22,14 @@
 // still come from whatever the real market order fills at (near bid), regardless of which price
 // triggers the decision — this change only affects trigger timing, not received amount.
 //
-// LATENCY BUG FIXED 2026-09-03: Bitfinex ticker messages used to be processed through a
-// serialized queue (`queue.then(() => onBfxTicker(...))`), and onBfxTicker awaits real order
-// submission (submitMarketOrder's fill-confirmation poll can take up to 5s). That meant every
-// entry/exit blocked ALL subsequent price ticks from being processed until the order finished —
-// found by comparing near-simultaneous live vs paper trades and seeing live consistently enter
-// 0.5-1s later at a meaningfully worse price on the exact same signal. Fixed by calling
-// onBfxTicker directly (fire-and-forget) instead of chaining through a queue — bfxBid/bfxAsk
-// update synchronously before any await, so price state stays fresh during an in-flight order;
-// orderInFlight already guards against duplicate/overlapping order submission.
+// LATENCY FIX TRIED THEN REVERTED 2026-09-03: briefly removed the serialized queue on the
+// Bitfinex ticker handler (calling onBfxTicker directly, fire-and-forget) to stop order
+// submission from blocking subsequent price ticks. That version was live for all three
+// real-money freeze incidents that day (position enters fine, then zero further ticks/peak
+// updates ever again, heartbeat still fresh) — root mechanism never conclusively proven, but
+// it's the only change in that window that touches how price messages get dispatched, and the
+// bot ran fine for hours before it existed. Reverted back to the serialized queue as the
+// higher-priority fix; the unconfirmed latency benefit isn't worth the repeat real losses.
 //
 // SINGLE-INSTANCE GUARANTEE: critical with real orders — claims a lock row (lock_owner/
 // lock_heartbeat) on startup, refuses to trade if another instance's heartbeat is fresh, releases
@@ -142,9 +141,21 @@ async function checkEntry() {
   }
 }
 
+let tickCount = 0;
+let lastTickLogAt = 0;
+
 async function onBfxTicker(bid: number, ask: number) {
   bfxBid = bid;
   bfxAsk = ask;
+  tickCount++;
+  // Diagnostic 2026-09-03: unconditional, fires before any other check, to directly prove
+  // whether onBfxTicker keeps executing after entry (three real positions froze with zero
+  // ticks recorded and no clear mechanism found in code review — this replaces guessing with
+  // direct evidence). Throttled to avoid spamming the runs table.
+  if (Date.now() - lastTickLogAt > 10_000) {
+    lastTickLogAt = Date.now();
+    logSolTrailContinuousRun({ actions: [{ action: "DIAG", tickCount, mode: state.mode, bid, ask, orderInFlight, enabled: state.enabled }] }).catch(() => {});
+  }
   if (!state.enabled || orderInFlight) return;
 
   if (state.mode !== "SOL") {
@@ -229,6 +240,7 @@ function connectBitfinex() {
   const ws = new WebSocket("wss://api-pub.bitfinex.com/ws/2");
   bfxWs = ws;
   let chanId: number | null = null;
+  let queue: Promise<void> = Promise.resolve();
 
   ws.on("open", () => {
     console.log("Bitfinex WS connected, subscribing to ticker (real bid/ask)...");
@@ -251,11 +263,12 @@ function connectBitfinex() {
     // was alive but not that price data was flowing; this fixes the watchdog itself having the
     // identical blind spot at a different layer.
     lastBfxMessageTime = Date.now();
-    // Fire-and-forget, NOT chained through a serialized queue — see the 2026-09-03 latency fix
-    // note below. bfxBid/bfxAsk update synchronously at the top of onBfxTicker before any await,
-    // so price state stays fresh even while a real order is in flight; orderInFlight already
-    // guards against duplicate/overlapping order submission.
-    onBfxTicker(bid, ask).catch((err) => console.error("onBfxTicker error:", err));
+    // REVERTED 2026-09-03: back to a serialized queue. The fire-and-forget version (direct call,
+    // no queue) was live for every one of the three real-money freeze incidents; before that
+    // change existed, this bot ran fine for hours. Never proved the exact mechanism, but it's
+    // the only change in that stretch that touches how price messages get dispatched at all, so
+    // reverting it takes priority over the unconfirmed latency-improvement theory.
+    queue = queue.then(() => onBfxTicker(bid, ask)).catch((err) => console.error("onBfxTicker error:", err));
   });
 
   ws.on("error", (err) => console.error("Bitfinex WS error:", err));
