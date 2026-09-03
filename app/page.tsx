@@ -1461,8 +1461,8 @@ export default function Dashboard() {
           />
         </div>
 
-        {/* ── Bitfinex Trail: always-on continuous worker + jump-trail ── */}
-        <div className="grid grid-cols-1 md:grid-cols-2 gap-6 items-start">
+        {/* ── Bitfinex Trail: always-on continuous worker ── */}
+        <div className="grid grid-cols-1 gap-6 items-start">
           <SolTrailContinuousPanel
             trades={solTrailContinuousTrades}
             state={solTrailContinuousState}
@@ -1474,6 +1474,10 @@ export default function Dashboard() {
             onClearHistory={handleSolTrailContinuousClearHistory}
             clearingHistory={solTrailContinuousClearing}
           />
+        </div>
+
+        {/* ── Book volume research logger: full width for more room to analyze ── */}
+        <div className="grid grid-cols-1 gap-6 items-start">
           <SolJumpTrailBitfinexPanel
             log={solBookVolumeLog}
             state={solJumpTrailState}
