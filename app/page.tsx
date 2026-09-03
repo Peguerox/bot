@@ -772,9 +772,11 @@ function SolTrailContinuousPanel({
     let cancelled = false;
     const poll = async () => {
       try {
-        const res = await fetch("https://api-pub.bitfinex.com/v2/ticker/tSOLUSD");
+        // Bitfinex's public API sends no CORS headers, so a direct browser fetch is silently
+        // blocked — proxied through our own API route instead (server-to-server, no CORS issue).
+        const res = await fetch("/api/bitfinex-price");
         const data = await res.json();
-        if (!cancelled && Array.isArray(data)) setLivePrice(data[6]); // LAST_PRICE
+        if (!cancelled && data.lastPrice != null) setLivePrice(data.lastPrice);
       } catch {}
     };
     poll();
