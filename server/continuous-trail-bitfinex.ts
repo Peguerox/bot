@@ -1,26 +1,28 @@
-// Standalone always-on worker — SOL/USD Pure Trail strategy on Bitfinex, run as a persistent
-// Render background worker instead of Trigger.dev's 1-min-cron + 50s-WS-burst pattern. Point of
-// this: true continuous tick coverage (no ~10s/min dark gap), so live results track the
-// backtest more closely.
+// REAL MONEY — Jump Trail strategy (NOT Pure Trail — this file used to run the always-re-enter
+// Pure Trail strategy, converted 2026-09-03 per explicit user instruction to the Jump strategy
+// instead). Watches Binance SOLUSDT for a "jump" (>=JUMP_PCT cumulative move within a 2s rolling
+// window) and, when flat, buys SOL on Bitfinex. Manages the position with a 0.1% trailing stop
+// (verified as the better setting vs 0.05% across both the 3-month backtest and real live tick
+// replay — see research/lead-lag-findings.md and the SOL Jump Trail paper bot's own history).
+// $20 seed, compounds. Same tables/dashboard panel as before (sol_trail_continuous_*) — schema
+// is compatible since both strategies are "flat vs holding SOL, entry/peak/stop" shaped, only
+// the entry TRIGGER differs (jump signal here, instant re-entry in the old Pure Trail version).
 //
-// REAL MONEY (converted 2026-09-03): was paper-only, now places real EXCHANGE MARKET orders on
-// Bitfinex via lib/bitfinex-auth.ts. $20 seed, compounds. Confirmed via direct test trades that
-// this account has zero taker fees on both tUSTUSD and tSOLUSD — the whole reason Bitfinex was
-// chosen. Reuses the same sol_trail_continuous_* tables/dashboard panel as the paper version
-// that ran earlier this session — this file was converted in place, not duplicated, per explicit
-// user instruction.
+// JUMP_PCT = 0.02%, same threshold as the paper SOL Jump Trail bot — the tested/validated
+// setting, not an untried one, per explicit user choice.
 //
-// Strategy (verified via backtest this session): no entry filter, instant re-entry the moment
-// flat; continuous trailing stop at SL_PCT below the peak price since entry, ratchets up only,
-// never loosens; no take-profit ceiling; no cooldown. The WS trade-tick feed is used to DECIDE
-// when to buy/sell (worst-case-consistent: ask-adjusted for entry timing, bid-adjusted for
-// peak/stop timing, matching the original backtest methodology) — but the price and quantity
-// actually RECORDED for entry_price/exit_price come from the real Bitfinex fill, not the
-// estimate, so realized P&L is ground truth.
+// REAL MONEY MECHANICS: same as the Pure Trail real-money conversion — the WS feeds only decide
+// WHEN to buy/sell (worst-case-consistent spread model for timing), but the price/quantity
+// actually recorded comes from the real Bitfinex fill via lib/bitfinex-auth.ts, not an estimate.
 //
-// SINGLE-INSTANCE GUARANTEE: critical now more than ever — a duplicate instance here would place
-// duplicate real orders. Claims a lock row (lock_owner/lock_heartbeat) on startup and refuses to
-// trade if another instance's heartbeat is still fresh. Releases the lock cleanly on shutdown.
+// SINGLE-INSTANCE GUARANTEE: critical with real orders — claims a lock row (lock_owner/
+// lock_heartbeat) on startup, refuses to trade if another instance's heartbeat is fresh, releases
+// the lock cleanly on shutdown.
+//
+// INFRA NOTE: this worker needs BOTH a Binance WS connection (jump signal) and a Bitfinex WS
+// connection (execution). Binance's global WS feed returns HTTP 451 from Render's US regions —
+// this service must run in a non-US region (Frankfurt/Singapore), same fix already applied to
+// the paper SOL Jump Trail worker.
 import dotenv from "dotenv";
 dotenv.config({ path: ".env.local" });
 
@@ -33,14 +35,17 @@ import {
 } from "../lib/sol-trail-continuous-db";
 import { submitMarketOrder } from "../lib/bitfinex-auth";
 
-const SYMBOL          = "tSOLUSD";
-const SL_PCT          = 0.1;
-const SEED_USD        = 20;
-const HALF_SPREAD_PCT = 0.0117; // real measured Bitfinex SOLUSD half-spread — used only to DECIDE timing
-const HEARTBEAT_MS    = 10_000;
-const LOCK_STALE_MS   = 30_000; // 3 missed heartbeats = assume dead, safe to take over
-const DB_WRITE_THROTTLE_MS = 2_000; // don't write peak/stop to DB on every tick
-const RUN_LOG_INTERVAL_MS  = 5 * 60_000; // heartbeat-style status row, not per-tick
+const BFX_SYMBOL       = "tSOLUSD";
+const BINANCE_WS       = "wss://stream.binance.com:9443/ws/solusdt@trade";
+const JUMP_PCT         = 0.02;   // % cumulative move over ROLL_MS to trigger entry — same threshold as the paper SOL Jump Trail bot
+const ROLL_MS          = 2000;
+const SL_PCT           = 0.1;    // verified better than 0.05% on both backtest and real tick replay
+const SEED_USD         = 20;
+const HALF_SPREAD_PCT  = 0.0117; // real measured Bitfinex SOLUSD half-spread — used only to DECIDE timing
+const HEARTBEAT_MS     = 10_000;
+const LOCK_STALE_MS    = 30_000;
+const DB_WRITE_THROTTLE_MS = 2_000;
+const RUN_LOG_INTERVAL_MS  = 5 * 60_000;
 
 const INSTANCE_ID = `${os.hostname()}-${process.pid}-${crypto.randomBytes(3).toString("hex")}`;
 
@@ -50,9 +55,9 @@ function exitFill(price: number): number { return price * (1 - HALF_SPREAD_PCT /
 let state: SolTrailContinuousState;
 let lastDbWrite = 0;
 let lastRunLog = 0;
-let ticksSinceLastLog = 0;
-let reconnectDelayMs = 1_000;
-let orderInFlight = false; // hard guard against re-entering while an order is still being placed/confirmed
+let orderInFlight = false;
+let binBuf: { t: number; p: number }[] = [];
+let bfxLast: number | null = null;
 
 async function acquireLock(): Promise<boolean> {
   state = await getSolTrailContinuousState();
@@ -72,7 +77,7 @@ async function heartbeat() {
     console.error(`Lost lock to ${fresh.lock_owner} — another instance took over. Exiting.`);
     process.exit(1);
   }
-  state.enabled = fresh.enabled; // allow toggling from dashboard without redeploy
+  state.enabled = fresh.enabled;
   await updateSolTrailContinuousState({ lock_heartbeat: new Date().toISOString() });
 }
 
@@ -88,42 +93,53 @@ async function releaseLock() {
   }
 }
 
-async function onTick(price: number) {
-  ticksSinceLastLog++;
-  if (!state.enabled || orderInFlight) return;
+function checkJump(): number | null {
+  if (binBuf.length < 2) return null;
+  const now = binBuf[binBuf.length - 1];
+  while (binBuf.length > 1 && now.t - binBuf[0].t > ROLL_MS) binBuf.shift();
+  const old = binBuf[0];
+  const pct = (now.p - old.p) / old.p * 100;
+  return pct >= JUMP_PCT ? pct : null; // long-only — spot can't short without margin
+}
 
-  if (state.mode === "USD") {
-    // Instant re-entry the moment flat — no candle cadence, no filter.
-    const effEntry = entryFill(price);
-    if (effEntry <= 0) return; // sanity guard, never actually happens
-    orderInFlight = true;
-    try {
-      const targetPool = SEED_USD + (state.realized_pnl_usd ?? 0);
-      const estQty = targetPool / effEntry;
-      console.log(`BUY signal @ est=${effEntry.toFixed(4)} qty~=${estQty.toFixed(4)} — submitting real order...`);
-      const fill = await submitMarketOrder(SYMBOL, estQty);
-      const patch = {
-        mode: "SOL" as const, sol_quantity: fill.execAmount, entry_price: fill.execPrice,
-        entry_time: new Date().toISOString(), usd_balance: 0,
-        peak_price: fill.execPrice, stop_price: fill.execPrice * (1 - SL_PCT / 100),
-      };
-      state = { ...state, ...patch };
-      await updateSolTrailContinuousState(patch);
-      lastDbWrite = Date.now();
-      console.log(`BUY FILLED price=${fill.execPrice.toFixed(4)} qty=${fill.execAmount.toFixed(4)} fee=${fill.fee}`);
-      await logSolTrailContinuousRun({ actions: [{ action: "BUY", price: fill.execPrice, qty: fill.execAmount, orderId: fill.orderId }] });
-      lastRunLog = Date.now();
-    } catch (err) {
-      console.error("BUY order failed:", err);
-      await logSolTrailContinuousRun({ actions: [{ action: "ERROR", stage: "buy", error: String(err) }] });
-    } finally {
-      orderInFlight = false;
-    }
-    return;
+async function onBinTick(price: number) {
+  binBuf.push({ t: Date.now(), p: price });
+  if (!state.enabled || state.mode !== "USD" || orderInFlight || bfxLast === null) return;
+
+  const jumpPct = checkJump();
+  if (jumpPct === null) return;
+
+  orderInFlight = true;
+  try {
+    const targetPool = SEED_USD + (state.realized_pnl_usd ?? 0);
+    const effEntry = entryFill(bfxLast);
+    const estQty = targetPool / effEntry;
+    console.log(`BUY signal (jump=${jumpPct.toFixed(4)}%) @ est=${effEntry.toFixed(4)} qty~=${estQty.toFixed(4)} — submitting real order...`);
+    const fill = await submitMarketOrder(BFX_SYMBOL, estQty);
+    const patch = {
+      mode: "SOL" as const, sol_quantity: fill.execAmount, entry_price: fill.execPrice,
+      entry_time: new Date().toISOString(), usd_balance: 0,
+      peak_price: fill.execPrice, stop_price: fill.execPrice * (1 - SL_PCT / 100),
+    };
+    state = { ...state, ...patch };
+    await updateSolTrailContinuousState(patch);
+    lastDbWrite = Date.now();
+    console.log(`BUY FILLED price=${fill.execPrice.toFixed(4)} qty=${fill.execAmount.toFixed(4)} fee=${fill.fee}`);
+    await logSolTrailContinuousRun({ actions: [{ action: "BUY", price: fill.execPrice, qty: fill.execAmount, orderId: fill.orderId, jumpPct }] });
+    lastRunLog = Date.now();
+    binBuf = [binBuf[binBuf.length - 1]]; // reset jump window so we don't immediately re-trigger
+  } catch (err) {
+    console.error("BUY order failed:", err);
+    await logSolTrailContinuousRun({ actions: [{ action: "ERROR", stage: "buy", error: String(err) }] });
+  } finally {
+    orderInFlight = false;
   }
+}
 
-  // mode === "SOL": track peak, check stop, both on the worst-case (bid-adjusted) price —
-  // this only decides WHEN to sell; the recorded exit price comes from the real fill.
+async function onBfxTick(price: number) {
+  bfxLast = price;
+  if (!state.enabled || orderInFlight || state.mode !== "SOL") return;
+
   const effSell = exitFill(price);
   const peak = state.peak_price ?? state.entry_price!;
   const stop = state.stop_price ?? peak * (1 - SL_PCT / 100);
@@ -135,7 +151,7 @@ async function onTick(price: number) {
       const origSolQty = state.sol_quantity!;
       const origEntryTime = state.entry_time!;
       console.log(`STOP signal, selling ${origSolQty.toFixed(4)} SOL — submitting real order...`);
-      const fill = await submitMarketOrder(SYMBOL, -origSolQty);
+      const fill = await submitMarketOrder(BFX_SYMBOL, -origSolQty);
       const usdOut = fill.execPrice * Math.abs(fill.execAmount); // execAmount is negative on a sell fill
       const usdIn  = origEntryPrice * origSolQty;
       const pnlUsd = usdOut - usdIn;
@@ -172,44 +188,46 @@ async function onTick(price: number) {
 
   if (Date.now() - lastRunLog > RUN_LOG_INTERVAL_MS) {
     await logSolTrailContinuousRun({
-      actions: [{ action: "STATUS", mode: state.mode, price, peak: state.peak_price, stop: state.stop_price, ticksSinceLastLog }],
+      actions: [{ action: "STATUS", mode: state.mode, price, peak: state.peak_price, stop: state.stop_price }],
     });
     lastRunLog = Date.now();
-    ticksSinceLastLog = 0;
   }
 }
 
-function connect() {
+function connectBinance() {
+  const ws = new WebSocket(BINANCE_WS);
+  ws.on("open", () => console.log("Binance WS connected"));
+  ws.on("message", (raw: Buffer) => {
+    try { const p = parseFloat(JSON.parse(raw.toString()).p); if (p) onBinTick(p).catch((err) => console.error("onBinTick error:", err)); } catch {}
+  });
+  ws.on("error", (e) => console.error("Binance WS error:", e));
+  ws.on("close", () => { console.log("Binance WS closed, reconnecting in 2s..."); setTimeout(connectBinance, 2000); });
+  return ws;
+}
+
+function connectBitfinex() {
   const ws = new WebSocket("wss://api-pub.bitfinex.com/ws/2");
   let chanId: number | null = null;
   let queue: Promise<void> = Promise.resolve();
 
   ws.on("open", () => {
-    console.log("WS connected, subscribing...");
-    reconnectDelayMs = 1_000;
-    ws.send(JSON.stringify({ event: "subscribe", channel: "trades", symbol: SYMBOL }));
+    console.log("Bitfinex WS connected, subscribing...");
+    ws.send(JSON.stringify({ event: "subscribe", channel: "trades", symbol: BFX_SYMBOL }));
   });
 
   ws.on("message", (raw: Buffer) => {
     let msg: any;
     try { msg = JSON.parse(raw.toString()); } catch { return; }
-
     if (msg.event === "subscribed" && msg.channel === "trades") { chanId = msg.chanId; return; }
-    if (!Array.isArray(msg) || msg[0] !== chanId) return;
-    if (msg[1] !== "te") return; // ignore heartbeats, snapshot, and "tu" duplicate confirmation
-
+    if (!Array.isArray(msg) || msg[0] !== chanId || msg[1] !== "te") return;
     const price = msg[2][3];
     if (!price || isNaN(price)) return;
-
-    queue = queue.then(() => onTick(price)).catch((err) => console.error("onTick error:", err));
+    queue = queue.then(() => onBfxTick(price)).catch((err) => console.error("onBfxTick error:", err));
   });
 
-  ws.on("error", (err) => console.error("WS error:", err));
-  ws.on("close", () => {
-    console.log(`WS closed, reconnecting in ${reconnectDelayMs}ms...`);
-    setTimeout(connect, reconnectDelayMs);
-    reconnectDelayMs = Math.min(reconnectDelayMs * 2, 30_000);
-  });
+  ws.on("error", (err) => console.error("Bitfinex WS error:", err));
+  ws.on("close", () => { console.log("Bitfinex WS closed, reconnecting in 2s..."); setTimeout(connectBitfinex, 2000); });
+  return ws;
 }
 
 async function main() {
@@ -228,9 +246,10 @@ async function main() {
   process.on("SIGINT", shutdown);
   process.on("SIGTERM", shutdown);
 
-  console.log(`Starting LIVE continuous trail worker (${INSTANCE_ID}), enabled=${state.enabled}, mode=${state.mode}`);
-  console.log(`REAL MONEY — placing actual orders on ${SYMBOL}. Seed $${SEED_USD}, compounding.`);
-  connect();
+  console.log(`Starting LIVE Jump Trail worker (${INSTANCE_ID}), enabled=${state.enabled}, mode=${state.mode}`);
+  console.log(`REAL MONEY — jump>=${JUMP_PCT}% triggers a real buy on ${BFX_SYMBOL}. Seed $${SEED_USD}, compounding, SL=${SL_PCT}%.`);
+  connectBinance();
+  connectBitfinex();
 }
 
 main().catch((err) => { console.error("Fatal:", err); process.exit(1); });
