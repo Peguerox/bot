@@ -10,8 +10,11 @@
 // in discrete steps, so exact equality is achievable, not absurdly strict). Long-only (spot
 // can't short without margin).
 //
-// SETTINGS: SL_PCT=0.1% trailing stop, no TP. Seed $20 (real money; paper bot uses $100 for
-// its own tracking, and still trails off bid — this live bot diverged 2026-09-03, see below).
+// SETTINGS: two-stage trail, no TP. Stop starts at 0.1% below entry; once a new peak is set,
+// the trail tightens to 0.05% below the new peak (backtested on paper trade tick data
+// 2026-09-03 — beat both a flat 0.1% trail and a 0.1% TP on every trade in the sample, small
+// n though). Seed $20 (real money; paper bot uses $100 for its own tracking, still on a flat
+// 0.1% trail off bid — this live bot has diverged from the paper bot's exact settings).
 //
 // REAL MONEY MECHANICS: entry sizes off Bitfinex's real ask. Peak-tracking and the stop trigger
 // switched from bid to ask 2026-09-03 per user request (was bid, "getting out late" concern) —
@@ -39,7 +42,8 @@ import {
 import { submitMarketOrder } from "../lib/bitfinex-auth";
 
 const BFX_SYMBOL       = "tSOLUSD";
-const SL_PCT           = 0.1;    // matches the paper bot's setting, for a fair live comparison
+const INIT_SL_PCT      = 0.1;    // initial stop distance from entry, until the first new peak is set
+const TIGHT_SL_PCT     = 0.05;   // tightened trail distance once a new peak (profit) is set — backtested on paper trade tick data 2026-09-03, beat both the flat 0.1% trail and a 0.1% TP
 const SEED_USD         = 20;
 const HEARTBEAT_MS     = 10_000;
 const LOCK_STALE_MS    = 30_000;
@@ -106,7 +110,7 @@ async function checkEntry() {
     const patch = {
       mode: "SOL" as const, sol_quantity: fill.execAmount, entry_price: fill.execPrice,
       entry_time: new Date().toISOString(), usd_balance: 0,
-      peak_price: fill.execPrice, stop_price: fill.execPrice * (1 - SL_PCT / 100),
+      peak_price: fill.execPrice, stop_price: fill.execPrice * (1 - INIT_SL_PCT / 100),
     };
     state = { ...state, ...patch };
     await updateSolTrailContinuousState(patch);
@@ -134,7 +138,7 @@ async function onBfxTicker(bid: number, ask: number) {
 
   const effSell = ask; // switched from bid to ask 2026-09-03 per user request — peak-tracking and stop trigger now follow Bitfinex's real ask, not bid. Real order fill/proceeds are still whatever the market sell actually executes at (near bid), this only changes the trigger timing.
   const peak = state.peak_price ?? state.entry_price!;
-  const stop = state.stop_price ?? peak * (1 - SL_PCT / 100);
+  const stop = state.stop_price ?? peak * (1 - INIT_SL_PCT / 100);
 
   if (effSell <= stop) {
     orderInFlight = true;
@@ -173,7 +177,7 @@ async function onBfxTicker(bid: number, ask: number) {
     }
     return;
   } else if (effSell > peak) {
-    state = { ...state, peak_price: effSell, stop_price: effSell * (1 - SL_PCT / 100) };
+    state = { ...state, peak_price: effSell, stop_price: effSell * (1 - TIGHT_SL_PCT / 100) };
     if (Date.now() - lastDbWrite > DB_WRITE_THROTTLE_MS) {
       await updateSolTrailContinuousState({ peak_price: state.peak_price, stop_price: state.stop_price });
       lastDbWrite = Date.now();
@@ -247,7 +251,7 @@ async function main() {
   process.on("SIGTERM", shutdown);
 
   console.log(`Starting LIVE Jump Trail worker (${INSTANCE_ID}), enabled=${state.enabled}, mode=${state.mode}`);
-  console.log(`REAL MONEY — signal: Binance ask - Bitfinex ask == exactly 0. Seed $${SEED_USD}, compounding, SL=${SL_PCT}%.`);
+  console.log(`REAL MONEY — signal: Binance ask - Bitfinex ask == exactly 0. Seed $${SEED_USD}, compounding, SL=${INIT_SL_PCT}% init / ${TIGHT_SL_PCT}% chase.`);
   connectBinance();
   connectBitfinex();
 }
