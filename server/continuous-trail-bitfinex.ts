@@ -141,21 +141,9 @@ async function checkEntry() {
   }
 }
 
-let tickCount = 0;
-let lastTickLogAt = 0;
-
 async function onBfxTicker(bid: number, ask: number) {
   bfxBid = bid;
   bfxAsk = ask;
-  tickCount++;
-  // Diagnostic 2026-09-03: unconditional, fires before any other check, to directly prove
-  // whether onBfxTicker keeps executing after entry (three real positions froze with zero
-  // ticks recorded and no clear mechanism found in code review — this replaces guessing with
-  // direct evidence). Throttled to avoid spamming the runs table.
-  if (Date.now() - lastTickLogAt > 10_000) {
-    lastTickLogAt = Date.now();
-    logSolTrailContinuousRun({ actions: [{ action: "DIAG", tickCount, mode: state.mode, bid, ask, orderInFlight, enabled: state.enabled }] }).catch(() => {});
-  }
   if (!state.enabled || orderInFlight) return;
 
   if (state.mode !== "SOL") {

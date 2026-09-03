@@ -767,7 +767,22 @@ function SolTrailContinuousPanel({
   const winRate  = totalTrades > 0 ? (wins / totalTrades * 100).toFixed(1) : "—";
   const mode = st?.mode ?? "USD";
 
-  const latestPrice: number | null = (() => {
+  const [livePrice, setLivePrice] = useState<number | null>(null);
+  useEffect(() => {
+    let cancelled = false;
+    const poll = async () => {
+      try {
+        const res = await fetch("https://api-pub.bitfinex.com/v2/ticker/tSOLUSD");
+        const data = await res.json();
+        if (!cancelled && Array.isArray(data)) setLivePrice(data[6]); // LAST_PRICE
+      } catch {}
+    };
+    poll();
+    const id = setInterval(poll, 5000);
+    return () => { cancelled = true; clearInterval(id); };
+  }, []);
+
+  const latestPrice: number | null = livePrice ?? (() => {
     for (const r of runs) {
       const actions: any[] = r.data?.actions ?? [];
       for (let i = actions.length - 1; i >= 0; i--) {
@@ -852,7 +867,11 @@ function SolTrailContinuousPanel({
           <Stat
             label="Status"
             value={statusText}
-            sub={mode === "SOL" && st?.entry_price ? `entry $${parseFloat(st.entry_price).toFixed(2)}` : "watching"}
+            sub={
+              mode === "SOL" && st?.entry_price
+                ? `entry $${parseFloat(st.entry_price).toFixed(2)}${latestPrice != null ? ` · now $${latestPrice.toFixed(2)}` : ""}`
+                : "watching"
+            }
             color={statusColor}
           />
           <Stat
