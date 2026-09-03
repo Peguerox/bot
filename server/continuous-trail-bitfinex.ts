@@ -11,9 +11,16 @@
 // JUMP_PCT = 0.02%, same threshold as the paper SOL Jump Trail bot — the tested/validated
 // setting, not an untried one, per explicit user choice.
 //
-// REAL MONEY MECHANICS: same as the Pure Trail real-money conversion — the WS feeds only decide
-// WHEN to buy/sell (worst-case-consistent spread model for timing), but the price/quantity
-// actually recorded comes from the real Bitfinex fill via lib/bitfinex-auth.ts, not an estimate.
+// REAL MONEY MECHANICS: entry/exit timing decisions use Bitfinex's real live ticker (true bid
+// and ask), not an estimate. Earlier version subscribed to the "trades" channel (last executed
+// price) and approximated bid/ask by subtracting/adding an assumed spread constant — but the
+// last trade price bounces between sitting near the real bid and near the real ask depending on
+// who was the aggressor, so a fixed offset from it isn't the same as the real bid. Found
+// 2026-09-03 after live P&L was running ~0.15 points worse than the paper bot over 11 matched
+// trades even after correcting the spread constant once already. Switched to the "ticker"
+// channel, which streams the real bid/ask directly — no more approximation needed. The
+// price/quantity actually recorded still comes from the real Bitfinex fill via
+// lib/bitfinex-auth.ts, not an estimate.
 //
 // SINGLE-INSTANCE GUARANTEE: critical with real orders — claims a lock row (lock_owner/
 // lock_heartbeat) on startup, refuses to trade if another instance's heartbeat is fresh, releases
@@ -41,7 +48,6 @@ const JUMP_PCT         = 0.02;   // % cumulative move over ROLL_MS to trigger en
 const ROLL_MS          = 2000;
 const SL_PCT           = 0.1;    // verified better than 0.05% on both backtest and real tick replay
 const SEED_USD         = 20;
-const HALF_SPREAD_PCT  = 0.0117; // real measured Bitfinex SOLUSD half-spread — used only to DECIDE timing
 const HEARTBEAT_MS     = 10_000;
 const LOCK_STALE_MS    = 30_000;
 const DB_WRITE_THROTTLE_MS = 2_000;
@@ -49,15 +55,13 @@ const RUN_LOG_INTERVAL_MS  = 5 * 60_000;
 
 const INSTANCE_ID = `${os.hostname()}-${process.pid}-${crypto.randomBytes(3).toString("hex")}`;
 
-function entryFill(price: number): number { return price * (1 + HALF_SPREAD_PCT / 100); } // ask-adjusted, timing only
-function exitFill(price: number): number { return price * (1 - HALF_SPREAD_PCT / 100); }  // bid-adjusted, timing only
-
 let state: SolTrailContinuousState;
 let lastDbWrite = 0;
 let lastRunLog = 0;
 let orderInFlight = false;
 let binBuf: { t: number; p: number }[] = [];
-let bfxLast: number | null = null;
+let bidLast: number | null = null;
+let askLast: number | null = null;
 
 async function acquireLock(): Promise<boolean> {
   state = await getSolTrailContinuousState();
@@ -104,7 +108,7 @@ function checkJump(): number | null {
 
 async function onBinTick(price: number) {
   binBuf.push({ t: Date.now(), p: price });
-  if (!state.enabled || state.mode !== "USD" || orderInFlight || bfxLast === null) return;
+  if (!state.enabled || state.mode !== "USD" || orderInFlight || askLast === null) return;
 
   const jumpPct = checkJump();
   if (jumpPct === null) return;
@@ -112,9 +116,8 @@ async function onBinTick(price: number) {
   orderInFlight = true;
   try {
     const targetPool = SEED_USD + (state.realized_pnl_usd ?? 0);
-    const effEntry = entryFill(bfxLast);
-    const estQty = targetPool / effEntry;
-    console.log(`BUY signal (jump=${jumpPct.toFixed(4)}%) @ est=${effEntry.toFixed(4)} qty~=${estQty.toFixed(4)} — submitting real order...`);
+    const estQty = targetPool / askLast; // real live ask, no estimate
+    console.log(`BUY signal (jump=${jumpPct.toFixed(4)}%) @ ask=${askLast.toFixed(4)} qty~=${estQty.toFixed(4)} — submitting real order...`);
     const fill = await submitMarketOrder(BFX_SYMBOL, estQty);
     const patch = {
       mode: "SOL" as const, sol_quantity: fill.execAmount, entry_price: fill.execPrice,
@@ -136,11 +139,12 @@ async function onBinTick(price: number) {
   }
 }
 
-async function onBfxTick(price: number) {
-  bfxLast = price;
+async function onBfxTicker(bid: number, ask: number) {
+  bidLast = bid;
+  askLast = ask;
   if (!state.enabled || orderInFlight || state.mode !== "SOL") return;
 
-  const effSell = exitFill(price);
+  const effSell = bid; // real live bid, no estimate — what a market sell would actually receive
   const peak = state.peak_price ?? state.entry_price!;
   const stop = state.stop_price ?? peak * (1 - SL_PCT / 100);
 
@@ -188,7 +192,7 @@ async function onBfxTick(price: number) {
 
   if (Date.now() - lastRunLog > RUN_LOG_INTERVAL_MS) {
     await logSolTrailContinuousRun({
-      actions: [{ action: "STATUS", mode: state.mode, price, peak: state.peak_price, stop: state.stop_price }],
+      actions: [{ action: "STATUS", mode: state.mode, bid, ask, peak: state.peak_price, stop: state.stop_price }],
     });
     lastRunLog = Date.now();
   }
@@ -211,18 +215,20 @@ function connectBitfinex() {
   let queue: Promise<void> = Promise.resolve();
 
   ws.on("open", () => {
-    console.log("Bitfinex WS connected, subscribing...");
-    ws.send(JSON.stringify({ event: "subscribe", channel: "trades", symbol: BFX_SYMBOL }));
+    console.log("Bitfinex WS connected, subscribing to ticker (real bid/ask)...");
+    ws.send(JSON.stringify({ event: "subscribe", channel: "ticker", symbol: BFX_SYMBOL }));
   });
 
   ws.on("message", (raw: Buffer) => {
     let msg: any;
     try { msg = JSON.parse(raw.toString()); } catch { return; }
-    if (msg.event === "subscribed" && msg.channel === "trades") { chanId = msg.chanId; return; }
-    if (!Array.isArray(msg) || msg[0] !== chanId || msg[1] !== "te") return;
-    const price = msg[2][3];
-    if (!price || isNaN(price)) return;
-    queue = queue.then(() => onBfxTick(price)).catch((err) => console.error("onBfxTick error:", err));
+    if (msg.event === "subscribed" && msg.channel === "ticker") { chanId = msg.chanId; return; }
+    if (!Array.isArray(msg) || msg[0] !== chanId || msg[1] === "hb") return;
+    const data = msg[1];
+    if (!Array.isArray(data) || data.length < 4) return;
+    const bid = data[0], ask = data[2];
+    if (!bid || !ask || isNaN(bid) || isNaN(ask)) return;
+    queue = queue.then(() => onBfxTicker(bid, ask)).catch((err) => console.error("onBfxTicker error:", err));
   });
 
   ws.on("error", (err) => console.error("Bitfinex WS error:", err));
