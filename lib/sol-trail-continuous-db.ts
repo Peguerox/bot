@@ -63,3 +63,9 @@ export async function logSolTrailContinuousRun(data: object) {
     .from("sol_trail_continuous_runs")
     .insert({ run_at: new Date().toISOString(), data });
 }
+
+export async function recordSolTrailContinuousTick(entryTime: string, bid: number, ask: number) {
+  await getSupabaseAdmin()
+    .from("sol_trail_continuous_ticks")
+    .insert({ entry_time: entryTime, tick_time: new Date().toISOString(), bid, ask });
+}
