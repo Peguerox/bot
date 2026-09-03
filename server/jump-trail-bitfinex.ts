@@ -1,7 +1,12 @@
 // Standalone always-on worker — watches Binance SOLUSDT for "jumps" (>=0.02% cumulative move
 // within a 2s rolling window) and, when flat, enters a Bitfinex tSOLUSD LONG paper position on
 // an up-jump (long-only — spot can't short without margin, out of scope for now). Position is
-// then managed with a 0.1% trailing stop on Bitfinex's own live ticks, worst-case spread.
+// then managed with a 0.05% trailing stop on Bitfinex's own live ticks, worst-case spread.
+//
+// SL changed from 0.1% to 0.05% on 2026-09-03 for a head-to-head comparison against the live
+// real-money bot (server/continuous-trail-bitfinex.ts, same jump signal, SL=0.1%). Also updated
+// HALF_SPREAD_PCT from 0.0117% to 0.015% to match the live ticker bid/ask actually measured that
+// day (the first live real trade showed ~0.03% extra round-trip cost vs the old assumption).
 //
 // Session finding motivating this (2026-09-02): across two independent windows (10min + 5min,
 // 27 discrete jump events total), 20/27 (74.1%) of Binance jumps were followed by a
@@ -24,9 +29,9 @@ import {
 
 const JUMP_PCT         = 0.02;   // % cumulative move over ROLL_MS to trigger entry
 const ROLL_MS          = 2000;
-const SL_PCT           = 0.1;
+const SL_PCT           = 0.05;   // head-to-head test vs the live bot's 0.1% — 2026-09-03
 const SEED_USD         = 100;
-const HALF_SPREAD_PCT  = 0.0117; // real measured Bitfinex SOLUSD half-spread
+const HALF_SPREAD_PCT  = 0.015;  // updated from 0.0117 to match live ticker bid/ask measured 2026-09-03
 const HEARTBEAT_MS     = 10_000;
 const LOCK_STALE_MS    = 30_000;
 const DB_WRITE_THROTTLE_MS = 2_000;
