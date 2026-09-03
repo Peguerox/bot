@@ -40,6 +40,9 @@ let bfxAsk: number | null = null;
 let currentTradeGapPct: number | null = null;
 let tpPrice: number | null = null;
 let slPrice: number | null = null;
+let armed = true; // re-arm filter 2026-09-03: gap==0 only counts as a fresh signal once the gap
+                   // has read non-zero at least once since the last entry -- stops the bot from
+                   // re-firing repeatedly on the same stagnant zero right after a trade closes.
 
 async function acquireLock(): Promise<boolean> {
   state = await getSolJumpTrailBitfinexState();
@@ -81,6 +84,7 @@ async function enterPosition(gapPct: number) {
   tpPrice = entry * (1 + TP_PCT / 100);
   slPrice = entry * (1 - SL_PCT / 100);
 
+  armed = false;
   currentTradeGapPct = gapPct;
   const patch = {
     mode: "LONG" as const, sol_quantity: solQty, entry_price: entry,
@@ -127,9 +131,11 @@ async function exitPosition(fillPrice: number, reason: "TP" | "SL") {
 }
 
 async function checkEntry() {
-  if (!state.enabled || state.mode !== "FLAT" || binanceAsk === null || bfxAsk === null) return;
+  if (binanceAsk === null || bfxAsk === null) return;
   const gapPct = (binanceAsk - bfxAsk) / bfxAsk * 100;
-  if (gapPct === 0) await enterPosition(gapPct);
+  if (gapPct !== 0) armed = true; // re-arms regardless of mode, so it's ready the moment we're flat again
+  if (!state.enabled || state.mode !== "FLAT") return;
+  if (gapPct === 0 && armed) await enterPosition(gapPct);
 }
 
 async function onBfxTicker(bid: number, ask: number) {
