@@ -1,15 +1,19 @@
 // REAL MONEY — Jump Trail strategy (NOT Pure Trail — this file used to run the always-re-enter
 // Pure Trail strategy, converted 2026-09-03 per explicit user instruction to the Jump strategy
 // instead). Watches Binance SOLUSDT for a "jump" (>=JUMP_PCT cumulative move within a 2s rolling
-// window) and, when flat, buys SOL on Bitfinex. Manages the position with a 0.1% trailing stop
-// (verified as the better setting vs 0.05% across both the 3-month backtest and real live tick
-// replay — see research/lead-lag-findings.md and the SOL Jump Trail paper bot's own history).
+// window, single-venue, no cross-venue comparison) and, when flat, buys SOL on Bitfinex. Manages
+// the position with a SL_PCT trailing stop on Bitfinex's real bid.
 // $20 seed, compounds. Same tables/dashboard panel as before (sol_trail_continuous_*) — schema
 // is compatible since both strategies are "flat vs holding SOL, entry/peak/stop" shaped, only
 // the entry TRIGGER differs (jump signal here, instant re-entry in the old Pure Trail version).
 //
-// JUMP_PCT = 0.02%, same threshold as the paper SOL Jump Trail bot — the tested/validated
-// setting, not an untried one, per explicit user choice.
+// PARAMETER HISTORY: was JUMP_PCT=0.02%/SL_PCT=0.1% (matching the paper bot's original,
+// most-tested setting). The paper bot was separately redesigned to a cross-venue ask-vs-ask gap
+// signal, but that research found the cross-venue thesis wasn't holding up in the specific
+// windows tested (see [[project_jump_trail_bot]] memory / research/lead-lag-findings.md) — so
+// this live bot was deliberately kept on the simpler single-venue jump signal instead, and on
+// 2026-09-03 lowered to JUMP_PCT=0.01%/SL_PCT=0.05% to retest a more sensitive combination now
+// that entry/exit use real bid/ask instead of an estimate.
 //
 // REAL MONEY MECHANICS: entry/exit timing decisions use Bitfinex's real live ticker (true bid
 // and ask), not an estimate. Earlier version subscribed to the "trades" channel (last executed
@@ -44,9 +48,9 @@ import { submitMarketOrder } from "../lib/bitfinex-auth";
 
 const BFX_SYMBOL       = "tSOLUSD";
 const BINANCE_WS       = "wss://stream.binance.com:9443/ws/solusdt@trade";
-const JUMP_PCT         = 0.02;   // % cumulative move over ROLL_MS to trigger entry — same threshold as the paper SOL Jump Trail bot
+const JUMP_PCT         = 0.01;   // lowered from 0.02% 2026-09-03 — testing a more sensitive single-venue Binance jump signal
 const ROLL_MS          = 2000;
-const SL_PCT           = 0.1;    // verified better than 0.05% on both backtest and real tick replay
+const SL_PCT           = 0.05;   // lowered from 0.1% 2026-09-03 — retesting now that entry/exit use real bid/ask (0.1% won the earlier comparison, but that was with the 0.02% cross-venue signal, not this 0.01% single-venue one)
 const SEED_USD         = 20;
 const HEARTBEAT_MS     = 10_000;
 const LOCK_STALE_MS    = 30_000;
