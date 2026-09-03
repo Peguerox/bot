@@ -228,7 +228,6 @@ function connectBitfinex() {
   const ws = new WebSocket("wss://api-pub.bitfinex.com/ws/2");
   bfxWs = ws;
   let chanId: number | null = null;
-  let queue: Promise<void> = Promise.resolve();
 
   ws.on("open", () => {
     console.log("Bitfinex WS connected, subscribing to ticker (real bid/ask)...");
@@ -251,12 +250,14 @@ function connectBitfinex() {
     // was alive but not that price data was flowing; this fixes the watchdog itself having the
     // identical blind spot at a different layer.
     lastBfxMessageTime = Date.now();
-    // REVERTED 2026-09-03: back to a serialized queue. The fire-and-forget version (direct call,
-    // no queue) was live for every one of the three real-money freeze incidents; before that
-    // change existed, this bot ran fine for hours. Never proved the exact mechanism, but it's
-    // the only change in that stretch that touches how price messages get dispatched at all, so
-    // reverting it takes priority over the unconfirmed latency-improvement theory.
-    queue = queue.then(() => onBfxTicker(bid, ask)).catch((err) => console.error("onBfxTicker error:", err));
+    // RE-APPLIED 2026-09-03: fire-and-forget, not a serialized queue. The actual root cause of
+    // every freeze incident was a missing function deploy (lib/sol-trail-continuous-db.ts never
+    // committed), unrelated to this queue/no-queue question entirely — see that fix's commit.
+    // With the real bug fixed, restoring this: order submission (which can take a few seconds)
+    // no longer blocks every subsequent price tick from being processed until it finishes.
+    // bfxBid/bfxAsk update synchronously before any await; orderInFlight already guards against
+    // duplicate/overlapping order submission.
+    onBfxTicker(bid, ask).catch((err) => console.error("onBfxTicker error:", err));
   });
 
   ws.on("error", (err) => console.error("Bitfinex WS error:", err));
