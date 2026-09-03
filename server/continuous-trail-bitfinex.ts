@@ -236,7 +236,6 @@ function connectBitfinex() {
   });
 
   ws.on("message", (raw: Buffer) => {
-    lastBfxMessageTime = Date.now(); // liveness signal — updated on EVERY message including heartbeats, independent of whether it parses as a usable ticker update
     let msg: any;
     try { msg = JSON.parse(raw.toString()); } catch { return; }
     if (msg.event === "subscribed" && msg.channel === "ticker") { chanId = msg.chanId; return; }
@@ -245,6 +244,13 @@ function connectBitfinex() {
     if (!Array.isArray(data) || data.length < 4) return;
     const bid = data[0], ask = data[2];
     if (!bid || !ask || isNaN(bid) || isNaN(ask)) return;
+    // Liveness signal only counts an actual parsed ticker update, NOT any raw message or "hb"
+    // frame — a socket that stays open and sends heartbeats while the subscription silently
+    // stops delivering real ticker data would otherwise look "alive" and defeat the watchdog.
+    // This was the second version of the same bug: first the lock heartbeat proved the process
+    // was alive but not that price data was flowing; this fixes the watchdog itself having the
+    // identical blind spot at a different layer.
+    lastBfxMessageTime = Date.now();
     // Fire-and-forget, NOT chained through a serialized queue — see the 2026-09-03 latency fix
     // note below. bfxBid/bfxAsk update synchronously at the top of onBfxTicker before any await,
     // so price state stays fresh even while a real order is in flight; orderInFlight already
