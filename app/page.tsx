@@ -1075,7 +1075,7 @@ function SolJumpTrailBitfinexPanel({
             </button>
           </div>
         </div>
-        <p className="text-gray-500 text-xs">REDESIGNED 2026-09-03: real Binance ask vs real Bitfinex ask, buy on Bitfinex when Binance's ask is ≥0.02% higher (Bitfinex hasn't caught up) · long-only (no shorting on spot) · PAPER · $100 seed, compounds · 0.1% trailing stop on real Bitfinex bid, no estimated spread</p>
+        <p className="text-gray-500 text-xs">REDESIGNED 2026-09-03: buy on Bitfinex when Binance ask - Bitfinex ask is exactly 0 (mean-reversion signal, not lag-follow) · long-only (no shorting on spot) · PAPER · $100 seed, compounds · 0.1% trailing stop on real Bitfinex bid</p>
       </div>
 
       {loading ? (

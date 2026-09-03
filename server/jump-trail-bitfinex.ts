@@ -1,19 +1,16 @@
-// Standalone always-on worker — REDESIGNED 2026-09-03. Old version watched Binance SOLUSDT for
-// a jump in isolation (own price moving >=0.02%) and assumed Bitfinex hadn't caught up — but
-// that's an assumption, not a check, and live results proved it wrong (see
-// server/continuous-trail-bitfinex.ts history and the 5-min SOLBTC test that only found 1 trade,
-// a loser, once we actually required a real cross-venue gap).
+// Standalone always-on worker — REDESIGNED AGAIN 2026-09-03. Previous version bought when
+// Binance's ask rose >=0.02% above Bitfinex's ask (assumed lag) — that thesis didn't hold up
+// (see event-based convergence testing this session: gap-widening events mostly led to further
+// divergence, not catch-up).
 //
-// New signal: continuously compare Binance's real ask to Bitfinex's real ask (same side on both
-// venues — comparing different sides, e.g. one ask to one bid, would just measure each venue's
-// own spread width, not a real cross-venue gap). When Binance's ask has risen above Bitfinex's
-// ask by >=GAP_PCT, that means Bitfinex hasn't caught up yet — buy on Bitfinex's ask right now,
-// same real price used for signal and execution, no separate estimate. Long-only (spot can't
-// short without margin).
+// New signal, based on a mean-reversion pattern found via statistical event analysis: events
+// where Bitfinex's own price went on to RISE started from a small absolute gap (avg -0.19%);
+// events where it went on to FALL started from a bigger absolute gap (avg -0.27%). So: buy when
+// the ask-to-ask gap is exactly zero — that's when Bitfinex's price has
+// historically been more likely to move up next. Same real Bitfinex ask used for signal and
+// execution. Long-only (spot can't short without margin).
 //
-// Exit: unchanged — 0.1% trailing stop, now using Bitfinex's real bid directly (upgraded from
-// the old trades-channel + estimated-spread approach to the same real-ticker fix already applied
-// to the live bot).
+// Exit: unchanged — 0.1% trailing stop on Bitfinex's real bid.
 import dotenv from "dotenv";
 dotenv.config({ path: ".env.local" });
 
@@ -25,7 +22,6 @@ import {
   logSolJumpTrailBitfinexRun, recordSolJumpTrailBitfinexTick, type SolJumpTrailBitfinexState,
 } from "../lib/sol-jump-trail-bitfinex-db";
 
-const GAP_PCT           = 0.02;   // % Binance ask must be above Bitfinex ask to trigger entry
 const SL_PCT             = 0.1;
 const SEED_USD           = 100;
 const HEARTBEAT_MS       = 10_000;
@@ -129,7 +125,7 @@ async function exitPosition(fillPrice: number) {
 async function checkEntry() {
   if (!state.enabled || state.mode !== "FLAT" || binanceAsk === null || bfxAsk === null) return;
   const gapPct = (binanceAsk - bfxAsk) / bfxAsk * 100;
-  if (gapPct >= GAP_PCT) await enterPosition(gapPct);
+  if (gapPct === 0) await enterPosition(gapPct);
 }
 
 async function onBfxTicker(bid: number, ask: number) {
@@ -217,7 +213,7 @@ async function main() {
   process.on("SIGTERM", shutdown);
 
   console.log(`Starting jump-trail worker (${INSTANCE_ID}), enabled=${state.enabled}, mode=${state.mode}`);
-  console.log(`Signal: Binance ask - Bitfinex ask >= ${GAP_PCT}%. SL/trail: ${SL_PCT}%.`);
+  console.log(`Signal: Binance ask - Bitfinex ask == exactly 0. SL/trail: ${SL_PCT}%.`);
   connectBinance();
   connectBitfinex();
 }
