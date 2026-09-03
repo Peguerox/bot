@@ -1075,7 +1075,7 @@ function SolJumpTrailBitfinexPanel({
             </button>
           </div>
         </div>
-        <p className="text-gray-500 text-xs">Binance SOLUSDT jump-signal (≥0.02% in 2s) → Bitfinex tSOLUSD long entry, long-only (no shorting on spot) · PAPER · $100 seed, compounds · 0.05% trailing stop (head-to-head vs SOL Jump Live's 0.1%) · spread updated to 0.015%</p>
+        <p className="text-gray-500 text-xs">Binance SOLUSDT jump-signal (≥0.02% in 2s) → Bitfinex tSOLUSD long entry, long-only (no shorting on spot) · PAPER · $100 seed, compounds · 0.05% trailing stop (head-to-head vs SOL Jump Live's 0.1%) · spread updated to 0.0267% (old + observed live extra cost)</p>
       </div>
 
       {loading ? (
