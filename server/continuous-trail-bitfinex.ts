@@ -59,10 +59,16 @@ const HEARTBEAT_MS     = 10_000;
 const LOCK_STALE_MS    = 30_000;
 const DB_WRITE_THROTTLE_MS = 2_000;
 const RUN_LOG_INTERVAL_MS  = 5 * 60_000;
+const WATCHDOG_INTERVAL_MS = 5_000;
+const BFX_STALE_MS         = 15_000; // no message at all (incl. heartbeats) on the Bitfinex WS for this long -> force reconnect
+const BFX_EMERGENCY_MS     = 25_000; // still stale this long while holding SOL -> emergency flatten via REST, independent of the (likely dead) WS
 
 const INSTANCE_ID = `${os.hostname()}-${process.pid}-${crypto.randomBytes(3).toString("hex")}`;
 
 let state: SolTrailContinuousState;
+let lastBfxMessageTime = Date.now();
+let bfxWs: WebSocket | null = null;
+let emergencyInProgress = false;
 let lastDbWrite = 0;
 let lastRunLog = 0;
 let orderInFlight = false;
@@ -221,6 +227,7 @@ function connectBinance() {
 
 function connectBitfinex() {
   const ws = new WebSocket("wss://api-pub.bitfinex.com/ws/2");
+  bfxWs = ws;
   let chanId: number | null = null;
 
   ws.on("open", () => {
@@ -229,6 +236,7 @@ function connectBitfinex() {
   });
 
   ws.on("message", (raw: Buffer) => {
+    lastBfxMessageTime = Date.now(); // liveness signal — updated on EVERY message including heartbeats, independent of whether it parses as a usable ticker update
     let msg: any;
     try { msg = JSON.parse(raw.toString()); } catch { return; }
     if (msg.event === "subscribed" && msg.channel === "ticker") { chanId = msg.chanId; return; }
@@ -247,6 +255,62 @@ function connectBitfinex() {
   ws.on("error", (err) => console.error("Bitfinex WS error:", err));
   ws.on("close", () => { console.log("Bitfinex WS closed, reconnecting in 2s..."); setTimeout(connectBitfinex, 2000); });
   return ws;
+}
+
+// Emergency backstop added 2026-09-03 after a real position sat unmanaged for ~30 minutes: the
+// Bitfinex WS went silent (no close/error event, just stopped delivering messages) and nothing
+// detected it — the lock heartbeat only proves the process is alive, not that price data is
+// flowing. Real price kept falling well past the stop while peak/stop_price never updated.
+// This flattens via a real order using a freshly-fetched REST price, fully independent of
+// whatever state the (possibly dead) WS is in, then exits so Render restarts a clean process.
+async function emergencyFlatten(reason: string) {
+  if (emergencyInProgress) return;
+  emergencyInProgress = true;
+  try {
+    console.error(`EMERGENCY FLATTEN triggered: ${reason}`);
+    await logSolTrailContinuousRun({ actions: [{ action: "ERROR", stage: "watchdog", error: reason }] }).catch(() => {});
+    const fresh = await getSolTrailContinuousState();
+    if (fresh.mode !== "SOL" || !fresh.sol_quantity) {
+      console.error("Watchdog: not holding per DB state, nothing to flatten.");
+      return;
+    }
+    const fill = await submitMarketOrder(BFX_SYMBOL, -fresh.sol_quantity);
+    const usdOut = fill.execPrice * Math.abs(fill.execAmount);
+    const usdIn = fresh.entry_price! * fresh.sol_quantity;
+    const pnlUsd = usdOut - usdIn;
+    const pnlPct = (pnlUsd / usdIn) * 100;
+    await updateSolTrailContinuousState({
+      mode: "USD", sol_quantity: null, entry_price: null, entry_time: null,
+      usd_balance: usdOut, peak_price: null, stop_price: null, enabled: false,
+    });
+    await recordSolTrailContinuousTrade({
+      entry_price: fresh.entry_price!, exit_price: fill.execPrice, sol_quantity: fresh.sol_quantity,
+      usd_in: usdIn, usd_out: usdOut, pnl_usd: pnlUsd, pnl_pct: pnlPct, entry_time: fresh.entry_time!,
+    });
+    console.error(`EMERGENCY FLATTEN complete @ ${fill.execPrice}, pnlPct=${pnlPct.toFixed(4)}. Bot paused (enabled=false).`);
+    await logSolTrailContinuousRun({ actions: [{ action: "STOP_FILLED", price: fill.execPrice, pnlUsd, pnlPct, orderId: fill.orderId, emergency: true }] }).catch(() => {});
+  } catch (err) {
+    console.error("EMERGENCY FLATTEN FAILED:", err);
+    await logSolTrailContinuousRun({ actions: [{ action: "ERROR", stage: "watchdog-flatten-failed", error: String(err) }] }).catch(() => {});
+  } finally {
+    process.exit(1); // exit regardless of outcome so Render restarts with a clean process/WS
+  }
+}
+
+function startWatchdog() {
+  setInterval(() => {
+    const staleMs = Date.now() - lastBfxMessageTime;
+    if (staleMs < BFX_STALE_MS) return;
+
+    if (state.mode === "SOL" && staleMs >= BFX_EMERGENCY_MS && !emergencyInProgress) {
+      emergencyFlatten(`Bitfinex WS silent for ${Math.round(staleMs / 1000)}s while holding SOL`)
+        .catch((err) => console.error("emergencyFlatten error:", err));
+      return;
+    }
+
+    console.error(`Watchdog: Bitfinex WS silent for ${Math.round(staleMs / 1000)}s, forcing reconnect...`);
+    bfxWs?.terminate();
+  }, WATCHDOG_INTERVAL_MS);
 }
 
 async function main() {
@@ -269,6 +333,7 @@ async function main() {
   console.log(`REAL MONEY — signal: Binance ask - Bitfinex ask == exactly 0. Seed $${SEED_USD}, compounding, SL=${INIT_SL_PCT}% init / ${TIGHT_SL_PCT}% chase.`);
   connectBinance();
   connectBitfinex();
+  startWatchdog();
 }
 
 main().catch((err) => { console.error("Fatal:", err); process.exit(1); });
