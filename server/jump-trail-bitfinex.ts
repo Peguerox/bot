@@ -19,7 +19,7 @@ import os from "os";
 import crypto from "crypto";
 import {
   getSolJumpTrailBitfinexState, updateSolJumpTrailBitfinexState, recordSolJumpTrailBitfinexTrade,
-  logSolJumpTrailBitfinexRun, type SolJumpTrailBitfinexState,
+  logSolJumpTrailBitfinexRun, recordSolJumpTrailBitfinexTick, type SolJumpTrailBitfinexState,
 } from "../lib/sol-jump-trail-bitfinex-db";
 
 const JUMP_PCT         = 0.02;   // % cumulative move over ROLL_MS to trigger entry
@@ -42,6 +42,7 @@ let lastDbWrite = 0;
 let lastRunLog = 0;
 let binBuf: { t: number; p: number }[] = [];
 let bfxLast: number | null = null;
+let currentTradeJumpPct: number | null = null; // jump size that triggered the currently-open position
 
 async function acquireLock(): Promise<boolean> {
   state = await getSolJumpTrailBitfinexState();
@@ -75,18 +76,18 @@ async function releaseLock() {
   } catch (err) { console.error("releaseLock failed:", err); }
 }
 
-function checkJump(): "UP" | "DOWN" | null {
+function checkJump(): { dir: "UP" | "DOWN"; pct: number } | null {
   if (binBuf.length < 2) return null;
   const now = binBuf[binBuf.length - 1];
   while (binBuf.length > 1 && now.t - binBuf[0].t > ROLL_MS) binBuf.shift();
   const old = binBuf[0];
   const pct = (now.p - old.p) / old.p * 100;
-  if (pct >= JUMP_PCT) return "UP";
-  if (pct <= -JUMP_PCT) return "DOWN";
+  if (pct >= JUMP_PCT) return { dir: "UP", pct };
+  if (pct <= -JUMP_PCT) return { dir: "DOWN", pct };
   return null;
 }
 
-async function enterPosition(dir: "LONG") {
+async function enterPosition(dir: "LONG", jumpPct: number) {
   if (bfxLast === null) return;
   const targetPool = SEED_USD + (state.realized_pnl_usd ?? 0);
   const entry = entryFillLong(bfxLast);
@@ -94,6 +95,7 @@ async function enterPosition(dir: "LONG") {
   const extreme = exitFillLong(bfxLast);
   const stop = extreme * (1 - SL_PCT / 100);
 
+  currentTradeJumpPct = jumpPct;
   const patch = {
     mode: dir, sol_quantity: solQty, entry_price: entry,
     entry_time: new Date().toISOString(), usd_balance: 0,
@@ -102,8 +104,8 @@ async function enterPosition(dir: "LONG") {
   state = { ...state, ...patch };
   await updateSolJumpTrailBitfinexState(patch);
   lastDbWrite = Date.now();
-  console.log(`ENTER ${dir}  @ $${entry.toFixed(4)}  qty=${solQty.toFixed(4)}`);
-  await logSolJumpTrailBitfinexRun({ actions: [{ action: "ENTER", direction: dir, price: entry, qty: solQty }] });
+  console.log(`ENTER ${dir}  @ $${entry.toFixed(4)}  qty=${solQty.toFixed(4)}  jump=${jumpPct.toFixed(4)}%`);
+  await logSolJumpTrailBitfinexRun({ actions: [{ action: "ENTER", direction: dir, price: entry, qty: solQty, jumpPct }] });
   lastRunLog = Date.now();
 
   binBuf = [binBuf[binBuf.length - 1]]; // reset jump window so we don't immediately re-trigger
@@ -119,6 +121,8 @@ async function exitPosition(fillPrice: number) {
   const usdOut = fillPrice * origQty;
   const pnlUsd = usdOut - usdIn;
   const pnlPct = (pnlUsd / usdIn) * 100;
+  const jumpPct = currentTradeJumpPct ?? 0;
+  currentTradeJumpPct = null;
 
   const patch = {
     mode: "FLAT" as const, sol_quantity: null, entry_price: null, entry_time: null,
@@ -129,6 +133,7 @@ async function exitPosition(fillPrice: number) {
   await recordSolJumpTrailBitfinexTrade({
     direction: dir, entry_price: origEntry, exit_price: fillPrice, sol_quantity: origQty,
     usd_in: usdIn, usd_out: usdOut, pnl_usd: pnlUsd, pnl_pct: pnlPct, entry_time: origEntryTime,
+    jump_pct: jumpPct,
   });
   lastDbWrite = Date.now();
   console.log(`EXIT ${dir}  @ $${fillPrice.toFixed(4)}  pnlUsd=${pnlUsd.toFixed(4)} pnlPct=${pnlPct.toFixed(4)}`);
@@ -141,6 +146,8 @@ async function onBfxTick(price: number) {
   if (!state.enabled) return;
 
   if (state.mode !== "LONG") return; // entries are driven by onBinTick, not here
+
+  recordSolJumpTrailBitfinexTick(state.entry_time!, price).catch((err) => console.error("recordTick error:", err));
 
   const effSell = exitFillLong(price);
   const extreme = state.extreme_price ?? state.entry_price!;
@@ -166,7 +173,7 @@ async function onBinTick(price: number) {
   binBuf.push({ t: Date.now(), p: price });
   if (!state.enabled || state.mode !== "FLAT") return;
   const jump = checkJump();
-  if (jump === "UP") await enterPosition("LONG");
+  if (jump?.dir === "UP") await enterPosition("LONG", jump.pct);
 }
 
 function connectBinance() {

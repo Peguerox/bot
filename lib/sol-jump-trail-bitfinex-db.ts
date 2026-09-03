@@ -45,6 +45,7 @@ export async function recordSolJumpTrailBitfinexTrade(params: {
   pnl_usd: number;
   pnl_pct: number;
   entry_time: string;
+  jump_pct: number;
 }) {
   const { error } = await getSupabaseAdmin()
     .from("sol_jump_trail_bitfinex_trades")
@@ -63,4 +64,10 @@ export async function logSolJumpTrailBitfinexRun(data: object) {
   await getSupabaseAdmin()
     .from("sol_jump_trail_bitfinex_runs")
     .insert({ run_at: new Date().toISOString(), data });
+}
+
+export async function recordSolJumpTrailBitfinexTick(entryTime: string, price: number) {
+  await getSupabaseAdmin()
+    .from("sol_jump_trail_bitfinex_ticks")
+    .insert({ entry_time: entryTime, tick_time: new Date().toISOString(), price });
 }
