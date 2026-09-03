@@ -1128,7 +1128,7 @@ function SolJumpTrailBitfinexPanel({
         ) : log.length === 0 ? (
           <p className="text-gray-600 text-sm">No samples yet</p>
         ) : (
-          <div className="overflow-auto h-56">
+          <div className="overflow-auto h-56 pr-4">
             <table className="w-full text-xs font-mono">
               <thead>
                 <tr className="text-gray-500 border-b border-gray-800 sticky top-0 bg-gray-900">
@@ -1136,7 +1136,7 @@ function SolJumpTrailBitfinexPanel({
                   <th className="text-right pb-1">Price</th>
                   <th className="text-right pb-1">Bid Vol</th>
                   <th className="text-right pb-1">Ask Vol</th>
-                  <th className="text-right pb-1">Imbalance</th>
+                  <th className="text-right pb-1 pr-1">Imbalance</th>
                 </tr>
               </thead>
               <tbody className="divide-y divide-gray-800/50">
@@ -1148,7 +1148,7 @@ function SolJumpTrailBitfinexPanel({
                       <td className="py-1 text-right text-yellow-400">${parseFloat(r.price).toFixed(2)}</td>
                       <td className="py-1 text-right text-green-400">{parseFloat(r.bid_volume).toFixed(1)}</td>
                       <td className="py-1 text-right text-red-400">{parseFloat(r.ask_volume).toFixed(1)}</td>
-                      <td className={`py-1 text-right ${imb < 0 ? "text-red-400" : "text-green-400"}`}>{imb.toFixed(3)}</td>
+                      <td className={`py-1 text-right pr-1 ${imb < 0 ? "text-red-400" : "text-green-400"}`}>{imb.toFixed(3)}</td>
                     </tr>
                   );
                 })}
