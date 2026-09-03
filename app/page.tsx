@@ -3,6 +3,7 @@
 import { useEffect, useState } from "react";
 import { getSupabase } from "@/lib/supabase";
 import PnLChart from "@/components/PnLChart";
+import BookVolumeChart from "@/components/BookVolumeChart";
 
 function Stat({ label, value, sub, color }: { label: string; value: string; sub: string; color: string }) {
   return (
@@ -1025,62 +1026,20 @@ function SolTrailContinuousPanel({
 }
 
 function SolJumpTrailBitfinexPanel({
-  trades, state, runs, loading,
+  log, state, loading,
   enabled, onToggle, toggling,
   onClearHistory, clearingHistory,
 }: {
-  trades: any[]; state: any; runs: any[]; loading: boolean;
+  log: any[]; state: any; loading: boolean;
   enabled: boolean; onToggle: () => void; toggling: boolean;
   onClearHistory: () => void; clearingHistory: boolean;
 }) {
-  const INITIAL  = 100;
-  const st   = state;
-  const totalPnl = st?.realized_pnl_usd ?? 0;
-  const totalTrades = st?.total_trades ?? 0;
-  const wins     = st?.total_wins ?? 0;
-  const losses   = totalTrades - wins;
-  const winRate  = totalTrades > 0 ? (wins / totalTrades * 100).toFixed(1) : "—";
-  const mode = st?.mode ?? "FLAT";
-
-  const [livePrice, setLivePrice] = useState<number | null>(null);
-  useEffect(() => {
-    let cancelled = false;
-    const poll = async () => {
-      try {
-        const res = await fetch("/api/bitfinex-price");
-        const data = await res.json();
-        if (!cancelled && data.lastPrice != null) setLivePrice(data.lastPrice);
-      } catch {}
-    };
-    poll();
-    const id = setInterval(poll, 5000);
-    return () => { cancelled = true; clearInterval(id); };
-  }, []);
-
-  const latestPrice: number | null = livePrice ?? (() => {
-    for (const r of runs) {
-      const actions: any[] = r.data?.actions ?? [];
-      for (let i = actions.length - 1; i >= 0; i--) {
-        const p = actions[i].price;
-        if (p != null) return parseFloat(p);
-      }
-    }
-    return null;
-  })();
-
-  const statusText  = mode === "LONG" ? "Long SOL" : mode === "SHORT" ? "Short SOL" : "Flat";
-  const statusColor = mode === "LONG" ? "text-green-400" : mode === "SHORT" ? "text-red-400" : "text-gray-400";
-  const chartTrades = trades.map((t: any) => ({ ...t, pnl: t.pnl_usd, exit_time: t.exit_time }));
-
-  const entryValue   = mode !== "FLAT" && st?.entry_price && st?.sol_quantity
-    ? parseFloat(st.entry_price) * parseFloat(st.sol_quantity) : null;
-  const currentValue = mode !== "FLAT" && latestPrice && st?.sol_quantity
-    ? parseFloat(st.sol_quantity) * latestPrice : null;
-  const openPnl = entryValue != null && currentValue != null
-    ? (mode === "LONG" ? currentValue - entryValue : entryValue - currentValue) : null;
-
-  const extremePrice = mode !== "FLAT" && st?.extreme_price ? parseFloat(st.extreme_price) : null;
-  const stopPrice = mode !== "FLAT" && st?.stop_price ? parseFloat(st.stop_price) : null;
+  const st = state;
+  const latest = log.length > 0 ? log[log.length - 1] : null;
+  const price = latest ? parseFloat(latest.price) : null;
+  const imbalance = latest ? parseFloat(latest.imbalance) : null;
+  const bidVolume = latest ? parseFloat(latest.bid_volume) : null;
+  const askVolume = latest ? parseFloat(latest.ask_volume) : null;
 
   const lockAge = st?.lock_heartbeat ? Date.now() - new Date(st.lock_heartbeat).getTime() : null;
   const workerAlive = lockAge != null && lockAge < 30_000;
@@ -1090,8 +1049,8 @@ function SolJumpTrailBitfinexPanel({
       <div className="space-y-1.5">
         <div className="flex items-center justify-between gap-2">
           <div className="flex items-center gap-2">
-            <h2 className="text-white font-bold text-lg">SOL Jump Trail</h2>
-            <span className="text-xs font-bold px-2 py-0.5 rounded-full bg-blue-500/20 text-blue-400">PAPER</span>
+            <h2 className="text-white font-bold text-lg">SOL Book Volume Log</h2>
+            <span className="text-xs font-bold px-2 py-0.5 rounded-full bg-purple-500/20 text-purple-400">RESEARCH</span>
             <span className={`text-xs font-bold px-2 py-0.5 rounded-full ${workerAlive ? "bg-green-500/20 text-green-400" : "bg-gray-700/40 text-gray-500"}`}>
               {workerAlive ? "worker alive" : "worker offline"}
             </span>
@@ -1101,7 +1060,7 @@ function SolJumpTrailBitfinexPanel({
               onClick={onClearHistory}
               disabled={clearingHistory || enabled}
               className="text-xs font-medium px-2.5 py-1.5 rounded-md bg-gray-800 text-gray-400 hover:bg-gray-700 hover:text-gray-200 transition-all disabled:opacity-30 disabled:cursor-not-allowed"
-              title={enabled ? "Pause bot before clearing" : "Delete all trade history and run logs"}
+              title={enabled ? "Pause logger before clearing" : "Delete all logged data"}
             >
               {clearingHistory ? "Clearing…" : "Clear"}
             </button>
@@ -1119,7 +1078,7 @@ function SolJumpTrailBitfinexPanel({
             </button>
           </div>
         </div>
-        <p className="text-gray-500 text-xs">REVERTED 2026-09-03: buy on Bitfinex when Binance ask - Bitfinex ask is exactly 0 (mean-reversion signal) · long-only (no shorting on spot) · PAPER · $100 seed, compounds · fixed OCO-style bracket: TP=+0.1% / SL=-0.05%, no trailing</p>
+        <p className="text-gray-500 text-xs">No trading, no signal — pure research logger. Records real Bitfinex order book volume (top 25 levels each side) and price every 5s, plus the derived imbalance ratio (bidVol - askVol) / (bidVol + askVol), so we can see the actual relationship before picking a threshold.</p>
       </div>
 
       {loading ? (
@@ -1129,130 +1088,67 @@ function SolJumpTrailBitfinexPanel({
       ) : (
         <div className="grid grid-cols-2 gap-2">
           <Stat
-            label="PnL"
-            value={`${totalPnl >= 0 ? "+" : ""}${(totalPnl / INITIAL * 100).toFixed(2)}%`}
-            sub={`${totalPnl >= 0 ? "+" : ""}$${totalPnl.toFixed(2)} · ${totalTrades} trades (${wins}W/${losses}L)`}
-            color={totalPnl >= 0 ? "text-green-400" : "text-red-400"}
-          />
-          <Stat
-            label="Win Rate"
-            value={`${winRate}%`}
-            sub={`${totalTrades} trades (${wins}W/${losses}L)`}
-            color="text-blue-400"
-          />
-          <Stat
-            label="Status"
-            value={statusText}
-            sub={mode !== "FLAT" && st?.entry_price ? `entry $${parseFloat(st.entry_price).toFixed(2)}` : "watching"}
-            color={statusColor}
-          />
-          <Stat
             label="SOL/USD"
-            value={latestPrice != null ? `$${latestPrice.toFixed(2)}` : "—"}
-            sub={mode !== "FLAT" && st?.sol_quantity ? `${parseFloat(st.sol_quantity).toFixed(3)} SOL ${mode}` : "no position"}
+            value={price != null ? `$${price.toFixed(2)}` : "—"}
+            sub={`${log.length} samples logged`}
             color="text-yellow-400"
+          />
+          <Stat
+            label="Imbalance"
+            value={imbalance != null ? imbalance.toFixed(3) : "—"}
+            sub={imbalance == null ? "—" : imbalance < 0 ? "ask-heavy" : imbalance > 0 ? "bid-heavy" : "balanced"}
+            color={imbalance == null ? "text-gray-500" : imbalance < 0 ? "text-red-400" : "text-green-400"}
+          />
+          <Stat
+            label="Bid volume"
+            value={bidVolume != null ? bidVolume.toFixed(1) : "—"}
+            sub="top 25 levels"
+            color="text-green-400"
+          />
+          <Stat
+            label="Ask volume"
+            value={askVolume != null ? askVolume.toFixed(1) : "—"}
+            sub="top 25 levels"
+            color="text-red-400"
           />
         </div>
       )}
 
       <div>
-        <p className="text-gray-500 text-xs uppercase tracking-wide mb-2">Cumulative PnL (USD)</p>
-        <PnLChart trades={chartTrades} initial={INITIAL} />
+        <p className="text-gray-500 text-xs uppercase tracking-wide mb-2">Price (yellow) vs Imbalance (blue)</p>
+        <BookVolumeChart log={log} />
       </div>
 
       <div>
-        <p className="text-gray-500 text-xs uppercase tracking-wide mb-2">Position</p>
-        <table className="w-full text-sm font-mono">
-          <thead>
-            <tr className="text-gray-600 border-b border-gray-800">
-              <th className="text-left pb-1 font-medium">Field</th>
-              <th className="text-right pb-1 font-medium">Value</th>
-            </tr>
-          </thead>
-          <tbody>
-            <tr className="border-b border-gray-800/50">
-              <td className="py-1.5 text-gray-400">Direction</td>
-              <td className={`py-1.5 text-right font-bold ${statusColor}`}>{statusText}</td>
-            </tr>
-            <tr className="border-b border-gray-800/50">
-              <td className="py-1.5 text-gray-400">SOL size</td>
-              <td className="py-1.5 text-right text-white">
-                {mode !== "FLAT" && st?.sol_quantity ? `${parseFloat(st.sol_quantity).toFixed(3)} SOL` : "—"}
-              </td>
-            </tr>
-            <tr className="border-b border-gray-800/50">
-              <td className="py-1.5 text-gray-400">Entry price</td>
-              <td className="py-1.5 text-right text-white">
-                {mode !== "FLAT" && st?.entry_price ? `$${parseFloat(st.entry_price).toFixed(2)}` : "—"}
-              </td>
-            </tr>
-            <tr className="border-b border-gray-800/50">
-              <td className="py-1.5 text-gray-400">Current price</td>
-              <td className="py-1.5 text-right text-yellow-400">
-                {latestPrice != null ? `$${latestPrice.toFixed(2)}` : "—"}
-              </td>
-            </tr>
-            <tr className="border-b border-gray-800/50">
-              <td className="py-1.5 text-gray-400">Best price since entry</td>
-              <td className="py-1.5 text-right text-green-400">
-                {extremePrice != null ? `$${extremePrice.toFixed(2)}` : "—"}
-              </td>
-            </tr>
-            <tr className="border-b border-gray-800/50">
-              <td className="py-1.5 text-gray-400">Trailing stop</td>
-              <td className="py-1.5 text-right text-red-400">
-                {stopPrice != null ? `$${stopPrice.toFixed(2)}` : "—"}
-              </td>
-            </tr>
-            <tr>
-              <td className="py-1.5 text-gray-400">Open PnL</td>
-              <td className={`py-1.5 text-right font-bold ${
-                openPnl == null ? "text-gray-600"
-                : openPnl >= 0 ? "text-green-400" : "text-red-400"
-              }`}>
-                {openPnl != null && entryValue
-                  ? `${openPnl >= 0 ? "+" : ""}${(openPnl / entryValue * 100).toFixed(2)}% (${openPnl >= 0 ? "+" : ""}$${openPnl.toFixed(2)})`
-                  : "—"}
-              </td>
-            </tr>
-          </tbody>
-        </table>
-      </div>
-
-      <div>
-        <p className="text-gray-500 text-xs uppercase tracking-wide mb-2">Recent Trades</p>
+        <p className="text-gray-500 text-xs uppercase tracking-wide mb-2">Recent Samples</p>
         {loading ? (
           <div className="animate-pulse space-y-2">
             {[...Array(3)].map((_, i) => <div key={i} className="h-8 bg-gray-800 rounded" />)}
           </div>
-        ) : trades.length === 0 ? (
-          <p className="text-gray-600 text-sm">No completed round trips yet</p>
+        ) : log.length === 0 ? (
+          <p className="text-gray-600 text-sm">No samples yet</p>
         ) : (
-          <div className="overflow-auto">
+          <div className="overflow-auto h-56">
             <table className="w-full text-xs font-mono">
               <thead>
-                <tr className="text-gray-500 border-b border-gray-800">
-                  <th className="text-left pb-1">Dir</th>
-                  <th className="text-left pb-1">Entry</th>
-                  <th className="text-left pb-1">Exit</th>
-                  <th className="text-right pb-1">PnL</th>
-                  <th className="text-right pb-1">%</th>
+                <tr className="text-gray-500 border-b border-gray-800 sticky top-0 bg-gray-900">
+                  <th className="text-left pb-1">Time</th>
+                  <th className="text-right pb-1">Price</th>
+                  <th className="text-right pb-1">Bid Vol</th>
+                  <th className="text-right pb-1">Ask Vol</th>
+                  <th className="text-right pb-1">Imbalance</th>
                 </tr>
               </thead>
               <tbody className="divide-y divide-gray-800/50">
-                {trades.slice(0, 8).map((t: any) => {
-                  const isWin = (t.pnl_usd ?? 0) > 0;
+                {log.slice().reverse().slice(0, 60).map((r: any) => {
+                  const imb = parseFloat(r.imbalance);
                   return (
-                    <tr key={t.id} className="hover:bg-gray-800/30">
-                      <td className={`py-1.5 ${t.direction === "LONG" ? "text-green-400" : "text-red-400"}`}>{t.direction}</td>
-                      <td className="py-1.5 text-gray-300">${t.entry_price ? parseFloat(t.entry_price).toFixed(2) : "—"}</td>
-                      <td className="py-1.5 text-gray-300">${t.exit_price  ? parseFloat(t.exit_price).toFixed(2)  : "—"}</td>
-                      <td className={`py-1.5 text-right ${isWin ? "text-green-400" : "text-red-400"}`}>
-                        {isWin ? "+" : ""}${(t.pnl_usd ?? 0).toFixed(2)}
-                      </td>
-                      <td className={`py-1.5 text-right ${isWin ? "text-green-400" : "text-red-400"}`}>
-                        {isWin ? "+" : ""}{(t.pnl_pct ?? 0).toFixed(2)}%
-                      </td>
+                    <tr key={r.id} className="hover:bg-gray-800/30">
+                      <td className="py-1 text-gray-500">{new Date(r.logged_at).toLocaleTimeString([], { hour: "2-digit", minute: "2-digit", second: "2-digit", hour12: false })}</td>
+                      <td className="py-1 text-right text-yellow-400">${parseFloat(r.price).toFixed(2)}</td>
+                      <td className="py-1 text-right text-green-400">{parseFloat(r.bid_volume).toFixed(1)}</td>
+                      <td className="py-1 text-right text-red-400">{parseFloat(r.ask_volume).toFixed(1)}</td>
+                      <td className={`py-1 text-right ${imb < 0 ? "text-red-400" : "text-green-400"}`}>{imb.toFixed(3)}</td>
                     </tr>
                   );
                 })}
@@ -1260,37 +1156,6 @@ function SolJumpTrailBitfinexPanel({
             </table>
           </div>
         )}
-      </div>
-
-      <div>
-        <p className="text-gray-500 text-xs uppercase tracking-wide mb-2">Activity</p>
-        <div className="h-56 overflow-y-auto space-y-0.5 font-mono text-sm pr-1">
-          {runs.length === 0 && <p className="text-gray-600">No runs yet.</p>}
-          {runs.map((r: any) => {
-            const actions: any[] = r.data?.actions ?? [];
-            const time = r.run_at
-              ? new Date(r.run_at).toLocaleTimeString([], { hour: "2-digit", minute: "2-digit", second: "2-digit", hour12: false })
-              : "";
-            return (
-              <div key={r.id} className="flex gap-2 items-start">
-                <span className="text-gray-600 shrink-0">{time}</span>
-                <div className="flex flex-col gap-0">
-                  {actions.map((a: any, i: number) => {
-                    const color = a.action === "ENTER" ? (a.direction === "LONG" ? "text-green-400" : "text-red-400")
-                      : a.action === "EXIT" ? (parseFloat(a.pnlUsd) >= 0 ? "text-green-400" : "text-red-400")
-                      : a.action === "STATUS" ? "text-gray-500"
-                      : "text-gray-500";
-                    const text = a.action === "ENTER" ? `ENTER ${a.direction}  qty=${parseFloat(a.qty).toFixed(3)} @ $${parseFloat(a.price).toFixed(2)}`
-                      : a.action === "EXIT" ? `EXIT ${a.direction}  @ $${parseFloat(a.price).toFixed(2)}  pnl ${parseFloat(a.pnlUsd) >= 0 ? "+" : ""}$${parseFloat(a.pnlUsd).toFixed(4)} (${parseFloat(a.pnlPct).toFixed(4)}%)`
-                      : a.action === "STATUS" ? `watching  ${a.mode}  $${a.price != null ? parseFloat(a.price).toFixed(2) : "—"}`
-                      : a.action;
-                    return <span key={i} className={color}>{text}</span>;
-                  })}
-                </div>
-              </div>
-            );
-          })}
-        </div>
       </div>
     </div>
   );
@@ -1320,8 +1185,7 @@ export default function Dashboard() {
   const [solTrailContinuousToggling, setSolTrailContinuousToggling] = useState(false);
   const [solTrailContinuousClearing, setSolTrailContinuousClearing] = useState(false);
   const [solJumpTrailState,   setSolJumpTrailState]   = useState<any>(null);
-  const [solJumpTrailTrades,  setSolJumpTrailTrades]  = useState<any[]>([]);
-  const [solJumpTrailRuns,    setSolJumpTrailRuns]    = useState<any[]>([]);
+  const [solBookVolumeLog,    setSolBookVolumeLog]    = useState<any[]>([]);
   const [solJumpTrailToggling, setSolJumpTrailToggling] = useState(false);
   const [solJumpTrailClearing, setSolJumpTrailClearing] = useState(false);
 
@@ -1337,8 +1201,7 @@ export default function Dashboard() {
       { data: solTrailContinuousTr },
       { data: solTrailContinuousRs },
       { data: solJumpTrailSt },
-      { data: solJumpTrailTr },
-      { data: solJumpTrailRs },
+      { data: solBookVolumeLog },
     ] = await Promise.all([
       getSupabase().from("surfer_state").select("*").eq("id", 1).single(),
       getSupabase().from("surfer_trades").select("*").order("exit_time", { ascending: false }).limit(5000),
@@ -1350,8 +1213,7 @@ export default function Dashboard() {
       getSupabase().from("sol_trail_continuous_trades").select("*").order("exit_time", { ascending: false }).limit(5000),
       getSupabase().from("sol_trail_continuous_runs").select("id,run_at,data").order("run_at", { ascending: false }).limit(120),
       getSupabase().from("sol_jump_trail_bitfinex_state").select("*").eq("id", 1).single(),
-      getSupabase().from("sol_jump_trail_bitfinex_trades").select("*").order("exit_time", { ascending: false }).limit(5000),
-      getSupabase().from("sol_jump_trail_bitfinex_runs").select("id,run_at,data").order("run_at", { ascending: false }).limit(120),
+      getSupabase().from("sol_book_volume_log").select("*").order("logged_at", { ascending: false }).limit(300),
     ]);
     setSurferState(surferSt ?? null);
     setSurferTrades(surferTr ?? []);
@@ -1363,8 +1225,7 @@ export default function Dashboard() {
     setSolTrailContinuousTrades(solTrailContinuousTr ?? []);
     setSolTrailContinuousRuns(solTrailContinuousRs ?? []);
     setSolJumpTrailState(solJumpTrailSt ?? null);
-    setSolJumpTrailTrades(solJumpTrailTr ?? []);
-    setSolJumpTrailRuns(solJumpTrailRs ?? []);
+    setSolBookVolumeLog((solBookVolumeLog ?? []).slice().reverse());
     setLoading(false);
   }
 
@@ -1468,7 +1329,6 @@ export default function Dashboard() {
       { name: "Surfer SOLBTC",  badge: "LIVE",  state: surferState,     runsTable: "surfer_runs",         pnlField: "realized_pnl_btc",  initial: SURFER_BTC_INITIAL, unit: "₿", venue: "us" as const, symbol: "SOLBTC" },
       { name: "Surfer SOLUSDT", badge: "LIVE",  state: surferUsdtState, runsTable: "surfer_usdt_runs",    pnlField: "realized_pnl_usdt", initial: 50, unit: "$", venue: "us" as const,       symbol: "SOLUSDT" },
       { name: "SOL Zero-Gap Live", badge: "LIVE", state: solTrailContinuousState, runsTable: "sol_trail_continuous_runs", pnlField: "realized_pnl_usd", initial: 20, unit: "$", venue: "bitfinex" as const, symbol: "tSOLUSD" },
-      { name: "SOL Jump Trail", badge: "PAPER", state: solJumpTrailState, runsTable: "sol_jump_trail_bitfinex_runs", pnlField: "realized_pnl_usd", initial: 100, unit: "$", venue: "bitfinex" as const, symbol: "tSOLUSD" },
     ];
 
     const rows: SummaryRow[] = [];
@@ -1547,8 +1407,7 @@ export default function Dashboard() {
       .subscribe();
     const ch18 = sb.channel("sol-jump-trail-bitfinex")
       .on("postgres_changes", { event: "*", schema: "public", table: "sol_jump_trail_bitfinex_state" }, debouncedLoad)
-      .on("postgres_changes", { event: "*", schema: "public", table: "sol_jump_trail_bitfinex_trades" }, debouncedLoad)
-      .on("postgres_changes", { event: "*", schema: "public", table: "sol_jump_trail_bitfinex_runs" }, debouncedLoad)
+      .on("postgres_changes", { event: "*", schema: "public", table: "sol_book_volume_log" }, debouncedLoad)
       .subscribe();
     return () => {
       if (debounceTimer) clearTimeout(debounceTimer);
@@ -1616,9 +1475,8 @@ export default function Dashboard() {
             clearingHistory={solTrailContinuousClearing}
           />
           <SolJumpTrailBitfinexPanel
-            trades={solJumpTrailTrades}
+            log={solBookVolumeLog}
             state={solJumpTrailState}
-            runs={solJumpTrailRuns}
             loading={loading}
             enabled={solJumpTrailState?.enabled ?? false}
             onToggle={handleSolJumpTrailToggle}

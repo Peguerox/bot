@@ -1,15 +1,10 @@
-// Standalone always-on paper worker — REVERTED 2026-09-03 back to the exact-zero cross-venue
-// gap signal (the best-performing paper strategy this session, +$3.17 realized / 19-26 wins
-// before being swapped out to test order book imbalance, which never showed a real signal).
-//
-// SIGNAL: continuously compare Binance's real ask (bookTicker) to Bitfinex's real ask (ticker
-// channel). Buy on Bitfinex the instant the gap is EXACTLY zero (gapPct === 0, no tolerance
-// band). Long-only (spot can't short without margin).
-//
-// EXIT: CHANGED 2026-09-03 from a 0.1% trailing stop to a fixed OCO-style bracket — TP=+0.1%,
-// SL=-0.05% from entry, whichever hits first, no trailing. Testing this specific fixed
-// combination fresh; the earlier tick-data backtest found a flat 0.1% TP alone underperformed
-// the trailing stop, but that test didn't pair it with a tighter 0.05% SL like this.
+// Standalone always-on worker — CONVERTED 2026-09-03 from a trading bot into a pure research
+// logger. No entry signal, no positions, no TP/SL. Just continuously records real order book
+// volume (top 25 levels each side, bid vs ask) alongside price and the derived imbalance ratio,
+// so the actual relationship between book depth and price movement can be inspected directly
+// instead of guessing a threshold up front. Reuses the same lock/enabled state table as the old
+// trading version (sol_jump_trail_bitfinex_state) purely for the single-instance lock and the
+// dashboard's enable/disable toggle — mode/entry/trade fields on that table are unused now.
 import dotenv from "dotenv";
 dotenv.config({ path: ".env.local" });
 
@@ -17,32 +12,25 @@ import WebSocket from "ws";
 import os from "os";
 import crypto from "crypto";
 import {
-  getSolJumpTrailBitfinexState, updateSolJumpTrailBitfinexState, recordSolJumpTrailBitfinexTrade,
-  logSolJumpTrailBitfinexRun, recordSolJumpTrailBitfinexTick, type SolJumpTrailBitfinexState,
+  getSolJumpTrailBitfinexState, updateSolJumpTrailBitfinexState,
 } from "../lib/sol-jump-trail-bitfinex-db";
+import { recordBookVolume } from "../lib/sol-book-volume-log-db";
 
-const TP_PCT              = 0.1;
-const SL_PCT              = 0.05;
-const SEED_USD            = 100;
-const HEARTBEAT_MS        = 10_000;
-const LOCK_STALE_MS       = 30_000;
-const DB_WRITE_THROTTLE_MS = 2_000;
-const RUN_LOG_INTERVAL_MS  = 5 * 60_000;
+const BOOK_LEVELS       = 25;
+const LOG_INTERVAL_MS   = 5_000; // throttle DB writes
+const HEARTBEAT_MS      = 10_000;
+const LOCK_STALE_MS     = 30_000;
 
 const INSTANCE_ID = `${os.hostname()}-${process.pid}-${crypto.randomBytes(3).toString("hex")}`;
 
-let state: SolJumpTrailBitfinexState;
-let lastDbWrite = 0;
-let lastRunLog = 0;
-let binanceAsk: number | null = null;
+type Level = { price: number; count: number; amount: number };
+const bids = new Map<number, Level>();
+const asks = new Map<number, Level>();
+
+let state: { enabled: boolean; lock_owner: string | null; lock_heartbeat: string | null };
+let lastLogAt = 0;
 let bfxBid: number | null = null;
 let bfxAsk: number | null = null;
-let currentTradeGapPct: number | null = null;
-let tpPrice: number | null = null;
-let slPrice: number | null = null;
-let armed = true; // re-arm filter 2026-09-03: gap==0 only counts as a fresh signal once the gap
-                   // has read non-zero at least once since the last entry -- stops the bot from
-                   // re-firing repeatedly on the same stagnant zero right after a trade closes.
 
 async function acquireLock(): Promise<boolean> {
   state = await getSolJumpTrailBitfinexState();
@@ -76,107 +64,59 @@ async function releaseLock() {
   } catch (err) { console.error("releaseLock failed:", err); }
 }
 
-async function enterPosition(gapPct: number) {
-  if (bfxAsk === null) return;
-  const targetPool = SEED_USD + (state.realized_pnl_usd ?? 0);
-  const entry = bfxAsk;
-  const solQty = targetPool / entry;
-  tpPrice = entry * (1 + TP_PCT / 100);
-  slPrice = entry * (1 - SL_PCT / 100);
-
-  armed = false;
-  currentTradeGapPct = gapPct;
-  const patch = {
-    mode: "LONG" as const, sol_quantity: solQty, entry_price: entry,
-    entry_time: new Date().toISOString(), usd_balance: 0,
-    extreme_price: entry, stop_price: slPrice,
-  };
-  state = { ...state, ...patch };
-  await updateSolJumpTrailBitfinexState(patch);
-  lastDbWrite = Date.now();
-  console.log(`ENTER LONG  @ $${entry.toFixed(4)}  qty=${solQty.toFixed(4)}  gap=${gapPct.toFixed(4)}%  TP=$${tpPrice.toFixed(4)}  SL=$${slPrice.toFixed(4)}`);
-  await logSolJumpTrailBitfinexRun({ actions: [{ action: "ENTER", direction: "LONG", price: entry, qty: solQty, jumpPct: gapPct }] });
-  lastRunLog = Date.now();
+function topN(map: Map<number, Level>, n: number, desc: boolean): Level[] {
+  const arr = Array.from(map.values());
+  arr.sort((a, b) => (desc ? b.price - a.price : a.price - b.price));
+  return arr.slice(0, n);
 }
 
-async function exitPosition(fillPrice: number, reason: "TP" | "SL") {
-  const origEntry = state.entry_price!;
-  const origQty = state.sol_quantity!;
-  const origEntryTime = state.entry_time!;
+function maybeLog() {
+  if (!state.enabled) return;
+  if (bfxBid === null || bfxAsk === null) return;
+  if (Date.now() - lastLogAt < LOG_INTERVAL_MS) return;
 
-  const usdIn = origEntry * origQty;
-  const usdOut = fillPrice * origQty;
-  const pnlUsd = usdOut - usdIn;
-  const pnlPct = (pnlUsd / usdIn) * 100;
-  const gapPct = currentTradeGapPct ?? 0;
-  currentTradeGapPct = null;
-  tpPrice = null;
-  slPrice = null;
+  const bidLevels = topN(bids, BOOK_LEVELS, true);
+  const askLevels = topN(asks, BOOK_LEVELS, false);
+  if (bidLevels.length < 5 || askLevels.length < 5) return;
+  const bidVolume = bidLevels.reduce((s, l) => s + Math.abs(l.amount), 0);
+  const askVolume = askLevels.reduce((s, l) => s + Math.abs(l.amount), 0);
+  const price = (bfxBid + bfxAsk) / 2;
 
-  const patch = {
-    mode: "FLAT" as const, sol_quantity: null, entry_price: null, entry_time: null,
-    usd_balance: usdOut, extreme_price: null, stop_price: null,
-  };
-  state = { ...state, ...patch };
-  await updateSolJumpTrailBitfinexState(patch);
-  await recordSolJumpTrailBitfinexTrade({
-    direction: "LONG", entry_price: origEntry, exit_price: fillPrice, sol_quantity: origQty,
-    usd_in: usdIn, usd_out: usdOut, pnl_usd: pnlUsd, pnl_pct: pnlPct, entry_time: origEntryTime,
-    jump_pct: gapPct,
+  lastLogAt = Date.now();
+  recordBookVolume(price, bidVolume, askVolume).catch((err) => console.error("recordBookVolume error:", err));
+}
+
+function connectBook() {
+  const ws = new WebSocket("wss://api-pub.bitfinex.com/ws/2");
+  let chanId: number | null = null;
+  ws.on("open", () => {
+    console.log("Bitfinex book WS connected, subscribing (P0, top 25 levels)...");
+    ws.send(JSON.stringify({ event: "subscribe", channel: "book", symbol: "tSOLUSD", prec: "P0", len: String(BOOK_LEVELS) }));
   });
-  lastDbWrite = Date.now();
-  console.log(`EXIT LONG (${reason})  @ $${fillPrice.toFixed(4)}  pnlUsd=${pnlUsd.toFixed(4)} pnlPct=${pnlPct.toFixed(4)}`);
-  await logSolJumpTrailBitfinexRun({ actions: [{ action: "EXIT", direction: "LONG", price: fillPrice, pnlUsd, pnlPct, reason }] });
-  lastRunLog = Date.now();
-}
-
-async function checkEntry() {
-  if (binanceAsk === null || bfxAsk === null) return;
-  const gapPct = (binanceAsk - bfxAsk) / bfxAsk * 100;
-  if (gapPct !== 0) armed = true; // re-arms regardless of mode, so it's ready the moment we're flat again
-  if (!state.enabled || state.mode !== "FLAT") return;
-  if (gapPct === 0 && armed) await enterPosition(gapPct);
-}
-
-async function onBfxTicker(bid: number, ask: number) {
-  bfxBid = bid;
-  bfxAsk = ask;
-
-  if (state.mode === "LONG") {
-    recordSolJumpTrailBitfinexTick(state.entry_time!, bid).catch((err) => console.error("recordTick error:", err));
-
-    const tp = tpPrice ?? state.entry_price! * (1 + TP_PCT / 100);
-    const sl = slPrice ?? state.stop_price!;
-    if (bid <= sl) { await exitPosition(sl, "SL"); return; }
-    if (bid >= tp) { await exitPosition(tp, "TP"); return; }
-
-    if (Date.now() - lastRunLog > RUN_LOG_INTERVAL_MS) {
-      await logSolJumpTrailBitfinexRun({
-        actions: [{ action: "STATUS", mode: state.mode, bid, ask, tp, sl }],
-      });
-      lastRunLog = Date.now();
-    }
-  } else {
-    await checkEntry();
-  }
-}
-
-function connectBinance() {
-  const ws = new WebSocket("wss://stream.binance.com:9443/ws/solusdt@bookTicker");
-  ws.on("open", () => console.log("Binance bookTicker WS connected (real bid/ask)"));
   ws.on("message", (raw: Buffer) => {
     try {
       const msg = JSON.parse(raw.toString());
-      const ask = parseFloat(msg.a);
-      if (ask) { binanceAsk = ask; checkEntry().catch((err) => console.error("checkEntry error:", err)); }
+      if (msg.event === "subscribed" && msg.channel === "book") { chanId = msg.chanId; return; }
+      if (!Array.isArray(msg) || msg[0] !== chanId || msg[1] === "hb") return;
+      const data = msg[1];
+      if (!Array.isArray(data)) return;
+      const applyLevel = (lvl: number[]) => {
+        const [price, count, amount] = lvl;
+        const map = amount > 0 ? bids : asks;
+        if (count === 0) map.delete(price);
+        else map.set(price, { price, count, amount });
+      };
+      if (Array.isArray(data[0])) { for (const lvl of data) applyLevel(lvl); }
+      else { applyLevel(data as number[]); }
+      maybeLog();
     } catch {}
   });
-  ws.on("error", (e) => console.error("Binance WS error:", e));
-  ws.on("close", () => { console.log("Binance WS closed, reconnecting in 2s..."); setTimeout(connectBinance, 2000); });
+  ws.on("error", (e) => console.error("Bitfinex book WS error:", e));
+  ws.on("close", () => { console.log("Bitfinex book WS closed, reconnecting in 2s..."); setTimeout(connectBook, 2000); });
   return ws;
 }
 
-function connectBitfinex() {
+function connectTicker() {
   const ws = new WebSocket("wss://api-pub.bitfinex.com/ws/2");
   let chanId: number | null = null;
   ws.on("open", () => {
@@ -192,11 +132,12 @@ function connectBitfinex() {
       if (!Array.isArray(data) || data.length < 4) return;
       const bid = data[0], ask = data[2];
       if (!bid || !ask) return;
-      onBfxTicker(bid, ask).catch((err) => console.error("onBfxTicker error:", err));
+      bfxBid = bid; bfxAsk = ask;
+      maybeLog();
     } catch {}
   });
-  ws.on("error", (e) => console.error("Bitfinex WS error:", e));
-  ws.on("close", () => { console.log("Bitfinex WS closed, reconnecting in 2s..."); setTimeout(connectBitfinex, 2000); });
+  ws.on("error", (e) => console.error("Bitfinex ticker WS error:", e));
+  ws.on("close", () => { console.log("Bitfinex ticker WS closed, reconnecting in 2s..."); setTimeout(connectTicker, 2000); });
   return ws;
 }
 
@@ -216,10 +157,9 @@ async function main() {
   process.on("SIGINT", shutdown);
   process.on("SIGTERM", shutdown);
 
-  console.log(`Starting jump-trail worker (${INSTANCE_ID}), enabled=${state.enabled}, mode=${state.mode}`);
-  console.log(`Signal: Binance ask - Bitfinex ask == exactly 0. TP=${TP_PCT}% / SL=${SL_PCT}% (fixed OCO-style, no trailing).`);
-  connectBinance();
-  connectBitfinex();
+  console.log(`Starting book-volume logger (${INSTANCE_ID}), enabled=${state.enabled}`);
+  connectBook();
+  connectTicker();
 }
 
 main().catch((err) => { console.error("Fatal:", err); process.exit(1); });
