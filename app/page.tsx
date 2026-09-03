@@ -1090,7 +1090,7 @@ function SolJumpTrailBitfinexPanel({
       <div className="space-y-1.5">
         <div className="flex items-center justify-between gap-2">
           <div className="flex items-center gap-2">
-            <h2 className="text-white font-bold text-lg">SOL Book Imbalance</h2>
+            <h2 className="text-white font-bold text-lg">SOL Jump Trail</h2>
             <span className="text-xs font-bold px-2 py-0.5 rounded-full bg-blue-500/20 text-blue-400">PAPER</span>
             <span className={`text-xs font-bold px-2 py-0.5 rounded-full ${workerAlive ? "bg-green-500/20 text-green-400" : "bg-gray-700/40 text-gray-500"}`}>
               {workerAlive ? "worker alive" : "worker offline"}
@@ -1119,7 +1119,7 @@ function SolJumpTrailBitfinexPanel({
             </button>
           </div>
         </div>
-        <p className="text-gray-500 text-xs">REDESIGNED 2026-09-03: buy on Bitfinex when order book imbalance (top 25 levels) is ask-heavy, imbalance ≤ -0.15 (untested idea, small-sample manual test only) · long-only (no shorting on spot) · PAPER · $100 seed, compounds · 0.1% trailing stop on real Bitfinex bid</p>
+        <p className="text-gray-500 text-xs">REVERTED 2026-09-03: buy on Bitfinex when Binance ask - Bitfinex ask is exactly 0 (mean-reversion signal) · long-only (no shorting on spot) · PAPER · $100 seed, compounds · fixed OCO-style bracket: TP=+0.1% / SL=-0.05%, no trailing</p>
       </div>
 
       {loading ? (
@@ -1437,7 +1437,7 @@ export default function Dashboard() {
   }
 
   async function handleSolJumpTrailClearHistory() {
-    if (!confirm("Delete all SOL Book Imbalance trade history and run logs?")) return;
+    if (!confirm("Delete all SOL Jump Trail trade history and run logs?")) return;
     setSolJumpTrailClearing(true);
     await fetch("/api/sol-jump-trail-bitfinex/clear-history", { method: "POST" });
     await load();
@@ -1468,7 +1468,7 @@ export default function Dashboard() {
       { name: "Surfer SOLBTC",  badge: "LIVE",  state: surferState,     runsTable: "surfer_runs",         pnlField: "realized_pnl_btc",  initial: SURFER_BTC_INITIAL, unit: "₿", venue: "us" as const, symbol: "SOLBTC" },
       { name: "Surfer SOLUSDT", badge: "LIVE",  state: surferUsdtState, runsTable: "surfer_usdt_runs",    pnlField: "realized_pnl_usdt", initial: 50, unit: "$", venue: "us" as const,       symbol: "SOLUSDT" },
       { name: "SOL Zero-Gap Live", badge: "LIVE", state: solTrailContinuousState, runsTable: "sol_trail_continuous_runs", pnlField: "realized_pnl_usd", initial: 20, unit: "$", venue: "bitfinex" as const, symbol: "tSOLUSD" },
-      { name: "SOL Book Imbalance", badge: "PAPER", state: solJumpTrailState, runsTable: "sol_jump_trail_bitfinex_runs", pnlField: "realized_pnl_usd", initial: 100, unit: "$", venue: "bitfinex" as const, symbol: "tSOLUSD" },
+      { name: "SOL Jump Trail", badge: "PAPER", state: solJumpTrailState, runsTable: "sol_jump_trail_bitfinex_runs", pnlField: "realized_pnl_usd", initial: 100, unit: "$", venue: "bitfinex" as const, symbol: "tSOLUSD" },
     ];
 
     const rows: SummaryRow[] = [];
