@@ -22,6 +22,16 @@
 // still come from whatever the real market order fills at (near bid), regardless of which price
 // triggers the decision — this change only affects trigger timing, not received amount.
 //
+// LATENCY BUG FIXED 2026-09-03: Bitfinex ticker messages used to be processed through a
+// serialized queue (`queue.then(() => onBfxTicker(...))`), and onBfxTicker awaits real order
+// submission (submitMarketOrder's fill-confirmation poll can take up to 5s). That meant every
+// entry/exit blocked ALL subsequent price ticks from being processed until the order finished —
+// found by comparing near-simultaneous live vs paper trades and seeing live consistently enter
+// 0.5-1s later at a meaningfully worse price on the exact same signal. Fixed by calling
+// onBfxTicker directly (fire-and-forget) instead of chaining through a queue — bfxBid/bfxAsk
+// update synchronously before any await, so price state stays fresh during an in-flight order;
+// orderInFlight already guards against duplicate/overlapping order submission.
+//
 // SINGLE-INSTANCE GUARANTEE: critical with real orders — claims a lock row (lock_owner/
 // lock_heartbeat) on startup, refuses to trade if another instance's heartbeat is fresh, releases
 // the lock cleanly on shutdown.
@@ -37,7 +47,7 @@ import os from "os";
 import crypto from "crypto";
 import {
   getSolTrailContinuousState, updateSolTrailContinuousState, recordSolTrailContinuousTrade,
-  logSolTrailContinuousRun, type SolTrailContinuousState,
+  logSolTrailContinuousRun, recordSolTrailContinuousTick, type SolTrailContinuousState,
 } from "../lib/sol-trail-continuous-db";
 import { submitMarketOrder } from "../lib/bitfinex-auth";
 
@@ -136,6 +146,8 @@ async function onBfxTicker(bid: number, ask: number) {
     return;
   }
 
+  recordSolTrailContinuousTick(state.entry_time!, bid, ask).catch((err) => console.error("recordTick error:", err));
+
   const effSell = ask; // switched from bid to ask 2026-09-03 per user request — peak-tracking and stop trigger now follow Bitfinex's real ask, not bid. Real order fill/proceeds are still whatever the market sell actually executes at (near bid), this only changes the trigger timing.
   const peak = state.peak_price ?? state.entry_price!;
   const stop = state.stop_price ?? peak * (1 - INIT_SL_PCT / 100);
@@ -210,7 +222,6 @@ function connectBinance() {
 function connectBitfinex() {
   const ws = new WebSocket("wss://api-pub.bitfinex.com/ws/2");
   let chanId: number | null = null;
-  let queue: Promise<void> = Promise.resolve();
 
   ws.on("open", () => {
     console.log("Bitfinex WS connected, subscribing to ticker (real bid/ask)...");
@@ -226,7 +237,11 @@ function connectBitfinex() {
     if (!Array.isArray(data) || data.length < 4) return;
     const bid = data[0], ask = data[2];
     if (!bid || !ask || isNaN(bid) || isNaN(ask)) return;
-    queue = queue.then(() => onBfxTicker(bid, ask)).catch((err) => console.error("onBfxTicker error:", err));
+    // Fire-and-forget, NOT chained through a serialized queue — see the 2026-09-03 latency fix
+    // note below. bfxBid/bfxAsk update synchronously at the top of onBfxTicker before any await,
+    // so price state stays fresh even while a real order is in flight; orderInFlight already
+    // guards against duplicate/overlapping order submission.
+    onBfxTicker(bid, ask).catch((err) => console.error("onBfxTicker error:", err));
   });
 
   ws.on("error", (err) => console.error("Bitfinex WS error:", err));
