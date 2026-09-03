@@ -10,12 +10,14 @@
 // in discrete steps, so exact equality is achievable, not absurdly strict). Long-only (spot
 // can't short without margin).
 //
-// SETTINGS: same as the paper bot for a fair live comparison — SL_PCT=0.1% trailing stop on
-// Bitfinex's real bid, no TP. Seed $20 (real money; paper bot uses $100 for its own tracking).
+// SETTINGS: SL_PCT=0.1% trailing stop, no TP. Seed $20 (real money; paper bot uses $100 for
+// its own tracking, and still trails off bid — this live bot diverged 2026-09-03, see below).
 //
-// REAL MONEY MECHANICS: entry sizes off Bitfinex's real ask, exit/stop triggers off Bitfinex's
-// real bid — both via the "ticker" WS channel (true bid/ask), not an estimate. Actual
-// execution price/quantity always comes from the real Bitfinex fill via lib/bitfinex-auth.ts.
+// REAL MONEY MECHANICS: entry sizes off Bitfinex's real ask. Peak-tracking and the stop trigger
+// switched from bid to ask 2026-09-03 per user request (was bid, "getting out late" concern) —
+// both come from the "ticker" WS channel (true bid/ask), not an estimate. Actual sell proceeds
+// still come from whatever the real market order fills at (near bid), regardless of which price
+// triggers the decision — this change only affects trigger timing, not received amount.
 //
 // SINGLE-INSTANCE GUARANTEE: critical with real orders — claims a lock row (lock_owner/
 // lock_heartbeat) on startup, refuses to trade if another instance's heartbeat is fresh, releases
@@ -130,7 +132,7 @@ async function onBfxTicker(bid: number, ask: number) {
     return;
   }
 
-  const effSell = bid; // real live bid, no estimate — what a market sell would actually receive
+  const effSell = ask; // switched from bid to ask 2026-09-03 per user request — peak-tracking and stop trigger now follow Bitfinex's real ask, not bid. Real order fill/proceeds are still whatever the market sell actually executes at (near bid), this only changes the trigger timing.
   const peak = state.peak_price ?? state.entry_price!;
   const stop = state.stop_price ?? peak * (1 - SL_PCT / 100);
 
