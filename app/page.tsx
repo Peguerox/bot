@@ -1097,7 +1097,7 @@ function SolJumpTrailBitfinexPanel({
             label="Imbalance"
             value={imbalance != null ? imbalance.toFixed(3) : "—"}
             sub={imbalance == null ? "—" : imbalance < 0 ? "ask-heavy" : imbalance > 0 ? "bid-heavy" : "balanced"}
-            color={imbalance == null ? "text-gray-500" : imbalance < 0 ? "text-red-400" : "text-green-400"}
+            color="text-blue-400"
           />
           <Stat
             label="Bid volume"
@@ -1148,7 +1148,7 @@ function SolJumpTrailBitfinexPanel({
                       <td className="py-1 text-right text-yellow-400">${parseFloat(r.price).toFixed(2)}</td>
                       <td className="py-1 text-right text-green-400">{parseFloat(r.bid_volume).toFixed(1)}</td>
                       <td className="py-1 text-right text-red-400">{parseFloat(r.ask_volume).toFixed(1)}</td>
-                      <td className={`py-1 text-right pr-1 ${imb < 0 ? "text-red-400" : "text-green-400"}`}>{imb.toFixed(3)}</td>
+                      <td className="py-1 text-right pr-1 text-blue-400">{imb.toFixed(3)}</td>
                     </tr>
                   );
                 })}
