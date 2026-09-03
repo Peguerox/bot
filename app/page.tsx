@@ -917,6 +917,12 @@ function SolTrailContinuousPanel({
               </td>
             </tr>
             <tr className="border-b border-gray-800/50">
+              <td className="py-1.5 text-gray-400">Current price</td>
+              <td className="py-1.5 text-right text-yellow-400">
+                {latestPrice != null ? `$${latestPrice.toFixed(2)}` : "—"}
+              </td>
+            </tr>
+            <tr className="border-b border-gray-800/50">
               <td className="py-1.5 text-gray-400">Peak since entry</td>
               <td className="py-1.5 text-right text-green-400">
                 {peakPrice != null ? `$${peakPrice.toFixed(2)}` : "—"}
@@ -1034,7 +1040,22 @@ function SolJumpTrailBitfinexPanel({
   const winRate  = totalTrades > 0 ? (wins / totalTrades * 100).toFixed(1) : "—";
   const mode = st?.mode ?? "FLAT";
 
-  const latestPrice: number | null = (() => {
+  const [livePrice, setLivePrice] = useState<number | null>(null);
+  useEffect(() => {
+    let cancelled = false;
+    const poll = async () => {
+      try {
+        const res = await fetch("/api/bitfinex-price");
+        const data = await res.json();
+        if (!cancelled && data.lastPrice != null) setLivePrice(data.lastPrice);
+      } catch {}
+    };
+    poll();
+    const id = setInterval(poll, 5000);
+    return () => { cancelled = true; clearInterval(id); };
+  }, []);
+
+  const latestPrice: number | null = livePrice ?? (() => {
     for (const r of runs) {
       const actions: any[] = r.data?.actions ?? [];
       for (let i = actions.length - 1; i >= 0; i--) {
@@ -1161,6 +1182,12 @@ function SolJumpTrailBitfinexPanel({
               <td className="py-1.5 text-gray-400">Entry price</td>
               <td className="py-1.5 text-right text-white">
                 {mode !== "FLAT" && st?.entry_price ? `$${parseFloat(st.entry_price).toFixed(2)}` : "—"}
+              </td>
+            </tr>
+            <tr className="border-b border-gray-800/50">
+              <td className="py-1.5 text-gray-400">Current price</td>
+              <td className="py-1.5 text-right text-yellow-400">
+                {latestPrice != null ? `$${latestPrice.toFixed(2)}` : "—"}
               </td>
             </tr>
             <tr className="border-b border-gray-800/50">
