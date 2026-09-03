@@ -940,7 +940,9 @@ function SolTrailContinuousPanel({
                 openPnl == null ? "text-gray-600"
                 : openPnl >= 0 ? "text-green-400" : "text-red-400"
               }`}>
-                {openPnl != null ? `${openPnl >= 0 ? "+" : ""}$${openPnl.toFixed(2)}` : "—"}
+                {openPnl != null && entryValue
+                  ? `${openPnl >= 0 ? "+" : ""}${(openPnl / entryValue * 100).toFixed(2)}% (${openPnl >= 0 ? "+" : ""}$${openPnl.toFixed(2)})`
+                  : "—"}
               </td>
             </tr>
           </tbody>
@@ -1208,7 +1210,9 @@ function SolJumpTrailBitfinexPanel({
                 openPnl == null ? "text-gray-600"
                 : openPnl >= 0 ? "text-green-400" : "text-red-400"
               }`}>
-                {openPnl != null ? `${openPnl >= 0 ? "+" : ""}$${openPnl.toFixed(2)}` : "—"}
+                {openPnl != null && entryValue
+                  ? `${openPnl >= 0 ? "+" : ""}${(openPnl / entryValue * 100).toFixed(2)}% (${openPnl >= 0 ? "+" : ""}$${openPnl.toFixed(2)})`
+                  : "—"}
               </td>
             </tr>
           </tbody>
