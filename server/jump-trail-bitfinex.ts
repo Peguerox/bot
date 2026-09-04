@@ -15,7 +15,10 @@
 // under that danger zone, picked it for the stronger real-world numbers over the theoretical
 // robustness of the higher thresholds.
 //
-// SIGNAL: Binance's own price only (no cross-venue comparison) — same single-venue jump concept
+// SIGNAL: Binance's own mid-price ((bestBid+bestAsk)/2 from the bookTicker stream, not raw last-
+// trade price) — mid-price is the standard reference for signal generation, avoids biasing the
+// jump calculation toward whichever side of the spread the last print happened to hit. Execution
+// still costs realistically against Bitfinex's real ask (buy) / bid (sell), unchanged.
 // as the original SOL jump-trail bot earlier this session, just on ETH now.
 // EXIT: 0.1% trailing stop on Bitfinex's real bid, no take-profit, re-entry only after a fresh
 // jump signal (not always-in like the pure-trail bot).
@@ -46,7 +49,7 @@ import { submitMarketOrder, submitMarketOrderSafe } from "../lib/bitfinex-auth";
 import { connectWalletBalances, getLiveBalance, isWalletReady } from "../lib/bitfinex-wallet-ws";
 
 const BFX_SYMBOL       = "tETHUSD";
-const BINANCE_WS       = "wss://stream.binance.com:9443/ws/ethusdt@trade";
+const BINANCE_WS       = "wss://stream.binance.com:9443/ws/ethusdt@bookTicker";
 const JUMP_PCT         = 0.02;
 const ROLL_MS          = 2000;
 const TRAIL_PCT        = 0.1;
@@ -226,9 +229,13 @@ async function onBfxTicker(bid: number, ask: number) {
 
 function connectBinance() {
   const ws = new WebSocket(BINANCE_WS);
-  ws.on("open", () => console.log("Binance WS connected"));
+  ws.on("open", () => console.log("Binance WS connected (bookTicker, mid-price signal)"));
   ws.on("message", (raw: Buffer) => {
-    try { const p = parseFloat(JSON.parse(raw.toString()).p); if (p) onBinTick(p).catch((err) => console.error("onBinTick error:", err)); } catch {}
+    try {
+      const msg = JSON.parse(raw.toString());
+      const bid = parseFloat(msg.b), ask = parseFloat(msg.a);
+      if (bid && ask) { const mid = (bid + ask) / 2; onBinTick(mid).catch((err) => console.error("onBinTick error:", err)); }
+    } catch {}
   });
   ws.on("error", (e) => console.error("Binance WS error:", e));
   ws.on("close", () => { console.log("Binance WS closed, reconnecting in 2s..."); setTimeout(connectBinance, 2000); });
