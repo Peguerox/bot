@@ -12,6 +12,10 @@ export async function GET() {
     { cache: "no-store" }
   );
   const data = await res.json();
+  if (!Array.isArray(data)) {
+    console.error("Binance klines non-array response:", res.status, JSON.stringify(data));
+    return NextResponse.json({ z: null, current: null, mean: null, std: null, error: data }, { status: 502 });
+  }
   const closes: number[] = data.map((k: any) => parseFloat(k[4]));
   // drop the still-forming last candle, keep the trailing WINDOW_MIN closed ones as the window
   const closed = closes.slice(0, -1);
