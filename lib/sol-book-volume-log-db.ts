@@ -11,6 +11,8 @@ export async function recordBookVolume(params: {
   askVolume25: number;
   binanceBid: number | null;
   binanceAsk: number | null;
+  bitstampBid: number | null;
+  bitstampAsk: number | null;
 }) {
   const ratio = (bid: number, ask: number) => (bid - ask) / (bid + ask);
   const { error } = await getSupabaseAdmin()
@@ -26,6 +28,8 @@ export async function recordBookVolume(params: {
       imbalance_25: ratio(params.bidVolume25, params.askVolume25),
       binance_bid: params.binanceBid,
       binance_ask: params.binanceAsk,
+      bitstamp_bid: params.bitstampBid,
+      bitstamp_ask: params.bitstampAsk,
     });
   if (error) throw new Error(`recordBookVolume: ${error.message}`);
 }

@@ -2,10 +2,12 @@
 // logger. No entry signal, no positions, no TP/SL. Continuously records real order book volume
 // alongside price, logging the imbalance ratio at THREE depths simultaneously (25/100/250 —
 // all of Bitfinex's supported book-channel depths) since 250 alone was found too sluggish to
-// react to real price moves. Also logs Binance's real bid/ask for the cross-venue gap. Reuses
-// the same lock/enabled state table as the old trading version (sol_jump_trail_bitfinex_state)
-// purely for the single-instance lock and the dashboard's enable/disable toggle — mode/entry/
-// trade fields on that table are unused now.
+// react to real price moves. Also logs Binance's and Bitstamp's real bid/ask for cross-venue gap
+// comparisons — Bitstamp was the strongest candidate from the earlier lead-lag research (73.3%
+// match rate) but was never actually built into anything until now. Reuses the same lock/enabled
+// state table as the old trading version (sol_jump_trail_bitfinex_state) purely for the
+// single-instance lock and the dashboard's enable/disable toggle — mode/entry/trade fields on
+// that table are unused now.
 import dotenv from "dotenv";
 dotenv.config({ path: ".env.local" });
 
@@ -34,6 +36,8 @@ let bfxBid: number | null = null;
 let bfxAsk: number | null = null;
 let binanceBid: number | null = null;
 let binanceAsk: number | null = null;
+let bitstampBid: number | null = null;
+let bitstampAsk: number | null = null;
 
 async function acquireLock(): Promise<boolean> {
   state = await getSolJumpTrailBitfinexState();
@@ -98,6 +102,7 @@ function maybeLog() {
     bidVolume25: sumAmount(bidLevels250.slice(0, 25)),
     askVolume25: sumAmount(askLevels250.slice(0, 25)),
     binanceBid, binanceAsk,
+    bitstampBid, bitstampAsk,
   }).catch((err) => console.error("recordBookVolume error:", err));
 }
 
@@ -172,6 +177,28 @@ function connectBinance() {
   return ws;
 }
 
+function connectBitstamp() {
+  // Bitstamp uses a Pusher-style envelope: subscribe to order_book_solusd, which streams the
+  // full top-of-book snapshot on every update (bids/asks arrays, best price first).
+  const ws = new WebSocket("wss://ws.bitstamp.net");
+  ws.on("open", () => {
+    console.log("Bitstamp WS connected, subscribing to order_book_solusd...");
+    ws.send(JSON.stringify({ event: "bts:subscribe", data: { channel: "order_book_solusd" } }));
+  });
+  ws.on("message", (raw: Buffer) => {
+    try {
+      const msg = JSON.parse(raw.toString());
+      if (msg.event !== "data") return;
+      const bids = msg.data?.bids, asks = msg.data?.asks;
+      if (Array.isArray(bids) && bids.length) bitstampBid = parseFloat(bids[0][0]);
+      if (Array.isArray(asks) && asks.length) bitstampAsk = parseFloat(asks[0][0]);
+    } catch {}
+  });
+  ws.on("error", (e) => console.error("Bitstamp WS error:", e));
+  ws.on("close", () => { console.log("Bitstamp WS closed, reconnecting in 2s..."); setTimeout(connectBitstamp, 2000); });
+  return ws;
+}
+
 async function main() {
   const got = await acquireLock();
   if (!got) process.exit(1);
@@ -192,6 +219,7 @@ async function main() {
   connectBook();
   connectTicker();
   connectBinance();
+  connectBitstamp();
 }
 
 main().catch((err) => { console.error("Fatal:", err); process.exit(1); });

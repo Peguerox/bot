@@ -1044,6 +1044,8 @@ function SolJumpTrailBitfinexPanel({
   const binanceAsk = latest?.binance_ask != null ? parseFloat(latest.binance_ask) : null;
   const bitfinexAsk = latest?.bitfinex_ask != null ? parseFloat(latest.bitfinex_ask) : null;
   const gapPct = binanceAsk != null && bitfinexAsk != null ? (binanceAsk - bitfinexAsk) / bitfinexAsk * 100 : null;
+  const bitstampAsk = latest?.bitstamp_ask != null ? parseFloat(latest.bitstamp_ask) : null;
+  const bitstampGapPct = bitstampAsk != null && bitfinexAsk != null ? (bitstampAsk - bitfinexAsk) / bitfinexAsk * 100 : null;
 
   const lockAge = st?.lock_heartbeat ? Date.now() - new Date(st.lock_heartbeat).getTime() : null;
   const workerAlive = lockAge != null && lockAge < 30_000;
@@ -1102,6 +1104,12 @@ function SolJumpTrailBitfinexPanel({
             value={gapPct != null ? `${gapPct.toFixed(4)}%` : "—"}
             sub={binanceAsk != null ? `Binance ask $${binanceAsk.toFixed(2)}` : "waiting for Binance"}
             color="text-orange-400"
+          />
+          <Stat
+            label="Bitstamp-Bitfinex gap"
+            value={bitstampGapPct != null ? `${bitstampGapPct.toFixed(4)}%` : "—"}
+            sub={bitstampAsk != null ? `Bitstamp ask $${bitstampAsk.toFixed(2)}` : "waiting for Bitstamp"}
+            color="text-pink-400"
           />
           <Stat
             label="Imbalance (25)"
