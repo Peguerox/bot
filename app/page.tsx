@@ -1316,6 +1316,7 @@ function EthZscoreBitfinexPanel({
 
   const [livePrice, setLivePrice] = useState<number | null>(null);
   const [liveSpreadPct, setLiveSpreadPct] = useState<number | null>(null);
+  const [liveZ, setLiveZ] = useState<number | null>(null);
   useEffect(() => {
     let cancelled = false;
     const poll = async () => {
@@ -1325,14 +1326,16 @@ function EthZscoreBitfinexPanel({
         if (!cancelled && data.lastPrice != null) setLivePrice(data.lastPrice);
         if (!cancelled && data.spreadPct != null) setLiveSpreadPct(data.spreadPct);
       } catch {}
+      try {
+        const res = await fetch("/api/eth-zscore-live");
+        const data = await res.json();
+        if (!cancelled && data.z != null) setLiveZ(data.z);
+      } catch {}
     };
     poll();
     const id = setInterval(poll, 5000);
     return () => { cancelled = true; clearInterval(id); };
   }, []);
-  // live z-score comes from the bot's own DB state (written by the worker itself on Render) --
-  // Vercel's servers are geo-blocked by Binance, so the dashboard can't compute this independently.
-  const liveZ = st?.current_z != null ? parseFloat(st.current_z) : null;
 
   const statusText = mode === "LONG" ? "Holding ETH" : "Watching (z-score)";
   const statusColor = mode === "LONG" ? "text-green-400" : "text-gray-400";
