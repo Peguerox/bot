@@ -42,7 +42,8 @@ import {
   getSolJumpTrailBitfinexState, updateSolJumpTrailBitfinexState, recordSolJumpTrailBitfinexTrade,
   logSolJumpTrailBitfinexRun, recordSolJumpTrailBitfinexTick, type SolJumpTrailBitfinexState,
 } from "../lib/sol-jump-trail-bitfinex-db";
-import { submitMarketOrderSafe } from "../lib/bitfinex-auth";
+import { submitMarketOrder, submitMarketOrderSafe } from "../lib/bitfinex-auth";
+import { connectWalletBalances, getLiveBalance, isWalletReady } from "../lib/bitfinex-wallet-ws";
 
 const BFX_SYMBOL       = "tETHUSD";
 const BINANCE_WS       = "wss://stream.binance.com:9443/ws/ethusdt@trade";
@@ -123,7 +124,7 @@ function checkJump(): number | null {
 
 async function onBinTick(price: number) {
   binBuf.push({ t: Date.now(), p: price });
-  if (!state.enabled || state.mode !== "FLAT" || orderInFlight || bfxAsk === null) return;
+  if (!state.enabled || state.mode !== "FLAT" || orderInFlight || bfxAsk === null || !isWalletReady()) return;
 
   const jumpPct = checkJump();
   if (jumpPct === null) return;
@@ -131,9 +132,12 @@ async function onBinTick(price: number) {
   orderInFlight = true;
   try {
     const targetPool = SEED_USD + (state.realized_pnl_usd ?? 0);
-    const estQty = targetPool / bfxAsk;
-    console.log(`BUY signal (jump=${jumpPct.toFixed(4)}%) @ ask=${bfxAsk.toFixed(4)} qty~=${estQty.toFixed(4)} — submitting real order...`);
-    const fill = await submitMarketOrderSafe(BFX_SYMBOL, estQty, "USD", bfxAsk);
+    const realUsd = getLiveBalance("USD");
+    const cappedPool = Math.min(targetPool, realUsd);
+    const estQty = cappedPool / bfxAsk;
+    if (estQty <= 0) { console.log(`BUY signal but no real USD available (real=${realUsd}) — skipping.`); return; }
+    console.log(`BUY signal (jump=${jumpPct.toFixed(4)}%) @ ask=${bfxAsk.toFixed(4)} qty~=${estQty.toFixed(4)} (real USD=${realUsd.toFixed(2)}) — submitting real order...`);
+    const fill = await submitMarketOrder(BFX_SYMBOL, estQty);
     const extreme = fill.execPrice;
     const stop = extreme * (1 - TRAIL_PCT / 100);
     const patch = {
@@ -172,10 +176,13 @@ async function onBfxTicker(bid: number, ask: number) {
       const origEntryPrice = state.entry_price!;
       const origQty = state.sol_quantity!;
       const origEntryTime = state.entry_time!;
-      console.log(`STOP signal, selling ${origQty.toFixed(4)} ETH — submitting real order...`);
-      const fill = await submitMarketOrderSafe(BFX_SYMBOL, -origQty, "ETH");
+      const realEth = getLiveBalance("ETH");
+      const sellQty = isWalletReady() ? Math.min(origQty, realEth) : origQty;
+      if (sellQty <= 0) throw new Error(`No real ETH available to sell (tracked=${origQty}, real=${realEth})`);
+      console.log(`STOP signal, selling ${sellQty.toFixed(4)} ETH (tracked=${origQty.toFixed(4)}, real=${realEth.toFixed(4)}) — submitting real order...`);
+      const fill = await submitMarketOrder(BFX_SYMBOL, -sellQty);
       const usdOut = fill.execPrice * Math.abs(fill.execAmount);
-      const usdIn  = origEntryPrice * origQty;
+      const usdIn  = origEntryPrice * Math.abs(fill.execAmount);
       const pnlUsd = usdOut - usdIn;
       const pnlPct = (pnlUsd / usdIn) * 100;
 
@@ -186,7 +193,7 @@ async function onBfxTicker(bid: number, ask: number) {
       state = { ...state, ...patch };
       await updateSolJumpTrailBitfinexState(patch);
       await recordSolJumpTrailBitfinexTrade({
-        direction: "LONG", entry_price: origEntryPrice, exit_price: fill.execPrice, sol_quantity: origQty,
+        direction: "LONG", entry_price: origEntryPrice, exit_price: fill.execPrice, sol_quantity: Math.abs(fill.execAmount),
         usd_in: usdIn, usd_out: usdOut, pnl_usd: pnlUsd, pnl_pct: pnlPct, entry_time: origEntryTime,
         jump_pct: 0,
       });
@@ -328,6 +335,7 @@ async function main() {
   console.log(`REAL MONEY — jump>=${JUMP_PCT}% (2s window) triggers a real buy on ${BFX_SYMBOL}. Seed $${SEED_USD}, compounding, trail=${TRAIL_PCT}%.`);
   connectBinance();
   connectBitfinex();
+  connectWalletBalances();
   startWatchdog();
 }
 
