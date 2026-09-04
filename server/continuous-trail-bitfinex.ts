@@ -80,7 +80,11 @@ async function heartbeat() {
     console.error(`Lost lock to ${fresh.lock_owner} — another instance took over. Exiting.`);
     process.exit(1);
   }
-  state.enabled = fresh.enabled;
+  if (orderInFlight) {
+    state.enabled = fresh.enabled;
+  } else {
+    state = fresh;
+  }
   await updateSolTrailContinuousState({ lock_heartbeat: new Date().toISOString() });
 }
 

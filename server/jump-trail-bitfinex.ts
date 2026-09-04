@@ -89,7 +89,16 @@ async function heartbeat() {
     console.error(`Lost lock to ${fresh.lock_owner} — another instance took over. Exiting.`);
     process.exit(1);
   }
-  state.enabled = fresh.enabled;
+  if (orderInFlight) {
+    // an order is actively being submitted/settled — don't clobber in-memory state mid-flight,
+    // just keep the enabled flag current.
+    state.enabled = fresh.enabled;
+  } else {
+    // no order in flight: DB is authoritative. Re-sync everything so any external change
+    // (manual flatten/reset, dashboard pause) takes effect immediately instead of being
+    // invisible until this process restarts.
+    state = fresh;
+  }
   await updateSolJumpTrailBitfinexState({ lock_heartbeat: new Date().toISOString() });
 }
 
