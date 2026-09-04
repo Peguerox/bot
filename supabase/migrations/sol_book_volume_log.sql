@@ -11,7 +11,8 @@ CREATE TABLE IF NOT EXISTS sol_book_volume_log (
   imbalance_25  DECIMAL(10,6),       -- same ratio, top 25 levels -- 250 alone found too sluggish to react to real price moves
   imbalance_100 DECIMAL(10,6),       -- same ratio, top 100 levels -- logging all 3 Bitfinex-supported depths to compare directly
   binance_bid  DECIMAL(20,8),
-  binance_ask  DECIMAL(20,8)
+  binance_ask  DECIMAL(20,8),
+  bitfinex_ask DECIMAL(20,8) -- real Bitfinex ask, so the cross-venue gap can be ask-to-ask (not ask-vs-midpoint) matching the methodology used everywhere else this session
 );
 CREATE INDEX IF NOT EXISTS sol_book_volume_log_logged_at_idx
   ON sol_book_volume_log (logged_at);

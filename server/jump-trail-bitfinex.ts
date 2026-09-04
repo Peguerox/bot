@@ -90,6 +90,7 @@ function maybeLog() {
   lastLogAt = Date.now();
   recordBookVolume({
     price,
+    bitfinexAsk: bfxAsk,
     bidVolume250: sumAmount(bidLevels250),
     askVolume250: sumAmount(askLevels250),
     bidVolume100: sumAmount(bidLevels250.slice(0, 100)),

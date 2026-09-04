@@ -1042,7 +1042,8 @@ function SolJumpTrailBitfinexPanel({
   const imbalance250 = latest ? parseFloat(latest.imbalance) : null;
   const binanceBid = latest?.binance_bid != null ? parseFloat(latest.binance_bid) : null;
   const binanceAsk = latest?.binance_ask != null ? parseFloat(latest.binance_ask) : null;
-  const gapPct = binanceAsk != null && price != null ? (binanceAsk - price) / price * 100 : null;
+  const bitfinexAsk = latest?.bitfinex_ask != null ? parseFloat(latest.bitfinex_ask) : null;
+  const gapPct = binanceAsk != null && bitfinexAsk != null ? (binanceAsk - bitfinexAsk) / bitfinexAsk * 100 : null;
 
   const lockAge = st?.lock_heartbeat ? Date.now() - new Date(st.lock_heartbeat).getTime() : null;
   const workerAlive = lockAge != null && lockAge < 30_000;
@@ -1156,7 +1157,8 @@ function SolJumpTrailBitfinexPanel({
                   const imb250 = parseFloat(r.imbalance);
                   const rPrice = parseFloat(r.price);
                   const rBinanceAsk = r.binance_ask != null ? parseFloat(r.binance_ask) : null;
-                  const rGap = rBinanceAsk != null ? (rBinanceAsk - rPrice) / rPrice * 100 : null;
+                  const rBitfinexAsk = r.bitfinex_ask != null ? parseFloat(r.bitfinex_ask) : null;
+                  const rGap = rBinanceAsk != null && rBitfinexAsk != null ? (rBinanceAsk - rBitfinexAsk) / rBitfinexAsk * 100 : null;
                   return (
                     <tr key={r.id} className="hover:bg-gray-800/30">
                       <td className="py-1 text-gray-500">{new Date(r.logged_at).toLocaleTimeString([], { hour: "2-digit", minute: "2-digit", second: "2-digit", hour12: false })}</td>

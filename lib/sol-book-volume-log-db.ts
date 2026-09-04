@@ -2,6 +2,7 @@ import { getSupabaseAdmin } from "./supabase-admin";
 
 export async function recordBookVolume(params: {
   price: number;
+  bitfinexAsk: number;
   bidVolume250: number;
   askVolume250: number;
   bidVolume100: number;
@@ -17,6 +18,7 @@ export async function recordBookVolume(params: {
     .insert({
       logged_at: new Date().toISOString(),
       price: params.price,
+      bitfinex_ask: params.bitfinexAsk,
       bid_volume: params.bidVolume250,
       ask_volume: params.askVolume250,
       imbalance: ratio(params.bidVolume250, params.askVolume250),
