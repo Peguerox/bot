@@ -1078,7 +1078,7 @@ function SolJumpTrailBitfinexPanel({
             </button>
           </div>
         </div>
-        <p className="text-gray-500 text-xs">No trading, no signal — pure research logger. Records real Bitfinex order book volume (top 25 levels each side) and price every 5s, plus the derived imbalance ratio (bidVol - askVol) / (bidVol + askVol), so we can see the actual relationship before picking a threshold.</p>
+        <p className="text-gray-500 text-xs">No trading, no signal — pure research logger. Records real Bitfinex order book volume (top 250 levels each side, the exchange max) and price every 5s, plus the derived imbalance ratio (bidVol - askVol) / (bidVol + askVol), so we can see the actual relationship before picking a threshold.</p>
       </div>
 
       {loading ? (
@@ -1102,13 +1102,13 @@ function SolJumpTrailBitfinexPanel({
           <Stat
             label="Bid volume"
             value={bidVolume != null ? bidVolume.toFixed(1) : "—"}
-            sub="top 25 levels"
+            sub="top 250 levels"
             color="text-green-400"
           />
           <Stat
             label="Ask volume"
             value={askVolume != null ? askVolume.toFixed(1) : "—"}
-            sub="top 25 levels"
+            sub="top 250 levels"
             color="text-red-400"
           />
         </div>

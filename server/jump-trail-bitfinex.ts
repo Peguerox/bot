@@ -16,7 +16,7 @@ import {
 } from "../lib/sol-jump-trail-bitfinex-db";
 import { recordBookVolume } from "../lib/sol-book-volume-log-db";
 
-const BOOK_LEVELS       = 25;
+const BOOK_LEVELS       = 250; // max Bitfinex offers for the book channel (options are 1/25/100/250)
 const LOG_INTERVAL_MS   = 5_000; // throttle DB writes
 const HEARTBEAT_MS      = 10_000;
 const LOCK_STALE_MS     = 30_000;
