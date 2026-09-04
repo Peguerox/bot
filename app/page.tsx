@@ -817,7 +817,7 @@ function SolTrailContinuousPanel({
       <div className="space-y-1.5">
         <div className="flex items-center justify-between gap-2">
           <div className="flex items-center gap-2">
-            <h2 className="text-white font-bold text-lg">SOL Zero-Gap Live</h2>
+            <h2 className="text-white font-bold text-lg">SOL OCO Live</h2>
             <span className="text-xs font-bold px-2 py-0.5 rounded-full bg-red-500/20 text-red-400">LIVE</span>
             <span className={`text-xs font-bold px-2 py-0.5 rounded-full ${workerAlive ? "bg-green-500/20 text-green-400" : "bg-gray-700/40 text-gray-500"}`}>
               {workerAlive ? "worker alive" : "worker offline"}
@@ -846,7 +846,7 @@ function SolTrailContinuousPanel({
             </button>
           </div>
         </div>
-        <p className="text-gray-500 text-xs">Binance ask - Bitfinex ask == exactly 0 → Bitfinex tSOLUSD real buy · LIVE · REAL MONEY · $20 seed, compounds · long-only (no shorting on spot) · no TP · 0.1% initial stop → 0.05% tightened trail once in profit, tracked on Bitfinex real ask</p>
+        <p className="text-gray-500 text-xs">CONVERTED 2026-09-04: always-on entry, no filter · fixed OCO bracket TP=+1% / SL=-0.1% (testing the 3mo backtest live — was +77% at optimistic spread, inverted to -1216% at realistic spread) · LIVE · REAL MONEY · $20 seed, compounds · long-only (no shorting on spot)</p>
       </div>
 
       {loading ? (
@@ -924,13 +924,13 @@ function SolTrailContinuousPanel({
               </td>
             </tr>
             <tr className="border-b border-gray-800/50">
-              <td className="py-1.5 text-gray-400">Peak since entry</td>
+              <td className="py-1.5 text-gray-400">Take profit</td>
               <td className="py-1.5 text-right text-green-400">
                 {peakPrice != null ? `$${peakPrice.toFixed(2)}` : "—"}
               </td>
             </tr>
             <tr className="border-b border-gray-800/50">
-              <td className="py-1.5 text-gray-400">Trailing stop</td>
+              <td className="py-1.5 text-gray-400">Stop loss</td>
               <td className="py-1.5 text-right text-red-400">
                 {stopPrice != null ? `$${stopPrice.toFixed(2)}` : "—"}
               </td>
@@ -1283,7 +1283,7 @@ export default function Dashboard() {
   }
 
   async function handleSolTrailContinuousClearHistory() {
-    if (!confirm("Delete all SOL Zero-Gap Live trade history and run logs?")) return;
+    if (!confirm("Delete all SOL OCO Live trade history and run logs?")) return;
     setSolTrailContinuousClearing(true);
     await fetch("/api/sol-trail-continuous/clear-history", { method: "POST" });
     await load();
@@ -1328,7 +1328,7 @@ export default function Dashboard() {
     const bots = [
       { name: "Surfer SOLBTC",  badge: "LIVE",  state: surferState,     runsTable: "surfer_runs",         pnlField: "realized_pnl_btc",  initial: SURFER_BTC_INITIAL, unit: "₿", venue: "us" as const, symbol: "SOLBTC" },
       { name: "Surfer SOLUSDT", badge: "LIVE",  state: surferUsdtState, runsTable: "surfer_usdt_runs",    pnlField: "realized_pnl_usdt", initial: 50, unit: "$", venue: "us" as const,       symbol: "SOLUSDT" },
-      { name: "SOL Zero-Gap Live", badge: "LIVE", state: solTrailContinuousState, runsTable: "sol_trail_continuous_runs", pnlField: "realized_pnl_usd", initial: 20, unit: "$", venue: "bitfinex" as const, symbol: "tSOLUSD" },
+      { name: "SOL OCO Live", badge: "LIVE", state: solTrailContinuousState, runsTable: "sol_trail_continuous_runs", pnlField: "realized_pnl_usd", initial: 20, unit: "$", venue: "bitfinex" as const, symbol: "tSOLUSD" },
     ];
 
     const rows: SummaryRow[] = [];
