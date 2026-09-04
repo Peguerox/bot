@@ -1,10 +1,11 @@
 // Standalone always-on worker — CONVERTED 2026-09-03 from a trading bot into a pure research
-// logger. No entry signal, no positions, no TP/SL. Just continuously records real order book
-// volume (top 25 levels each side, bid vs ask) alongside price and the derived imbalance ratio,
-// so the actual relationship between book depth and price movement can be inspected directly
-// instead of guessing a threshold up front. Reuses the same lock/enabled state table as the old
-// trading version (sol_jump_trail_bitfinex_state) purely for the single-instance lock and the
-// dashboard's enable/disable toggle — mode/entry/trade fields on that table are unused now.
+// logger. No entry signal, no positions, no TP/SL. Continuously records real order book volume
+// alongside price, logging the imbalance ratio at THREE depths simultaneously (25/100/250 —
+// all of Bitfinex's supported book-channel depths) since 250 alone was found too sluggish to
+// react to real price moves. Also logs Binance's real bid/ask for the cross-venue gap. Reuses
+// the same lock/enabled state table as the old trading version (sol_jump_trail_bitfinex_state)
+// purely for the single-instance lock and the dashboard's enable/disable toggle — mode/entry/
+// trade fields on that table are unused now.
 import dotenv from "dotenv";
 dotenv.config({ path: ".env.local" });
 
@@ -31,6 +32,8 @@ let state: { enabled: boolean; lock_owner: string | null; lock_heartbeat: string
 let lastLogAt = 0;
 let bfxBid: number | null = null;
 let bfxAsk: number | null = null;
+let binanceBid: number | null = null;
+let binanceAsk: number | null = null;
 
 async function acquireLock(): Promise<boolean> {
   state = await getSolJumpTrailBitfinexState();
@@ -70,20 +73,31 @@ function topN(map: Map<number, Level>, n: number, desc: boolean): Level[] {
   return arr.slice(0, n);
 }
 
+function sumAmount(levels: Level[]): number {
+  return levels.reduce((s, l) => s + Math.abs(l.amount), 0);
+}
+
 function maybeLog() {
   if (!state.enabled) return;
   if (bfxBid === null || bfxAsk === null) return;
   if (Date.now() - lastLogAt < LOG_INTERVAL_MS) return;
 
-  const bidLevels = topN(bids, BOOK_LEVELS, true);
-  const askLevels = topN(asks, BOOK_LEVELS, false);
-  if (bidLevels.length < 5 || askLevels.length < 5) return;
-  const bidVolume = bidLevels.reduce((s, l) => s + Math.abs(l.amount), 0);
-  const askVolume = askLevels.reduce((s, l) => s + Math.abs(l.amount), 0);
-  const price = (bfxBid + bfxAsk) / 2;
+  const bidLevels250 = topN(bids, 250, true);
+  const askLevels250 = topN(asks, 250, false);
+  if (bidLevels250.length < 5 || askLevels250.length < 5) return;
 
+  const price = (bfxBid + bfxAsk) / 2;
   lastLogAt = Date.now();
-  recordBookVolume(price, bidVolume, askVolume).catch((err) => console.error("recordBookVolume error:", err));
+  recordBookVolume({
+    price,
+    bidVolume250: sumAmount(bidLevels250),
+    askVolume250: sumAmount(askLevels250),
+    bidVolume100: sumAmount(bidLevels250.slice(0, 100)),
+    askVolume100: sumAmount(askLevels250.slice(0, 100)),
+    bidVolume25: sumAmount(bidLevels250.slice(0, 25)),
+    askVolume25: sumAmount(askLevels250.slice(0, 25)),
+    binanceBid, binanceAsk,
+  }).catch((err) => console.error("recordBookVolume error:", err));
 }
 
 function connectBook() {
@@ -141,6 +155,22 @@ function connectTicker() {
   return ws;
 }
 
+function connectBinance() {
+  const ws = new WebSocket("wss://stream.binance.com:9443/ws/solusdt@bookTicker");
+  ws.on("open", () => console.log("Binance bookTicker WS connected (real bid/ask)"));
+  ws.on("message", (raw: Buffer) => {
+    try {
+      const msg = JSON.parse(raw.toString());
+      const bid = parseFloat(msg.b), ask = parseFloat(msg.a);
+      if (bid) binanceBid = bid;
+      if (ask) binanceAsk = ask;
+    } catch {}
+  });
+  ws.on("error", (e) => console.error("Binance WS error:", e));
+  ws.on("close", () => { console.log("Binance WS closed, reconnecting in 2s..."); setTimeout(connectBinance, 2000); });
+  return ws;
+}
+
 async function main() {
   const got = await acquireLock();
   if (!got) process.exit(1);
@@ -160,6 +190,7 @@ async function main() {
   console.log(`Starting book-volume logger (${INSTANCE_ID}), enabled=${state.enabled}`);
   connectBook();
   connectTicker();
+  connectBinance();
 }
 
 main().catch((err) => { console.error("Fatal:", err); process.exit(1); });

@@ -1037,9 +1037,12 @@ function SolJumpTrailBitfinexPanel({
   const st = state;
   const latest = log.length > 0 ? log[log.length - 1] : null;
   const price = latest ? parseFloat(latest.price) : null;
-  const imbalance = latest ? parseFloat(latest.imbalance) : null;
-  const bidVolume = latest ? parseFloat(latest.bid_volume) : null;
-  const askVolume = latest ? parseFloat(latest.ask_volume) : null;
+  const imbalance25 = latest?.imbalance_25 != null ? parseFloat(latest.imbalance_25) : null;
+  const imbalance100 = latest?.imbalance_100 != null ? parseFloat(latest.imbalance_100) : null;
+  const imbalance250 = latest ? parseFloat(latest.imbalance) : null;
+  const binanceBid = latest?.binance_bid != null ? parseFloat(latest.binance_bid) : null;
+  const binanceAsk = latest?.binance_ask != null ? parseFloat(latest.binance_ask) : null;
+  const gapPct = binanceAsk != null && price != null ? (binanceAsk - price) / price * 100 : null;
 
   const lockAge = st?.lock_heartbeat ? Date.now() - new Date(st.lock_heartbeat).getTime() : null;
   const workerAlive = lockAge != null && lockAge < 30_000;
@@ -1078,7 +1081,7 @@ function SolJumpTrailBitfinexPanel({
             </button>
           </div>
         </div>
-        <p className="text-gray-500 text-xs">No trading, no signal — pure research logger. Records real Bitfinex order book volume (top 250 levels each side, the exchange max) and price every 5s, plus the derived imbalance ratio (bidVol - askVol) / (bidVol + askVol), so we can see the actual relationship before picking a threshold.</p>
+        <p className="text-gray-500 text-xs">No trading, no signal — pure research logger. Records real Bitfinex order book volume and price every 5s, imbalance ratio at 3 depths (25/100/250 levels — 250 alone found too sluggish to react to real price moves), plus Binance's real bid/ask for the cross-venue gap.</p>
       </div>
 
       {loading ? (
@@ -1086,7 +1089,7 @@ function SolJumpTrailBitfinexPanel({
           {[...Array(4)].map((_, i) => <div key={i} className="h-16 bg-gray-800 rounded-lg" />)}
         </div>
       ) : (
-        <div className="grid grid-cols-2 gap-2">
+        <div className="grid grid-cols-2 md:grid-cols-3 gap-2">
           <Stat
             label="SOL/USD"
             value={price != null ? `$${price.toFixed(2)}` : "—"}
@@ -1094,28 +1097,34 @@ function SolJumpTrailBitfinexPanel({
             color="text-yellow-400"
           />
           <Stat
-            label="Imbalance"
-            value={imbalance != null ? imbalance.toFixed(3) : "—"}
-            sub={imbalance == null ? "—" : imbalance < 0 ? "ask-heavy" : imbalance > 0 ? "bid-heavy" : "balanced"}
+            label="Binance-Bitfinex gap"
+            value={gapPct != null ? `${gapPct.toFixed(4)}%` : "—"}
+            sub={binanceAsk != null ? `Binance ask $${binanceAsk.toFixed(2)}` : "waiting for Binance"}
+            color="text-orange-400"
+          />
+          <Stat
+            label="Imbalance (25)"
+            value={imbalance25 != null ? imbalance25.toFixed(3) : "—"}
+            sub="top 25 levels"
             color="text-blue-400"
           />
           <Stat
-            label="Bid volume"
-            value={bidVolume != null ? bidVolume.toFixed(1) : "—"}
-            sub="top 250 levels"
-            color="text-green-400"
+            label="Imbalance (100)"
+            value={imbalance100 != null ? imbalance100.toFixed(3) : "—"}
+            sub="top 100 levels"
+            color="text-purple-400"
           />
           <Stat
-            label="Ask volume"
-            value={askVolume != null ? askVolume.toFixed(1) : "—"}
+            label="Imbalance (250)"
+            value={imbalance250 != null ? imbalance250.toFixed(3) : "—"}
             sub="top 250 levels"
-            color="text-red-400"
+            color="text-emerald-400"
           />
         </div>
       )}
 
       <div>
-        <p className="text-gray-500 text-xs uppercase tracking-wide mb-2">Price (yellow) vs Imbalance (blue)</p>
+        <p className="text-gray-500 text-xs uppercase tracking-wide mb-2">Price vs Imbalance at 3 depths</p>
         <BookVolumeChart log={log} />
       </div>
 
@@ -1134,21 +1143,28 @@ function SolJumpTrailBitfinexPanel({
                 <tr className="text-gray-500 border-b border-gray-800 sticky top-0 bg-gray-900">
                   <th className="text-left pb-1">Time</th>
                   <th className="text-right pb-1">Price</th>
-                  <th className="text-right pb-1">Bid Vol</th>
-                  <th className="text-right pb-1">Ask Vol</th>
-                  <th className="text-right pb-1 pr-1">Imbalance</th>
+                  <th className="text-right pb-1">Imb 25</th>
+                  <th className="text-right pb-1">Imb 100</th>
+                  <th className="text-right pb-1">Imb 250</th>
+                  <th className="text-right pb-1 pr-1">Gap %</th>
                 </tr>
               </thead>
               <tbody className="divide-y divide-gray-800/50">
                 {log.slice().reverse().slice(0, 60).map((r: any) => {
-                  const imb = parseFloat(r.imbalance);
+                  const imb25 = r.imbalance_25 != null ? parseFloat(r.imbalance_25) : null;
+                  const imb100 = r.imbalance_100 != null ? parseFloat(r.imbalance_100) : null;
+                  const imb250 = parseFloat(r.imbalance);
+                  const rPrice = parseFloat(r.price);
+                  const rBinanceAsk = r.binance_ask != null ? parseFloat(r.binance_ask) : null;
+                  const rGap = rBinanceAsk != null ? (rBinanceAsk - rPrice) / rPrice * 100 : null;
                   return (
                     <tr key={r.id} className="hover:bg-gray-800/30">
                       <td className="py-1 text-gray-500">{new Date(r.logged_at).toLocaleTimeString([], { hour: "2-digit", minute: "2-digit", second: "2-digit", hour12: false })}</td>
-                      <td className="py-1 text-right text-yellow-400">${parseFloat(r.price).toFixed(2)}</td>
-                      <td className="py-1 text-right text-green-400">{parseFloat(r.bid_volume).toFixed(1)}</td>
-                      <td className="py-1 text-right text-red-400">{parseFloat(r.ask_volume).toFixed(1)}</td>
-                      <td className="py-1 text-right pr-1 text-blue-400">{imb.toFixed(3)}</td>
+                      <td className="py-1 text-right text-yellow-400">${rPrice.toFixed(2)}</td>
+                      <td className="py-1 text-right text-blue-400">{imb25 != null ? imb25.toFixed(3) : "—"}</td>
+                      <td className="py-1 text-right text-purple-400">{imb100 != null ? imb100.toFixed(3) : "—"}</td>
+                      <td className="py-1 text-right text-emerald-400">{imb250.toFixed(3)}</td>
+                      <td className="py-1 text-right pr-1 text-orange-400">{rGap != null ? rGap.toFixed(4) : "—"}</td>
                     </tr>
                   );
                 })}

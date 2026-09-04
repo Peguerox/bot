@@ -1,6 +1,6 @@
 "use client";
 
-import { LineChart, Line, XAxis, YAxis, Tooltip, ResponsiveContainer, ReferenceLine } from "recharts";
+import { LineChart, Line, XAxis, YAxis, Tooltip, ResponsiveContainer, ReferenceLine, Legend } from "recharts";
 
 export default function BookVolumeChart({ log }: { log: any[] }) {
   if (log.length === 0) return (
@@ -13,9 +13,9 @@ export default function BookVolumeChart({ log }: { log: any[] }) {
     i,
     label: new Date(r.logged_at).toLocaleTimeString([], { hour: "2-digit", minute: "2-digit", second: "2-digit", hour12: false }),
     price: parseFloat(r.price),
-    imbalance: parseFloat(r.imbalance),
-    bidVolume: parseFloat(r.bid_volume),
-    askVolume: parseFloat(r.ask_volume),
+    imbalance25: r.imbalance_25 != null ? parseFloat(r.imbalance_25) : null,
+    imbalance100: r.imbalance_100 != null ? parseFloat(r.imbalance_100) : null,
+    imbalance250: parseFloat(r.imbalance),
   }));
 
   const prices = data.map(d => d.price);
@@ -23,7 +23,7 @@ export default function BookVolumeChart({ log }: { log: any[] }) {
   const max = Math.max(...prices);
 
   return (
-    <ResponsiveContainer width="100%" height={260}>
+    <ResponsiveContainer width="100%" height={280}>
       <LineChart data={data} margin={{ top: 5, right: 10, left: 10, bottom: 5 }}>
         <XAxis dataKey="i" tick={false} tickLine={false} axisLine={false} />
         <YAxis
@@ -39,7 +39,7 @@ export default function BookVolumeChart({ log }: { log: any[] }) {
           yAxisId="imbalance"
           orientation="right"
           domain={[-1, 1]}
-          tick={{ fill: "#60a5fa", fontSize: 11 }}
+          tick={{ fill: "#9ca3af", fontSize: 11 }}
           tickLine={false}
           axisLine={false}
           tickFormatter={v => v.toFixed(2)}
@@ -51,13 +51,15 @@ export default function BookVolumeChart({ log }: { log: any[] }) {
           labelFormatter={(_: any, payload: readonly any[]) => payload?.[0]?.payload?.label ?? ""}
           formatter={(v: any, name: any) => {
             if (name === "price") return [`$${Number(v).toFixed(4)}`, "Price"];
-            if (name === "imbalance") return [Number(v).toFixed(4), "Imbalance"];
-            return [v, name];
+            return [Number(v).toFixed(4), name];
           }}
         />
+        <Legend wrapperStyle={{ fontSize: 11 }} />
         <ReferenceLine yAxisId="imbalance" y={0} stroke="#374151" strokeDasharray="4 4" />
-        <Line yAxisId="price" type="monotone" dataKey="price" stroke="#facc15" strokeWidth={2} dot={false} isAnimationActive={false} />
-        <Line yAxisId="imbalance" type="monotone" dataKey="imbalance" stroke="#60a5fa" strokeWidth={1.5} dot={false} isAnimationActive={false} />
+        <Line yAxisId="price" type="monotone" dataKey="price" name="Price" stroke="#facc15" strokeWidth={2} dot={false} isAnimationActive={false} />
+        <Line yAxisId="imbalance" type="monotone" dataKey="imbalance25" name="Imbalance (25)" stroke="#60a5fa" strokeWidth={1.5} dot={false} isAnimationActive={false} connectNulls />
+        <Line yAxisId="imbalance" type="monotone" dataKey="imbalance100" name="Imbalance (100)" stroke="#c084fc" strokeWidth={1.5} dot={false} isAnimationActive={false} connectNulls />
+        <Line yAxisId="imbalance" type="monotone" dataKey="imbalance250" name="Imbalance (250)" stroke="#34d399" strokeWidth={1.5} dot={false} isAnimationActive={false} />
       </LineChart>
     </ResponsiveContainer>
   );
