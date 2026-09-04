@@ -4,11 +4,16 @@ import { NextResponse } from "next/server";
 // server/zscore-trail-bitfinex.ts (window = trailing 25 completed 1-min Binance closes, current =
 // latest close), so the dashboard can show how close price actually is to the z<=-2.0 entry
 // trigger in real time -- was previously only visible in the BUY log line after the fact.
+//
+// Uses data-api.binance.vision, NOT api.binance.com -- Binance geo-blocks Vercel's server IPs
+// from api.binance.com directly ("Service unavailable from a restricted location", confirmed via
+// a real 502 in production). Same data-api.binance.vision workaround already used by
+// app/api/buy-hold/route.ts for this exact reason.
 const WINDOW_MIN = 25;
 
 export async function GET() {
   const res = await fetch(
-    `https://api.binance.com/api/v3/klines?symbol=ETHUSDT&interval=1m&limit=${WINDOW_MIN + 2}`,
+    `https://data-api.binance.vision/api/v3/klines?symbol=ETHUSDT&interval=1m&limit=${WINDOW_MIN + 2}`,
     { cache: "no-store" }
   );
   const data = await res.json();
