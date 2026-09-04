@@ -9,5 +9,6 @@ export async function GET(req: NextRequest) {
   const symbol = req.nextUrl.searchParams.get("symbol") || "tSOLUSD";
   const res = await fetch(`https://api-pub.bitfinex.com/v2/ticker/${symbol}`);
   const data = await res.json();
-  return NextResponse.json({ lastPrice: data[6] });
+  const bid = data[0], ask = data[2];
+  return NextResponse.json({ lastPrice: data[6], bid, ask, spreadPct: (ask - bid) / bid * 100 });
 }

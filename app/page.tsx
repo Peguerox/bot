@@ -769,6 +769,7 @@ function SolTrailContinuousPanel({
   const mode = st?.mode ?? "USD";
 
   const [livePrice, setLivePrice] = useState<number | null>(null);
+  const [liveSpreadPct, setLiveSpreadPct] = useState<number | null>(null);
   useEffect(() => {
     let cancelled = false;
     const poll = async () => {
@@ -778,6 +779,7 @@ function SolTrailContinuousPanel({
         const res = await fetch("/api/bitfinex-price?symbol=tETHUSD");
         const data = await res.json();
         if (!cancelled && data.lastPrice != null) setLivePrice(data.lastPrice);
+        if (!cancelled && data.spreadPct != null) setLiveSpreadPct(data.spreadPct);
       } catch {}
     };
     poll();
@@ -880,7 +882,10 @@ function SolTrailContinuousPanel({
           <Stat
             label="ETH/USD"
             value={latestPrice != null ? `$${latestPrice.toFixed(2)}` : "—"}
-            sub={mode === "SOL" && st?.sol_quantity ? `${parseFloat(st.sol_quantity).toFixed(3)} ETH held` : "no position"}
+            sub={
+              (mode === "SOL" && st?.sol_quantity ? `${parseFloat(st.sol_quantity).toFixed(3)} ETH held` : "no position") +
+              (liveSpreadPct != null ? ` · spread ${liveSpreadPct.toFixed(4)}%` : "")
+            }
             color="text-yellow-400"
           />
         </div>
@@ -918,9 +923,10 @@ function SolTrailContinuousPanel({
               </td>
             </tr>
             <tr className="border-b border-gray-800/50">
-              <td className="py-1.5 text-gray-400">Current price</td>
+              <td className="py-1.5 text-gray-400">Current price (spread)</td>
               <td className="py-1.5 text-right text-yellow-400">
                 {latestPrice != null ? `$${latestPrice.toFixed(2)}` : "—"}
+                {liveSpreadPct != null ? <span className="text-gray-500"> ({liveSpreadPct.toFixed(4)}%)</span> : null}
               </td>
             </tr>
             <tr className="border-b border-gray-800/50">
