@@ -1187,6 +1187,276 @@ function SolJumpTrailBitfinexPanel({
   );
 }
 
+function SolEmaVwapPanel({
+  trades, state, runs, loading,
+  enabled, onToggle, toggling,
+  onClearHistory, clearingHistory,
+}: {
+  trades: any[]; state: any; runs: any[]; loading: boolean;
+  enabled: boolean; onToggle: () => void; toggling: boolean;
+  onClearHistory: () => void; clearingHistory: boolean;
+}) {
+  const INITIAL = 100;
+  const st = state;
+  const totalPnl = st?.realized_pnl_usd ?? 0;
+  const totalTrades = st?.total_trades ?? 0;
+  const wins = st?.total_wins ?? 0;
+  const losses = totalTrades - wins;
+  const winRate = totalTrades > 0 ? (wins / totalTrades * 100).toFixed(1) : "—";
+  const posState: string = st?.position_state ?? "FLAT";
+  const holding = posState === "FULL" || posState === "HALF";
+
+  const [livePrice, setLivePrice] = useState<number | null>(null);
+  useEffect(() => {
+    let cancelled = false;
+    const poll = async () => {
+      try {
+        const res = await fetch("/api/bitfinex-price");
+        const data = await res.json();
+        if (!cancelled && data.lastPrice != null) setLivePrice(data.lastPrice);
+      } catch {}
+    };
+    poll();
+    const id = setInterval(poll, 5000);
+    return () => { cancelled = true; clearInterval(id); };
+  }, []);
+
+  const statusText: Record<string, string> = { FLAT: "Watching", ARMED: "Armed (waiting for bounce)", FULL: "Holding (full)", HALF: "Holding (half, breakeven)" };
+  const statusColor: Record<string, string> = { FLAT: "text-gray-400", ARMED: "text-yellow-400", FULL: "text-green-400", HALF: "text-blue-400" };
+  const chartTrades = trades.map((t: any) => ({ ...t, pnl: t.pnl_usd, exit_time: t.exit_time }));
+
+  const entryValue = holding && st?.entry_price && st?.remaining_qty
+    ? parseFloat(st.entry_price) * parseFloat(st.remaining_qty) : null;
+  const currentValue = holding && livePrice && st?.remaining_qty
+    ? parseFloat(st.remaining_qty) * livePrice : null;
+  const openPnl = entryValue != null && currentValue != null ? currentValue - entryValue : null;
+
+  // Only meaningful state-change actions -- CHECK/WAITING fire every minute and would flood this.
+  const meaningfulActions = new Set(["ARM", "DISARM", "ENTER", "TP_PARTIAL", "BREAKEVEN_EXIT", "SL_FULL", "ERROR"]);
+  const activityRuns = runs.filter((r: any) => (r.data?.actions ?? []).some((a: any) => meaningfulActions.has(a.action)));
+
+  const lastRunAt = runs[0]?.run_at ? new Date(runs[0].run_at).getTime() : null;
+  const workerAlive = lastRunAt != null && Date.now() - lastRunAt < 3 * 60_000; // cron runs every 1min, allow some slack
+
+  return (
+    <div className="bg-gray-900 rounded-xl p-5 space-y-5 flex flex-col">
+      <div className="space-y-1.5">
+        <div className="flex items-center justify-between gap-2">
+          <div className="flex items-center gap-2">
+            <h2 className="text-white font-bold text-lg">SOL EMA/VWAP Scalper</h2>
+            <span className="text-xs font-bold px-2 py-0.5 rounded-full bg-blue-500/20 text-blue-400">PAPER</span>
+            <span className={`text-xs font-bold px-2 py-0.5 rounded-full ${workerAlive ? "bg-green-500/20 text-green-400" : "bg-gray-700/40 text-gray-500"}`}>
+              {workerAlive ? "cron alive" : "cron offline"}
+            </span>
+          </div>
+          <div className="flex items-center gap-1.5 shrink-0">
+            <button
+              onClick={onClearHistory}
+              disabled={clearingHistory || enabled}
+              className="text-xs font-medium px-2.5 py-1.5 rounded-md bg-gray-800 text-gray-400 hover:bg-gray-700 hover:text-gray-200 transition-all disabled:opacity-30 disabled:cursor-not-allowed"
+              title={enabled ? "Pause bot before clearing" : "Delete all trade history and run logs"}
+            >
+              {clearingHistory ? "Clearing…" : "Clear"}
+            </button>
+            <button
+              onClick={onToggle}
+              disabled={toggling}
+              className={`flex items-center gap-2 text-xs font-semibold px-3 py-1.5 rounded-md transition-all disabled:opacity-50 disabled:cursor-not-allowed ${
+                enabled
+                  ? "bg-green-500/20 text-green-400 hover:bg-green-500/30"
+                  : "bg-gray-800 text-gray-400 hover:bg-gray-700 hover:text-gray-200"
+              }`}
+            >
+              <span className={`w-1.5 h-1.5 rounded-full ${enabled ? "bg-green-400" : "bg-gray-600"}`} />
+              {toggling ? "…" : enabled ? "Running" : "Paused"}
+            </button>
+          </div>
+        </div>
+        <p className="text-gray-500 text-xs">EMA9/EMA21 cross arms the signal, entry on the retrace-and-bounce off VWAP (5m candles, 15m trend filter) · long-only · PAPER · $100 seed · SL = VWAP - 0.05%, TP = entry + 2x risk · half closed at TP, rest rides at breakeven · runs every 1min via cron, not a live worker</p>
+      </div>
+
+      {loading ? (
+        <div className="grid grid-cols-2 gap-2 animate-pulse">
+          {[...Array(4)].map((_, i) => <div key={i} className="h-16 bg-gray-800 rounded-lg" />)}
+        </div>
+      ) : (
+        <div className="grid grid-cols-2 gap-2">
+          <Stat
+            label="PnL"
+            value={`${totalPnl >= 0 ? "+" : ""}${(totalPnl / INITIAL * 100).toFixed(2)}%`}
+            sub={`${totalPnl >= 0 ? "+" : ""}$${totalPnl.toFixed(2)} · ${totalTrades} trades (${wins}W/${losses}L)`}
+            color={totalPnl >= 0 ? "text-green-400" : "text-red-400"}
+          />
+          <Stat
+            label="Win Rate"
+            value={`${winRate}%`}
+            sub={`${totalTrades} trades (${wins}W/${losses}L)`}
+            color="text-blue-400"
+          />
+          <Stat
+            label="Status"
+            value={statusText[posState] ?? posState}
+            sub={holding && st?.entry_price ? `entry $${parseFloat(st.entry_price).toFixed(2)}` : "watching for EMA cross"}
+            color={statusColor[posState] ?? "text-gray-400"}
+          />
+          <Stat
+            label="SOL/USD"
+            value={livePrice != null ? `$${livePrice.toFixed(2)}` : "—"}
+            sub={holding && st?.remaining_qty ? `${parseFloat(st.remaining_qty).toFixed(3)} SOL held` : "no position"}
+            color="text-yellow-400"
+          />
+        </div>
+      )}
+
+      <div>
+        <p className="text-gray-500 text-xs uppercase tracking-wide mb-2">Cumulative PnL (USD)</p>
+        <PnLChart trades={chartTrades} initial={INITIAL} />
+      </div>
+
+      <div>
+        <p className="text-gray-500 text-xs uppercase tracking-wide mb-2">Position</p>
+        <table className="w-full text-sm font-mono">
+          <thead>
+            <tr className="text-gray-600 border-b border-gray-800">
+              <th className="text-left pb-1 font-medium">Field</th>
+              <th className="text-right pb-1 font-medium">Value</th>
+            </tr>
+          </thead>
+          <tbody>
+            <tr className="border-b border-gray-800/50">
+              <td className="py-1.5 text-gray-400">Status</td>
+              <td className={`py-1.5 text-right font-bold ${statusColor[posState] ?? "text-gray-400"}`}>{statusText[posState] ?? posState}</td>
+            </tr>
+            <tr className="border-b border-gray-800/50">
+              <td className="py-1.5 text-gray-400">SOL held</td>
+              <td className="py-1.5 text-right text-white">
+                {holding && st?.remaining_qty ? `${parseFloat(st.remaining_qty).toFixed(3)} SOL` : "—"}
+              </td>
+            </tr>
+            <tr className="border-b border-gray-800/50">
+              <td className="py-1.5 text-gray-400">Entry price</td>
+              <td className="py-1.5 text-right text-white">
+                {holding && st?.entry_price ? `$${parseFloat(st.entry_price).toFixed(2)}` : "—"}
+              </td>
+            </tr>
+            <tr className="border-b border-gray-800/50">
+              <td className="py-1.5 text-gray-400">Current price</td>
+              <td className="py-1.5 text-right text-yellow-400">
+                {livePrice != null ? `$${livePrice.toFixed(2)}` : "—"}
+              </td>
+            </tr>
+            <tr className="border-b border-gray-800/50">
+              <td className="py-1.5 text-gray-400">Take profit</td>
+              <td className="py-1.5 text-right text-green-400">
+                {holding && st?.tp_price ? `$${parseFloat(st.tp_price).toFixed(2)}` : "—"}
+              </td>
+            </tr>
+            <tr className="border-b border-gray-800/50">
+              <td className="py-1.5 text-gray-400">Stop loss</td>
+              <td className="py-1.5 text-right text-red-400">
+                {holding && st?.sl_price ? `$${parseFloat(st.sl_price).toFixed(2)}` : "—"}
+              </td>
+            </tr>
+            <tr>
+              <td className="py-1.5 text-gray-400">Open PnL</td>
+              <td className={`py-1.5 text-right font-bold ${
+                openPnl == null ? "text-gray-600"
+                : openPnl >= 0 ? "text-green-400" : "text-red-400"
+              }`}>
+                {openPnl != null && entryValue
+                  ? `${openPnl >= 0 ? "+" : ""}${(openPnl / entryValue * 100).toFixed(2)}% (${openPnl >= 0 ? "+" : ""}$${openPnl.toFixed(2)})`
+                  : "—"}
+              </td>
+            </tr>
+          </tbody>
+        </table>
+      </div>
+
+      <div>
+        <p className="text-gray-500 text-xs uppercase tracking-wide mb-2">Recent Trades</p>
+        {loading ? (
+          <div className="animate-pulse space-y-2">
+            {[...Array(3)].map((_, i) => <div key={i} className="h-8 bg-gray-800 rounded" />)}
+          </div>
+        ) : trades.length === 0 ? (
+          <p className="text-gray-600 text-sm">No completed round trips yet</p>
+        ) : (
+          <div className="overflow-auto">
+            <table className="w-full text-xs font-mono">
+              <thead>
+                <tr className="text-gray-500 border-b border-gray-800">
+                  <th className="text-left pb-1">Reason</th>
+                  <th className="text-left pb-1">Entry</th>
+                  <th className="text-left pb-1">Exit</th>
+                  <th className="text-right pb-1">PnL</th>
+                  <th className="text-right pb-1">%</th>
+                </tr>
+              </thead>
+              <tbody className="divide-y divide-gray-800/50">
+                {trades.slice(0, 8).map((t: any) => {
+                  const isWin = (t.pnl_usd ?? 0) > 0;
+                  return (
+                    <tr key={t.id} className="hover:bg-gray-800/30">
+                      <td className={`py-1.5 ${t.exit_reason === "SL" ? "text-red-400" : "text-green-400"}`}>{t.exit_reason}</td>
+                      <td className="py-1.5 text-gray-300">${t.entry_price ? parseFloat(t.entry_price).toFixed(2) : "—"}</td>
+                      <td className="py-1.5 text-gray-300">${t.exit_price  ? parseFloat(t.exit_price).toFixed(2)  : "—"}</td>
+                      <td className={`py-1.5 text-right ${isWin ? "text-green-400" : "text-red-400"}`}>
+                        {isWin ? "+" : ""}${(t.pnl_usd ?? 0).toFixed(2)}
+                      </td>
+                      <td className={`py-1.5 text-right ${isWin ? "text-green-400" : "text-red-400"}`}>
+                        {isWin ? "+" : ""}{(t.pnl_pct ?? 0).toFixed(2)}%
+                      </td>
+                    </tr>
+                  );
+                })}
+              </tbody>
+            </table>
+          </div>
+        )}
+      </div>
+
+      <div>
+        <p className="text-gray-500 text-xs uppercase tracking-wide mb-2">Activity (state changes only)</p>
+        <div className="h-56 overflow-y-auto space-y-0.5 font-mono text-sm pr-1">
+          {activityRuns.length === 0 && <p className="text-gray-600">No state changes yet — waiting for an EMA cross.</p>}
+          {activityRuns.map((r: any) => {
+            const actions: any[] = (r.data?.actions ?? []).filter((a: any) => meaningfulActions.has(a.action));
+            const time = r.run_at
+              ? new Date(r.run_at).toLocaleTimeString([], { hour: "2-digit", minute: "2-digit", second: "2-digit", hour12: false })
+              : "";
+            return (
+              <div key={r.id} className="flex gap-2 items-start">
+                <span className="text-gray-600 shrink-0">{time}</span>
+                <div className="flex flex-col gap-0">
+                  {actions.map((a: any, i: number) => {
+                    const color = a.action === "ENTER" ? "text-yellow-400"
+                      : a.action === "ARM" ? "text-blue-400"
+                      : a.action === "DISARM" ? "text-gray-500"
+                      : a.action === "TP_PARTIAL" ? "text-green-400"
+                      : a.action === "BREAKEVEN_EXIT" ? "text-gray-400"
+                      : a.action === "SL_FULL" ? "text-red-400"
+                      : a.action === "ERROR" ? "text-red-400"
+                      : "text-gray-500";
+                    const text = a.action === "ENTER" ? `ENTER  qty=${parseFloat(a.qty).toFixed(3)} @ $${parseFloat(a.price).toFixed(2)}  SL=$${parseFloat(a.sl).toFixed(2)}  TP=$${parseFloat(a.tp).toFixed(2)}`
+                      : a.action === "ARM" ? `ARMED — EMA9 crossed above EMA21`
+                      : a.action === "DISARM" ? `DISARMED — ${a.reason}`
+                      : a.action === "TP_PARTIAL" ? `TP HIT (half closed)  @ $${parseFloat(a.price).toFixed(2)}  pnl=$${a.pnlUsd}`
+                      : a.action === "BREAKEVEN_EXIT" ? `BREAKEVEN EXIT (remaining half)  @ $${parseFloat(a.price).toFixed(2)}  pnl=$${a.pnlUsd}`
+                      : a.action === "SL_FULL" ? `STOP HIT  @ $${parseFloat(a.price).toFixed(2)}  pnl=$${a.pnlUsd}`
+                      : a.action === "ERROR" ? `ERROR (${a.stage}): ${a.error}`
+                      : a.action;
+                    return <span key={i} className={color}>{text}</span>;
+                  })}
+                </div>
+              </div>
+            );
+          })}
+        </div>
+      </div>
+    </div>
+  );
+}
+
 // ── Dashboard ───────────────────────────────────────────────────────────────
 
 export default function Dashboard() {
@@ -1214,6 +1484,11 @@ export default function Dashboard() {
   const [solBookVolumeLog,    setSolBookVolumeLog]    = useState<any[]>([]);
   const [solJumpTrailToggling, setSolJumpTrailToggling] = useState(false);
   const [solJumpTrailClearing, setSolJumpTrailClearing] = useState(false);
+  const [solEmaVwapState,   setSolEmaVwapState]   = useState<any>(null);
+  const [solEmaVwapTrades,  setSolEmaVwapTrades]  = useState<any[]>([]);
+  const [solEmaVwapRuns,    setSolEmaVwapRuns]    = useState<any[]>([]);
+  const [solEmaVwapToggling, setSolEmaVwapToggling] = useState(false);
+  const [solEmaVwapClearing, setSolEmaVwapClearing] = useState(false);
 
   async function load() {
     const [
@@ -1228,6 +1503,9 @@ export default function Dashboard() {
       { data: solTrailContinuousRs },
       { data: solJumpTrailSt },
       { data: solBookVolumeLog },
+      { data: solEmaVwapSt },
+      { data: solEmaVwapTr },
+      { data: solEmaVwapRs },
     ] = await Promise.all([
       getSupabase().from("surfer_state").select("*").eq("id", 1).single(),
       getSupabase().from("surfer_trades").select("*").order("exit_time", { ascending: false }).limit(5000),
@@ -1240,6 +1518,9 @@ export default function Dashboard() {
       getSupabase().from("sol_trail_continuous_runs").select("id,run_at,data").order("run_at", { ascending: false }).limit(120),
       getSupabase().from("sol_jump_trail_bitfinex_state").select("*").eq("id", 1).single(),
       getSupabase().from("sol_book_volume_log").select("*").order("logged_at", { ascending: false }).limit(300),
+      getSupabase().from("sol_ema_vwap_state").select("*").eq("id", 1).single(),
+      getSupabase().from("sol_ema_vwap_trades").select("*").order("exit_time", { ascending: false }).limit(5000),
+      getSupabase().from("sol_ema_vwap_runs").select("id,run_at,data").order("run_at", { ascending: false }).limit(120),
     ]);
     setSurferState(surferSt ?? null);
     setSurferTrades(surferTr ?? []);
@@ -1252,6 +1533,9 @@ export default function Dashboard() {
     setSolTrailContinuousRuns(solTrailContinuousRs ?? []);
     setSolJumpTrailState(solJumpTrailSt ?? null);
     setSolBookVolumeLog((solBookVolumeLog ?? []).slice().reverse());
+    setSolEmaVwapState(solEmaVwapSt ?? null);
+    setSolEmaVwapTrades(solEmaVwapTr ?? []);
+    setSolEmaVwapRuns(solEmaVwapRs ?? []);
     setLoading(false);
   }
 
@@ -1329,6 +1613,21 @@ export default function Dashboard() {
     await fetch("/api/sol-jump-trail-bitfinex/clear-history", { method: "POST" });
     await load();
     setSolJumpTrailClearing(false);
+  }
+
+  async function handleSolEmaVwapToggle() {
+    setSolEmaVwapToggling(true);
+    await fetch("/api/sol-ema-vwap/toggle", { method: "POST" });
+    await load();
+    setSolEmaVwapToggling(false);
+  }
+
+  async function handleSolEmaVwapClearHistory() {
+    if (!confirm("Delete all EMA/VWAP trade history and run logs?")) return;
+    setSolEmaVwapClearing(true);
+    await fetch("/api/sol-ema-vwap/clear-history", { method: "POST" });
+    await load();
+    setSolEmaVwapClearing(false);
   }
 
   function formatElapsed(ms: number): string {
@@ -1435,9 +1734,14 @@ export default function Dashboard() {
       .on("postgres_changes", { event: "*", schema: "public", table: "sol_jump_trail_bitfinex_state" }, debouncedLoad)
       .on("postgres_changes", { event: "*", schema: "public", table: "sol_book_volume_log" }, debouncedLoad)
       .subscribe();
+    const ch19 = sb.channel("sol-ema-vwap")
+      .on("postgres_changes", { event: "*", schema: "public", table: "sol_ema_vwap_state" }, debouncedLoad)
+      .on("postgres_changes", { event: "*", schema: "public", table: "sol_ema_vwap_trades" }, debouncedLoad)
+      .on("postgres_changes", { event: "*", schema: "public", table: "sol_ema_vwap_runs" }, debouncedLoad)
+      .subscribe();
     return () => {
       if (debounceTimer) clearTimeout(debounceTimer);
-      sb.removeChannel(ch1); sb.removeChannel(ch2); sb.removeChannel(ch17); sb.removeChannel(ch18);
+      sb.removeChannel(ch1); sb.removeChannel(ch2); sb.removeChannel(ch17); sb.removeChannel(ch18); sb.removeChannel(ch19);
     };
   }, []);
 
@@ -1513,6 +1817,21 @@ export default function Dashboard() {
             toggling={solJumpTrailToggling}
             onClearHistory={handleSolJumpTrailClearHistory}
             clearingHistory={solJumpTrailClearing}
+          />
+        </div>
+
+        {/* ── EMA9/EMA21 + VWAP scalper: cron-based, below the always-on workers ── */}
+        <div className="grid grid-cols-1 gap-6 items-start">
+          <SolEmaVwapPanel
+            trades={solEmaVwapTrades}
+            state={solEmaVwapState}
+            runs={solEmaVwapRuns}
+            loading={loading}
+            enabled={solEmaVwapState?.enabled ?? false}
+            onToggle={handleSolEmaVwapToggle}
+            toggling={solEmaVwapToggling}
+            onClearHistory={handleSolEmaVwapClearHistory}
+            clearingHistory={solEmaVwapClearing}
           />
         </div>
 
