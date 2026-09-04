@@ -796,7 +796,7 @@ function SolTrailContinuousPanel({
     return null;
   })();
 
-  const statusText  = mode === "SOL" ? "Holding SOL" : "Holding USD";
+  const statusText  = mode === "SOL" ? "Holding ETH" : "Holding USD";
   const statusColor = mode === "SOL" ? "text-green-400" : "text-gray-400";
   const chartTrades = trades.map((t: any) => ({ ...t, pnl: t.pnl_usd, exit_time: t.exit_time }));
 
@@ -846,7 +846,7 @@ function SolTrailContinuousPanel({
             </button>
           </div>
         </div>
-        <p className="text-gray-500 text-xs">CONVERTED 2026-09-04: SOL fixed-OCO failed a full-year backtest at every TP/SL combo tried once spread was realistic. ETH's real spread is ~3.6x tighter than SOL's — always-in 0.1% trail backtested positive on ETH across every spread scenario tested (1yr) · LIVE · REAL MONEY · $20 seed, compounds · long-only (no shorting on spot)</p>
+        <p className="text-gray-500 text-xs">Always-in trailing stop, ETH/USD, 0.1% trail · LIVE · REAL MONEY · $20 seed, compounds · long-only (no shorting on spot)</p>
       </div>
 
       {loading ? (
