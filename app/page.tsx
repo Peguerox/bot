@@ -2073,8 +2073,8 @@ export default function Dashboard() {
     const bots = [
       { name: "Surfer SOLBTC",  badge: "LIVE",  state: surferState,     runsTable: "surfer_runs",         pnlField: "realized_pnl_btc",  initial: SURFER_BTC_INITIAL, unit: "₿", venue: "us" as const, symbol: "SOLBTC" },
       { name: "Surfer SOLUSDT", badge: "LIVE",  state: surferUsdtState, runsTable: "surfer_usdt_runs",    pnlField: "realized_pnl_usdt", initial: 50, unit: "$", venue: "us" as const,       symbol: "SOLUSDT" },
-      { name: "ETH Pure Trail Live", badge: "LIVE", state: solTrailContinuousState, runsTable: "sol_trail_continuous_runs", pnlField: "realized_pnl_usd", initial: 20, unit: "$", venue: "bitfinex" as const, symbol: "tETHUSD" },
-      { name: "ETH Jump Trail Live", badge: "LIVE", state: solJumpTrailState, runsTable: "sol_jump_trail_bitfinex_runs", pnlField: "realized_pnl_usd", initial: 20, unit: "$", venue: "bitfinex" as const, symbol: "tETHUSD" },
+      { name: "ETH Z-Score Live (Worker 1)", badge: "LIVE", state: ethZscoreState, runsTable: "eth_zscore_bitfinex_runs", pnlField: "realized_pnl_usd", initial: 20, unit: "$", venue: "bitfinex" as const, symbol: "tETHUSD" },
+      { name: "ETH Jump Trail Live (Worker 2)", badge: "LIVE", state: solJumpTrailState, runsTable: "sol_jump_trail_bitfinex_runs", pnlField: "realized_pnl_usd", initial: 20, unit: "$", venue: "bitfinex" as const, symbol: "tETHUSD" },
     ];
 
     const rows: SummaryRow[] = [];
