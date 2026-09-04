@@ -2213,21 +2213,6 @@ export default function Dashboard() {
           />
         </div>
 
-        {/* ── Bitfinex Trail: always-on continuous worker ── */}
-        <div className="grid grid-cols-1 gap-6 items-start">
-          <SolTrailContinuousPanel
-            trades={solTrailContinuousTrades}
-            state={solTrailContinuousState}
-            runs={solTrailContinuousRuns}
-            loading={loading}
-            enabled={solTrailContinuousState?.enabled ?? false}
-            onToggle={handleSolTrailContinuousToggle}
-            toggling={solTrailContinuousToggling}
-            onClearHistory={handleSolTrailContinuousClearHistory}
-            clearingHistory={solTrailContinuousClearing}
-          />
-        </div>
-
         {/* ── ETH Jump Trail: second live real-money bot ── */}
         <div className="grid grid-cols-1 gap-6 items-start">
           <SolJumpTrailBitfinexPanel
@@ -2255,21 +2240,6 @@ export default function Dashboard() {
             toggling={ethZscoreToggling}
             onClearHistory={handleEthZscoreClearHistory}
             clearingHistory={ethZscoreClearing}
-          />
-        </div>
-
-        {/* ── EMA9/EMA21 + VWAP scalper: cron-based, below the always-on workers ── */}
-        <div className="grid grid-cols-1 gap-6 items-start">
-          <SolEmaVwapPanel
-            trades={solEmaVwapTrades}
-            state={solEmaVwapState}
-            runs={solEmaVwapRuns}
-            loading={loading}
-            enabled={solEmaVwapState?.enabled ?? false}
-            onToggle={handleSolEmaVwapToggle}
-            toggling={solEmaVwapToggling}
-            onClearHistory={handleSolEmaVwapClearHistory}
-            clearingHistory={solEmaVwapClearing}
           />
         </div>
 
