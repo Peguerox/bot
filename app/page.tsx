@@ -775,7 +775,7 @@ function SolTrailContinuousPanel({
       try {
         // Bitfinex's public API sends no CORS headers, so a direct browser fetch is silently
         // blocked — proxied through our own API route instead (server-to-server, no CORS issue).
-        const res = await fetch("/api/bitfinex-price");
+        const res = await fetch("/api/bitfinex-price?symbol=tETHUSD");
         const data = await res.json();
         if (!cancelled && data.lastPrice != null) setLivePrice(data.lastPrice);
       } catch {}
@@ -878,9 +878,9 @@ function SolTrailContinuousPanel({
             color={statusColor}
           />
           <Stat
-            label="SOL/USD"
+            label="ETH/USD"
             value={latestPrice != null ? `$${latestPrice.toFixed(2)}` : "—"}
-            sub={mode === "SOL" && st?.sol_quantity ? `${parseFloat(st.sol_quantity).toFixed(3)} SOL held` : "no position"}
+            sub={mode === "SOL" && st?.sol_quantity ? `${parseFloat(st.sol_quantity).toFixed(3)} ETH held` : "no position"}
             color="text-yellow-400"
           />
         </div>
@@ -906,9 +906,9 @@ function SolTrailContinuousPanel({
               <td className={`py-1.5 text-right font-bold ${statusColor}`}>{statusText}</td>
             </tr>
             <tr className="border-b border-gray-800/50">
-              <td className="py-1.5 text-gray-400">SOL held</td>
+              <td className="py-1.5 text-gray-400">ETH held</td>
               <td className="py-1.5 text-right text-white">
-                {mode === "SOL" && st?.sol_quantity ? `${parseFloat(st.sol_quantity).toFixed(3)} SOL` : "—"}
+                {mode === "SOL" && st?.sol_quantity ? `${parseFloat(st.sol_quantity).toFixed(3)} ETH` : "—"}
               </td>
             </tr>
             <tr className="border-b border-gray-800/50">
@@ -1211,7 +1211,7 @@ function SolEmaVwapPanel({
     let cancelled = false;
     const poll = async () => {
       try {
-        const res = await fetch("/api/bitfinex-price");
+        const res = await fetch("/api/bitfinex-price?symbol=tSOLUSD");
         const data = await res.json();
         if (!cancelled && data.lastPrice != null) setLivePrice(data.lastPrice);
       } catch {}
