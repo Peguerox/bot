@@ -1,15 +1,23 @@
-// REAL MONEY — converted 2026-09-04 to test the OCO backtest finding live (TP=+1%/SL=-0.1%,
-// sequential re-entry, no entry filter). Backtest on 3mo of tSOLUSD 1-min candles: at an
-// optimistic 0.0096% half-spread, +77.10% simple sum (6,687 trades, 10.1% win rate). At a more
-// realistic 0.050% half-spread, the SAME setup INVERTS to -1,216.50% (18,083 trades, 3.0% win
-// rate) — the SL is so close (0.1%) that a wider spread eats most of its margin, making it
-// trivially easy to hit. Extremely spread-sensitive. Testing live to get a real measurement
-// instead of guessing at the spread assumption — small stakes ($20), explicit user request.
+// REAL MONEY — converted 2026-09-04 from SOL fixed-OCO (TP=1%/SL=0.1%) to ETH/USD always-in
+// pure trail. The OCO approach failed a full-year backtest at realistic spread across every
+// TP/SL combo tried (0.1%-5% TP, 0.1%-0.5% SL) — all negative once spread was set to SOL's real
+// measured level (~0.03% full spread) or worse. Checking other pairs' spreads found ETH's real
+// spread is much tighter (~0.008% full spread vs SOL's ~0.029% at the time measured) — closer
+// to the OPTIMISTIC spread case that made every strategy look artificially good. Backtested an
+// always-in 0.1% trail (buy immediately, trail stop 0.1% below the highest bid since entry,
+// re-enter instantly on stop-out) on ETH/USD over a full year at ETH's own spread: positive
+// across every spread scenario tested (+693% optimistic real-spread case down to +206% at a
+// deliberately conservative 0.01% half-spread) — the first strategy this session to survive
+// the full range of spread assumptions, not just the tightest one.
 //
-// SIGNAL: none. Always re-enter immediately when flat, no filter, matching the backtest exactly.
-// EXIT: fixed OCO bracket, no trailing — TP=+1% / SL=-0.1% from entry, whichever hits first.
-// Entry priced at real Bitfinex ask; exit checks priced at real Bitfinex bid (worst-case-
-// consistent, same methodology as every other bot this session).
+// NOT YET DONE: only spot-checked ETH's real spread once, right before backtesting — same
+// caveat as every spread-based backtest today, spread can widen at other times of day/week.
+// This live run is partly to get a real measurement instead of trusting a single backtest.
+//
+// STRATEGY: no entry signal/filter — always re-enter the instant flat. Trail a stop TRAIL_PCT
+// below the highest real bid seen since entry, re-evaluated on every tick. Entry priced at real
+// Bitfinex ask, stop checked against real Bitfinex bid (worst-case-consistent, same methodology
+// as every other bot this session).
 //
 // SINGLE-INSTANCE GUARANTEE: critical with real orders — claims a lock row (lock_owner/
 // lock_heartbeat) on startup, refuses to trade if another instance's heartbeat is fresh, releases
@@ -31,12 +39,12 @@ import {
 } from "../lib/sol-trail-continuous-db";
 import { submitMarketOrder } from "../lib/bitfinex-auth";
 
-const BFX_SYMBOL       = "tSOLUSD";
-const TP_PCT           = 1.0;
-const SL_PCT           = 0.1;
+const BFX_SYMBOL       = "tETHUSD";
+const TRAIL_PCT        = 0.1;
 const SEED_USD         = 20;
 const HEARTBEAT_MS     = 10_000;
 const LOCK_STALE_MS    = 30_000;
+const DB_WRITE_THROTTLE_MS = 2_000;
 const RUN_LOG_INTERVAL_MS  = 5 * 60_000;
 const WATCHDOG_INTERVAL_MS = 5_000;
 const BFX_STALE_MS         = 15_000;
@@ -45,6 +53,7 @@ const BFX_EMERGENCY_MS     = 25_000;
 const INSTANCE_ID = `${os.hostname()}-${process.pid}-${crypto.randomBytes(3).toString("hex")}`;
 
 let state: SolTrailContinuousState;
+let lastDbWrite = 0;
 let lastBfxMessageTime = Date.now();
 let bfxWs: WebSocket | null = null;
 let emergencyInProgress = false;
@@ -52,8 +61,6 @@ let lastRunLog = 0;
 let orderInFlight = false;
 let bfxBid: number | null = null;
 let bfxAsk: number | null = null;
-let tpPrice: number | null = null;
-let slPrice: number | null = null;
 
 async function acquireLock(): Promise<boolean> {
   state = await getSolTrailContinuousState();
@@ -96,18 +103,19 @@ async function checkEntry() {
   try {
     const targetPool = SEED_USD + (state.realized_pnl_usd ?? 0);
     const estQty = targetPool / bfxAsk;
-    console.log(`BUY (always-on, no filter) @ ask=${bfxAsk.toFixed(4)} qty~=${estQty.toFixed(4)} — submitting real order...`);
+    console.log(`BUY (always-on trail, no filter) @ ask=${bfxAsk.toFixed(4)} qty~=${estQty.toFixed(4)} — submitting real order...`);
     const fill = await submitMarketOrder(BFX_SYMBOL, estQty);
-    tpPrice = fill.execPrice * (1 + TP_PCT / 100);
-    slPrice = fill.execPrice * (1 - SL_PCT / 100);
+    const extreme = fill.execPrice;
+    const stop = extreme * (1 - TRAIL_PCT / 100);
     const patch = {
       mode: "SOL" as const, sol_quantity: fill.execAmount, entry_price: fill.execPrice,
       entry_time: new Date().toISOString(), usd_balance: 0,
-      peak_price: tpPrice, stop_price: slPrice, // peak_price repurposed to hold the TP target (fixed bracket, no trailing)
+      peak_price: extreme, stop_price: stop,
     };
     state = { ...state, ...patch };
     await updateSolTrailContinuousState(patch);
-    console.log(`BUY FILLED price=${fill.execPrice.toFixed(4)} qty=${fill.execAmount.toFixed(4)} fee=${fill.fee} TP=${tpPrice.toFixed(4)} SL=${slPrice.toFixed(4)}`);
+    lastDbWrite = Date.now();
+    console.log(`BUY FILLED price=${fill.execPrice.toFixed(4)} qty=${fill.execAmount.toFixed(4)} fee=${fill.fee} stop=${stop.toFixed(4)}`);
     await logSolTrailContinuousRun({ actions: [{ action: "BUY", price: fill.execPrice, qty: fill.execAmount, orderId: fill.orderId }] });
     lastRunLog = Date.now();
   } catch (err) {
@@ -130,28 +138,22 @@ async function onBfxTicker(bid: number, ask: number) {
 
   recordSolTrailContinuousTick(state.entry_time!, bid, ask).catch((err) => console.error("recordTick error:", err));
 
-  const tp = tpPrice ?? state.entry_price! * (1 + TP_PCT / 100);
-  const sl = slPrice ?? state.stop_price!;
-  const hitTP = bid >= tp;
-  const hitSL = bid <= sl;
+  const peak = state.peak_price ?? state.entry_price!;
+  const stop = state.stop_price ?? peak * (1 - TRAIL_PCT / 100);
 
-  if (hitSL || hitTP) {
-    // conservative tie-break: if both somehow true on the same tick, SL wins (matches the backtest)
-    const reason = hitSL ? "SL" : "TP";
-    const exitTarget = hitSL ? sl : tp;
+  if (bid <= stop) {
     orderInFlight = true;
     try {
       const origEntryPrice = state.entry_price!;
       const origSolQty = state.sol_quantity!;
       const origEntryTime = state.entry_time!;
-      console.log(`${reason} signal, selling ${origSolQty.toFixed(4)} SOL — submitting real order...`);
+      console.log(`STOP signal, selling ${origSolQty.toFixed(4)} ETH — submitting real order...`);
       const fill = await submitMarketOrder(BFX_SYMBOL, -origSolQty);
       const usdOut = fill.execPrice * Math.abs(fill.execAmount);
       const usdIn  = origEntryPrice * origSolQty;
       const pnlUsd = usdOut - usdIn;
       const pnlPct = (pnlUsd / usdIn) * 100;
 
-      tpPrice = null; slPrice = null;
       const patch = {
         mode: "USD" as const, sol_quantity: null, entry_price: null, entry_time: null,
         usd_balance: usdOut, peak_price: null, stop_price: null,
@@ -162,8 +164,9 @@ async function onBfxTicker(bid: number, ask: number) {
         entry_price: origEntryPrice, exit_price: fill.execPrice, sol_quantity: origSolQty,
         usd_in: usdIn, usd_out: usdOut, pnl_usd: pnlUsd, pnl_pct: pnlPct, entry_time: origEntryTime,
       });
-      console.log(`${reason} FILLED price=${fill.execPrice.toFixed(4)} pnlUsd=${pnlUsd.toFixed(4)} pnlPct=${pnlPct.toFixed(4)}`);
-      await logSolTrailContinuousRun({ actions: [{ action: reason === "TP" ? "TP_FILLED" : "SL_FILLED", price: fill.execPrice, pnlUsd, pnlPct, orderId: fill.orderId, target: exitTarget }] });
+      lastDbWrite = Date.now();
+      console.log(`STOP FILLED price=${fill.execPrice.toFixed(4)} pnlUsd=${pnlUsd.toFixed(4)} pnlPct=${pnlPct.toFixed(4)}`);
+      await logSolTrailContinuousRun({ actions: [{ action: "STOP_FILLED", price: fill.execPrice, pnlUsd, pnlPct, orderId: fill.orderId }] });
       lastRunLog = Date.now();
     } catch (err) {
       console.error("SELL order failed:", err);
@@ -171,12 +174,20 @@ async function onBfxTicker(bid: number, ask: number) {
     } finally {
       orderInFlight = false;
     }
+    // Always-in: re-enter the instant we're flat again (checkEntry no-ops if disabled meanwhile).
+    await checkEntry();
     return;
+  } else if (bid > peak) {
+    state = { ...state, peak_price: bid, stop_price: bid * (1 - TRAIL_PCT / 100) };
+    if (Date.now() - lastDbWrite > DB_WRITE_THROTTLE_MS) {
+      await updateSolTrailContinuousState({ peak_price: state.peak_price, stop_price: state.stop_price });
+      lastDbWrite = Date.now();
+    }
   }
 
   if (Date.now() - lastRunLog > RUN_LOG_INTERVAL_MS) {
     await logSolTrailContinuousRun({
-      actions: [{ action: "STATUS", mode: state.mode, bid, ask, tp, sl }],
+      actions: [{ action: "STATUS", mode: state.mode, bid, ask, peak: state.peak_price, stop: state.stop_price }],
     });
     lastRunLog = Date.now();
   }
@@ -251,7 +262,7 @@ function startWatchdog() {
     if (staleMs < BFX_STALE_MS) return;
 
     if (state.mode === "SOL" && staleMs >= BFX_EMERGENCY_MS && !emergencyInProgress) {
-      emergencyFlatten(`Bitfinex WS silent for ${Math.round(staleMs / 1000)}s while holding SOL`)
+      emergencyFlatten(`Bitfinex WS silent for ${Math.round(staleMs / 1000)}s while holding ETH`)
         .catch((err) => console.error("emergencyFlatten error:", err));
       return;
     }
@@ -277,8 +288,8 @@ async function main() {
   process.on("SIGINT", shutdown);
   process.on("SIGTERM", shutdown);
 
-  console.log(`Starting LIVE OCO worker (${INSTANCE_ID}), enabled=${state.enabled}, mode=${state.mode}`);
-  console.log(`REAL MONEY — always-on entry, no filter. Seed $${SEED_USD}, compounding, TP=${TP_PCT}% / SL=${SL_PCT}%.`);
+  console.log(`Starting LIVE ETH pure-trail worker (${INSTANCE_ID}), enabled=${state.enabled}, mode=${state.mode}`);
+  console.log(`REAL MONEY — always-on entry, no filter. Seed $${SEED_USD}, compounding, trail=${TRAIL_PCT}%.`);
   connectBitfinex();
   startWatchdog();
 }
