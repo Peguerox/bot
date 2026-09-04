@@ -31,7 +31,13 @@ async function bitfinexAuthPost(path: string, body: object = {}): Promise<any> {
     body: JSON.stringify(body),
     signal: AbortSignal.timeout(10_000),
   });
-  if (!res.ok) throw new Error(`Bitfinex auth ${path} error: ${res.status}`);
+  if (!res.ok) {
+    // FIX 2026-09-04: error used to just say "error: 500" with no reason, which made it
+    // impossible for callers to tell "insufficient balance" apart from any other failure —
+    // needed for the shared-wallet retry logic in submitMarketOrderSafe below.
+    const text = await res.text().catch(() => "");
+    throw new Error(`Bitfinex auth ${path} error: ${res.status} ${text}`);
+  }
   return res.json();
 }
 
@@ -65,4 +71,45 @@ export async function getWalletBalance(currency: string): Promise<number> {
   const wallets = await bitfinexAuthPost("auth/r/wallets");
   const wallet = wallets.find((w: any[]) => w[0] === "exchange" && w[1] === currency);
   return wallet ? wallet[2] : 0;
+}
+
+// SHARED-WALLET FIX 2026-09-04: multiple live bots can trade the same asset on the same real
+// account concurrently (intentional). Each bot's own internal quantity tracking can drift from
+// the real combined wallet balance because of normal fill-precision behavior on Bitfinex's side
+// -- not a bug in either bot individually, just an unavoidable consequence of two independent
+// trackers sharing one real pool. This caused a real incident: a sell kept failing with
+// "not enough exchange balance" every 15s for 2+ minutes, retrying with the same wrong number
+// forever. Fix: keep the hot path exactly as fast as before (no balance check on every trade --
+// that would add real latency for no benefit in the ~99% of trades with no drift). Only on an
+// actual "insufficient balance" failure, re-check the real balance and retry ONCE with the
+// corrected amount -- self-heals in under a second instead of looping on stale data.
+export async function submitMarketOrderSafe(
+  symbol: string,
+  amount: number,
+  balanceCurrency: string,
+  priceForConversion?: number, // required for buys (amount is in base currency, balance is in quote currency)
+): Promise<OrderFill> {
+  try {
+    return await submitMarketOrder(symbol, amount);
+  } catch (err) {
+    const msg = String(err);
+    if (!/insufficient|not enough exchange balance/i.test(msg)) throw err;
+
+    console.error(`submitMarketOrder failed (${msg}) — re-checking real ${balanceCurrency} balance and retrying once...`);
+    const realBalance = await getWalletBalance(balanceCurrency);
+
+    let cappedAmount: number;
+    if (amount > 0) {
+      if (!priceForConversion) throw new Error("priceForConversion required for buy-side retry");
+      cappedAmount = Math.min(amount, realBalance / priceForConversion);
+    } else {
+      cappedAmount = -Math.min(Math.abs(amount), realBalance);
+    }
+
+    if (Math.abs(cappedAmount) < 1e-8) {
+      throw new Error(`No real ${balanceCurrency} balance available to retry (real balance: ${realBalance})`);
+    }
+    console.error(`Retrying with corrected amount: requested ${amount}, using ${cappedAmount} (real balance ${realBalance} ${balanceCurrency})`);
+    return await submitMarketOrder(symbol, cappedAmount);
+  }
 }

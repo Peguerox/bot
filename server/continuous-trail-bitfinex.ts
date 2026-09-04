@@ -37,7 +37,7 @@ import {
   getSolTrailContinuousState, updateSolTrailContinuousState, recordSolTrailContinuousTrade,
   logSolTrailContinuousRun, recordSolTrailContinuousTick, type SolTrailContinuousState,
 } from "../lib/sol-trail-continuous-db";
-import { submitMarketOrder } from "../lib/bitfinex-auth";
+import { submitMarketOrderSafe } from "../lib/bitfinex-auth";
 
 const BFX_SYMBOL       = "tETHUSD";
 const TRAIL_PCT        = 0.1;
@@ -104,7 +104,7 @@ async function checkEntry() {
     const targetPool = SEED_USD + (state.realized_pnl_usd ?? 0);
     const estQty = targetPool / bfxAsk;
     console.log(`BUY (always-on trail, no filter) @ ask=${bfxAsk.toFixed(4)} qty~=${estQty.toFixed(4)} — submitting real order...`);
-    const fill = await submitMarketOrder(BFX_SYMBOL, estQty);
+    const fill = await submitMarketOrderSafe(BFX_SYMBOL, estQty, "USD", bfxAsk);
     const extreme = fill.execPrice;
     const stop = extreme * (1 - TRAIL_PCT / 100);
     const patch = {
@@ -148,7 +148,7 @@ async function onBfxTicker(bid: number, ask: number) {
       const origSolQty = state.sol_quantity!;
       const origEntryTime = state.entry_time!;
       console.log(`STOP signal, selling ${origSolQty.toFixed(4)} ETH — submitting real order...`);
-      const fill = await submitMarketOrder(BFX_SYMBOL, -origSolQty);
+      const fill = await submitMarketOrderSafe(BFX_SYMBOL, -origSolQty, "ETH");
       const usdOut = fill.execPrice * Math.abs(fill.execAmount);
       const usdIn  = origEntryPrice * origSolQty;
       const pnlUsd = usdOut - usdIn;
@@ -233,7 +233,7 @@ async function emergencyFlatten(reason: string) {
       console.error("Watchdog: not holding per DB state, nothing to flatten.");
       return;
     }
-    const fill = await submitMarketOrder(BFX_SYMBOL, -fresh.sol_quantity);
+    const fill = await submitMarketOrderSafe(BFX_SYMBOL, -fresh.sol_quantity, "ETH");
     const usdOut = fill.execPrice * Math.abs(fill.execAmount);
     const usdIn = fresh.entry_price! * fresh.sol_quantity;
     const pnlUsd = usdOut - usdIn;

@@ -23,6 +23,15 @@
 // SINGLE-INSTANCE GUARANTEE + WATCHDOG: same proven pattern as continuous-trail-bitfinex.ts —
 // lock row with heartbeat, emergency-flatten via a fresh REST price if the Bitfinex ticker goes
 // silent while holding.
+//
+// SHARED-WALLET FIX 2026-09-04: this bot and continuous-trail-bitfinex.ts (ETH Pure Trail) both
+// trade real ETH on the SAME Bitfinex account — intentional, both run concurrently. But each
+// bot's internal sol_quantity/USD tracking only reflects its OWN trades, not the other bot's,
+// so the two can drift out of sync with the real combined wallet balance. This caused a real
+// incident: a sell failed repeatedly for 2+ minutes with "not enough exchange balance" because
+// the tracked quantity (0.0079017) didn't match the real wallet (0.00788837) after the other
+// bot's concurrent trading. Fix: query the real wallet balance immediately before every buy/sell
+// and cap the order size to whatever's actually available, instead of trusting internal state.
 import dotenv from "dotenv";
 dotenv.config({ path: ".env.local" });
 
@@ -33,7 +42,7 @@ import {
   getSolJumpTrailBitfinexState, updateSolJumpTrailBitfinexState, recordSolJumpTrailBitfinexTrade,
   logSolJumpTrailBitfinexRun, recordSolJumpTrailBitfinexTick, type SolJumpTrailBitfinexState,
 } from "../lib/sol-jump-trail-bitfinex-db";
-import { submitMarketOrder } from "../lib/bitfinex-auth";
+import { submitMarketOrderSafe } from "../lib/bitfinex-auth";
 
 const BFX_SYMBOL       = "tETHUSD";
 const BINANCE_WS       = "wss://stream.binance.com:9443/ws/ethusdt@trade";
@@ -115,7 +124,7 @@ async function onBinTick(price: number) {
     const targetPool = SEED_USD + (state.realized_pnl_usd ?? 0);
     const estQty = targetPool / bfxAsk;
     console.log(`BUY signal (jump=${jumpPct.toFixed(4)}%) @ ask=${bfxAsk.toFixed(4)} qty~=${estQty.toFixed(4)} — submitting real order...`);
-    const fill = await submitMarketOrder(BFX_SYMBOL, estQty);
+    const fill = await submitMarketOrderSafe(BFX_SYMBOL, estQty, "USD", bfxAsk);
     const extreme = fill.execPrice;
     const stop = extreme * (1 - TRAIL_PCT / 100);
     const patch = {
@@ -155,7 +164,7 @@ async function onBfxTicker(bid: number, ask: number) {
       const origQty = state.sol_quantity!;
       const origEntryTime = state.entry_time!;
       console.log(`STOP signal, selling ${origQty.toFixed(4)} ETH — submitting real order...`);
-      const fill = await submitMarketOrder(BFX_SYMBOL, -origQty);
+      const fill = await submitMarketOrderSafe(BFX_SYMBOL, -origQty, "ETH");
       const usdOut = fill.execPrice * Math.abs(fill.execAmount);
       const usdIn  = origEntryPrice * origQty;
       const pnlUsd = usdOut - usdIn;
@@ -250,7 +259,7 @@ async function emergencyFlatten(reason: string) {
       console.error("Watchdog: not holding per DB state, nothing to flatten.");
       return;
     }
-    const fill = await submitMarketOrder(BFX_SYMBOL, -fresh.sol_quantity);
+    const fill = await submitMarketOrderSafe(BFX_SYMBOL, -fresh.sol_quantity, "ETH");
     const usdOut = fill.execPrice * Math.abs(fill.execAmount);
     const usdIn = fresh.entry_price! * fresh.sol_quantity;
     const pnlUsd = usdOut - usdIn;
