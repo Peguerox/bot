@@ -9,16 +9,16 @@ import { getSupabaseAdmin } from "@/lib/supabase-admin";
 //
 // Both live bots use the same Jump entry (0.02% in a rolling window) + ratcheting stop exit as
 // of 2026-09-05 -- Worker 1 ("zscore" query param, kept for the existing dashboard button) trades
-// SOL/tSOLUSD now, Worker 2 ("jump-trail") trades ETH/tETHUSD. Ratchet: entry-0.1% initial stop,
-// moves to breakeven once price clears entry, resumes trailing peak-0.1% once price clears
-// entry+0.1%.
+// SOL/tSOLUSD now, Worker 2 ("jump-trail") trades ETH/tETHUSD. Ratchet: entry-0.05% initial stop,
+// moves to breakeven once price clears entry, resumes trailing peak-0.05% once price clears
+// entry+0.05%.
 //
 // Uses data-api.binance.vision, not api.binance.com -- Binance geo-blocks Vercel's server IPs
 // from api.binance.com directly (see app/api/buy-hold and app/api/eth-zscore-live for the same
 // fix applied earlier).
 
-const TRAIL_PCT = 0.1;
-const ARM_PCT = 0.1;
+const TRAIL_PCT = 0.05;
+const ARM_PCT = 0.05;
 const JUMP_PCT = 0.02;
 
 const BOT_CONFIG = {
