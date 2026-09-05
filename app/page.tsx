@@ -1050,6 +1050,7 @@ function SolJumpTrailBitfinexPanel({
 
   const [livePrice, setLivePrice] = useState<number | null>(null);
   const [liveSpreadPct, setLiveSpreadPct] = useState<number | null>(null);
+  const [liveZ, setLiveZ] = useState<number | null>(null);
   useEffect(() => {
     let cancelled = false;
     const poll = async () => {
@@ -1058,6 +1059,11 @@ function SolJumpTrailBitfinexPanel({
         const data = await res.json();
         if (!cancelled && data.lastPrice != null) setLivePrice(data.lastPrice);
         if (!cancelled && data.spreadPct != null) setLiveSpreadPct(data.spreadPct);
+      } catch {}
+      try {
+        const res = await fetch("/api/eth-zscore-live?symbol=ETHUSDT");
+        const data = await res.json();
+        if (!cancelled && data.z != null) setLiveZ(data.z);
       } catch {}
     };
     poll();
@@ -1158,7 +1164,7 @@ function SolJumpTrailBitfinexPanel({
 
       {loading ? (
         <div className="grid grid-cols-2 gap-2 animate-pulse">
-          {[...Array(4)].map((_, i) => <div key={i} className="h-16 bg-gray-800 rounded-lg" />)}
+          {[...Array(5)].map((_, i) => <div key={i} className="h-16 bg-gray-800 rounded-lg" />)}
         </div>
       ) : (
         <div className="grid grid-cols-2 gap-2">
@@ -1179,6 +1185,12 @@ function SolJumpTrailBitfinexPanel({
             value={statusText}
             sub={mode === "LONG" && st?.entry_price ? `entry $${parseFloat(st.entry_price).toFixed(2)}` : "watching for z≤-2.0"}
             color={statusColor}
+          />
+          <Stat
+            label="Live Z-Score"
+            value={liveZ != null ? liveZ.toFixed(3) : "—"}
+            sub={liveZ != null ? (liveZ <= -2.0 ? "⚡ at/past trigger (z≤-2.0)" : `${(-2.0 - liveZ).toFixed(3)} away from -2.0 trigger`) : "loading…"}
+            color={liveZ != null ? (liveZ <= -2.0 ? "text-green-400" : liveZ <= -1.5 ? "text-yellow-400" : "text-gray-400") : "text-gray-500"}
           />
           <Stat
             label="ETH/USD"
@@ -1354,6 +1366,7 @@ function EthZscoreBitfinexPanel({
 
   const [livePrice, setLivePrice] = useState<number | null>(null);
   const [liveSpreadPct, setLiveSpreadPct] = useState<number | null>(null);
+  const [liveZ, setLiveZ] = useState<number | null>(null);
   useEffect(() => {
     let cancelled = false;
     const poll = async () => {
@@ -1362,6 +1375,11 @@ function EthZscoreBitfinexPanel({
         const data = await res.json();
         if (!cancelled && data.lastPrice != null) setLivePrice(data.lastPrice);
         if (!cancelled && data.spreadPct != null) setLiveSpreadPct(data.spreadPct);
+      } catch {}
+      try {
+        const res = await fetch("/api/eth-zscore-live?symbol=SOLUSDT");
+        const data = await res.json();
+        if (!cancelled && data.z != null) setLiveZ(data.z);
       } catch {}
     };
     poll();
@@ -1483,6 +1501,12 @@ function EthZscoreBitfinexPanel({
             value={statusText}
             sub={mode === "LONG" && st?.entry_price ? `entry $${parseFloat(st.entry_price).toFixed(2)}` : "watching for z≤-2.0"}
             color={statusColor}
+          />
+          <Stat
+            label="Live Z-Score"
+            value={liveZ != null ? liveZ.toFixed(3) : "—"}
+            sub={liveZ != null ? (liveZ <= -2.0 ? "⚡ at/past trigger (z≤-2.0)" : `${(-2.0 - liveZ).toFixed(3)} away from -2.0 trigger`) : "loading…"}
+            color={liveZ != null ? (liveZ <= -2.0 ? "text-green-400" : liveZ <= -1.5 ? "text-yellow-400" : "text-gray-400") : "text-gray-500"}
           />
           <Stat
             label="SOL/USD"
