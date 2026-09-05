@@ -1164,7 +1164,7 @@ function SolJumpTrailBitfinexPanel({
 
       {loading ? (
         <div className="grid grid-cols-2 gap-2 animate-pulse">
-          {[...Array(5)].map((_, i) => <div key={i} className="h-16 bg-gray-800 rounded-lg" />)}
+          {[...Array(4)].map((_, i) => <div key={i} className="h-16 bg-gray-800 rounded-lg" />)}
         </div>
       ) : (
         <div className="grid grid-cols-2 gap-2">
@@ -1185,12 +1185,6 @@ function SolJumpTrailBitfinexPanel({
             value={statusText}
             sub={mode === "LONG" && st?.entry_price ? `entry $${parseFloat(st.entry_price).toFixed(2)}` : "watching for z≤-2.0"}
             color={statusColor}
-          />
-          <Stat
-            label="Live Z-Score"
-            value={liveZ != null ? liveZ.toFixed(3) : "—"}
-            sub={liveZ != null ? (liveZ <= -2.0 ? "⚡ at/past trigger (z≤-2.0)" : `${(-2.0 - liveZ).toFixed(3)} away from -2.0 trigger`) : "loading…"}
-            color={liveZ != null ? (liveZ <= -2.0 ? "text-green-400" : liveZ <= -1.5 ? "text-yellow-400" : "text-gray-400") : "text-gray-500"}
           />
           <Stat
             label="ETH/USD"
@@ -1240,6 +1234,13 @@ function SolJumpTrailBitfinexPanel({
               <td className="py-1.5 text-right text-yellow-400">
                 {livePrice != null ? `$${livePrice.toFixed(2)}` : "—"}
                 {liveSpreadPct != null ? <span className="text-gray-500"> ({liveSpreadPct.toFixed(4)}%)</span> : null}
+              </td>
+            </tr>
+            <tr className="border-b border-gray-800/50">
+              <td className="py-1.5 text-gray-400">Z-Score</td>
+              <td className={`py-1.5 text-right font-bold ${liveZ != null ? (liveZ <= -2.0 ? "text-green-400" : liveZ <= -1.5 ? "text-yellow-400" : "text-gray-400") : "text-gray-600"}`}>
+                {liveZ != null ? liveZ.toFixed(3) : "—"}
+                {liveZ != null ? <span className="text-gray-500"> {liveZ <= -2.0 ? "(⚡ at/past -2.0 trigger)" : `(${(-2.0 - liveZ).toFixed(3)} from -2.0)`}</span> : null}
               </td>
             </tr>
             <tr className="border-b border-gray-800/50">
@@ -1480,7 +1481,7 @@ function EthZscoreBitfinexPanel({
 
       {loading ? (
         <div className="grid grid-cols-2 gap-2 animate-pulse">
-          {[...Array(5)].map((_, i) => <div key={i} className="h-16 bg-gray-800 rounded-lg" />)}
+          {[...Array(4)].map((_, i) => <div key={i} className="h-16 bg-gray-800 rounded-lg" />)}
         </div>
       ) : (
         <div className="grid grid-cols-2 gap-2">
@@ -1501,12 +1502,6 @@ function EthZscoreBitfinexPanel({
             value={statusText}
             sub={mode === "LONG" && st?.entry_price ? `entry $${parseFloat(st.entry_price).toFixed(2)}` : "watching for z≤-2.0"}
             color={statusColor}
-          />
-          <Stat
-            label="Live Z-Score"
-            value={liveZ != null ? liveZ.toFixed(3) : "—"}
-            sub={liveZ != null ? (liveZ <= -2.0 ? "⚡ at/past trigger (z≤-2.0)" : `${(-2.0 - liveZ).toFixed(3)} away from -2.0 trigger`) : "loading…"}
-            color={liveZ != null ? (liveZ <= -2.0 ? "text-green-400" : liveZ <= -1.5 ? "text-yellow-400" : "text-gray-400") : "text-gray-500"}
           />
           <Stat
             label="SOL/USD"
@@ -1556,6 +1551,13 @@ function EthZscoreBitfinexPanel({
               <td className="py-1.5 text-right text-yellow-400">
                 {livePrice != null ? `$${livePrice.toFixed(2)}` : "—"}
                 {liveSpreadPct != null ? <span className="text-gray-500"> ({liveSpreadPct.toFixed(4)}%)</span> : null}
+              </td>
+            </tr>
+            <tr className="border-b border-gray-800/50">
+              <td className="py-1.5 text-gray-400">Z-Score</td>
+              <td className={`py-1.5 text-right font-bold ${liveZ != null ? (liveZ <= -2.0 ? "text-green-400" : liveZ <= -1.5 ? "text-yellow-400" : "text-gray-400") : "text-gray-600"}`}>
+                {liveZ != null ? liveZ.toFixed(3) : "—"}
+                {liveZ != null ? <span className="text-gray-500"> {liveZ <= -2.0 ? "(⚡ at/past -2.0 trigger)" : `(${(-2.0 - liveZ).toFixed(3)} from -2.0)`}</span> : null}
               </td>
             </tr>
             <tr className="border-b border-gray-800/50">
