@@ -1354,20 +1354,14 @@ function EthZscoreBitfinexPanel({
 
   const [livePrice, setLivePrice] = useState<number | null>(null);
   const [liveSpreadPct, setLiveSpreadPct] = useState<number | null>(null);
-  const [liveZ, setLiveZ] = useState<number | null>(null);
   useEffect(() => {
     let cancelled = false;
     const poll = async () => {
       try {
-        const res = await fetch("/api/bitfinex-price?symbol=tETHUSD");
+        const res = await fetch("/api/bitfinex-price?symbol=tSOLUSD");
         const data = await res.json();
         if (!cancelled && data.lastPrice != null) setLivePrice(data.lastPrice);
         if (!cancelled && data.spreadPct != null) setLiveSpreadPct(data.spreadPct);
-      } catch {}
-      try {
-        const res = await fetch("/api/eth-zscore-live");
-        const data = await res.json();
-        if (!cancelled && data.z != null) setLiveZ(data.z);
       } catch {}
     };
     poll();
@@ -1375,7 +1369,7 @@ function EthZscoreBitfinexPanel({
     return () => { cancelled = true; clearInterval(id); };
   }, []);
 
-  const statusText = mode === "LONG" ? "Holding ETH" : "Watching (z-score)";
+  const statusText = mode === "LONG" ? "Holding SOL" : "Watching (jump)";
   const statusColor = mode === "LONG" ? "text-green-400" : "text-gray-400";
   const chartTrades = trades.map((t: any) => ({ ...t, pnl: t.pnl_usd, exit_time: t.exit_time }));
 
@@ -1409,7 +1403,7 @@ function EthZscoreBitfinexPanel({
       <div className="space-y-1.5">
         <div className="flex items-center justify-between gap-2">
           <div className="flex items-center gap-2">
-            <h2 className="text-white font-bold text-lg">ETH Z-Score Live (Worker 1)</h2>
+            <h2 className="text-white font-bold text-lg">SOL Jump Trail Live (Worker 1)</h2>
             <span className="text-xs font-bold px-2 py-0.5 rounded-full bg-red-500/20 text-red-400">LIVE</span>
             <span className={`text-xs font-bold px-2 py-0.5 rounded-full ${workerAlive ? "bg-green-500/20 text-green-400" : "bg-gray-700/40 text-gray-500"}`}>
               {workerAlive ? "worker alive" : "worker offline"}
@@ -1446,7 +1440,7 @@ function EthZscoreBitfinexPanel({
             </button>
           </div>
         </div>
-        <p className="text-gray-500 text-xs">Continuous rolling 25min z-score on Binance ETHUSDT (z≤-2.0) → Bitfinex tETHUSD real buy · 0.1% trailing stop, no take-profit · LIVE · REAL MONEY · $20 seed, compounds · long-only (no shorting on spot) · separate API key from Worker 2</p>
+        <p className="text-gray-500 text-xs">Jump ≥0.02% (2s window) on Binance SOLUSDT → Bitfinex tSOLUSD real buy · ratcheting stop (entry-0.1% initial, breakeven once price clears entry, trails past entry+0.1%) · LIVE · REAL MONEY · $20 seed, compounds · long-only (no shorting on spot) · separate API key from Worker 2</p>
         {expVsActual && (
           expVsActual.ok ? (
             <div className="bg-gray-800/50 rounded-lg p-3 text-xs font-mono space-y-1">
@@ -1487,20 +1481,14 @@ function EthZscoreBitfinexPanel({
           <Stat
             label="Status"
             value={statusText}
-            sub={mode === "LONG" && st?.entry_price ? `entry $${parseFloat(st.entry_price).toFixed(2)}` : "watching for z≤-2.0"}
+            sub={mode === "LONG" && st?.entry_price ? `entry $${parseFloat(st.entry_price).toFixed(2)}` : "watching for jump≥0.02%"}
             color={statusColor}
           />
           <Stat
-            label="Live Z-Score"
-            value={liveZ != null ? liveZ.toFixed(3) : "—"}
-            sub={liveZ != null ? (liveZ <= -2.0 ? "⚡ at/past trigger (z≤-2.0)" : `${(-2.0 - liveZ).toFixed(3)} away from -2.0 trigger`) : "loading…"}
-            color={liveZ != null ? (liveZ <= -2.0 ? "text-green-400" : liveZ <= -1.5 ? "text-yellow-400" : "text-gray-400") : "text-gray-500"}
-          />
-          <Stat
-            label="ETH/USD"
+            label="SOL/USD"
             value={livePrice != null ? `$${livePrice.toFixed(2)}` : "—"}
             sub={
-              (mode === "LONG" && st?.eth_quantity ? `${parseFloat(st.eth_quantity).toFixed(3)} ETH held` : "no position") +
+              (mode === "LONG" && st?.eth_quantity ? `${parseFloat(st.eth_quantity).toFixed(3)} SOL held` : "no position") +
               (liveSpreadPct != null ? ` · spread ${liveSpreadPct.toFixed(4)}%` : "")
             }
             color="text-yellow-400"
@@ -1528,9 +1516,9 @@ function EthZscoreBitfinexPanel({
               <td className={`py-1.5 text-right font-bold ${statusColor}`}>{statusText}</td>
             </tr>
             <tr className="border-b border-gray-800/50">
-              <td className="py-1.5 text-gray-400">ETH held</td>
+              <td className="py-1.5 text-gray-400">SOL held</td>
               <td className="py-1.5 text-right text-white">
-                {mode === "LONG" && st?.eth_quantity ? `${parseFloat(st.eth_quantity).toFixed(3)} ETH` : "—"}
+                {mode === "LONG" && st?.eth_quantity ? `${parseFloat(st.eth_quantity).toFixed(3)} SOL` : "—"}
               </td>
             </tr>
             <tr className="border-b border-gray-800/50">
@@ -1553,7 +1541,7 @@ function EthZscoreBitfinexPanel({
               </td>
             </tr>
             <tr className="border-b border-gray-800/50">
-              <td className="py-1.5 text-gray-400">Trailing stop</td>
+              <td className="py-1.5 text-gray-400">Ratchet stop</td>
               <td className="py-1.5 text-right text-red-400">
                 {stopPrice != null ? `$${stopPrice.toFixed(2)}` : "—"}
               </td>
@@ -2149,7 +2137,7 @@ export default function Dashboard() {
     const bots = [
       { name: "Surfer SOLBTC",  badge: "LIVE",  state: surferState,     runsTable: "surfer_runs",         pnlField: "realized_pnl_btc",  initial: SURFER_BTC_INITIAL, unit: "₿", venue: "us" as const, symbol: "SOLBTC" },
       { name: "Surfer SOLUSDT", badge: "LIVE",  state: surferUsdtState, runsTable: "surfer_usdt_runs",    pnlField: "realized_pnl_usdt", initial: 50, unit: "$", venue: "us" as const,       symbol: "SOLUSDT" },
-      { name: "ETH Z-Score Live (Worker 1)", badge: "LIVE", state: ethZscoreState, runsTable: "eth_zscore_bitfinex_runs", pnlField: "realized_pnl_usd", initial: 20, unit: "$", venue: "bitfinex" as const, symbol: "tETHUSD" },
+      { name: "SOL Jump Trail Live (Worker 1)", badge: "LIVE", state: ethZscoreState, runsTable: "eth_zscore_bitfinex_runs", pnlField: "realized_pnl_usd", initial: 20, unit: "$", venue: "bitfinex" as const, symbol: "tSOLUSD" },
       { name: "ETH Jump Trail Live (Worker 2)", badge: "LIVE", state: solJumpTrailState, runsTable: "sol_jump_trail_bitfinex_runs", pnlField: "realized_pnl_usd", initial: 20, unit: "$", venue: "bitfinex" as const, symbol: "tETHUSD" },
     ];
 
