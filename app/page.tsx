@@ -1081,6 +1081,19 @@ function SolJumpTrailBitfinexPanel({
   const lockAge = st?.lock_heartbeat ? Date.now() - new Date(st.lock_heartbeat).getTime() : null;
   const workerAlive = lockAge != null && lockAge < 30_000;
 
+  const [expVsActual, setExpVsActual] = useState<any>(null);
+  const [expVsActualLoading, setExpVsActualLoading] = useState(false);
+  async function handleExpectedVsActual() {
+    setExpVsActualLoading(true);
+    try {
+      const res = await fetch("/api/expected-vs-actual?bot=jump-trail");
+      setExpVsActual(await res.json());
+    } catch {
+      setExpVsActual({ ok: false, error: "Request failed" });
+    }
+    setExpVsActualLoading(false);
+  }
+
   return (
     <div className="bg-gray-900 rounded-xl p-5 space-y-5 flex flex-col">
       <div className="space-y-1.5">
@@ -1093,6 +1106,14 @@ function SolJumpTrailBitfinexPanel({
             </span>
           </div>
           <div className="flex items-center gap-1.5 shrink-0">
+            <button
+              onClick={handleExpectedVsActual}
+              disabled={expVsActualLoading}
+              className="text-xs font-medium px-2.5 py-1.5 rounded-md bg-gray-800 text-gray-400 hover:bg-gray-700 hover:text-gray-200 transition-all disabled:opacity-50"
+              title="Compare real trade results against what the backtest predicts for the exact same real trading window"
+            >
+              {expVsActualLoading ? "Comparing…" : "Real vs Backtest"}
+            </button>
             <button
               onClick={onClearHistory}
               disabled={clearingHistory || enabled}
@@ -1116,6 +1137,23 @@ function SolJumpTrailBitfinexPanel({
           </div>
         </div>
         <p className="text-gray-500 text-xs">Binance ETHUSDT jump signal (≥0.02% in 2s) → Bitfinex tETHUSD real buy · 0.1% trailing stop, no take-profit · LIVE · REAL MONEY · $20 seed, compounds · long-only (no shorting on spot)</p>
+        {expVsActual && (
+          expVsActual.ok ? (
+            <div className="bg-gray-800/50 rounded-lg p-3 text-xs font-mono space-y-1">
+              <p className="text-gray-500 mb-1">Real vs backtest, same real window ({expVsActual.windowStart?.slice(0,16).replace("T"," ")} → {expVsActual.windowEnd?.slice(0,16).replace("T"," ")})</p>
+              <div className="grid grid-cols-3 gap-2 text-gray-400">
+                <span></span><span className="text-white font-semibold">Real</span><span className="text-white font-semibold">Backtest</span>
+                <span>Trades</span><span>{expVsActual.real.trades}</span><span>{expVsActual.backtest.trades}</span>
+                <span>Win rate</span><span>{expVsActual.real.winRate.toFixed(1)}%</span><span>{expVsActual.backtest.winRate.toFixed(1)}%</span>
+                <span>Sum pnl%</span>
+                <span className={expVsActual.real.sumPnlPct >= 0 ? "text-green-400" : "text-red-400"}>{expVsActual.real.sumPnlPct >= 0 ? "+" : ""}{expVsActual.real.sumPnlPct.toFixed(4)}%</span>
+                <span className={expVsActual.backtest.sumPnlPct >= 0 ? "text-green-400" : "text-red-400"}>{expVsActual.backtest.sumPnlPct >= 0 ? "+" : ""}{expVsActual.backtest.sumPnlPct.toFixed(4)}%</span>
+              </div>
+            </div>
+          ) : (
+            <p className="text-red-400 text-xs">{expVsActual.error}</p>
+          )
+        )}
       </div>
 
       {loading ? (
@@ -1353,6 +1391,19 @@ function EthZscoreBitfinexPanel({
   const lockAge = st?.lock_heartbeat ? Date.now() - new Date(st.lock_heartbeat).getTime() : null;
   const workerAlive = lockAge != null && lockAge < 30_000;
 
+  const [expVsActual, setExpVsActual] = useState<any>(null);
+  const [expVsActualLoading, setExpVsActualLoading] = useState(false);
+  async function handleExpectedVsActual() {
+    setExpVsActualLoading(true);
+    try {
+      const res = await fetch("/api/expected-vs-actual?bot=zscore");
+      setExpVsActual(await res.json());
+    } catch {
+      setExpVsActual({ ok: false, error: "Request failed" });
+    }
+    setExpVsActualLoading(false);
+  }
+
   return (
     <div className="bg-gray-900 rounded-xl p-5 space-y-5 flex flex-col">
       <div className="space-y-1.5">
@@ -1365,6 +1416,14 @@ function EthZscoreBitfinexPanel({
             </span>
           </div>
           <div className="flex items-center gap-1.5 shrink-0">
+            <button
+              onClick={handleExpectedVsActual}
+              disabled={expVsActualLoading}
+              className="text-xs font-medium px-2.5 py-1.5 rounded-md bg-gray-800 text-gray-400 hover:bg-gray-700 hover:text-gray-200 transition-all disabled:opacity-50"
+              title="Compare real trade results against what the backtest predicts for the exact same real trading window"
+            >
+              {expVsActualLoading ? "Comparing…" : "Real vs Backtest"}
+            </button>
             <button
               onClick={onClearHistory}
               disabled={clearingHistory || enabled}
@@ -1388,6 +1447,23 @@ function EthZscoreBitfinexPanel({
           </div>
         </div>
         <p className="text-gray-500 text-xs">Continuous rolling 25min z-score on Binance ETHUSDT (z≤-2.0) → Bitfinex tETHUSD real buy · 0.1% trailing stop, no take-profit · LIVE · REAL MONEY · $20 seed, compounds · long-only (no shorting on spot) · separate API key from Worker 2</p>
+        {expVsActual && (
+          expVsActual.ok ? (
+            <div className="bg-gray-800/50 rounded-lg p-3 text-xs font-mono space-y-1">
+              <p className="text-gray-500 mb-1">Real vs backtest, same real window ({expVsActual.windowStart?.slice(0,16).replace("T"," ")} → {expVsActual.windowEnd?.slice(0,16).replace("T"," ")})</p>
+              <div className="grid grid-cols-3 gap-2 text-gray-400">
+                <span></span><span className="text-white font-semibold">Real</span><span className="text-white font-semibold">Backtest</span>
+                <span>Trades</span><span>{expVsActual.real.trades}</span><span>{expVsActual.backtest.trades}</span>
+                <span>Win rate</span><span>{expVsActual.real.winRate.toFixed(1)}%</span><span>{expVsActual.backtest.winRate.toFixed(1)}%</span>
+                <span>Sum pnl%</span>
+                <span className={expVsActual.real.sumPnlPct >= 0 ? "text-green-400" : "text-red-400"}>{expVsActual.real.sumPnlPct >= 0 ? "+" : ""}{expVsActual.real.sumPnlPct.toFixed(4)}%</span>
+                <span className={expVsActual.backtest.sumPnlPct >= 0 ? "text-green-400" : "text-red-400"}>{expVsActual.backtest.sumPnlPct >= 0 ? "+" : ""}{expVsActual.backtest.sumPnlPct.toFixed(4)}%</span>
+              </div>
+            </div>
+          ) : (
+            <p className="text-red-400 text-xs">{expVsActual.error}</p>
+          )
+        )}
       </div>
 
       {loading ? (
