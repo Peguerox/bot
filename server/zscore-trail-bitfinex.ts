@@ -1,24 +1,24 @@
-// REAL MONEY — converted 2026-09-05 from the ETH Z-score bot into the SOL Jump Trail (ratchet
-// stop) live bot on Worker 1's existing Render service/API key/DB tables (still named
-// eth_zscore_bitfinex_* / "eth" internally — kept as-is, same precedent as jump-trail-bitfinex.ts
-// still using sol_jump_trail_bitfinex_* tables while trading ETH. No schema change, no new
-// Render service — just swaps what this process trades and how it decides entries/exits.
+// REAL MONEY — converted 2026-09-05 (again) from SOL Jump Trail back to SOL Z-score, on Worker
+// 1's existing Render service/API key/DB tables (still named eth_zscore_bitfinex_* internally --
+// kept as-is, same precedent used throughout this session).
 //
-// WHY: Z-score was consistently the weakest earner in every real-spread backtest this session
-// (ETH Z-score ratchet 2yr: $13,012 total, 7/104 losing weeks) vs Jump on either asset. The
-// original motivation for touching Worker 2 was "Jump is too choppy" -- but the ratcheting stop
-// (see below) fixed that directly on the Jump signal itself, and SOL turned out to be the best
-// asset for it. So instead of replacing Jump with Z-score, this replaces Z-score with the
-// strongest config found: Jump entry + ratchet exit, on SOL instead of ETH.
+// WHY: Jump's entries are momentum bursts, and its failure mode is a fast reversal -- exactly the
+// moment a market-order stop suffers the worst slippage (thin book at speed). Real trade audit
+// this session found 9/34 SOL Jump trades and 5/26 ETH Jump trades slipped meaningfully past the
+// modeled stop (SOL: 0.51 pct-points of total slippage across the session, ETH: 0.24). Z-score's
+// mean-reversion entries don't chase a breakout, so the same execution risk doesn't apply on
+// entry -- moving both workers back to Z-score to see if it holds up better in real execution,
+// even though every backtest this session rated raw Jump higher on paper.
 //
-// SIGNAL: same as Worker 2 -- Binance SOLUSDT mid-price ((bestBid+bestAsk)/2 from bookTicker),
-// 2s rolling window, jump >= 0.02% triggers a real buy on Bitfinex tSOLUSD.
+// SIGNAL: continuous rolling z-score against Binance SOLUSDT's own mid-price ((bestBid+bestAsk)/2
+// from bookTicker), NOT raw last-trade price. Window = last 25 completed 1-minute mid-price
+// closes, checked continuously in real time (not gated to candle close). Entry: z <= -2.0 while
+// flat.
 //
-// EXIT: ratcheting stop -- entry-0.1% initial, moves to breakeven once price pushes above entry,
-// resumes trailing peak-0.1% once price clears entry+0.1%. Backtested (SOL/USD, real measured
-// spread 0.00975% half, $1000/trade): 2yr $78,831.70 total, $757.36/wk avg, 0/104 losing weeks --
-// beats plain 0.1% trailing stop ($71,529.60, 7/104 losing weeks) and every Z-score variant
-// tested (ETH or SOL) on every metric.
+// EXIT: ratcheting stop, SL=0.1% (widened back from the 0.05% tried on Jump -- explicitly
+// requested at 0.1% this time, not re-tested at 0.05% for Z-score). Entry-0.1% initial stop,
+// moves to breakeven once price clears entry, resumes trailing peak-0.1% once price clears
+// entry+0.1%.
 //
 // SINGLE-INSTANCE GUARANTEE + WATCHDOG + SHARED-WALLET FIX: same proven pattern as
 // jump-trail-bitfinex.ts -- lock row with heartbeat, emergency-flatten via a fresh REST price if
@@ -38,11 +38,11 @@ import { connectWalletBalances, getLiveBalance, isWalletReady } from "../lib/bit
 
 const BFX_SYMBOL       = "tSOLUSD";
 const BINANCE_WS       = "wss://stream.binance.com:9443/ws/solusdt@bookTicker";
-const JUMP_PCT         = 0.02;
-const ROLL_MS          = 2000;
-const TRAIL_PCT        = 0.05;
-const ARM_PCT          = 0.05; // price must clear entry + this% before the stop trails past breakeven
-const SEED_USD         = 20;
+const ZSCORE_WINDOW_MIN = 25;
+const Z_ENTRY           = -2.0;
+const TRAIL_PCT         = 0.1;
+const ARM_PCT           = 0.1; // price must clear entry + this% before the stop trails past breakeven
+const SEED_USD          = 20;
 const HEARTBEAT_MS     = 10_000;
 const LOCK_STALE_MS    = 30_000;
 const DB_WRITE_THROTTLE_MS = 2_000;
@@ -60,9 +60,13 @@ let lastBfxMessageTime = Date.now();
 let bfxWs: WebSocket | null = null;
 let emergencyInProgress = false;
 let orderInFlight = false;
-let binBuf: { t: number; p: number }[] = [];
 let bfxBid: number | null = null;
 let bfxAsk: number | null = null;
+
+// rolling 1-min-close window for the z-score baseline
+let oneMinCloses: number[] = [];
+let currentMinuteBucket = 0;
+let currentMinuteLastPrice: number | null = null;
 
 async function acquireLock(): Promise<boolean> {
   state = await getEthZscoreBitfinexState();
@@ -109,21 +113,31 @@ function computeStop(entryPrice: number, extremePrice: number): number {
   return entryPrice * (1 - TRAIL_PCT / 100);
 }
 
-function checkJump(): number | null {
-  if (binBuf.length < 2) return null;
-  const now = binBuf[binBuf.length - 1];
-  while (binBuf.length > 1 && now.t - binBuf[0].t > ROLL_MS) binBuf.shift();
-  const old = binBuf[0];
-  const pct = (now.p - old.p) / old.p * 100;
-  return pct >= JUMP_PCT ? pct : null; // long-only — spot can't short without margin
+function calcZ(current: number): number | null {
+  if (oneMinCloses.length < ZSCORE_WINDOW_MIN) return null;
+  const window = oneMinCloses.slice(-ZSCORE_WINDOW_MIN);
+  const mean = window.reduce((s, v) => s + v, 0) / window.length;
+  const variance = window.reduce((s, v) => s + (v - mean) ** 2, 0) / window.length;
+  const std = Math.sqrt(variance);
+  return std > 0 ? (current - mean) / std : 0;
 }
 
 async function onBinTick(price: number) {
-  binBuf.push({ t: Date.now(), p: price });
+  const minuteBucket = Math.floor(Date.now() / 60_000);
+  if (currentMinuteBucket === 0) currentMinuteBucket = minuteBucket;
+  if (minuteBucket > currentMinuteBucket) {
+    if (currentMinuteLastPrice !== null) {
+      oneMinCloses.push(currentMinuteLastPrice);
+      if (oneMinCloses.length > ZSCORE_WINDOW_MIN) oneMinCloses.shift();
+    }
+    currentMinuteBucket = minuteBucket;
+  }
+  currentMinuteLastPrice = price;
+
   if (!state.enabled || state.mode !== "FLAT" || orderInFlight || bfxAsk === null || bfxBid === null || !isWalletReady()) return;
 
-  const jumpPct = checkJump();
-  if (jumpPct === null) return;
+  const z = calcZ(price);
+  if (z === null || z > Z_ENTRY) return;
 
   orderInFlight = true;
   try {
@@ -133,7 +147,7 @@ async function onBinTick(price: number) {
     const estQty = cappedPool / bfxAsk;
     if (estQty <= 0) { console.log(`BUY signal but no real USD available (real=${realUsd}) — skipping.`); return; }
     const entrySpreadPct = (bfxAsk - bfxBid) / bfxBid * 100;
-    console.log(`BUY signal (jump=${jumpPct.toFixed(4)}%) @ ask=${bfxAsk.toFixed(4)} qty~=${estQty.toFixed(4)} (real USD=${realUsd.toFixed(2)}) — submitting real order...`);
+    console.log(`BUY signal (z=${z.toFixed(3)}) @ ask=${bfxAsk.toFixed(4)} qty~=${estQty.toFixed(4)} (real USD=${realUsd.toFixed(2)}) — submitting real order...`);
     const fill = await submitMarketOrder(BFX_SYMBOL, estQty);
     const extreme = fill.execPrice;
     const stop = computeStop(fill.execPrice, extreme);
@@ -145,10 +159,9 @@ async function onBinTick(price: number) {
     state = { ...state, ...patch };
     await updateEthZscoreBitfinexState(patch);
     lastDbWrite = Date.now();
-    console.log(`BUY FILLED price=${fill.execPrice.toFixed(4)} qty=${fill.execAmount.toFixed(4)} fee=${fill.fee}`);
-    await logEthZscoreBitfinexRun({ actions: [{ action: "BUY", price: fill.execPrice, qty: fill.execAmount, orderId: fill.orderId, jumpPct }] });
+    console.log(`BUY FILLED price=${fill.execPrice.toFixed(4)} qty=${fill.execAmount.toFixed(4)} fee=${fill.fee} z=${z.toFixed(3)}`);
+    await logEthZscoreBitfinexRun({ actions: [{ action: "BUY", price: fill.execPrice, qty: fill.execAmount, orderId: fill.orderId, z }] });
     lastRunLog = Date.now();
-    binBuf = [binBuf[binBuf.length - 1]]; // reset jump window so we don't immediately re-trigger
   } catch (err) {
     console.error("BUY order failed:", err);
     await logEthZscoreBitfinexRun({ actions: [{ action: "ERROR", stage: "buy", error: String(err) }] });
@@ -193,7 +206,7 @@ async function onBfxTicker(bid: number, ask: number) {
       await recordEthZscoreBitfinexTrade({
         entry_price: origEntryPrice, exit_price: fill.execPrice, eth_quantity: Math.abs(fill.execAmount),
         usd_in: usdIn, usd_out: usdOut, pnl_usd: pnlUsd, pnl_pct: pnlPct,
-        zscore_at_entry: 0, entry_spread_pct: origEntrySpread, exit_spread_pct: exitSpreadPct,
+        zscore_at_entry: Z_ENTRY, entry_spread_pct: origEntrySpread, exit_spread_pct: exitSpreadPct,
         entry_time: origEntryTime,
       });
       lastDbWrite = Date.now();
@@ -290,7 +303,7 @@ async function emergencyFlatten(reason: string) {
     await recordEthZscoreBitfinexTrade({
       entry_price: fresh.entry_price!, exit_price: fill.execPrice, eth_quantity: fresh.eth_quantity,
       usd_in: usdIn, usd_out: usdOut, pnl_usd: pnlUsd, pnl_pct: pnlPct,
-      zscore_at_entry: 0, entry_spread_pct: fresh.entry_spread_pct, exit_spread_pct: null,
+      zscore_at_entry: Z_ENTRY, entry_spread_pct: fresh.entry_spread_pct, exit_spread_pct: null,
       entry_time: fresh.entry_time!,
     });
     console.error(`EMERGENCY FLATTEN complete @ ${fill.execPrice}, pnlPct=${pnlPct.toFixed(4)}. Bot paused (enabled=false).`);
@@ -335,8 +348,8 @@ async function main() {
   process.on("SIGINT", shutdown);
   process.on("SIGTERM", shutdown);
 
-  console.log(`Starting LIVE SOL Jump Trail (ratchet) worker (${INSTANCE_ID}), enabled=${state.enabled}, mode=${state.mode}`);
-  console.log(`REAL MONEY — jump>=${JUMP_PCT}% (2s window) triggers a real buy on ${BFX_SYMBOL}. Seed $${SEED_USD}, compounding, ratchet stop (initial -${TRAIL_PCT}%, breakeven at entry, trail past +${ARM_PCT}%).`);
+  console.log(`Starting LIVE SOL Z-score (ratchet) worker (${INSTANCE_ID}), enabled=${state.enabled}, mode=${state.mode}`);
+  console.log(`REAL MONEY — z<=${Z_ENTRY} (${ZSCORE_WINDOW_MIN}min rolling window) triggers a real buy on ${BFX_SYMBOL}. Seed $${SEED_USD}, compounding, ratchet stop (initial -${TRAIL_PCT}%, breakeven at entry, trail past +${ARM_PCT}%).`);
   connectBinance();
   connectBitfinex();
   connectWalletBalances();

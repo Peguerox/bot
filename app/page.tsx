@@ -1065,7 +1065,7 @@ function SolJumpTrailBitfinexPanel({
     return () => { cancelled = true; clearInterval(id); };
   }, []);
 
-  const statusText = mode === "LONG" ? "Holding ETH" : "Watching";
+  const statusText = mode === "LONG" ? "Holding ETH" : "Watching (z-score)";
   const statusColor = mode === "LONG" ? "text-green-400" : "text-gray-400";
   const chartTrades = trades.map((t: any) => ({ ...t, pnl: t.pnl_usd, exit_time: t.exit_time }));
 
@@ -1099,7 +1099,7 @@ function SolJumpTrailBitfinexPanel({
       <div className="space-y-1.5">
         <div className="flex items-center justify-between gap-2">
           <div className="flex items-center gap-2">
-            <h2 className="text-white font-bold text-lg">ETH Jump Trail Live</h2>
+            <h2 className="text-white font-bold text-lg">ETH Z-Score Live (Worker 2)</h2>
             <span className="text-xs font-bold px-2 py-0.5 rounded-full bg-red-500/20 text-red-400">LIVE</span>
             <span className={`text-xs font-bold px-2 py-0.5 rounded-full ${workerAlive ? "bg-green-500/20 text-green-400" : "bg-gray-700/40 text-gray-500"}`}>
               {workerAlive ? "worker alive" : "worker offline"}
@@ -1136,7 +1136,7 @@ function SolJumpTrailBitfinexPanel({
             </button>
           </div>
         </div>
-        <p className="text-gray-500 text-xs">Binance ETHUSDT jump signal (≥0.02% in 2s) → Bitfinex tETHUSD real buy · 0.1% trailing stop, no take-profit · LIVE · REAL MONEY · $20 seed, compounds · long-only (no shorting on spot)</p>
+        <p className="text-gray-500 text-xs">Continuous rolling 25min z-score on Binance ETHUSDT (z≤-2.0) → Bitfinex tETHUSD real buy · ratcheting stop (entry-0.1% initial, breakeven once price clears entry, trails past entry+0.1%) · LIVE · REAL MONEY · $20 seed, compounds · long-only (no shorting on spot)</p>
         {expVsActual && (
           expVsActual.ok ? (
             <div className="bg-gray-800/50 rounded-lg p-3 text-xs font-mono space-y-1">
@@ -1177,7 +1177,7 @@ function SolJumpTrailBitfinexPanel({
           <Stat
             label="Status"
             value={statusText}
-            sub={mode === "LONG" && st?.entry_price ? `entry $${parseFloat(st.entry_price).toFixed(2)}` : "watching for jump"}
+            sub={mode === "LONG" && st?.entry_price ? `entry $${parseFloat(st.entry_price).toFixed(2)}` : "watching for z≤-2.0"}
             color={statusColor}
           />
           <Stat
@@ -1237,7 +1237,7 @@ function SolJumpTrailBitfinexPanel({
               </td>
             </tr>
             <tr className="border-b border-gray-800/50">
-              <td className="py-1.5 text-gray-400">Trailing stop</td>
+              <td className="py-1.5 text-gray-400">Ratchet stop</td>
               <td className="py-1.5 text-right text-red-400">
                 {stopPrice != null ? `$${stopPrice.toFixed(2)}` : "—"}
               </td>
@@ -1369,7 +1369,7 @@ function EthZscoreBitfinexPanel({
     return () => { cancelled = true; clearInterval(id); };
   }, []);
 
-  const statusText = mode === "LONG" ? "Holding SOL" : "Watching (jump)";
+  const statusText = mode === "LONG" ? "Holding SOL" : "Watching (z-score)";
   const statusColor = mode === "LONG" ? "text-green-400" : "text-gray-400";
   const chartTrades = trades.map((t: any) => ({ ...t, pnl: t.pnl_usd, exit_time: t.exit_time }));
 
@@ -1403,7 +1403,7 @@ function EthZscoreBitfinexPanel({
       <div className="space-y-1.5">
         <div className="flex items-center justify-between gap-2">
           <div className="flex items-center gap-2">
-            <h2 className="text-white font-bold text-lg">SOL Jump Trail Live (Worker 1)</h2>
+            <h2 className="text-white font-bold text-lg">SOL Z-Score Live (Worker 1)</h2>
             <span className="text-xs font-bold px-2 py-0.5 rounded-full bg-red-500/20 text-red-400">LIVE</span>
             <span className={`text-xs font-bold px-2 py-0.5 rounded-full ${workerAlive ? "bg-green-500/20 text-green-400" : "bg-gray-700/40 text-gray-500"}`}>
               {workerAlive ? "worker alive" : "worker offline"}
@@ -1440,7 +1440,7 @@ function EthZscoreBitfinexPanel({
             </button>
           </div>
         </div>
-        <p className="text-gray-500 text-xs">Jump ≥0.02% (2s window) on Binance SOLUSDT → Bitfinex tSOLUSD real buy · ratcheting stop (entry-0.1% initial, breakeven once price clears entry, trails past entry+0.1%) · LIVE · REAL MONEY · $20 seed, compounds · long-only (no shorting on spot) · separate API key from Worker 2</p>
+        <p className="text-gray-500 text-xs">Continuous rolling 25min z-score on Binance SOLUSDT (z≤-2.0) → Bitfinex tSOLUSD real buy · ratcheting stop (entry-0.1% initial, breakeven once price clears entry, trails past entry+0.1%) · LIVE · REAL MONEY · $20 seed, compounds · long-only (no shorting on spot) · separate API key from Worker 2</p>
         {expVsActual && (
           expVsActual.ok ? (
             <div className="bg-gray-800/50 rounded-lg p-3 text-xs font-mono space-y-1">
@@ -1481,7 +1481,7 @@ function EthZscoreBitfinexPanel({
           <Stat
             label="Status"
             value={statusText}
-            sub={mode === "LONG" && st?.entry_price ? `entry $${parseFloat(st.entry_price).toFixed(2)}` : "watching for jump≥0.02%"}
+            sub={mode === "LONG" && st?.entry_price ? `entry $${parseFloat(st.entry_price).toFixed(2)}` : "watching for z≤-2.0"}
             color={statusColor}
           />
           <Stat
@@ -2137,8 +2137,8 @@ export default function Dashboard() {
     const bots = [
       { name: "Surfer SOLBTC",  badge: "LIVE",  state: surferState,     runsTable: "surfer_runs",         pnlField: "realized_pnl_btc",  initial: SURFER_BTC_INITIAL, unit: "₿", venue: "us" as const, symbol: "SOLBTC" },
       { name: "Surfer SOLUSDT", badge: "LIVE",  state: surferUsdtState, runsTable: "surfer_usdt_runs",    pnlField: "realized_pnl_usdt", initial: 50, unit: "$", venue: "us" as const,       symbol: "SOLUSDT" },
-      { name: "SOL Jump Trail Live (Worker 1)", badge: "LIVE", state: ethZscoreState, runsTable: "eth_zscore_bitfinex_runs", pnlField: "realized_pnl_usd", initial: 20, unit: "$", venue: "bitfinex" as const, symbol: "tSOLUSD" },
-      { name: "ETH Jump Trail Live (Worker 2)", badge: "LIVE", state: solJumpTrailState, runsTable: "sol_jump_trail_bitfinex_runs", pnlField: "realized_pnl_usd", initial: 20, unit: "$", venue: "bitfinex" as const, symbol: "tETHUSD" },
+      { name: "SOL Z-Score Live (Worker 1)", badge: "LIVE", state: ethZscoreState, runsTable: "eth_zscore_bitfinex_runs", pnlField: "realized_pnl_usd", initial: 20, unit: "$", venue: "bitfinex" as const, symbol: "tSOLUSD" },
+      { name: "ETH Z-Score Live (Worker 2)", badge: "LIVE", state: solJumpTrailState, runsTable: "sol_jump_trail_bitfinex_runs", pnlField: "realized_pnl_usd", initial: 20, unit: "$", venue: "bitfinex" as const, symbol: "tETHUSD" },
     ];
 
     const rows: SummaryRow[] = [];

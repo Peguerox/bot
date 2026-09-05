@@ -1,40 +1,27 @@
-// REAL MONEY — converted 2026-09-04 from the book-volume research logger into the ETH Jump
-// Trail live bot: watch Binance ETHUSDT for a fast cumulative move (real tick data, 2s rolling
-// window — the true version of the signal, not the 1-min close-to-close approximation used for
-// backtesting since historical tick data isn't available), buy on Bitfinex on the thesis it
-// follows with a short lag, manage with a 0.1% trailing stop.
+// REAL MONEY — converted 2026-09-05 (again) from ETH Jump Trail to ETH Z-score, on Worker 2's
+// existing Render service/API key/DB tables (still named sol_jump_trail_bitfinex_* internally --
+// kept as-is, same precedent used throughout this session).
 //
-// BACKTEST (1yr, Binance ETHUSDT -> Bitfinex tETHUSD, 1-min-close approximation of the jump
-// signal, worst-case-consistent spread/fill methodology): at ETH's real measured spread
-// (~0.004% half-spread), every threshold tested (0.02-0.05%) was strongly positive (+1115% to
-// +1237%). Even at a middling 0.01% half-spread assumption, still solidly positive (+567-592%).
-// Only failed at a conservative 0.02% half-spread. JUMP_PCT=0.02% had the STRONGEST returns of
-// the sweep at the spread levels closest to ETH's real one (+1237.26% at 0.004%, +566.68% at
-// 0.01%) — it was the least robust of the four at the hypothetical conservative 0.02% spread
-// case (-690.16%, the worst of the four there), but since live spread has been running well
-// under that danger zone, picked it for the stronger real-world numbers over the theoretical
-// robustness of the higher thresholds.
+// WHY: Jump's entries are momentum bursts, and its failure mode is a fast reversal -- exactly the
+// moment a market-order stop suffers the worst slippage (thin book at speed). Real trade audit
+// this session found 9/34 SOL Jump trades and 5/26 ETH Jump trades slipped meaningfully past the
+// modeled stop (SOL: 0.51 pct-points of total slippage across the session, ETH: 0.24). Z-score's
+// mean-reversion entries don't chase a breakout, so the same execution risk doesn't apply on
+// entry -- moving both workers back to Z-score to see if it holds up better in real execution,
+// even though every backtest this session rated raw Jump higher on paper.
 //
-// SIGNAL: Binance's own mid-price ((bestBid+bestAsk)/2 from the bookTicker stream, not raw last-
-// trade price) — mid-price is the standard reference for signal generation, avoids biasing the
-// jump calculation toward whichever side of the spread the last print happened to hit. Execution
-// still costs realistically against Bitfinex's real ask (buy) / bid (sell), unchanged.
-// as the original SOL jump-trail bot earlier this session, just on ETH now.
-// EXIT: 0.1% trailing stop on Bitfinex's real bid, no take-profit, re-entry only after a fresh
-// jump signal (not always-in like the pure-trail bot).
+// SIGNAL: continuous rolling z-score against Binance ETHUSDT's own mid-price ((bestBid+bestAsk)/2
+// from bookTicker), NOT raw last-trade price. Window = last 25 completed 1-minute mid-price
+// closes, checked continuously in real time (not gated to candle close). Entry: z <= -2.0 while
+// flat.
 //
-// SINGLE-INSTANCE GUARANTEE + WATCHDOG: same proven pattern as continuous-trail-bitfinex.ts —
-// lock row with heartbeat, emergency-flatten via a fresh REST price if the Bitfinex ticker goes
-// silent while holding.
+// EXIT: ratcheting stop, SL=0.1% (explicitly requested at 0.1% this time, not 0.05%). Entry-0.1%
+// initial stop, moves to breakeven once price clears entry, resumes trailing peak-0.1% once price
+// clears entry+0.1%.
 //
-// SHARED-WALLET FIX 2026-09-04: this bot and continuous-trail-bitfinex.ts (ETH Pure Trail) both
-// trade real ETH on the SAME Bitfinex account — intentional, both run concurrently. But each
-// bot's internal sol_quantity/USD tracking only reflects its OWN trades, not the other bot's,
-// so the two can drift out of sync with the real combined wallet balance. This caused a real
-// incident: a sell failed repeatedly for 2+ minutes with "not enough exchange balance" because
-// the tracked quantity (0.0079017) didn't match the real wallet (0.00788837) after the other
-// bot's concurrent trading. Fix: query the real wallet balance immediately before every buy/sell
-// and cap the order size to whatever's actually available, instead of trusting internal state.
+// SINGLE-INSTANCE GUARANTEE + WATCHDOG + SHARED-WALLET FIX: lock row with heartbeat,
+// emergency-flatten via a fresh REST price if the Bitfinex ticker goes silent while holding, real
+// live-balance check before every order.
 import dotenv from "dotenv";
 dotenv.config({ path: ".env.local" });
 
@@ -50,10 +37,10 @@ import { connectWalletBalances, getLiveBalance, isWalletReady } from "../lib/bit
 
 const BFX_SYMBOL       = "tETHUSD";
 const BINANCE_WS       = "wss://stream.binance.com:9443/ws/ethusdt@bookTicker";
-const JUMP_PCT         = 0.02;
-const ROLL_MS          = 2000;
-const TRAIL_PCT        = 0.05;
-const ARM_PCT          = 0.05; // price must clear entry + this% before the stop trails past breakeven
+const ZSCORE_WINDOW_MIN = 25;
+const Z_ENTRY           = -2.0;
+const TRAIL_PCT        = 0.1;
+const ARM_PCT          = 0.1; // price must clear entry + this% before the stop trails past breakeven
 const SEED_USD         = 20;
 const HEARTBEAT_MS     = 10_000;
 const LOCK_STALE_MS    = 30_000;
@@ -72,9 +59,13 @@ let lastBfxMessageTime = Date.now();
 let bfxWs: WebSocket | null = null;
 let emergencyInProgress = false;
 let orderInFlight = false;
-let binBuf: { t: number; p: number }[] = [];
 let bfxBid: number | null = null;
 let bfxAsk: number | null = null;
+
+// rolling 1-min-close window for the z-score baseline
+let oneMinCloses: number[] = [];
+let currentMinuteBucket = 0;
+let currentMinuteLastPrice: number | null = null;
 
 async function acquireLock(): Promise<boolean> {
   state = await getSolJumpTrailBitfinexState();
@@ -95,13 +86,8 @@ async function heartbeat() {
     process.exit(1);
   }
   if (orderInFlight) {
-    // an order is actively being submitted/settled — don't clobber in-memory state mid-flight,
-    // just keep the enabled flag current.
     state.enabled = fresh.enabled;
   } else {
-    // no order in flight: DB is authoritative. Re-sync everything so any external change
-    // (manual flatten/reset, dashboard pause) takes effect immediately instead of being
-    // invisible until this process restarts.
     state = fresh;
   }
   await updateSolJumpTrailBitfinexState({ lock_heartbeat: new Date().toISOString() });
@@ -118,8 +104,7 @@ async function releaseLock() {
 }
 
 // Ratcheting stop: entry-0.1% until price pushes above entry (then breakeven), then trailing
-// peak-0.1% once price clears entry+0.1%. Backtested 2yr real spread: +13% total$ vs plain
-// trailing stop, losing weeks 4/104 vs 14/104 on this Jump signal.
+// peak-0.1% once price clears entry+0.1%.
 function computeStop(entryPrice: number, extremePrice: number): number {
   const armThreshold = entryPrice * (1 + ARM_PCT / 100);
   if (extremePrice >= armThreshold) return extremePrice * (1 - TRAIL_PCT / 100);
@@ -127,21 +112,31 @@ function computeStop(entryPrice: number, extremePrice: number): number {
   return entryPrice * (1 - TRAIL_PCT / 100);
 }
 
-function checkJump(): number | null {
-  if (binBuf.length < 2) return null;
-  const now = binBuf[binBuf.length - 1];
-  while (binBuf.length > 1 && now.t - binBuf[0].t > ROLL_MS) binBuf.shift();
-  const old = binBuf[0];
-  const pct = (now.p - old.p) / old.p * 100;
-  return pct >= JUMP_PCT ? pct : null; // long-only — spot can't short without margin
+function calcZ(current: number): number | null {
+  if (oneMinCloses.length < ZSCORE_WINDOW_MIN) return null;
+  const window = oneMinCloses.slice(-ZSCORE_WINDOW_MIN);
+  const mean = window.reduce((s, v) => s + v, 0) / window.length;
+  const variance = window.reduce((s, v) => s + (v - mean) ** 2, 0) / window.length;
+  const std = Math.sqrt(variance);
+  return std > 0 ? (current - mean) / std : 0;
 }
 
 async function onBinTick(price: number) {
-  binBuf.push({ t: Date.now(), p: price });
-  if (!state.enabled || state.mode !== "FLAT" || orderInFlight || bfxAsk === null || !isWalletReady()) return;
+  const minuteBucket = Math.floor(Date.now() / 60_000);
+  if (currentMinuteBucket === 0) currentMinuteBucket = minuteBucket;
+  if (minuteBucket > currentMinuteBucket) {
+    if (currentMinuteLastPrice !== null) {
+      oneMinCloses.push(currentMinuteLastPrice);
+      if (oneMinCloses.length > ZSCORE_WINDOW_MIN) oneMinCloses.shift();
+    }
+    currentMinuteBucket = minuteBucket;
+  }
+  currentMinuteLastPrice = price;
 
-  const jumpPct = checkJump();
-  if (jumpPct === null) return;
+  if (!state.enabled || state.mode !== "FLAT" || orderInFlight || bfxAsk === null || bfxBid === null || !isWalletReady()) return;
+
+  const z = calcZ(price);
+  if (z === null || z > Z_ENTRY) return;
 
   orderInFlight = true;
   try {
@@ -150,7 +145,7 @@ async function onBinTick(price: number) {
     const cappedPool = Math.min(targetPool, realUsd);
     const estQty = cappedPool / bfxAsk;
     if (estQty <= 0) { console.log(`BUY signal but no real USD available (real=${realUsd}) — skipping.`); return; }
-    console.log(`BUY signal (jump=${jumpPct.toFixed(4)}%) @ ask=${bfxAsk.toFixed(4)} qty~=${estQty.toFixed(4)} (real USD=${realUsd.toFixed(2)}) — submitting real order...`);
+    console.log(`BUY signal (z=${z.toFixed(3)}) @ ask=${bfxAsk.toFixed(4)} qty~=${estQty.toFixed(4)} (real USD=${realUsd.toFixed(2)}) — submitting real order...`);
     const fill = await submitMarketOrder(BFX_SYMBOL, estQty);
     const extreme = fill.execPrice;
     const stop = computeStop(fill.execPrice, extreme);
@@ -162,10 +157,9 @@ async function onBinTick(price: number) {
     state = { ...state, ...patch };
     await updateSolJumpTrailBitfinexState(patch);
     lastDbWrite = Date.now();
-    console.log(`BUY FILLED price=${fill.execPrice.toFixed(4)} qty=${fill.execAmount.toFixed(4)} fee=${fill.fee}`);
-    await logSolJumpTrailBitfinexRun({ actions: [{ action: "BUY", price: fill.execPrice, qty: fill.execAmount, orderId: fill.orderId, jumpPct }] });
+    console.log(`BUY FILLED price=${fill.execPrice.toFixed(4)} qty=${fill.execAmount.toFixed(4)} fee=${fill.fee} z=${z.toFixed(3)}`);
+    await logSolJumpTrailBitfinexRun({ actions: [{ action: "BUY", price: fill.execPrice, qty: fill.execAmount, orderId: fill.orderId, z }] });
     lastRunLog = Date.now();
-    binBuf = [binBuf[binBuf.length - 1]]; // reset jump window so we don't immediately re-trigger
   } catch (err) {
     console.error("BUY order failed:", err);
     await logSolJumpTrailBitfinexRun({ actions: [{ action: "ERROR", stage: "buy", error: String(err) }] });
@@ -350,8 +344,8 @@ async function main() {
   process.on("SIGINT", shutdown);
   process.on("SIGTERM", shutdown);
 
-  console.log(`Starting LIVE ETH Jump Trail worker (${INSTANCE_ID}), enabled=${state.enabled}, mode=${state.mode}`);
-  console.log(`REAL MONEY — jump>=${JUMP_PCT}% (2s window) triggers a real buy on ${BFX_SYMBOL}. Seed $${SEED_USD}, compounding, trail=${TRAIL_PCT}%.`);
+  console.log(`Starting LIVE ETH Z-score (ratchet) worker (${INSTANCE_ID}), enabled=${state.enabled}, mode=${state.mode}`);
+  console.log(`REAL MONEY — z<=${Z_ENTRY} (${ZSCORE_WINDOW_MIN}min rolling window) triggers a real buy on ${BFX_SYMBOL}. Seed $${SEED_USD}, compounding, ratchet stop (initial -${TRAIL_PCT}%, breakeven at entry, trail past +${ARM_PCT}%).`);
   connectBinance();
   connectBitfinex();
   connectWalletBalances();

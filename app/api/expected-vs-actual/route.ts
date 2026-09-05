@@ -7,19 +7,22 @@ import { getSupabaseAdmin } from "@/lib/supabase-admin";
 // logic, compare aggregate stats). Turned into a standing dashboard feature instead of a one-off
 // script, per request, so it doesn't need to be re-asked for every time.
 //
-// Both live bots use the same Jump entry (0.02% in a rolling window) + ratcheting stop exit as
-// of 2026-09-05 -- Worker 1 ("zscore" query param, kept for the existing dashboard button) trades
-// SOL/tSOLUSD now, Worker 2 ("jump-trail") trades ETH/tETHUSD. Ratchet: entry-0.05% initial stop,
-// moves to breakeven once price clears entry, resumes trailing peak-0.05% once price clears
-// entry+0.05%.
+// Both live bots use the same Z-score entry (25min rolling window, z<=-2.0) + ratcheting stop
+// exit as of 2026-09-05 -- Worker 1 ("zscore" query param) trades SOL/tSOLUSD, Worker 2
+// ("jump-trail" query param, kept for the existing dashboard button) trades ETH/tETHUSD. Ratchet:
+// entry-0.1% initial stop, moves to breakeven once price clears entry, resumes trailing
+// peak-0.1% once price clears entry+0.1%. Switched back from Jump entries after a real-trade
+// audit found Jump's fast-reversal failure mode caused meaningful market-order slippage past the
+// modeled stop (SOL: 0.51 pct-points across 34 trades, ETH: 0.24 across 26).
 //
 // Uses data-api.binance.vision, not api.binance.com -- Binance geo-blocks Vercel's server IPs
 // from api.binance.com directly (see app/api/buy-hold and app/api/eth-zscore-live for the same
 // fix applied earlier).
 
-const TRAIL_PCT = 0.05;
-const ARM_PCT = 0.05;
-const JUMP_PCT = 0.02;
+const TRAIL_PCT = 0.1;
+const ARM_PCT = 0.1;
+const ZSCORE_WINDOW_MIN = 25;
+const Z_ENTRY = -2.0;
 
 const BOT_CONFIG = {
   "jump-trail": { table: "sol_jump_trail_bitfinex_trades", binanceSymbol: "ETHUSDT", bfxSymbol: "tETHUSD", halfSpreadPct: 0.0072 },
@@ -69,13 +72,27 @@ function computeStop(halfSpreadPct: number, entryPrice: number, extremePrice: nu
   return entryPrice * (1 - TRAIL_PCT / 100);
 }
 
+function computeRollingZ(closes: number[], windowMin: number): number[] {
+  const z: number[] = new Array(closes.length).fill(NaN);
+  for (let i = windowMin; i < closes.length; i++) {
+    const window = closes.slice(i - windowMin, i);
+    const mean = window.reduce((s, v) => s + v, 0) / window.length;
+    const variance = window.reduce((s, v) => s + (v - mean) ** 2, 0) / window.length;
+    const std = Math.sqrt(variance);
+    z[i] = std > 0 ? (closes[i] - mean) / std : 0;
+  }
+  return z;
+}
+
 function runBacktest(binance: Candle[], bfxByTime: Map<number, Candle>, bfxTimesSorted: number[], halfSpreadPct: number) {
   let trades = 0, wins = 0, totalPnlPct = 0;
   let cooldownUntilIdx = -1;
+  const closes = binance.map((c) => c.close);
+  const z = computeRollingZ(closes, ZSCORE_WINDOW_MIN);
   for (let i = 1; i < binance.length; i++) {
     if (i <= cooldownUntilIdx) continue;
-    const jump = (binance[i].close - binance[i - 1].close) / binance[i - 1].close * 100 >= JUMP_PCT;
-    if (jump) {
+    const signal = !isNaN(z[i]) && z[i] <= Z_ENTRY;
+    if (signal) {
       const signalTime = binance[i].time;
       const entryIdx = bfxTimesSorted.indexOf(signalTime);
       const bfxEntryCandle = bfxByTime.get(signalTime);
