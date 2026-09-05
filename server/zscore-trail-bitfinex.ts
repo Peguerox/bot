@@ -62,6 +62,8 @@ let emergencyInProgress = false;
 let orderInFlight = false;
 let bfxBid: number | null = null;
 let bfxAsk: number | null = null;
+let lastSkipLog = 0;
+const SKIP_LOG_THROTTLE_MS = 30_000;
 
 // rolling 1-min-close window for the z-score baseline
 let oneMinCloses: number[] = [];
@@ -134,10 +136,22 @@ async function onBinTick(price: number) {
   }
   currentMinuteLastPrice = price;
 
-  if (!state.enabled || state.mode !== "FLAT" || orderInFlight || bfxAsk === null || bfxBid === null || !isWalletReady()) return;
+  const zRaw = calcZ(price);
+  if (zRaw === null || zRaw > Z_ENTRY) return;
+  const z: number = zRaw;
 
-  const z = calcZ(price);
-  if (z === null || z > Z_ENTRY) return;
+  // Real signal from here on -- log WHY we don't act on it, instead of silently returning, so a
+  // signal that never results in a trade is never a mystery.
+  if (!state.enabled || state.mode !== "FLAT" || orderInFlight) return; // expected/routine, not worth logging
+  function logSkip(reason: string) {
+    if (Date.now() - lastSkipLog > SKIP_LOG_THROTTLE_MS) {
+      console.log(`SIGNAL SKIPPED (z=${z.toFixed(3)}): ${reason}`);
+      logEthZscoreBitfinexRun({ actions: [{ action: "SKIPPED", z, reason }] }).catch(() => {});
+      lastSkipLog = Date.now();
+    }
+  }
+  if (bfxAsk === null || bfxBid === null) { logSkip("Bitfinex ticker not connected yet (bfxAsk/bfxBid null)"); return; }
+  if (!isWalletReady()) { logSkip("Wallet WS not authenticated/ready yet"); return; }
 
   orderInFlight = true;
   try {
