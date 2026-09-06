@@ -7,20 +7,21 @@ import { getSupabaseAdmin } from "@/lib/supabase-admin";
 // logic, compare aggregate stats). Turned into a standing dashboard feature instead of a one-off
 // script, per request, so it doesn't need to be re-asked for every time.
 //
-// Both live bots use the same Z-score entry (25min rolling window, z<=-2.0) + ratcheting stop
-// exit as of 2026-09-05 -- Worker 1 ("zscore" query param) trades SOL/tSOLUSD, Worker 2
-// ("jump-trail" query param, kept for the existing dashboard button) trades ETH/tETHUSD. Ratchet:
-// entry-0.1% initial stop, moves to breakeven once price clears entry, resumes trailing
-// peak-0.1% once price clears entry+0.1%. Switched back from Jump entries after a real-trade
-// audit found Jump's fast-reversal failure mode caused meaningful market-order slippage past the
-// modeled stop (SOL: 0.51 pct-points across 34 trades, ETH: 0.24 across 26).
+// Both live bots use the same Z-score entry (25min rolling window, z<=-2.0) + fixed OCO exit
+// (SL=0.1% / TP=0.4%, no ratchet) as of 2026-09-05 night -- Worker 1 ("zscore" query param)
+// trades SOL/tSOLUSD, Worker 2 ("jump-trail" query param, kept for the existing dashboard button)
+// trades ETH/tETHUSD. Switched from the ratchet after real trades showed wins averaging ~1.6-1.7x
+// smaller than losses (small breakeven exits, rare big trail wins). Switched to Z-score (from
+// Jump) earlier after a real-trade audit found Jump's fast-reversal failure mode caused
+// meaningful market-order slippage past the modeled stop (SOL: 0.51 pct-points across 34 trades,
+// ETH: 0.24 across 26).
 //
 // Uses data-api.binance.vision, not api.binance.com -- Binance geo-blocks Vercel's server IPs
 // from api.binance.com directly (see app/api/buy-hold and app/api/eth-zscore-live for the same
 // fix applied earlier).
 
-const TRAIL_PCT = 0.1;
-const ARM_PCT = 0.1;
+const SL_PCT = 0.1;
+const TP_PCT = 0.4;
 const ZSCORE_WINDOW_MIN = 25;
 const Z_ENTRY = -2.0;
 
@@ -65,13 +66,6 @@ async function fetchBitfinex(symbol: string, start: number, end: number): Promis
   return all;
 }
 
-function computeStop(halfSpreadPct: number, entryPrice: number, extremePrice: number): number {
-  const armThreshold = entryPrice * (1 + ARM_PCT / 100);
-  if (extremePrice >= armThreshold) return extremePrice * (1 - TRAIL_PCT / 100);
-  if (extremePrice > entryPrice) return entryPrice;
-  return entryPrice * (1 - TRAIL_PCT / 100);
-}
-
 function computeRollingZ(closes: number[], windowMin: number): number[] {
   const z: number[] = new Array(closes.length).fill(NaN);
   for (let i = windowMin; i < closes.length; i++) {
@@ -98,24 +92,31 @@ function runBacktest(binance: Candle[], bfxByTime: Map<number, Candle>, bfxTimes
       const bfxEntryCandle = bfxByTime.get(signalTime);
       if (bfxEntryCandle && entryIdx !== -1 && entryIdx + 1 < bfxTimesSorted.length) {
         const entryAsk = bfxEntryCandle.close * (1 + halfSpreadPct / 100);
-        let stop = computeStop(halfSpreadPct, entryAsk, bfxEntryCandle.close);
-        let peak = bfxEntryCandle.close;
+        const slPrice = entryAsk * (1 - SL_PCT / 100);
+        const tpPrice = entryAsk * (1 + TP_PCT / 100);
         let exited = false;
         for (let j = entryIdx + 1; j < bfxTimesSorted.length; j++) {
           const c = bfxByTime.get(bfxTimesSorted[j])!;
+          const bidHigh = c.high * (1 - halfSpreadPct / 100);
           const bidLow = c.low * (1 - halfSpreadPct / 100);
-          if (bidLow <= stop) {
-            const pnlPct = (stop - entryAsk) / entryAsk * 100;
+          if (bidLow <= slPrice) {
+            const pnlPct = (slPrice - entryAsk) / entryAsk * 100;
             totalPnlPct += pnlPct;
             trades++;
-            if (pnlPct > 0) wins++;
             exited = true;
             const exitTime = bfxTimesSorted[j];
             while (cooldownUntilIdx + 1 < binance.length && binance[cooldownUntilIdx + 1].time < exitTime) cooldownUntilIdx++;
             break;
           }
-          if (c.high > peak) peak = c.high;
-          stop = computeStop(halfSpreadPct, entryAsk, peak);
+          if (bidHigh >= tpPrice) {
+            const pnlPct = (tpPrice - entryAsk) / entryAsk * 100;
+            totalPnlPct += pnlPct;
+            trades++; wins++;
+            exited = true;
+            const exitTime = bfxTimesSorted[j];
+            while (cooldownUntilIdx + 1 < binance.length && binance[cooldownUntilIdx + 1].time < exitTime) cooldownUntilIdx++;
+            break;
+          }
         }
         if (!exited) { /* unresolved at end of fetched window, skip */ }
       }

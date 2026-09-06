@@ -15,9 +15,13 @@
 // closes, checked continuously in real time (not gated to candle close). Entry: z <= -2.0 while
 // flat.
 //
-// EXIT: ratcheting stop, SL=0.1% (explicitly requested at 0.1% this time, not 0.05%). Entry-0.1%
-// initial stop, moves to breakeven once price clears entry, resumes trailing peak-0.1% once price
-// clears entry+0.1%.
+// EXIT: fixed OCO, SL=0.1% / TP=0.4% -- switched from the ratchet 2026-09-05 night after real
+// trades showed wins averaging ~1.6-1.7x smaller than losses under the ratchet (small breakeven
+// exits, rare big trail wins that mean-reversion entries don't reliably produce). Backtested 2yr
+// real spread: ETH +$1,980 total (21.0% win rate, 41/104 losing weeks), SOL +$1,922 (20.8%,
+// 32/104) -- both positive but far weaker than the ratchet's $13,012/7-losing-weeks on ETH.
+// Requested anyway to see real-money behavior directly instead of trusting backtest numbers that
+// have repeatedly overstated real performance this session.
 //
 // SINGLE-INSTANCE GUARANTEE + WATCHDOG + SHARED-WALLET FIX: lock row with heartbeat,
 // emergency-flatten via a fresh REST price if the Bitfinex ticker goes silent while holding, real
@@ -39,8 +43,8 @@ const BFX_SYMBOL       = "tETHUSD";
 const BINANCE_WS       = "wss://stream.binance.com:9443/ws/ethusdt@bookTicker";
 const ZSCORE_WINDOW_MIN = 25;
 const Z_ENTRY           = -2.0;
-const TRAIL_PCT        = 0.1;
-const ARM_PCT          = 0.1; // price must clear entry + this% before the stop trails past breakeven
+const SL_PCT           = 0.1;
+const TP_PCT           = 0.4; // fixed OCO, no ratchet -- requested to try after real trades showed small wins/bigger losses
 const SEED_USD         = 20;
 const HEARTBEAT_MS     = 10_000;
 const LOCK_STALE_MS    = 30_000;
@@ -105,15 +109,6 @@ async function releaseLock() {
   } catch (err) { console.error("releaseLock failed:", err); }
 }
 
-// Ratcheting stop: entry-0.1% until price pushes above entry (then breakeven), then trailing
-// peak-0.1% once price clears entry+0.1%.
-function computeStop(entryPrice: number, extremePrice: number): number {
-  const armThreshold = entryPrice * (1 + ARM_PCT / 100);
-  if (extremePrice >= armThreshold) return extremePrice * (1 - TRAIL_PCT / 100);
-  if (extremePrice > entryPrice) return entryPrice;
-  return entryPrice * (1 - TRAIL_PCT / 100);
-}
-
 function calcZ(current: number): number | null {
   if (oneMinCloses.length < ZSCORE_WINDOW_MIN) return null;
   const window = oneMinCloses.slice(-ZSCORE_WINDOW_MIN);
@@ -161,12 +156,12 @@ async function onBinTick(price: number) {
     if (estQty <= 0) { console.log(`BUY signal but no real USD available (real=${realUsd}) — skipping.`); return; }
     console.log(`BUY signal (z=${z.toFixed(3)}) @ ask=${bfxAsk.toFixed(4)} qty~=${estQty.toFixed(4)} (real USD=${realUsd.toFixed(2)}) — submitting real order...`);
     const fill = await submitMarketOrder(BFX_SYMBOL, estQty);
-    const extreme = fill.execPrice;
-    const stop = computeStop(fill.execPrice, extreme);
+    const slPrice = fill.execPrice * (1 - SL_PCT / 100);
+    const tpPrice = fill.execPrice * (1 + TP_PCT / 100);
     const patch = {
       mode: "LONG" as const, sol_quantity: fill.execAmount, entry_price: fill.execPrice,
       entry_time: new Date().toISOString(), usd_balance: 0,
-      extreme_price: extreme, stop_price: stop,
+      extreme_price: tpPrice, stop_price: slPrice, // extreme_price repurposed to hold the fixed TP target (no ratchet)
     };
     state = { ...state, ...patch };
     await updateSolJumpTrailBitfinexState(patch);
@@ -189,11 +184,10 @@ async function onBfxTicker(bid: number, ask: number) {
 
   recordSolJumpTrailBitfinexTick(state.entry_time!, bid).catch((err) => console.error("recordTick error:", err));
 
-  const entryPrice = state.entry_price!;
-  const extreme = state.extreme_price ?? entryPrice;
-  const stop = state.stop_price ?? computeStop(entryPrice, extreme);
+  const slPrice = state.stop_price!;
+  const tpPrice = state.extreme_price!; // repurposed to hold the fixed TP target (no ratchet)
 
-  if (bid <= stop) {
+  if (bid <= slPrice || bid >= tpPrice) {
     orderInFlight = true;
     try {
       const origEntryPrice = state.entry_price!;
@@ -202,7 +196,7 @@ async function onBfxTicker(bid: number, ask: number) {
       const realEth = getLiveBalance("ETH");
       const sellQty = isWalletReady() ? Math.min(origQty, realEth) : origQty;
       if (sellQty <= 0) throw new Error(`No real ETH available to sell (tracked=${origQty}, real=${realEth})`);
-      console.log(`STOP signal, selling ${sellQty.toFixed(4)} ETH (tracked=${origQty.toFixed(4)}, real=${realEth.toFixed(4)}) — submitting real order...`);
+      console.log(`${bid >= tpPrice ? "TP" : "SL"} signal, selling ${sellQty.toFixed(4)} ETH (tracked=${origQty.toFixed(4)}, real=${realEth.toFixed(4)}) — submitting real order...`);
       const fill = await submitMarketOrder(BFX_SYMBOL, -sellQty);
       const usdOut = fill.execPrice * Math.abs(fill.execAmount);
       const usdIn  = origEntryPrice * Math.abs(fill.execAmount);
@@ -221,7 +215,7 @@ async function onBfxTicker(bid: number, ask: number) {
         jump_pct: 0,
       });
       lastDbWrite = Date.now();
-      console.log(`STOP FILLED price=${fill.execPrice.toFixed(4)} pnlUsd=${pnlUsd.toFixed(4)} pnlPct=${pnlPct.toFixed(4)}`);
+      console.log(`EXIT FILLED price=${fill.execPrice.toFixed(4)} pnlUsd=${pnlUsd.toFixed(4)} pnlPct=${pnlPct.toFixed(4)}`);
       await logSolJumpTrailBitfinexRun({ actions: [{ action: "EXIT", direction: "LONG", price: fill.execPrice, pnlUsd, pnlPct, orderId: fill.orderId }] });
       lastRunLog = Date.now();
     } catch (err) {
@@ -231,17 +225,11 @@ async function onBfxTicker(bid: number, ask: number) {
       orderInFlight = false;
     }
     return;
-  } else if (bid > extreme) {
-    state = { ...state, extreme_price: bid, stop_price: computeStop(entryPrice, bid) };
-    if (Date.now() - lastDbWrite > DB_WRITE_THROTTLE_MS) {
-      await updateSolJumpTrailBitfinexState({ extreme_price: state.extreme_price, stop_price: state.stop_price });
-      lastDbWrite = Date.now();
-    }
   }
 
   if (Date.now() - lastRunLog > RUN_LOG_INTERVAL_MS) {
     await logSolJumpTrailBitfinexRun({
-      actions: [{ action: "STATUS", mode: state.mode, bid, ask, extreme: state.extreme_price, stop: state.stop_price }],
+      actions: [{ action: "STATUS", mode: state.mode, bid, ask, tp: tpPrice, sl: slPrice }],
     });
     lastRunLog = Date.now();
   }
@@ -359,7 +347,7 @@ async function main() {
   process.on("SIGTERM", shutdown);
 
   console.log(`Starting LIVE ETH Z-score (ratchet) worker (${INSTANCE_ID}), enabled=${state.enabled}, mode=${state.mode}`);
-  console.log(`REAL MONEY — z<=${Z_ENTRY} (${ZSCORE_WINDOW_MIN}min rolling window) triggers a real buy on ${BFX_SYMBOL}. Seed $${SEED_USD}, compounding, ratchet stop (initial -${TRAIL_PCT}%, breakeven at entry, trail past +${ARM_PCT}%).`);
+  console.log(`REAL MONEY — z<=${Z_ENTRY} (${ZSCORE_WINDOW_MIN}min rolling window) triggers a real buy on ${BFX_SYMBOL}. Seed $${SEED_USD}, compounding, fixed OCO (SL=-${SL_PCT}%, TP=+${TP_PCT}%, no ratchet).`);
   connectBinance();
   connectBitfinex();
   connectWalletBalances();
