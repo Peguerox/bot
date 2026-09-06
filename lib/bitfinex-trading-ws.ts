@@ -193,7 +193,10 @@ let cidCounter = 0;
 export function submitMarketOrderWs(symbol: string, amount: number, timeoutMs = 3000): Promise<OrderFill> {
   return new Promise((resolve, reject) => {
     if (!authWs || authWs.readyState !== WebSocket.OPEN) { reject(new Error("Auth WS not connected")); return; }
-    const cid = Date.now() * 1000 + (cidCounter++ % 1000);
+    // CID must be a small integer, unique per UTC day -- ms-since-midnight-UTC (max 86,399,999)
+    // stays safely under int32 range. A full Date.now()-based value (~1.75e15) was rejected with
+    // "cid: invalid", caught by a real BTC test before this went live on real trades.
+    const cid = (Date.now() % 86_400_000) + (cidCounter++ % 1000);
     const submitTime = Date.now();
     const timeout = setTimeout(() => {
       pendingOrders.delete(cid);
