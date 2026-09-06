@@ -167,7 +167,7 @@ export async function GET(req: NextRequest) {
     return NextResponse.json({ ok: false, error: "No real trades yet for this bot" });
   }
 
-  const warmupMs = 5 * 60_000;
+  const warmupMs = 30 * 60_000; // both bots now use a 25min rolling z-score window -- needs 25min+ of candles before the backtest's z-score is even valid, or early signals get silently undercounted
   const start = new Date(trades[0].entry_time).getTime() - warmupMs;
   const end = new Date(trades[trades.length - 1].exit_time).getTime() + 5 * 60_000;
 
