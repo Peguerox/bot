@@ -1459,7 +1459,7 @@ function EthZscoreBitfinexPanel({
             </button>
           </div>
         </div>
-        <p className="text-gray-500 text-xs">Continuous rolling 25min z-score on Binance SOLUSDT (z≤-2.0) → Bitfinex tSOLUSD real buy · fixed OCO exit, SL=0.1% / TP=0.2%, no ratchet · LIVE · REAL MONEY · $20 seed, compounds · long-only (no shorting on spot) · separate API key from Worker 2</p>
+        <p className="text-gray-500 text-xs">Continuous rolling 25min z-score on Binance SOLUSDT (z≤-2.0) → Bitfinex tSOLUSD real buy · ratcheting stop (entry-0.1% initial, breakeven once price clears entry, trails past entry+0.1%), orders/fills over WS, bid/ask from the real order book · LIVE · REAL MONEY · $20 seed, compounds · long-only (no shorting on spot) · separate API key from Worker 2</p>
         {expVsActual && (
           expVsActual.ok ? (
             <div className="bg-gray-800/50 rounded-lg p-3 text-xs font-mono space-y-1">
@@ -1561,13 +1561,13 @@ function EthZscoreBitfinexPanel({
               </td>
             </tr>
             <tr className="border-b border-gray-800/50">
-              <td className="py-1.5 text-gray-400">Take-profit (0.2%)</td>
+              <td className="py-1.5 text-gray-400">Peak since entry</td>
               <td className="py-1.5 text-right text-green-400">
                 {extremePrice != null ? `$${extremePrice.toFixed(2)}` : "—"}
               </td>
             </tr>
             <tr className="border-b border-gray-800/50">
-              <td className="py-1.5 text-gray-400">Stop-loss (0.1%)</td>
+              <td className="py-1.5 text-gray-400">Ratchet stop</td>
               <td className="py-1.5 text-right text-red-400">
                 {stopPrice != null ? `$${stopPrice.toFixed(2)}` : "—"}
               </td>
