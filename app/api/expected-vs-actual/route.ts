@@ -21,7 +21,7 @@ import { getSupabaseAdmin } from "@/lib/supabase-admin";
 // fix applied earlier).
 
 const SL_PCT = 0.1;
-const TP_PCT = 0.4;
+const TP_PCT = 0.2;
 const ZSCORE_WINDOW_MIN = 25;
 const Z_ENTRY = -2.0;
 
