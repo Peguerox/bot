@@ -1142,7 +1142,7 @@ function SolJumpTrailBitfinexPanel({
             </button>
           </div>
         </div>
-        <p className="text-gray-500 text-xs">Continuous rolling 25min z-score on Binance ETHUSDT (z≤-2.0) → Bitfinex tETHUSD real buy · fixed OCO exit, SL=0.1% / TP=0.2%, no ratchet · LIVE · REAL MONEY · $20 seed, compounds · long-only (no shorting on spot)</p>
+        <p className="text-gray-500 text-xs">Continuous rolling 25min z-score on Binance ETHUSDT (z≤-2.0) → Bitfinex tETHUSD real buy · fixed OCO exit, SL=0.1% / TP=0.2%, no ratchet · orders/fills over WS, bid/ask from the real order book · LIVE · REAL MONEY · $20 seed, compounds · long-only (no shorting on spot)</p>
         {expVsActual && (
           expVsActual.ok ? (
             <div className="bg-gray-800/50 rounded-lg p-3 text-xs font-mono space-y-1">

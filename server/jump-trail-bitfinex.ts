@@ -1,31 +1,26 @@
-// REAL MONEY — converted 2026-09-05 (again) from ETH Jump Trail to ETH Z-score, on Worker 2's
-// existing Render service/API key/DB tables (still named sol_jump_trail_bitfinex_* internally --
-// kept as-is, same precedent used throughout this session).
+// REAL MONEY — ETH Z-score, Worker 2's existing Render service/API key/DB tables (still named
+// sol_jump_trail_bitfinex_* internally -- kept as-is, same precedent used throughout this session).
 //
-// WHY: Jump's entries are momentum bursts, and its failure mode is a fast reversal -- exactly the
-// moment a market-order stop suffers the worst slippage (thin book at speed). Real trade audit
-// this session found 9/34 SOL Jump trades and 5/26 ETH Jump trades slipped meaningfully past the
-// modeled stop (SOL: 0.51 pct-points of total slippage across the session, ETH: 0.24). Z-score's
-// mean-reversion entries don't chase a breakout, so the same execution risk doesn't apply on
-// entry -- moving both workers back to Z-score to see if it holds up better in real execution,
-// even though every backtest this session rated raw Jump higher on paper.
+// 2026-09-06 REWRITE: same WS-native execution path as Worker 1 (lib/bitfinex-trading-ws.ts),
+// applied here after proving out clean on SOL first: orders submit over the already-authenticated
+// WS and fills arrive via the `te` push event (matched by client order id) instead of polling
+// REST every 500ms for up to 5s. Bid/ask now come from the real order book (`book` channel,
+// updates on every book change) instead of the throttled `ticker` snapshot. Exit strategy itself
+// is UNCHANGED -- still the fixed OCO (SL=0.1%/TP=0.2%) already running live, deliberately left
+// as-is so this only tests the execution-layer change, not a strategy change, on this bot.
 //
 // SIGNAL: continuous rolling z-score against Binance ETHUSDT's own mid-price ((bestBid+bestAsk)/2
 // from bookTicker), NOT raw last-trade price. Window = last 25 completed 1-minute mid-price
 // closes, checked continuously in real time (not gated to candle close). Entry: z <= -2.0 while
 // flat.
 //
-// EXIT: fixed OCO, SL=0.1% / TP=0.4% -- switched from the ratchet 2026-09-05 night after real
-// trades showed wins averaging ~1.6-1.7x smaller than losses under the ratchet (small breakeven
-// exits, rare big trail wins that mean-reversion entries don't reliably produce). Backtested 2yr
-// real spread: ETH +$1,980 total (21.0% win rate, 41/104 losing weeks), SOL +$1,922 (20.8%,
-// 32/104) -- both positive but far weaker than the ratchet's $13,012/7-losing-weeks on ETH.
-// Requested anyway to see real-money behavior directly instead of trusting backtest numbers that
-// have repeatedly overstated real performance this session.
+// EXIT: fixed OCO, SL=0.1% / TP=0.2% (unchanged from before this rewrite).
 //
 // SINGLE-INSTANCE GUARANTEE + WATCHDOG + SHARED-WALLET FIX: lock row with heartbeat,
-// emergency-flatten via a fresh REST price if the Bitfinex ticker goes silent while holding, real
-// live-balance check before every order.
+// emergency-flatten via a fresh REST price if the book feed goes silent while holding, real
+// live-balance check before every order. Emergency path still uses the proven REST
+// submitMarketOrderSafe (lib/bitfinex-auth.ts) deliberately -- that's the rare, safety-critical
+// path where an extra REST round trip is acceptable, unlike the speed-critical hot path.
 import dotenv from "dotenv";
 dotenv.config({ path: ".env.local" });
 
@@ -34,39 +29,38 @@ import os from "os";
 import crypto from "crypto";
 import {
   getSolJumpTrailBitfinexState, updateSolJumpTrailBitfinexState, recordSolJumpTrailBitfinexTrade,
-  logSolJumpTrailBitfinexRun, recordSolJumpTrailBitfinexTick, type SolJumpTrailBitfinexState,
+  logSolJumpTrailBitfinexRun, type SolJumpTrailBitfinexState,
 } from "../lib/sol-jump-trail-bitfinex-db";
-import { submitMarketOrder, submitMarketOrderSafe } from "../lib/bitfinex-auth";
-import { connectWalletBalances, getLiveBalance, isWalletReady } from "../lib/bitfinex-wallet-ws";
+import { submitMarketOrderSafe } from "../lib/bitfinex-auth";
+import {
+  connectPublicBook, getBookBidAsk, isBookReady, bookMessageAge,
+  connectAuthenticated, getLiveBalance, isWalletReady, submitMarketOrderFast,
+} from "../lib/bitfinex-trading-ws";
 
 const BFX_SYMBOL       = "tETHUSD";
 const BINANCE_WS       = "wss://stream.binance.com:9443/ws/ethusdt@bookTicker";
 const ZSCORE_WINDOW_MIN = 25;
 const Z_ENTRY           = -2.0;
 const SL_PCT           = 0.1;
-const TP_PCT           = 0.2; // tighter TP, requested despite backtesting negative (2yr ETH: -$2,492, 80/104 losing weeks) to see real behavior
+const TP_PCT           = 0.2; // unchanged from the currently-live config
 const SEED_USD         = 20;
 const HEARTBEAT_MS     = 10_000;
 const LOCK_STALE_MS    = 30_000;
 const DB_WRITE_THROTTLE_MS = 2_000;
 const RUN_LOG_INTERVAL_MS  = 5 * 60_000;
 const WATCHDOG_INTERVAL_MS = 5_000;
-const BFX_STALE_MS         = 15_000;
-const BFX_EMERGENCY_MS     = 25_000;
+const BOOK_STALE_MS        = 15_000;
+const BOOK_EMERGENCY_MS    = 25_000;
 
 const INSTANCE_ID = `${os.hostname()}-${process.pid}-${crypto.randomBytes(3).toString("hex")}`;
 
 let state: SolJumpTrailBitfinexState;
 let lastDbWrite = 0;
 let lastRunLog = 0;
-let lastBfxMessageTime = Date.now();
-let bfxWs: WebSocket | null = null;
-let emergencyInProgress = false;
-let orderInFlight = false;
-let bfxBid: number | null = null;
-let bfxAsk: number | null = null;
 let lastSkipLog = 0;
 const SKIP_LOG_THROTTLE_MS = 30_000;
+let orderInFlight = false;
+let emergencyInProgress = false;
 
 // rolling 1-min-close window for the z-score baseline
 let oneMinCloses: number[] = [];
@@ -133,6 +127,7 @@ async function onBinTick(price: number) {
   const zRaw = calcZ(price);
   if (zRaw === null || zRaw > Z_ENTRY) return;
   const z: number = zRaw;
+  const signalTime = Date.now();
 
   // Real signal from here on -- log WHY we don't act on it, instead of silently returning, so a
   // signal that never results in a trade is never a mystery.
@@ -144,7 +139,8 @@ async function onBinTick(price: number) {
       lastSkipLog = Date.now();
     }
   }
-  if (bfxAsk === null || bfxBid === null) { logSkip("Bitfinex ticker not connected yet (bfxAsk/bfxBid null)"); return; }
+  const { bid: bfxBid, ask: bfxAsk } = getBookBidAsk();
+  if (!isBookReady() || bfxAsk === null || bfxBid === null) { logSkip("Order book not ready yet"); return; }
   if (!isWalletReady()) { logSkip("Wallet WS not authenticated/ready yet"); return; }
 
   orderInFlight = true;
@@ -155,7 +151,8 @@ async function onBinTick(price: number) {
     const estQty = cappedPool / bfxAsk;
     if (estQty <= 0) { console.log(`BUY signal but no real USD available (real=${realUsd}) — skipping.`); return; }
     console.log(`BUY signal (z=${z.toFixed(3)}) @ ask=${bfxAsk.toFixed(4)} qty~=${estQty.toFixed(4)} (real USD=${realUsd.toFixed(2)}) — submitting real order...`);
-    const fill = await submitMarketOrder(BFX_SYMBOL, estQty);
+    const fill = await submitMarketOrderFast(BFX_SYMBOL, estQty);
+    const totalLatencyMs = Date.now() - signalTime;
     const slPrice = fill.execPrice * (1 - SL_PCT / 100);
     const tpPrice = fill.execPrice * (1 + TP_PCT / 100);
     const patch = {
@@ -166,8 +163,8 @@ async function onBinTick(price: number) {
     state = { ...state, ...patch };
     await updateSolJumpTrailBitfinexState(patch);
     lastDbWrite = Date.now();
-    console.log(`BUY FILLED price=${fill.execPrice.toFixed(4)} qty=${fill.execAmount.toFixed(4)} fee=${fill.fee} z=${z.toFixed(3)}`);
-    await logSolJumpTrailBitfinexRun({ actions: [{ action: "BUY", price: fill.execPrice, qty: fill.execAmount, orderId: fill.orderId, z }] });
+    console.log(`BUY FILLED price=${fill.execPrice.toFixed(4)} qty=${fill.execAmount.toFixed(4)} fee=${fill.fee} z=${z.toFixed(3)} fillLatencyMs=${fill.latencyMs} totalLatencyMs=${totalLatencyMs}`);
+    await logSolJumpTrailBitfinexRun({ actions: [{ action: "BUY", price: fill.execPrice, qty: fill.execAmount, orderId: fill.orderId, z, fillLatencyMs: fill.latencyMs, totalLatencyMs }] });
     lastRunLog = Date.now();
   } catch (err) {
     console.error("BUY order failed:", err);
@@ -177,17 +174,16 @@ async function onBinTick(price: number) {
   }
 }
 
-async function onBfxTicker(bid: number, ask: number) {
-  bfxBid = bid;
-  bfxAsk = ask;
+async function onBookUpdate() {
   if (!state.enabled || orderInFlight || state.mode !== "LONG") return;
-
-  recordSolJumpTrailBitfinexTick(state.entry_time!, bid).catch((err) => console.error("recordTick error:", err));
+  const { bid, ask } = getBookBidAsk();
+  if (bid === null || ask === null) return;
 
   const slPrice = state.stop_price!;
   const tpPrice = state.extreme_price!; // repurposed to hold the fixed TP target (no ratchet)
 
   if (bid <= slPrice || bid >= tpPrice) {
+    const signalTime = Date.now();
     orderInFlight = true;
     try {
       const origEntryPrice = state.entry_price!;
@@ -197,7 +193,8 @@ async function onBfxTicker(bid: number, ask: number) {
       const sellQty = isWalletReady() ? Math.min(origQty, realEth) : origQty;
       if (sellQty <= 0) throw new Error(`No real ETH available to sell (tracked=${origQty}, real=${realEth})`);
       console.log(`${bid >= tpPrice ? "TP" : "SL"} signal, selling ${sellQty.toFixed(4)} ETH (tracked=${origQty.toFixed(4)}, real=${realEth.toFixed(4)}) — submitting real order...`);
-      const fill = await submitMarketOrder(BFX_SYMBOL, -sellQty);
+      const fill = await submitMarketOrderFast(BFX_SYMBOL, -sellQty);
+      const totalLatencyMs = Date.now() - signalTime;
       const usdOut = fill.execPrice * Math.abs(fill.execAmount);
       const usdIn  = origEntryPrice * Math.abs(fill.execAmount);
       const pnlUsd = usdOut - usdIn;
@@ -215,8 +212,8 @@ async function onBfxTicker(bid: number, ask: number) {
         jump_pct: 0,
       });
       lastDbWrite = Date.now();
-      console.log(`EXIT FILLED price=${fill.execPrice.toFixed(4)} pnlUsd=${pnlUsd.toFixed(4)} pnlPct=${pnlPct.toFixed(4)}`);
-      await logSolJumpTrailBitfinexRun({ actions: [{ action: "EXIT", direction: "LONG", price: fill.execPrice, pnlUsd, pnlPct, orderId: fill.orderId }] });
+      console.log(`EXIT FILLED price=${fill.execPrice.toFixed(4)} pnlUsd=${pnlUsd.toFixed(4)} pnlPct=${pnlPct.toFixed(4)} fillLatencyMs=${fill.latencyMs} totalLatencyMs=${totalLatencyMs}`);
+      await logSolJumpTrailBitfinexRun({ actions: [{ action: "EXIT", direction: "LONG", price: fill.execPrice, pnlUsd, pnlPct, orderId: fill.orderId, fillLatencyMs: fill.latencyMs, totalLatencyMs }] });
       lastRunLog = Date.now();
     } catch (err) {
       console.error("SELL order failed:", err);
@@ -247,35 +244,6 @@ function connectBinance() {
   });
   ws.on("error", (e) => console.error("Binance WS error:", e));
   ws.on("close", () => { console.log("Binance WS closed, reconnecting in 2s..."); setTimeout(connectBinance, 2000); });
-  return ws;
-}
-
-function connectBitfinex() {
-  const ws = new WebSocket("wss://api-pub.bitfinex.com/ws/2");
-  bfxWs = ws;
-  let chanId: number | null = null;
-  let queue: Promise<void> = Promise.resolve();
-
-  ws.on("open", () => {
-    console.log("Bitfinex WS connected, subscribing to ticker (real bid/ask)...");
-    ws.send(JSON.stringify({ event: "subscribe", channel: "ticker", symbol: BFX_SYMBOL }));
-  });
-
-  ws.on("message", (raw: Buffer) => {
-    let msg: any;
-    try { msg = JSON.parse(raw.toString()); } catch { return; }
-    if (msg.event === "subscribed" && msg.channel === "ticker") { chanId = msg.chanId; return; }
-    if (!Array.isArray(msg) || msg[0] !== chanId || msg[1] === "hb") return;
-    const data = msg[1];
-    if (!Array.isArray(data) || data.length < 4) return;
-    const bid = data[0], ask = data[2];
-    if (!bid || !ask || isNaN(bid) || isNaN(ask)) return;
-    lastBfxMessageTime = Date.now();
-    queue = queue.then(() => onBfxTicker(bid, ask)).catch((err) => console.error("onBfxTicker error:", err));
-  });
-
-  ws.on("error", (err) => console.error("Bitfinex WS error:", err));
-  ws.on("close", () => { console.log("Bitfinex WS closed, reconnecting in 2s..."); setTimeout(connectBitfinex, 2000); });
   return ws;
 }
 
@@ -316,17 +284,16 @@ async function emergencyFlatten(reason: string) {
 
 function startWatchdog() {
   setInterval(() => {
-    const staleMs = Date.now() - lastBfxMessageTime;
-    if (staleMs < BFX_STALE_MS) return;
+    const staleMs = bookMessageAge();
+    if (staleMs < BOOK_STALE_MS) return;
 
-    if (state.mode === "LONG" && staleMs >= BFX_EMERGENCY_MS && !emergencyInProgress) {
-      emergencyFlatten(`Bitfinex WS silent for ${Math.round(staleMs / 1000)}s while holding ETH`)
+    if (state.mode === "LONG" && staleMs >= BOOK_EMERGENCY_MS && !emergencyInProgress) {
+      emergencyFlatten(`Order book feed silent for ${Math.round(staleMs / 1000)}s while holding ETH`)
         .catch((err) => console.error("emergencyFlatten error:", err));
       return;
     }
 
-    console.error(`Watchdog: Bitfinex WS silent for ${Math.round(staleMs / 1000)}s, forcing reconnect...`);
-    bfxWs?.terminate();
+    console.error(`Watchdog: order book feed silent for ${Math.round(staleMs / 1000)}s.`);
   }, WATCHDOG_INTERVAL_MS);
 }
 
@@ -346,13 +313,12 @@ async function main() {
   process.on("SIGINT", shutdown);
   process.on("SIGTERM", shutdown);
 
-  console.log(`Starting LIVE ETH Z-score (ratchet) worker (${INSTANCE_ID}), enabled=${state.enabled}, mode=${state.mode}`);
-  console.log(`REAL MONEY — z<=${Z_ENTRY} (${ZSCORE_WINDOW_MIN}min rolling window) triggers a real buy on ${BFX_SYMBOL}. Seed $${SEED_USD}, compounding, fixed OCO (SL=-${SL_PCT}%, TP=+${TP_PCT}%, no ratchet).`);
+  console.log(`Starting LIVE ETH Z-score (fixed OCO, WS execution) worker (${INSTANCE_ID}), enabled=${state.enabled}, mode=${state.mode}`);
+  console.log(`REAL MONEY — z<=${Z_ENTRY} (${ZSCORE_WINDOW_MIN}min rolling window) triggers a real buy on ${BFX_SYMBOL}. Seed $${SEED_USD}, compounding, fixed OCO (SL=-${SL_PCT}%, TP=+${TP_PCT}%, no ratchet). Orders + fills over WS, bid/ask from the real order book.`);
   connectBinance();
-  connectBitfinex();
-  connectWalletBalances();
+  connectPublicBook(BFX_SYMBOL, () => { onBookUpdate().catch((err) => console.error("onBookUpdate error:", err)); });
+  connectAuthenticated();
   startWatchdog();
 }
 
 main().catch((err) => { console.error("Fatal:", err); process.exit(1); });
-// redeploy nudge 2026-09-06T17:47:09Z
