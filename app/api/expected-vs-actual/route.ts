@@ -7,26 +7,25 @@ import { getSupabaseAdmin } from "@/lib/supabase-admin";
 // logic, compare aggregate stats). Turned into a standing dashboard feature instead of a one-off
 // script, per request, so it doesn't need to be re-asked for every time.
 //
-// As of 2026-09-07: Worker 1 ("zscore" query param, kept for the existing dashboard button) is
-// BTC/tBTCUSD running the raw Jump strategy (jump>=0.02% in a rolling window, plain 0.1% trailing
-// stop, no ratchet/OCO) -- the original design that backtested +1237% on ETH/1yr, now on BTC with
-// its own real measured spread. Worker 2 ("jump-trail" query param) stays ETH/tETHUSD on Z-score
-// entry + fixed OCO (SL=0.1%/TP=0.2%).
+// As of 2026-09-07: both live bots run the same design -- Jump entry (jump>=0.02% in a rolling
+// window) + ratcheting stop exit (SL=ARM=0.1%). Worker 1 ("zscore" query param, kept for the
+// existing dashboard button) is BTC/tBTCUSD; Worker 2 ("jump-trail") is ETH/tETHUSD. Switched
+// Worker 2 off Z-score+OCO after real trading showed that config tracking its own backtest 2.18x
+// worse (a fixed SL is where a real fast-market gap hits hardest); Jump+ratchet on Worker 1
+// tracked its backtest almost exactly over the same kind of window, verified independently
+// trade-by-trade.
 //
 // Uses data-api.binance.vision, not api.binance.com -- Binance geo-blocks Vercel's server IPs
 // from api.binance.com directly (see app/api/buy-hold and app/api/eth-zscore-live for the same
 // fix applied earlier).
 
-const ZSCORE_WINDOW_MIN = 25;
-const Z_ENTRY = -2.0;
 const JUMP_PCT = 0.02;
-const OCO_SL_PCT = 0.1;
-const OCO_TP_PCT = 0.2;
-const PLAIN_TRAIL_PCT = 0.1;
+const TRAIL_PCT = 0.1;
+const ARM_PCT = 0.1;
 
 const BOT_CONFIG = {
-  "jump-trail": { table: "sol_jump_trail_bitfinex_trades", binanceSymbol: "ETHUSDT", bfxSymbol: "tETHUSD", halfSpreadPct: 0.0072, signalType: "zscore" as const, exitType: "oco" as const },
-  "zscore":     { table: "eth_zscore_bitfinex_trades",      binanceSymbol: "BTCUSDT", bfxSymbol: "tBTCUSD", halfSpreadPct: 0.00772, signalType: "jump" as const, exitType: "plain" as const },
+  "jump-trail": { table: "sol_jump_trail_bitfinex_trades", binanceSymbol: "ETHUSDT", bfxSymbol: "tETHUSD", halfSpreadPct: 0.0072 },
+  "zscore":     { table: "eth_zscore_bitfinex_trades",      binanceSymbol: "BTCUSDT", bfxSymbol: "tBTCUSD", halfSpreadPct: 0.00772 },
 } as const;
 
 type Candle = { time: number; open: number; close: number; high: number; low: number };
@@ -65,84 +64,44 @@ async function fetchBitfinex(symbol: string, start: number, end: number): Promis
   return all;
 }
 
-function computeRollingZ(closes: number[], windowMin: number): number[] {
-  const z: number[] = new Array(closes.length).fill(NaN);
-  for (let i = windowMin; i < closes.length; i++) {
-    const window = closes.slice(i - windowMin, i);
-    const mean = window.reduce((s, v) => s + v, 0) / window.length;
-    const variance = window.reduce((s, v) => s + (v - mean) ** 2, 0) / window.length;
-    const std = Math.sqrt(variance);
-    z[i] = std > 0 ? (closes[i] - mean) / std : 0;
-  }
-  return z;
+function computeStop(entryPrice: number, extremePrice: number): number {
+  const armThreshold = entryPrice * (1 + ARM_PCT / 100);
+  if (extremePrice >= armThreshold) return extremePrice * (1 - TRAIL_PCT / 100);
+  if (extremePrice > entryPrice) return entryPrice;
+  return entryPrice * (1 - TRAIL_PCT / 100);
 }
 
-function runBacktest(
-  binance: Candle[], bfxByTime: Map<number, Candle>, bfxTimesSorted: number[],
-  halfSpreadPct: number, signalType: "zscore" | "jump", exitType: "oco" | "plain"
-) {
+function runBacktest(binance: Candle[], bfxByTime: Map<number, Candle>, bfxTimesSorted: number[], halfSpreadPct: number) {
   let trades = 0, wins = 0, totalPnlPct = 0;
   let cooldownUntilIdx = -1;
-  const closes = binance.map((c) => c.close);
-  const z = signalType === "zscore" ? computeRollingZ(closes, ZSCORE_WINDOW_MIN) : null;
 
   for (let i = 1; i < binance.length; i++) {
     if (i <= cooldownUntilIdx) continue;
-    const signal = signalType === "zscore"
-      ? (!isNaN(z![i]) && z![i] <= Z_ENTRY)
-      : ((binance[i].close - binance[i - 1].close) / binance[i - 1].close * 100 >= JUMP_PCT);
-    if (signal) {
+    const jump = (binance[i].close - binance[i - 1].close) / binance[i - 1].close * 100 >= JUMP_PCT;
+    if (jump) {
       const signalTime = binance[i].time;
       const entryIdx = bfxTimesSorted.indexOf(signalTime);
       const bfxEntryCandle = bfxByTime.get(signalTime);
       if (bfxEntryCandle && entryIdx !== -1 && entryIdx + 1 < bfxTimesSorted.length) {
         const entryAsk = bfxEntryCandle.close * (1 + halfSpreadPct / 100);
+        let stop = computeStop(entryAsk, bfxEntryCandle.close);
+        let peak = bfxEntryCandle.close;
         let exited = false;
-
-        if (exitType === "plain") {
-          let stop = entryAsk * (1 - PLAIN_TRAIL_PCT / 100);
-          let peak = bfxEntryCandle.close;
-          for (let j = entryIdx + 1; j < bfxTimesSorted.length; j++) {
-            const c = bfxByTime.get(bfxTimesSorted[j])!;
-            const bidLow = c.low * (1 - halfSpreadPct / 100);
-            if (bidLow <= stop) {
-              const pnlPct = (stop - entryAsk) / entryAsk * 100;
-              totalPnlPct += pnlPct;
-              trades++;
-              if (pnlPct > 0) wins++;
-              exited = true;
-              const exitTime = bfxTimesSorted[j];
-              while (cooldownUntilIdx + 1 < binance.length && binance[cooldownUntilIdx + 1].time < exitTime) cooldownUntilIdx++;
-              break;
-            }
-            if (c.high > peak) { peak = c.high; stop = peak * (1 - PLAIN_TRAIL_PCT / 100); }
+        for (let j = entryIdx + 1; j < bfxTimesSorted.length; j++) {
+          const c = bfxByTime.get(bfxTimesSorted[j])!;
+          const bidLow = c.low * (1 - halfSpreadPct / 100);
+          if (bidLow <= stop) {
+            const pnlPct = (stop - entryAsk) / entryAsk * 100;
+            totalPnlPct += pnlPct;
+            trades++;
+            if (pnlPct > 0) wins++;
+            exited = true;
+            const exitTime = bfxTimesSorted[j];
+            while (cooldownUntilIdx + 1 < binance.length && binance[cooldownUntilIdx + 1].time < exitTime) cooldownUntilIdx++;
+            break;
           }
-        } else {
-          const slPrice = entryAsk * (1 - OCO_SL_PCT / 100);
-          const tpPrice = entryAsk * (1 + OCO_TP_PCT / 100);
-          for (let j = entryIdx + 1; j < bfxTimesSorted.length; j++) {
-            const c = bfxByTime.get(bfxTimesSorted[j])!;
-            const bidHigh = c.high * (1 - halfSpreadPct / 100);
-            const bidLow = c.low * (1 - halfSpreadPct / 100);
-            if (bidLow <= slPrice) {
-              const pnlPct = (slPrice - entryAsk) / entryAsk * 100;
-              totalPnlPct += pnlPct;
-              trades++;
-              exited = true;
-              const exitTime = bfxTimesSorted[j];
-              while (cooldownUntilIdx + 1 < binance.length && binance[cooldownUntilIdx + 1].time < exitTime) cooldownUntilIdx++;
-              break;
-            }
-            if (bidHigh >= tpPrice) {
-              const pnlPct = (tpPrice - entryAsk) / entryAsk * 100;
-              totalPnlPct += pnlPct;
-              trades++; wins++;
-              exited = true;
-              const exitTime = bfxTimesSorted[j];
-              while (cooldownUntilIdx + 1 < binance.length && binance[cooldownUntilIdx + 1].time < exitTime) cooldownUntilIdx++;
-              break;
-            }
-          }
+          if (c.high > peak) peak = c.high;
+          stop = computeStop(entryAsk, peak);
         }
         if (!exited) { /* unresolved at end of fetched window, skip */ }
       }
@@ -165,8 +124,7 @@ export async function GET(req: NextRequest) {
     return NextResponse.json({ ok: false, error: "No real trades yet for this bot" });
   }
 
-  // z-score needs 25min+ of candles before it's even valid; jump only needs the prior candle.
-  const warmupMs = cfg.signalType === "zscore" ? 30 * 60_000 : 5 * 60_000;
+  const warmupMs = 5 * 60_000; // jump only needs the prior candle
   const start = new Date(trades[0].entry_time).getTime() - warmupMs;
   const end = new Date(trades[trades.length - 1].exit_time).getTime() + 5 * 60_000;
 
@@ -178,7 +136,7 @@ export async function GET(req: NextRequest) {
   for (const c of bfx) bfxByTime.set(c.time, c);
   const bfxTimesSorted = bfx.map((c) => c.time).sort((a, b) => a - b);
 
-  const bt = runBacktest(binance, bfxByTime, bfxTimesSorted, cfg.halfSpreadPct, cfg.signalType, cfg.exitType);
+  const bt = runBacktest(binance, bfxByTime, bfxTimesSorted, cfg.halfSpreadPct);
 
   const realWins = trades.filter((t: any) => t.pnl_usd > 0).length;
   const realSumPct = trades.reduce((s: number, t: any) => s + t.pnl_pct, 0);

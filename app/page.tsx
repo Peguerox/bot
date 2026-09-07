@@ -1050,7 +1050,6 @@ function SolJumpTrailBitfinexPanel({
 
   const [livePrice, setLivePrice] = useState<number | null>(null);
   const [liveSpreadPct, setLiveSpreadPct] = useState<number | null>(null);
-  const [liveZ, setLiveZ] = useState<number | null>(null);
   useEffect(() => {
     let cancelled = false;
     const poll = async () => {
@@ -1060,18 +1059,13 @@ function SolJumpTrailBitfinexPanel({
         if (!cancelled && data.lastPrice != null) setLivePrice(data.lastPrice);
         if (!cancelled && data.spreadPct != null) setLiveSpreadPct(data.spreadPct);
       } catch {}
-      try {
-        const res = await fetch("/api/eth-zscore-live?symbol=ETHUSDT");
-        const data = await res.json();
-        if (!cancelled && data.z != null) setLiveZ(data.z);
-      } catch {}
     };
     poll();
     const id = setInterval(poll, 5000);
     return () => { cancelled = true; clearInterval(id); };
   }, []);
 
-  const statusText = mode === "LONG" ? "Holding ETH" : "Watching (z-score)";
+  const statusText = mode === "LONG" ? "Holding ETH" : "Watching (jump)";
   const statusColor = mode === "LONG" ? "text-green-400" : "text-gray-400";
   const chartTrades = trades.map((t: any) => ({ ...t, pnl: t.pnl_usd, exit_time: t.exit_time }));
 
@@ -1105,7 +1099,7 @@ function SolJumpTrailBitfinexPanel({
       <div className="space-y-1.5">
         <div className="flex items-center justify-between gap-2">
           <div className="flex items-center gap-2">
-            <h2 className="text-white font-bold text-lg">ETH Z-Score Live (Worker 2)</h2>
+            <h2 className="text-white font-bold text-lg">ETH Jump Trail Live (Worker 2)</h2>
             <span className="text-xs font-bold px-2 py-0.5 rounded-full bg-red-500/20 text-red-400">LIVE</span>
             <span className={`text-xs font-bold px-2 py-0.5 rounded-full ${workerAlive ? "bg-green-500/20 text-green-400" : "bg-gray-700/40 text-gray-500"}`}>
               {workerAlive ? "worker alive" : "worker offline"}
@@ -1142,7 +1136,7 @@ function SolJumpTrailBitfinexPanel({
             </button>
           </div>
         </div>
-        <p className="text-gray-500 text-xs">Continuous rolling 25min z-score on Binance ETHUSDT (z≤-2.0) → Bitfinex tETHUSD real buy · fixed OCO exit, SL=0.1% / TP=0.2%, no ratchet · orders/fills over WS, bid/ask from the real order book · LIVE · REAL MONEY · $20 seed, compounds · long-only (no shorting on spot)</p>
+        <p className="text-gray-500 text-xs">Jump ≥0.02% (2s window) on Binance ETHUSDT → Bitfinex tETHUSD real buy · ratcheting stop (entry-0.1% initial, breakeven once price clears entry, trails past entry+0.1%) · orders/fills over WS, bid/ask from the real order book · LIVE · REAL MONEY · $20 seed, compounds · long-only (no shorting on spot)</p>
         {expVsActual && (
           expVsActual.ok ? (
             <div className="bg-gray-800/50 rounded-lg p-3 text-xs font-mono space-y-1">
@@ -1183,7 +1177,7 @@ function SolJumpTrailBitfinexPanel({
           <Stat
             label="Status"
             value={statusText}
-            sub={mode === "LONG" && st?.entry_price ? `entry $${parseFloat(st.entry_price).toFixed(2)}` : "watching for z≤-2.0"}
+            sub={mode === "LONG" && st?.entry_price ? `entry $${parseFloat(st.entry_price).toFixed(2)}` : "watching for jump≥0.02%"}
             color={statusColor}
           />
           <Stat
@@ -1237,20 +1231,13 @@ function SolJumpTrailBitfinexPanel({
               </td>
             </tr>
             <tr className="border-b border-gray-800/50">
-              <td className="py-1.5 text-gray-400">Z-Score</td>
-              <td className={`py-1.5 text-right font-bold ${liveZ != null ? (liveZ <= -2.0 ? "text-green-400" : liveZ <= -1.5 ? "text-yellow-400" : "text-gray-400") : "text-gray-600"}`}>
-                {liveZ != null ? liveZ.toFixed(3) : "—"}
-                {liveZ != null ? <span className="text-gray-500"> {liveZ <= -2.0 ? "(⚡ at/past -2.0 trigger)" : `(${(-2.0 - liveZ).toFixed(3)} from -2.0)`}</span> : null}
-              </td>
-            </tr>
-            <tr className="border-b border-gray-800/50">
-              <td className="py-1.5 text-gray-400">Take-profit (0.2%)</td>
+              <td className="py-1.5 text-gray-400">Peak since entry</td>
               <td className="py-1.5 text-right text-green-400">
                 {extremePrice != null ? `$${extremePrice.toFixed(2)}` : "—"}
               </td>
             </tr>
             <tr className="border-b border-gray-800/50">
-              <td className="py-1.5 text-gray-400">Stop-loss (0.1%)</td>
+              <td className="py-1.5 text-gray-400">Ratchet stop</td>
               <td className="py-1.5 text-right text-red-400">
                 {stopPrice != null ? `$${stopPrice.toFixed(2)}` : "—"}
               </td>

@@ -1,26 +1,29 @@
-// REAL MONEY — ETH Z-score, Worker 2's existing Render service/API key/DB tables (still named
-// sol_jump_trail_bitfinex_* internally -- kept as-is, same precedent used throughout this session).
+// REAL MONEY — ETH Jump Trail + ratchet, replacing Z-score + fixed OCO (0.1%/0.2%) on
+// 2026-09-07.
 //
-// 2026-09-06 REWRITE: same WS-native execution path as Worker 1 (lib/bitfinex-trading-ws.ts),
-// applied here after proving out clean on SOL first: orders submit over the already-authenticated
-// WS and fills arrive via the `te` push event (matched by client order id) instead of polling
-// REST every 500ms for up to 5s. Bid/ask now come from the real order book (`book` channel,
-// updates on every book change) instead of the throttled `ticker` snapshot. Exit strategy itself
-// is UNCHANGED -- still the fixed OCO (SL=0.1%/TP=0.2%) already running live, deliberately left
-// as-is so this only tests the execution-layer change, not a strategy change, on this bot.
+// WHY: real trading confirmed Worker 2's OCO exit was tracking its own backtest 2.18x worse
+// (real -3.046% vs backtest -1.400% over the same window) while Worker 1's Jump+ratchet on BTC
+// tracked almost exactly (real -1.624% vs backtest -1.658%, verified independently trade-by-
+// trade). OCO's fixed SL is where a real trade already showed -0.216% loss against an intended
+// -0.1% stop -- structurally the most exposed exit to a fast market gap. A trailing/ratchet exit
+// doesn't have that fixed-price-target fragility. Switching Worker 2 to the same Jump+ratchet
+// design already proven on Worker 1, on ETH -- the strongest backtest of the whole session.
 //
-// SIGNAL: continuous rolling z-score against Binance ETHUSDT's own mid-price ((bestBid+bestAsk)/2
-// from bookTicker), NOT raw last-trade price. Window = last 25 completed 1-minute mid-price
-// closes, checked continuously in real time (not gated to candle close). Entry: z <= -2.0 while
-// flat.
+// STRATEGY: jump>=0.02% in a 2s rolling window, ratcheting stop exit (SL=ARM=0.1%): entry-0.1%
+// initial stop, moves to breakeven once price clears entry, resumes trailing peak-0.1% once price
+// clears entry+0.1%. 2yr backtest, real spread 0.0072% half: $58,825.85 total (fixed $1000/trade),
+// 33.8% win rate, 2/104 losing weeks -- the strongest number of any config tested this session.
 //
-// EXIT: fixed OCO, SL=0.1% / TP=0.2% (unchanged from before this rewrite).
+// EXECUTION: reuses the proven WS-native path (lib/bitfinex-trading-ws.ts) -- orders over the
+// authenticated WS, fills accumulated across every `te` partial-fill event, bid/ask from the real
+// order book, not the throttled ticker. Same latency logging as both other live bots.
 //
-// SINGLE-INSTANCE GUARANTEE + WATCHDOG + SHARED-WALLET FIX: lock row with heartbeat,
-// emergency-flatten via a fresh REST price if the book feed goes silent while holding, real
-// live-balance check before every order. Emergency path still uses the proven REST
-// submitMarketOrderSafe (lib/bitfinex-auth.ts) deliberately -- that's the rare, safety-critical
-// path where an extra REST round trip is acceptable, unlike the speed-critical hot path.
+// SIGNAL: Binance ETHUSDT's own mid-price ((bestBid+bestAsk)/2 from bookTicker), not raw
+// last-trade price -- avoids biasing the jump calc toward whichever side of the spread the last
+// print hit.
+//
+// DB: reuses Worker 2's existing Render service/API key/DB tables (still named
+// sol_jump_trail_bitfinex_* internally -- same precedent as every other worker this session).
 import dotenv from "dotenv";
 dotenv.config({ path: ".env.local" });
 
@@ -39,10 +42,10 @@ import {
 
 const BFX_SYMBOL       = "tETHUSD";
 const BINANCE_WS       = "wss://stream.binance.com:9443/ws/ethusdt@bookTicker";
-const ZSCORE_WINDOW_MIN = 25;
-const Z_ENTRY           = -2.0;
-const SL_PCT           = 0.1;
-const TP_PCT           = 0.2; // unchanged from the currently-live config
+const JUMP_PCT         = 0.02;
+const ROLL_MS          = 2000;
+const TRAIL_PCT        = 0.1;
+const ARM_PCT          = 0.1; // price must clear entry + this% before the stop trails past breakeven
 const SEED_USD         = 20;
 const HEARTBEAT_MS     = 10_000;
 const LOCK_STALE_MS    = 30_000;
@@ -61,11 +64,7 @@ let lastSkipLog = 0;
 const SKIP_LOG_THROTTLE_MS = 30_000;
 let orderInFlight = false;
 let emergencyInProgress = false;
-
-// rolling 1-min-close window for the z-score baseline
-let oneMinCloses: number[] = [];
-let currentMinuteBucket = 0;
-let currentMinuteLastPrice: number | null = null;
+let binBuf: { t: number; p: number }[] = [];
 
 async function acquireLock(): Promise<boolean> {
   state = await getSolJumpTrailBitfinexState();
@@ -103,30 +102,29 @@ async function releaseLock() {
   } catch (err) { console.error("releaseLock failed:", err); }
 }
 
-function calcZ(current: number): number | null {
-  if (oneMinCloses.length < ZSCORE_WINDOW_MIN) return null;
-  const window = oneMinCloses.slice(-ZSCORE_WINDOW_MIN);
-  const mean = window.reduce((s, v) => s + v, 0) / window.length;
-  const variance = window.reduce((s, v) => s + (v - mean) ** 2, 0) / window.length;
-  const std = Math.sqrt(variance);
-  return std > 0 ? (current - mean) / std : 0;
+// Ratcheting stop: entry-0.1% until price pushes above entry (then breakeven), then trailing
+// peak-0.1% once price clears entry+0.1%.
+function computeStop(entryPrice: number, extremePrice: number): number {
+  const armThreshold = entryPrice * (1 + ARM_PCT / 100);
+  if (extremePrice >= armThreshold) return extremePrice * (1 - TRAIL_PCT / 100);
+  if (extremePrice > entryPrice) return entryPrice;
+  return entryPrice * (1 - TRAIL_PCT / 100);
+}
+
+function checkJump(): number | null {
+  if (binBuf.length < 2) return null;
+  const now = binBuf[binBuf.length - 1];
+  while (binBuf.length > 1 && now.t - binBuf[0].t > ROLL_MS) binBuf.shift();
+  const old = binBuf[0];
+  const pct = (now.p - old.p) / old.p * 100;
+  return pct >= JUMP_PCT ? pct : null; // long-only — spot can't short without margin
 }
 
 async function onBinTick(price: number) {
-  const minuteBucket = Math.floor(Date.now() / 60_000);
-  if (currentMinuteBucket === 0) currentMinuteBucket = minuteBucket;
-  if (minuteBucket > currentMinuteBucket) {
-    if (currentMinuteLastPrice !== null) {
-      oneMinCloses.push(currentMinuteLastPrice);
-      if (oneMinCloses.length > ZSCORE_WINDOW_MIN) oneMinCloses.shift();
-    }
-    currentMinuteBucket = minuteBucket;
-  }
-  currentMinuteLastPrice = price;
+  binBuf.push({ t: Date.now(), p: price });
 
-  const zRaw = calcZ(price);
-  if (zRaw === null || zRaw > Z_ENTRY) return;
-  const z: number = zRaw;
+  const jumpPct = checkJump();
+  if (jumpPct === null) return;
   const signalTime = Date.now();
 
   // Real signal from here on -- log WHY we don't act on it, instead of silently returning, so a
@@ -134,8 +132,8 @@ async function onBinTick(price: number) {
   if (!state.enabled || state.mode !== "FLAT" || orderInFlight) return; // expected/routine, not worth logging
   function logSkip(reason: string) {
     if (Date.now() - lastSkipLog > SKIP_LOG_THROTTLE_MS) {
-      console.log(`SIGNAL SKIPPED (z=${z.toFixed(3)}): ${reason}`);
-      logSolJumpTrailBitfinexRun({ actions: [{ action: "SKIPPED", z, reason }] }).catch(() => {});
+      console.log(`SIGNAL SKIPPED (jump=${jumpPct!.toFixed(4)}%): ${reason}`);
+      logSolJumpTrailBitfinexRun({ actions: [{ action: "SKIPPED", jumpPct, reason }] }).catch(() => {});
       lastSkipLog = Date.now();
     }
   }
@@ -150,22 +148,21 @@ async function onBinTick(price: number) {
     const cappedPool = Math.min(targetPool, realUsd);
     const estQty = cappedPool / bfxAsk;
     if (estQty <= 0) { console.log(`BUY signal but no real USD available (real=${realUsd}) — skipping.`); return; }
-    console.log(`BUY signal (z=${z.toFixed(3)}) @ ask=${bfxAsk.toFixed(4)} qty~=${estQty.toFixed(4)} (real USD=${realUsd.toFixed(2)}) — submitting real order...`);
+    console.log(`BUY signal (jump=${jumpPct.toFixed(4)}%) @ ask=${bfxAsk.toFixed(4)} qty~=${estQty.toFixed(6)} (real USD=${realUsd.toFixed(2)}) — submitting real order...`);
     const fill = await submitMarketOrderFast(BFX_SYMBOL, estQty);
     const totalLatencyMs = Date.now() - signalTime;
-    const slPrice = fill.execPrice * (1 - SL_PCT / 100);
-    const tpPrice = fill.execPrice * (1 + TP_PCT / 100);
     const patch = {
       mode: "LONG" as const, sol_quantity: fill.execAmount, entry_price: fill.execPrice,
       entry_time: new Date().toISOString(), usd_balance: 0,
-      extreme_price: tpPrice, stop_price: slPrice, // extreme_price repurposed to hold the fixed TP target (no ratchet)
+      extreme_price: fill.execPrice, stop_price: computeStop(fill.execPrice, fill.execPrice),
     };
     state = { ...state, ...patch };
     await updateSolJumpTrailBitfinexState(patch);
     lastDbWrite = Date.now();
-    console.log(`BUY FILLED price=${fill.execPrice.toFixed(4)} qty=${fill.execAmount.toFixed(4)} fee=${fill.fee} z=${z.toFixed(3)} fillLatencyMs=${fill.latencyMs} totalLatencyMs=${totalLatencyMs}`);
-    await logSolJumpTrailBitfinexRun({ actions: [{ action: "BUY", price: fill.execPrice, qty: fill.execAmount, orderId: fill.orderId, z, fillLatencyMs: fill.latencyMs, totalLatencyMs }] });
+    console.log(`BUY FILLED price=${fill.execPrice.toFixed(4)} qty=${fill.execAmount.toFixed(6)} fee=${fill.fee} jump=${jumpPct.toFixed(4)}% fillLatencyMs=${fill.latencyMs} totalLatencyMs=${totalLatencyMs}`);
+    await logSolJumpTrailBitfinexRun({ actions: [{ action: "BUY", price: fill.execPrice, qty: fill.execAmount, orderId: fill.orderId, jumpPct, fillLatencyMs: fill.latencyMs, totalLatencyMs }] });
     lastRunLog = Date.now();
+    binBuf = [binBuf[binBuf.length - 1]]; // reset jump window so we don't immediately re-trigger
   } catch (err) {
     console.error("BUY order failed:", err);
     await logSolJumpTrailBitfinexRun({ actions: [{ action: "ERROR", stage: "buy", error: String(err) }] });
@@ -179,10 +176,11 @@ async function onBookUpdate() {
   const { bid, ask } = getBookBidAsk();
   if (bid === null || ask === null) return;
 
-  const slPrice = state.stop_price!;
-  const tpPrice = state.extreme_price!; // repurposed to hold the fixed TP target (no ratchet)
+  const entryPrice = state.entry_price!;
+  const extreme = state.extreme_price ?? entryPrice;
+  const stop = state.stop_price ?? computeStop(entryPrice, extreme);
 
-  if (bid <= slPrice || bid >= tpPrice) {
+  if (bid <= stop) {
     const signalTime = Date.now();
     orderInFlight = true;
     try {
@@ -192,7 +190,7 @@ async function onBookUpdate() {
       const realEth = getLiveBalance("ETH");
       const sellQty = isWalletReady() ? Math.min(origQty, realEth) : origQty;
       if (sellQty <= 0) throw new Error(`No real ETH available to sell (tracked=${origQty}, real=${realEth})`);
-      console.log(`${bid >= tpPrice ? "TP" : "SL"} signal, selling ${sellQty.toFixed(4)} ETH (tracked=${origQty.toFixed(4)}, real=${realEth.toFixed(4)}) — submitting real order...`);
+      console.log(`STOP signal, selling ${sellQty.toFixed(6)} ETH (tracked=${origQty.toFixed(6)}, real=${realEth.toFixed(6)}) — submitting real order...`);
       const fill = await submitMarketOrderFast(BFX_SYMBOL, -sellQty);
       const totalLatencyMs = Date.now() - signalTime;
       const usdOut = fill.execPrice * Math.abs(fill.execAmount);
@@ -212,7 +210,7 @@ async function onBookUpdate() {
         jump_pct: 0,
       });
       lastDbWrite = Date.now();
-      console.log(`EXIT FILLED price=${fill.execPrice.toFixed(4)} pnlUsd=${pnlUsd.toFixed(4)} pnlPct=${pnlPct.toFixed(4)} fillLatencyMs=${fill.latencyMs} totalLatencyMs=${totalLatencyMs}`);
+      console.log(`STOP FILLED price=${fill.execPrice.toFixed(4)} pnlUsd=${pnlUsd.toFixed(4)} pnlPct=${pnlPct.toFixed(4)} fillLatencyMs=${fill.latencyMs} totalLatencyMs=${totalLatencyMs}`);
       await logSolJumpTrailBitfinexRun({ actions: [{ action: "EXIT", direction: "LONG", price: fill.execPrice, pnlUsd, pnlPct, orderId: fill.orderId, fillLatencyMs: fill.latencyMs, totalLatencyMs }] });
       lastRunLog = Date.now();
     } catch (err) {
@@ -222,11 +220,17 @@ async function onBookUpdate() {
       orderInFlight = false;
     }
     return;
+  } else if (bid > extreme) {
+    state = { ...state, extreme_price: bid, stop_price: computeStop(entryPrice, bid) };
+    if (Date.now() - lastDbWrite > DB_WRITE_THROTTLE_MS) {
+      await updateSolJumpTrailBitfinexState({ extreme_price: state.extreme_price, stop_price: state.stop_price });
+      lastDbWrite = Date.now();
+    }
   }
 
   if (Date.now() - lastRunLog > RUN_LOG_INTERVAL_MS) {
     await logSolJumpTrailBitfinexRun({
-      actions: [{ action: "STATUS", mode: state.mode, bid, ask, tp: tpPrice, sl: slPrice }],
+      actions: [{ action: "STATUS", mode: state.mode, bid, ask, extreme: state.extreme_price, stop: state.stop_price }],
     });
     lastRunLog = Date.now();
   }
@@ -313,8 +317,8 @@ async function main() {
   process.on("SIGINT", shutdown);
   process.on("SIGTERM", shutdown);
 
-  console.log(`Starting LIVE ETH Z-score (fixed OCO, WS execution) worker (${INSTANCE_ID}), enabled=${state.enabled}, mode=${state.mode}`);
-  console.log(`REAL MONEY — z<=${Z_ENTRY} (${ZSCORE_WINDOW_MIN}min rolling window) triggers a real buy on ${BFX_SYMBOL}. Seed $${SEED_USD}, compounding, fixed OCO (SL=-${SL_PCT}%, TP=+${TP_PCT}%, no ratchet). Orders + fills over WS, bid/ask from the real order book.`);
+  console.log(`Starting LIVE ETH Jump Trail (ratchet, WS execution) worker (${INSTANCE_ID}), enabled=${state.enabled}, mode=${state.mode}`);
+  console.log(`REAL MONEY — jump>=${JUMP_PCT}% (2s window) triggers a real buy on ${BFX_SYMBOL}. Seed $${SEED_USD}, compounding, ratchet stop (initial -${TRAIL_PCT}%, breakeven at entry, trail past +${ARM_PCT}%). Orders + fills over WS, bid/ask from the real order book.`);
   connectBinance();
   connectPublicBook(BFX_SYMBOL, () => { onBookUpdate().catch((err) => console.error("onBookUpdate error:", err)); });
   connectAuthenticated();
