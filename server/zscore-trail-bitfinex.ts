@@ -1,15 +1,17 @@
-// REAL MONEY — BTC Jump Trail + ratchet, Worker 1's existing Render service/API key/DB tables
-// (still named eth_zscore_bitfinex_* internally -- kept as-is, same precedent used throughout
-// this session). Converted 2026-09-07 from SOL Z-score, then from plain-trail to ratchet the same
-// day after real trading confirmed the plain-trail version tracked its backtest almost exactly
-// (real -1.624% vs backtest -1.658% over the same window, verified independently trade-by-trade)
-// -- proof the WS execution path itself is trustworthy, which justified pushing further on exit
-// design. Ratchet backtested clearly stronger than plain trail on this exact Jump entry, 2yr real
-// spread: BTC $24,392.83 total (vs $15,742.80 plain), 9/104 losing weeks (vs 31/104 plain).
+// REAL MONEY — BTC Jump Trail, plain (no ratchet), Worker 1's existing Render service/API
+// key/DB tables (still named eth_zscore_bitfinex_* internally -- kept as-is, same precedent
+// used throughout this session). Converted 2026-09-07 from SOL Z-score to plain-trail Jump, then
+// to ratchet the same day (ratchet backtested stronger: $24,392.83 vs $15,742.80 over 2yr), then
+// back to plain-trail again a few hours later once ratchet's real trading badly diverged from
+// its own backtest (see project_ratchet_whipsaw_finding memory) -- the ratchet's breakeven-on-
+// touch stop was getting tripped by ordinary noise seconds after entry, causing rapid re-entry/
+// exit chop that a 1-min-candle backtest structurally can't represent (live jump signal runs on
+// a continuous 2s tick window, not 1-min closes). Reverting to plain trail because it's the
+// config that's actually been proven to track its own backtest closely in real trading (real
+// -1.624% vs backtest -1.658% over the same window, verified independently trade-by-trade).
 //
-// STRATEGY: jump>=0.02% in a 2s rolling window (unchanged), exit now the ratcheting stop
-// (SL=ARM=0.1%): entry-0.1% initial stop, moves to breakeven once price clears entry, resumes
-// trailing peak-0.1% once price clears entry+0.1%.
+// STRATEGY: jump>=0.02% in a 2s rolling window, exit on a plain trailing stop -- TRAIL_PCT below
+// the peak price since entry, no breakeven arm, no ratchet.
 //
 // EXECUTION: reuses the proven WS-native path from tonight's rewrite (lib/bitfinex-trading-ws.ts)
 // -- orders over the authenticated WS, fills accumulated across every `te` partial-fill event
@@ -40,7 +42,6 @@ const BINANCE_WS       = "wss://stream.binance.com:9443/ws/btcusdt@bookTicker";
 const JUMP_PCT         = 0.02;
 const ROLL_MS          = 2000;
 const TRAIL_PCT        = 0.1;
-const ARM_PCT          = 0.1; // price must clear entry + this% before the stop trails past breakeven
 const SEED_USD         = 20;
 const HEARTBEAT_MS     = 10_000;
 const LOCK_STALE_MS    = 30_000;
@@ -97,13 +98,9 @@ async function heartbeat() {
   await updateEthZscoreBitfinexState({ lock_heartbeat: new Date().toISOString() });
 }
 
-// Ratcheting stop: entry-0.1% until price pushes above entry (then breakeven), then trailing
-// peak-0.1% once price clears entry+0.1%.
+// Plain trailing stop: TRAIL_PCT below the highest price seen since entry. No breakeven arm.
 function computeStop(entryPrice: number, extremePrice: number): number {
-  const armThreshold = entryPrice * (1 + ARM_PCT / 100);
-  if (extremePrice >= armThreshold) return extremePrice * (1 - TRAIL_PCT / 100);
-  if (extremePrice > entryPrice) return entryPrice;
-  return entryPrice * (1 - TRAIL_PCT / 100);
+  return extremePrice * (1 - TRAIL_PCT / 100);
 }
 
 function checkJump(): number | null {
@@ -317,8 +314,8 @@ async function main() {
   process.on("SIGINT", shutdown);
   process.on("SIGTERM", shutdown);
 
-  console.log(`Starting LIVE BTC Jump Trail (ratchet, WS execution) worker (${INSTANCE_ID}), enabled=${state.enabled}, mode=${state.mode}`);
-  console.log(`REAL MONEY — jump>=${JUMP_PCT}% (2s window) triggers a real buy on ${BFX_SYMBOL}. Seed $${SEED_USD}, compounding, ratchet stop (initial -${TRAIL_PCT}%, breakeven at entry, trail past +${ARM_PCT}%). Orders + fills over WS, bid/ask from the real order book.`);
+  console.log(`Starting LIVE BTC Jump Trail (plain trail, WS execution) worker (${INSTANCE_ID}), enabled=${state.enabled}, mode=${state.mode}`);
+  console.log(`REAL MONEY — jump>=${JUMP_PCT}% (2s window) triggers a real buy on ${BFX_SYMBOL}. Seed $${SEED_USD}, compounding, plain trailing stop -${TRAIL_PCT}% below peak since entry. Orders + fills over WS, bid/ask from the real order book.`);
   connectBinance();
   connectPublicBook(BFX_SYMBOL, () => { onBookUpdate().catch((err) => console.error("onBookUpdate error:", err)); });
   connectAuthenticated();

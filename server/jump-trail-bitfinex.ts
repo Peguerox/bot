@@ -1,328 +1,376 @@
-// REAL MONEY — ETH Jump Trail + ratchet, replacing Z-score + fixed OCO (0.1%/0.2%) on
-// 2026-09-07.
-//
-// WHY: real trading confirmed Worker 2's OCO exit was tracking its own backtest 2.18x worse
-// (real -3.046% vs backtest -1.400% over the same window) while Worker 1's Jump+ratchet on BTC
-// tracked almost exactly (real -1.624% vs backtest -1.658%, verified independently trade-by-
-// trade). OCO's fixed SL is where a real trade already showed -0.216% loss against an intended
-// -0.1% stop -- structurally the most exposed exit to a fast market gap. A trailing/ratchet exit
-// doesn't have that fixed-price-target fragility. Switching Worker 2 to the same Jump+ratchet
-// design already proven on Worker 1, on ETH -- the strongest backtest of the whole session.
-//
-// STRATEGY: jump>=0.02% in a 2s rolling window, ratcheting stop exit (SL=ARM=0.1%): entry-0.1%
-// initial stop, moves to breakeven once price clears entry, resumes trailing peak-0.1% once price
-// clears entry+0.1%. 2yr backtest, real spread 0.0072% half: $58,825.85 total (fixed $1000/trade),
-// 33.8% win rate, 2/104 losing weeks -- the strongest number of any config tested this session.
-//
-// EXECUTION: reuses the proven WS-native path (lib/bitfinex-trading-ws.ts) -- orders over the
-// authenticated WS, fills accumulated across every `te` partial-fill event, bid/ask from the real
-// order book, not the throttled ticker. Same latency logging as both other live bots.
-//
-// SIGNAL: Binance ETHUSDT's own mid-price ((bestBid+bestAsk)/2 from bookTicker), not raw
-// last-trade price -- avoids biasing the jump calc toward whichever side of the spread the last
-// print hit.
-//
-// DB: reuses Worker 2's existing Render service/API key/DB tables (still named
-// sol_jump_trail_bitfinex_* internally -- same precedent as every other worker this session).
+// NO LONGER REAL MONEY. Worker 2's Render service/API key repurposed 2026-09-07 from the ETH
+// Jump+ratchet live trading bot (retired after real trading badly diverged from its own
+// backtest -- see project_ratchet_whipsaw_finding memory) into a signal-agnostic live
+// microstructure logger. No entry/exit logic, no orders, no positions held. Every 1s this
+// snapshots live book/spread/trade-flow/cross-venue conditions for BOTH BTC and ETH on Bitfinex
+// (+ Binance for cross-venue features) and, once 60s has passed, backfills what price actually
+// did next (5s/15s/30s/60s) before writing one labeled row to `market_ticks`. Purpose: build a
+// dataset to mine for real stay/exit or entry/exit patterns (starting with plain supervised
+// classification: predict up/down/flat per horizon) instead of guessing at static rules first.
+// Runs on Worker 2's existing pod so the 2-worker budget stays at 2 -- no new Render service.
+// Worker 1 continues live BTC trading in parallel (plain trail, see zscore-trail-bitfinex.ts).
 import dotenv from "dotenv";
 dotenv.config({ path: ".env.local" });
 
 import WebSocket from "ws";
-import os from "os";
-import crypto from "crypto";
-import {
-  getSolJumpTrailBitfinexState, updateSolJumpTrailBitfinexState, recordSolJumpTrailBitfinexTrade,
-  logSolJumpTrailBitfinexRun, type SolJumpTrailBitfinexState,
-} from "../lib/sol-jump-trail-bitfinex-db";
-import { submitMarketOrderSafe } from "../lib/bitfinex-auth";
-import {
-  connectPublicBook, getBookBidAsk, isBookReady, bookMessageAge,
-  connectAuthenticated, getLiveBalance, isWalletReady, submitMarketOrderFast,
-} from "../lib/bitfinex-trading-ws";
+import { insertMarketTick } from "../lib/market-ticks-db";
 
-const BFX_SYMBOL       = "tETHUSD";
-const BINANCE_WS       = "wss://stream.binance.com:9443/ws/ethusdt@bookTicker";
-const JUMP_PCT         = 0.02;
-const ROLL_MS          = 2000;
-const TRAIL_PCT        = 0.1;
-const ARM_PCT          = 0.1; // price must clear entry + this% before the stop trails past breakeven
-const SEED_USD         = 20;
-const HEARTBEAT_MS     = 10_000;
-const LOCK_STALE_MS    = 30_000;
-const DB_WRITE_THROTTLE_MS = 2_000;
-const RUN_LOG_INTERVAL_MS  = 5 * 60_000;
-const WATCHDOG_INTERVAL_MS = 5_000;
-const BOOK_STALE_MS        = 15_000;
-const BOOK_EMERGENCY_MS    = 25_000;
+const SYMBOLS = [
+  { bfx: "tBTCUSD", binance: "btcusdt" },
+  { bfx: "tETHUSD", binance: "ethusdt" },
+];
 
-const INSTANCE_ID = `${os.hostname()}-${process.pid}-${crypto.randomBytes(3).toString("hex")}`;
+const HISTORY_MS = 65_000; // slightly more than the 60s max label horizon
+const LABEL_HORIZONS_MS = [5_000, 15_000, 30_000, 60_000];
+const SLIPPAGE_NOTIONAL_USD = 500;
+const FLAT_EPS_PCT = 0.005;
 
-let state: SolJumpTrailBitfinexState;
-let lastDbWrite = 0;
-let lastRunLog = 0;
-let lastSkipLog = 0;
-const SKIP_LOG_THROTTLE_MS = 30_000;
-let orderInFlight = false;
-let emergencyInProgress = false;
-let binBuf: { t: number; p: number }[] = [];
+type BookLevel = { count: number; amount: number };
+type Trade = { ts: number; price: number; amount: number };
+type HistEntry = { ts: number; mid: number; spreadPct: number; imbalance: number };
+type Pending = { ts: number; mid: number; features: Record<string, unknown> };
 
-async function acquireLock(): Promise<boolean> {
-  state = await getSolJumpTrailBitfinexState();
-  const heartbeatAge = state.lock_heartbeat ? Date.now() - new Date(state.lock_heartbeat).getTime() : Infinity;
-  if (state.lock_owner && heartbeatAge < LOCK_STALE_MS) {
-    console.error(`Refusing to start: lock held by ${state.lock_owner}, last heartbeat ${heartbeatAge}ms ago`);
-    return false;
+type SymState = {
+  bfx: string;
+  binance: string;
+  book: Map<number, BookLevel>;
+  bookChanId: number | null;
+  bookReady: boolean;
+  tradesChanId: number | null;
+  trades: Trade[];
+  history: HistEntry[];
+  pending: Pending[];
+  prevLevelKey: Set<string>;
+  binanceBid: number | null;
+  binanceAsk: number | null;
+  binanceBidQty: number | null;
+  binanceAskQty: number | null;
+  prevVelocity1s: number | null;
+};
+
+const states = new Map<string, SymState>();
+for (const s of SYMBOLS) {
+  states.set(s.bfx, {
+    bfx: s.bfx, binance: s.binance,
+    book: new Map(), bookChanId: null, bookReady: false,
+    tradesChanId: null, trades: [], history: [], pending: [],
+    prevLevelKey: new Set(),
+    binanceBid: null, binanceAsk: null, binanceBidQty: null, binanceAskQty: null,
+    prevVelocity1s: null,
+  });
+}
+
+function applyBookRow(state: SymState, row: [number, number, number]) {
+  const [price, count, amount] = row;
+  if (count === 0) state.book.delete(price);
+  else state.book.set(price, { count, amount });
+}
+
+function bestBidAsk(state: SymState): { bid: number | null; ask: number | null } {
+  let bid: number | null = null, ask: number | null = null;
+  for (const [price, lvl] of state.book) {
+    if (lvl.amount > 0 && (bid === null || price > bid)) bid = price;
+    if (lvl.amount < 0 && (ask === null || price < ask)) ask = price;
   }
-  await updateSolJumpTrailBitfinexState({ lock_owner: INSTANCE_ID, lock_heartbeat: new Date().toISOString() });
-  console.log(`Lock acquired as ${INSTANCE_ID}`);
-  return true;
+  return { bid, ask };
 }
 
-async function heartbeat() {
-  const fresh = await getSolJumpTrailBitfinexState();
-  if (fresh.lock_owner !== INSTANCE_ID) {
-    console.error(`Lost lock to ${fresh.lock_owner} — another instance took over. Exiting.`);
-    process.exit(1);
+function sortedLevels(state: SymState, side: "bid" | "ask"): { price: number; size: number }[] {
+  const rows = [...state.book.entries()]
+    .filter(([, lvl]) => (side === "bid" ? lvl.amount > 0 : lvl.amount < 0))
+    .map(([price, lvl]) => ({ price, size: Math.abs(lvl.amount) }));
+  rows.sort((a, b) => (side === "bid" ? b.price - a.price : a.price - b.price));
+  return rows;
+}
+
+function depthSum(levels: { size: number }[], n: number): number {
+  return levels.slice(0, n).reduce((s, l) => s + l.size, 0);
+}
+
+function estimateSlippagePct(levels: { price: number; size: number }[], bestPrice: number, notionalUsd: number): number | null {
+  let remaining = notionalUsd, cost = 0, filled = 0;
+  for (const l of levels) {
+    const levelNotional = l.price * l.size;
+    const take = Math.min(remaining, levelNotional);
+    const takeSize = take / l.price;
+    cost += take;
+    filled += takeSize;
+    remaining -= take;
+    if (remaining <= 0) break;
   }
-  if (orderInFlight) {
-    state.enabled = fresh.enabled;
-  } else {
-    state = fresh;
+  if (filled === 0 || remaining > 0) return null; // book too thin to fill
+  const avgPrice = cost / filled;
+  return (avgPrice - bestPrice) / bestPrice * 100;
+}
+
+function findHistAt(state: SymState, msAgo: number, now: number): HistEntry | null {
+  const target = now - msAgo;
+  let best: HistEntry | null = null, bestDiff = Infinity;
+  for (const h of state.history) {
+    const diff = Math.abs(h.ts - target);
+    if (diff < bestDiff) { bestDiff = diff; best = h; }
   }
-  await updateSolJumpTrailBitfinexState({ lock_heartbeat: new Date().toISOString() });
+  return bestDiff <= 1_500 ? best : null;
 }
 
-async function releaseLock() {
-  try {
-    const fresh = await getSolJumpTrailBitfinexState();
-    if (fresh.lock_owner === INSTANCE_ID) {
-      await updateSolJumpTrailBitfinexState({ lock_owner: null, lock_heartbeat: null });
-      console.log("Lock released cleanly.");
-    }
-  } catch (err) { console.error("releaseLock failed:", err); }
+function stdev(values: number[]): number | null {
+  if (values.length < 2) return null;
+  const mean = values.reduce((a, b) => a + b, 0) / values.length;
+  const variance = values.reduce((a, b) => a + (b - mean) ** 2, 0) / values.length;
+  return Math.sqrt(variance);
 }
 
-// Ratcheting stop: entry-0.1% until price pushes above entry (then breakeven), then trailing
-// peak-0.1% once price clears entry+0.1%.
-function computeStop(entryPrice: number, extremePrice: number): number {
-  const armThreshold = entryPrice * (1 + ARM_PCT / 100);
-  if (extremePrice >= armThreshold) return extremePrice * (1 - TRAIL_PCT / 100);
-  if (extremePrice > entryPrice) return entryPrice;
-  return entryPrice * (1 - TRAIL_PCT / 100);
-}
+function computeFeatures(state: SymState, now: number): { mid: number; features: Record<string, unknown> } | null {
+  const { bid, ask } = bestBidAsk(state);
+  if (bid === null || ask === null) return null;
+  const mid = (bid + ask) / 2;
+  const spreadPct = (ask - bid) / mid * 100;
 
-function checkJump(): number | null {
-  if (binBuf.length < 2) return null;
-  const now = binBuf[binBuf.length - 1];
-  while (binBuf.length > 1 && now.t - binBuf[0].t > ROLL_MS) binBuf.shift();
-  const old = binBuf[0];
-  const pct = (now.p - old.p) / old.p * 100;
-  return pct >= JUMP_PCT ? pct : null; // long-only — spot can't short without margin
-}
+  const bidLevels = sortedLevels(state, "bid");
+  const askLevels = sortedLevels(state, "ask");
+  const bidDepthTop3 = depthSum(bidLevels, 3), bidDepthTop10 = depthSum(bidLevels, 10);
+  const askDepthTop3 = depthSum(askLevels, 3), askDepthTop10 = depthSum(askLevels, 10);
+  const imbalance = (bidDepthTop10 - askDepthTop10) / (bidDepthTop10 + askDepthTop10 || 1);
 
-async function onBinTick(price: number) {
-  binBuf.push({ t: Date.now(), p: price });
+  const bidSize0 = bidLevels[0]?.size ?? 0, askSize0 = askLevels[0]?.size ?? 0;
+  const microprice = (bidSize0 + askSize0) > 0
+    ? (bid * askSize0 + ask * bidSize0) / (bidSize0 + askSize0)
+    : mid;
+  const micropriceDivergencePct = (microprice - mid) / mid * 100;
 
-  const jumpPct = checkJump();
-  if (jumpPct === null) return;
-  const signalTime = Date.now();
+  const levelKey = new Set<string>([...state.book.entries()].map(([p, l]) => `${p}:${l.amount}`));
+  let churn = 0;
+  for (const k of levelKey) if (!state.prevLevelKey.has(k)) churn++;
+  for (const k of state.prevLevelKey) if (!levelKey.has(k)) churn++;
+  state.prevLevelKey = levelKey;
 
-  // Real signal from here on -- log WHY we don't act on it, instead of silently returning, so a
-  // signal that never results in a trade is never a mystery.
-  if (!state.enabled || state.mode !== "FLAT" || orderInFlight) return; // expected/routine, not worth logging
-  function logSkip(reason: string) {
-    if (Date.now() - lastSkipLog > SKIP_LOG_THROTTLE_MS) {
-      console.log(`SIGNAL SKIPPED (jump=${jumpPct!.toFixed(4)}%): ${reason}`);
-      logSolJumpTrailBitfinexRun({ actions: [{ action: "SKIPPED", jumpPct, reason }] }).catch(() => {});
-      lastSkipLog = Date.now();
-    }
-  }
-  const { bid: bfxBid, ask: bfxAsk } = getBookBidAsk();
-  if (!isBookReady() || bfxAsk === null || bfxBid === null) { logSkip("Order book not ready yet"); return; }
-  if (!isWalletReady()) { logSkip("Wallet WS not authenticated/ready yet"); return; }
+  const recentTrades5s = state.trades.filter((t) => t.ts >= now - 5_000);
+  const trades60s = state.trades.filter((t) => t.ts >= now - 60_000);
+  const lastTrade = state.trades[state.trades.length - 1] ?? null;
+  const buyVol5s = recentTrades5s.filter((t) => t.amount > 0).reduce((s, t) => s + t.amount, 0);
+  const sellVol5s = recentTrades5s.filter((t) => t.amount < 0).reduce((s, t) => s + Math.abs(t.amount), 0);
+  const vwap5sNotional = recentTrades5s.reduce((s, t) => s + t.price * Math.abs(t.amount), 0);
+  const vwap5sVolume = recentTrades5s.reduce((s, t) => s + Math.abs(t.amount), 0);
+  const vwap5s = vwap5sVolume > 0 ? vwap5sNotional / vwap5sVolume : null;
+  const avgTradeSize60s = trades60s.length > 0
+    ? trades60s.reduce((s, t) => s + Math.abs(t.amount), 0) / trades60s.length
+    : null;
+  const maxTradeSize5s = recentTrades5s.length > 0 ? Math.max(...recentTrades5s.map((t) => Math.abs(t.amount))) : 0;
+  const largeTradeFlag = avgTradeSize60s !== null && avgTradeSize60s > 0 && maxTradeSize5s > 5 * avgTradeSize60s;
 
-  orderInFlight = true;
-  try {
-    const targetPool = SEED_USD + (state.realized_pnl_usd ?? 0);
-    const realUsd = getLiveBalance("USD");
-    const cappedPool = Math.min(targetPool, realUsd);
-    const estQty = cappedPool / bfxAsk;
-    if (estQty <= 0) { console.log(`BUY signal but no real USD available (real=${realUsd}) — skipping.`); return; }
-    console.log(`BUY signal (jump=${jumpPct.toFixed(4)}%) @ ask=${bfxAsk.toFixed(4)} qty~=${estQty.toFixed(6)} (real USD=${realUsd.toFixed(2)}) — submitting real order...`);
-    const fill = await submitMarketOrderFast(BFX_SYMBOL, estQty);
-    const totalLatencyMs = Date.now() - signalTime;
-    const patch = {
-      mode: "LONG" as const, sol_quantity: fill.execAmount, entry_price: fill.execPrice,
-      entry_time: new Date().toISOString(), usd_balance: 0,
-      extreme_price: fill.execPrice, stop_price: computeStop(fill.execPrice, fill.execPrice),
+  const vel1s = findHistAt(state, 1_000, now);
+  const vel5s = findHistAt(state, 5_000, now);
+  const vel15s = findHistAt(state, 15_000, now);
+  const vel30s = findHistAt(state, 30_000, now);
+  const vel60s = findHistAt(state, 60_000, now);
+  const velocity1sPct = vel1s ? (mid - vel1s.mid) / vel1s.mid * 100 : null;
+  const acceleration = velocity1sPct !== null && state.prevVelocity1s !== null ? velocity1sPct - state.prevVelocity1s : null;
+  if (velocity1sPct !== null) state.prevVelocity1s = velocity1sPct;
+
+  const recentHist = state.history.slice(-15);
+  const returns1s: number[] = [];
+  for (let i = 1; i < recentHist.length; i++) returns1s.push((recentHist[i].mid - recentHist[i - 1].mid) / recentHist[i - 1].mid * 100);
+  const realizedVol15s = stdev(returns1s);
+  const spreadVol15s = stdev(recentHist.map((h) => h.spreadPct));
+  const imbalanceTrend5s = vel5s ? imbalance - vel5s.imbalance : null;
+
+  const slippageBuyPct = estimateSlippagePct(askLevels, ask, SLIPPAGE_NOTIONAL_USD);
+  const slippageSellPct = estimateSlippagePct(bidLevels, bid, SLIPPAGE_NOTIONAL_USD);
+
+  let binance: Record<string, unknown> | null = null;
+  if (state.binanceBid !== null && state.binanceAsk !== null) {
+    const bMid = (state.binanceBid + state.binanceAsk) / 2;
+    const bImb = state.binanceBidQty !== null && state.binanceAskQty !== null && (state.binanceBidQty + state.binanceAskQty) > 0
+      ? (state.binanceBidQty - state.binanceAskQty) / (state.binanceBidQty + state.binanceAskQty)
+      : null;
+    binance = {
+      mid: bMid,
+      bestBid: state.binanceBid,
+      bestAsk: state.binanceAsk,
+      spreadPct: (state.binanceAsk - state.binanceBid) / bMid * 100,
+      imbalance: bImb,
+      venueGapPct: (bMid - mid) / mid * 100,
     };
-    state = { ...state, ...patch };
-    await updateSolJumpTrailBitfinexState(patch);
-    lastDbWrite = Date.now();
-    console.log(`BUY FILLED price=${fill.execPrice.toFixed(4)} qty=${fill.execAmount.toFixed(6)} fee=${fill.fee} jump=${jumpPct.toFixed(4)}% fillLatencyMs=${fill.latencyMs} totalLatencyMs=${totalLatencyMs}`);
-    await logSolJumpTrailBitfinexRun({ actions: [{ action: "BUY", price: fill.execPrice, qty: fill.execAmount, orderId: fill.orderId, jumpPct, fillLatencyMs: fill.latencyMs, totalLatencyMs }] });
-    lastRunLog = Date.now();
-    binBuf = [binBuf[binBuf.length - 1]]; // reset jump window so we don't immediately re-trigger
-  } catch (err) {
-    console.error("BUY order failed:", err);
-    await logSolJumpTrailBitfinexRun({ actions: [{ action: "ERROR", stage: "buy", error: String(err) }] });
-  } finally {
-    orderInFlight = false;
+  }
+
+  return {
+    mid,
+    features: {
+      bestBid: bid, bestAsk: ask, spreadPct,
+      bidDepthTop3, bidDepthTop10, askDepthTop3, askDepthTop10,
+      imbalance, bidLevelCount: bidLevels.length, askLevelCount: askLevels.length,
+      bidSlope: bidDepthTop10 > 0 ? bidDepthTop3 / bidDepthTop10 : null,
+      askSlope: askDepthTop10 > 0 ? askDepthTop3 / askDepthTop10 : null,
+      bookChurn: churn,
+      microprice, micropriceDivergencePct,
+      lastTradePrice: lastTrade?.price ?? null,
+      lastTradeSize: lastTrade ? Math.abs(lastTrade.amount) : null,
+      lastTradeSide: lastTrade ? (lastTrade.amount > 0 ? "buy" : "sell") : null,
+      timeSinceLastTradeMs: lastTrade ? now - lastTrade.ts : null,
+      tradeRate1s: state.trades.filter((t) => t.ts >= now - 1_000).length,
+      buyVol5s, sellVol5s, vwap5s, largeTradeFlag,
+      velocity1sPct,
+      velocity5sPct: vel5s ? (mid - vel5s.mid) / vel5s.mid * 100 : null,
+      velocity15sPct: vel15s ? (mid - vel15s.mid) / vel15s.mid * 100 : null,
+      velocity30sPct: vel30s ? (mid - vel30s.mid) / vel30s.mid * 100 : null,
+      velocity60sPct: vel60s ? (mid - vel60s.mid) / vel60s.mid * 100 : null,
+      acceleration, realizedVol15s, spreadVol15s, imbalanceTrend5s,
+      slippageBuyPct, slippageSellPct,
+      binance,
+    },
+  };
+}
+
+function labelDirection(pctChange: number): "up" | "down" | "flat" {
+  if (pctChange > FLAT_EPS_PCT) return "up";
+  if (pctChange < -FLAT_EPS_PCT) return "down";
+  return "flat";
+}
+
+async function flushPending(state: SymState, now: number) {
+  const ready = state.pending.filter((p) => now - p.ts >= 60_000);
+  if (ready.length === 0) return;
+  state.pending = state.pending.filter((p) => now - p.ts < 60_000);
+
+  for (const p of ready) {
+    const labels: Record<string, unknown> = {};
+    // Look up actual future prices relative to p.ts (not "now"-relative), via direct scan.
+    for (const horizonMs of LABEL_HORIZONS_MS) {
+      const targetTs = p.ts + horizonMs;
+      let best: HistEntry | null = null, bestDiff = Infinity;
+      for (const h of state.history) {
+        const diff = Math.abs(h.ts - targetTs);
+        if (diff < bestDiff) { bestDiff = diff; best = h; }
+      }
+      const key = `${horizonMs / 1000}s`;
+      if (best && bestDiff <= 1_500) {
+        const pct = (best.mid - p.mid) / p.mid * 100;
+        labels[`pct${key}`] = pct;
+        labels[`dir${key}`] = labelDirection(pct);
+      } else {
+        labels[`pct${key}`] = null;
+        labels[`dir${key}`] = null;
+      }
+    }
+    await insertMarketTick({
+      symbol: state.bfx,
+      ts: new Date(p.ts).toISOString(),
+      mid_price: p.mid,
+      features: p.features,
+      labels,
+    });
   }
 }
 
-async function onBookUpdate() {
-  if (!state.enabled || orderInFlight || state.mode !== "LONG") return;
-  const { bid, ask } = getBookBidAsk();
-  if (bid === null || ask === null) return;
+function connectBitfinex() {
+  const ws = new WebSocket("wss://api-pub.bitfinex.com/ws/2");
 
-  const entryPrice = state.entry_price!;
-  const extreme = state.extreme_price ?? entryPrice;
-  const stop = state.stop_price ?? computeStop(entryPrice, extreme);
-
-  if (bid <= stop) {
-    const signalTime = Date.now();
-    orderInFlight = true;
-    try {
-      const origEntryPrice = state.entry_price!;
-      const origQty = state.sol_quantity!;
-      const origEntryTime = state.entry_time!;
-      const realEth = getLiveBalance("ETH");
-      const sellQty = isWalletReady() ? Math.min(origQty, realEth) : origQty;
-      if (sellQty <= 0) throw new Error(`No real ETH available to sell (tracked=${origQty}, real=${realEth})`);
-      console.log(`STOP signal, selling ${sellQty.toFixed(6)} ETH (tracked=${origQty.toFixed(6)}, real=${realEth.toFixed(6)}) — submitting real order...`);
-      const fill = await submitMarketOrderFast(BFX_SYMBOL, -sellQty);
-      const totalLatencyMs = Date.now() - signalTime;
-      const usdOut = fill.execPrice * Math.abs(fill.execAmount);
-      const usdIn  = origEntryPrice * Math.abs(fill.execAmount);
-      const pnlUsd = usdOut - usdIn;
-      const pnlPct = (pnlUsd / usdIn) * 100;
-
-      const patch = {
-        mode: "FLAT" as const, sol_quantity: null, entry_price: null, entry_time: null,
-        usd_balance: usdOut, extreme_price: null, stop_price: null,
-      };
-      state = { ...state, ...patch };
-      await updateSolJumpTrailBitfinexState(patch);
-      await recordSolJumpTrailBitfinexTrade({
-        direction: "LONG", entry_price: origEntryPrice, exit_price: fill.execPrice, sol_quantity: Math.abs(fill.execAmount),
-        usd_in: usdIn, usd_out: usdOut, pnl_usd: pnlUsd, pnl_pct: pnlPct, entry_time: origEntryTime,
-        jump_pct: 0,
-      });
-      lastDbWrite = Date.now();
-      console.log(`STOP FILLED price=${fill.execPrice.toFixed(4)} pnlUsd=${pnlUsd.toFixed(4)} pnlPct=${pnlPct.toFixed(4)} fillLatencyMs=${fill.latencyMs} totalLatencyMs=${totalLatencyMs}`);
-      await logSolJumpTrailBitfinexRun({ actions: [{ action: "EXIT", direction: "LONG", price: fill.execPrice, pnlUsd, pnlPct, orderId: fill.orderId, fillLatencyMs: fill.latencyMs, totalLatencyMs }] });
-      lastRunLog = Date.now();
-    } catch (err) {
-      console.error("SELL order failed:", err);
-      await logSolJumpTrailBitfinexRun({ actions: [{ action: "ERROR", stage: "sell", error: String(err) }] });
-    } finally {
-      orderInFlight = false;
+  ws.on("open", () => {
+    console.log("Bitfinex WS connected, subscribing book+trades for", SYMBOLS.map((s) => s.bfx).join(", "));
+    for (const s of SYMBOLS) {
+      ws.send(JSON.stringify({ event: "subscribe", channel: "book", symbol: s.bfx, prec: "P0", freq: "F0", len: "25" }));
+      ws.send(JSON.stringify({ event: "subscribe", channel: "trades", symbol: s.bfx }));
     }
-    return;
-  } else if (bid > extreme) {
-    state = { ...state, extreme_price: bid, stop_price: computeStop(entryPrice, bid) };
-    if (Date.now() - lastDbWrite > DB_WRITE_THROTTLE_MS) {
-      await updateSolJumpTrailBitfinexState({ extreme_price: state.extreme_price, stop_price: state.stop_price });
-      lastDbWrite = Date.now();
-    }
-  }
+  });
 
-  if (Date.now() - lastRunLog > RUN_LOG_INTERVAL_MS) {
-    await logSolJumpTrailBitfinexRun({
-      actions: [{ action: "STATUS", mode: state.mode, bid, ask, extreme: state.extreme_price, stop: state.stop_price }],
-    });
-    lastRunLog = Date.now();
-  }
+  const chanToSymbol = new Map<number, { bfx: string; channel: "book" | "trades" }>();
+
+  ws.on("message", (raw: Buffer) => {
+    let msg: any;
+    try { msg = JSON.parse(raw.toString()); } catch { return; }
+
+    if (msg.event === "subscribed") {
+      if (msg.channel === "book" || msg.channel === "trades") {
+        chanToSymbol.set(msg.chanId, { bfx: msg.symbol, channel: msg.channel });
+        const state = states.get(msg.symbol);
+        if (state) {
+          if (msg.channel === "book") { state.bookChanId = msg.chanId; state.book.clear(); state.bookReady = false; }
+          else state.tradesChanId = msg.chanId;
+        }
+      }
+      return;
+    }
+
+    if (!Array.isArray(msg) || msg[1] === "hb") return;
+    const meta = chanToSymbol.get(msg[0]);
+    if (!meta) return;
+    const state = states.get(meta.bfx);
+    if (!state) return;
+
+    if (meta.channel === "book") {
+      const data = msg[1];
+      if (Array.isArray(data[0])) {
+        state.book.clear();
+        for (const row of data) applyBookRow(state, row);
+        state.bookReady = true;
+      } else {
+        applyBookRow(state, data);
+      }
+    } else if (meta.channel === "trades") {
+      if (msg[1] === "te") {
+        const [, , mts, amount, price] = msg[2];
+        state.trades.push({ ts: mts, price, amount });
+      }
+      // ignore "tu" (duplicate/updated copy of the same trade) and the initial snapshot array
+    }
+  });
+
+  ws.on("error", (err) => console.error("Bitfinex WS error:", err));
+  ws.on("close", () => {
+    console.log("Bitfinex WS closed, reconnecting in 2s...");
+    for (const state of states.values()) { state.bookReady = false; state.book.clear(); }
+    setTimeout(connectBitfinex, 2_000);
+  });
 }
 
 function connectBinance() {
-  const ws = new WebSocket(BINANCE_WS);
-  ws.on("open", () => console.log("Binance WS connected (bookTicker, mid-price signal)"));
+  const streams = SYMBOLS.map((s) => `${s.binance}@bookTicker`).join("/");
+  const ws = new WebSocket(`wss://stream.binance.com:9443/stream?streams=${streams}`);
+  const streamToBfx = new Map(SYMBOLS.map((s) => [`${s.binance}@bookTicker`, s.bfx]));
+
+  ws.on("open", () => console.log("Binance WS connected, streaming bookTicker for", SYMBOLS.map((s) => s.binance).join(", ")));
+
   ws.on("message", (raw: Buffer) => {
-    try {
-      const msg = JSON.parse(raw.toString());
-      const bid = parseFloat(msg.b), ask = parseFloat(msg.a);
-      if (bid && ask) { const mid = (bid + ask) / 2; onBinTick(mid).catch((err) => console.error("onBinTick error:", err)); }
-    } catch {}
+    let msg: any;
+    try { msg = JSON.parse(raw.toString()); } catch { return; }
+    const bfx = streamToBfx.get(msg.stream);
+    if (!bfx) return;
+    const state = states.get(bfx);
+    if (!state) return;
+    const d = msg.data;
+    state.binanceBid = parseFloat(d.b);
+    state.binanceAsk = parseFloat(d.a);
+    state.binanceBidQty = parseFloat(d.B);
+    state.binanceAskQty = parseFloat(d.A);
   });
-  ws.on("error", (e) => console.error("Binance WS error:", e));
-  ws.on("close", () => { console.log("Binance WS closed, reconnecting in 2s..."); setTimeout(connectBinance, 2000); });
-  return ws;
+
+  ws.on("error", (err) => console.error("Binance WS error:", err));
+  ws.on("close", () => {
+    console.log("Binance WS closed, reconnecting in 2s...");
+    setTimeout(connectBinance, 2_000);
+  });
 }
 
-async function emergencyFlatten(reason: string) {
-  if (emergencyInProgress) return;
-  emergencyInProgress = true;
-  try {
-    console.error(`EMERGENCY FLATTEN triggered: ${reason}`);
-    await logSolJumpTrailBitfinexRun({ actions: [{ action: "ERROR", stage: "watchdog", error: reason }] }).catch(() => {});
-    const fresh = await getSolJumpTrailBitfinexState();
-    if (fresh.mode !== "LONG" || !fresh.sol_quantity) {
-      console.error("Watchdog: not holding per DB state, nothing to flatten.");
-      return;
-    }
-    const fill = await submitMarketOrderSafe(BFX_SYMBOL, -fresh.sol_quantity, "ETH");
-    const usdOut = fill.execPrice * Math.abs(fill.execAmount);
-    const usdIn = fresh.entry_price! * fresh.sol_quantity;
-    const pnlUsd = usdOut - usdIn;
-    const pnlPct = (pnlUsd / usdIn) * 100;
-    await updateSolJumpTrailBitfinexState({
-      mode: "FLAT", sol_quantity: null, entry_price: null, entry_time: null,
-      usd_balance: usdOut, extreme_price: null, stop_price: null, enabled: false,
-    });
-    await recordSolJumpTrailBitfinexTrade({
-      direction: "LONG", entry_price: fresh.entry_price!, exit_price: fill.execPrice, sol_quantity: fresh.sol_quantity,
-      usd_in: usdIn, usd_out: usdOut, pnl_usd: pnlUsd, pnl_pct: pnlPct, entry_time: fresh.entry_time!,
-      jump_pct: 0,
-    });
-    console.error(`EMERGENCY FLATTEN complete @ ${fill.execPrice}, pnlPct=${pnlPct.toFixed(4)}. Bot paused (enabled=false).`);
-    await logSolJumpTrailBitfinexRun({ actions: [{ action: "EXIT", direction: "LONG", price: fill.execPrice, pnlUsd, pnlPct, orderId: fill.orderId, emergency: true }] }).catch(() => {});
-  } catch (err) {
-    console.error("EMERGENCY FLATTEN FAILED:", err);
-    await logSolJumpTrailBitfinexRun({ actions: [{ action: "ERROR", stage: "watchdog-flatten-failed", error: String(err) }] }).catch(() => {});
-  } finally {
-    process.exit(1);
+async function tick() {
+  const now = Date.now();
+  for (const state of states.values()) {
+    if (!state.bookReady) continue;
+    const result = computeFeatures(state, now);
+    if (!result) continue;
+    const { mid, features } = result;
+    state.history.push({ ts: now, mid, spreadPct: features.spreadPct as number, imbalance: features.imbalance as number });
+    state.history = state.history.filter((h) => now - h.ts <= HISTORY_MS);
+    state.trades = state.trades.filter((t) => now - t.ts <= HISTORY_MS);
+    state.pending.push({ ts: now, mid, features });
+    await flushPending(state, now);
   }
 }
 
-function startWatchdog() {
-  setInterval(() => {
-    const staleMs = bookMessageAge();
-    if (staleMs < BOOK_STALE_MS) return;
-
-    if (state.mode === "LONG" && staleMs >= BOOK_EMERGENCY_MS && !emergencyInProgress) {
-      emergencyFlatten(`Order book feed silent for ${Math.round(staleMs / 1000)}s while holding ETH`)
-        .catch((err) => console.error("emergencyFlatten error:", err));
-      return;
-    }
-
-    console.error(`Watchdog: order book feed silent for ${Math.round(staleMs / 1000)}s.`);
-  }, WATCHDOG_INTERVAL_MS);
-}
-
 async function main() {
-  const got = await acquireLock();
-  if (!got) process.exit(1);
-
-  const heartbeatTimer = setInterval(() => {
-    heartbeat().catch((err) => console.error("heartbeat failed:", err));
-  }, HEARTBEAT_MS);
-
-  const shutdown = async () => {
-    clearInterval(heartbeatTimer);
-    await releaseLock();
-    process.exit(0);
-  };
-  process.on("SIGINT", shutdown);
-  process.on("SIGTERM", shutdown);
-
-  console.log(`Starting LIVE ETH Jump Trail (ratchet, WS execution) worker (${INSTANCE_ID}), enabled=${state.enabled}, mode=${state.mode}`);
-  console.log(`REAL MONEY — jump>=${JUMP_PCT}% (2s window) triggers a real buy on ${BFX_SYMBOL}. Seed $${SEED_USD}, compounding, ratchet stop (initial -${TRAIL_PCT}%, breakeven at entry, trail past +${ARM_PCT}%). Orders + fills over WS, bid/ask from the real order book.`);
+  connectBitfinex();
   connectBinance();
-  connectPublicBook(BFX_SYMBOL, () => { onBookUpdate().catch((err) => console.error("onBookUpdate error:", err)); });
-  connectAuthenticated();
-  startWatchdog();
+  setInterval(() => { tick().catch((err) => console.error("tick error:", err)); }, 1_000);
+  console.log("Market microstructure logger running (BTC + ETH, no orders, no real money).");
 }
 
-main().catch((err) => { console.error("Fatal:", err); process.exit(1); });
+main().catch((err) => { console.error(err); process.exit(1); });
