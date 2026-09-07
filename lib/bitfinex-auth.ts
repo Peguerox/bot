@@ -43,6 +43,26 @@ async function bitfinexAuthPost(path: string, body: object = {}): Promise<any> {
 
 export type OrderFill = { orderId: number; execPrice: number; execAmount: number; fee: number };
 
+// Polls trade history for an order that ALREADY EXISTS (known orderId) and aggregates every
+// matching partial fill into one weighted-average result. Submits nothing -- safe to call after
+// a WS order times out with a known orderId, to find out what actually happened without risking
+// a double-execution from submitting a brand new order on top of one that may have partially or
+// fully filled already.
+export async function lookupOrderFill(symbol: string, orderId: number, attempts = 10, delayMs = 500): Promise<OrderFill> {
+  for (let attempt = 0; attempt < attempts; attempt++) {
+    await new Promise((r) => setTimeout(r, delayMs));
+    const trades = await bitfinexAuthPost(`auth/r/trades/${symbol}/hist`, { limit: 25 });
+    const matches = trades.filter((t: any[]) => t[3] === orderId);
+    if (matches.length > 0) {
+      const totalAmount = matches.reduce((s: number, t: any[]) => s + t[4], 0);
+      const totalFee = matches.reduce((s: number, t: any[]) => s + t[9], 0);
+      const weightedPrice = matches.reduce((s: number, t: any[]) => s + t[4] * t[5], 0) / totalAmount;
+      return { orderId, execPrice: weightedPrice, execAmount: totalAmount, fee: totalFee };
+    }
+  }
+  throw new Error(`Order ${orderId} has no fills found after ${(attempts * delayMs / 1000).toFixed(1)}s — check Bitfinex manually`);
+}
+
 // Submits an EXCHANGE MARKET order and polls trade history for the fill. Throws if no fill
 // appears within the timeout — market orders on a liquid pair like tSOLUSD should fill in well
 // under a second, so a few retries at 500ms is generous, not tight.
@@ -52,19 +72,7 @@ export async function submitMarketOrder(symbol: string, amount: number): Promise
   });
   if (submitRes[6] !== "SUCCESS") throw new Error(`Order submit failed: ${JSON.stringify(submitRes)}`);
   const orderId: number = submitRes[4][0][0];
-
-  for (let attempt = 0; attempt < 10; attempt++) {
-    await new Promise((r) => setTimeout(r, 500));
-    const trades = await bitfinexAuthPost(`auth/r/trades/${symbol}/hist`, { limit: 10 });
-    const matches = trades.filter((t: any[]) => t[3] === orderId);
-    if (matches.length > 0) {
-      const totalAmount = matches.reduce((s: number, t: any[]) => s + t[4], 0);
-      const totalFee = matches.reduce((s: number, t: any[]) => s + t[9], 0);
-      const weightedPrice = matches.reduce((s: number, t: any[]) => s + t[4] * t[5], 0) / totalAmount;
-      return { orderId, execPrice: weightedPrice, execAmount: totalAmount, fee: totalFee };
-    }
-  }
-  throw new Error(`Order ${orderId} submitted but no fill found after 5s — check Bitfinex manually`);
+  return lookupOrderFill(symbol, orderId);
 }
 
 export async function getWalletBalance(currency: string): Promise<number> {

@@ -19,7 +19,7 @@
 // ws-auth-trades, ws-public-books) on 2026-09-06.
 import WebSocket from "ws";
 import crypto from "crypto";
-import { submitMarketOrder as submitMarketOrderRest } from "./bitfinex-auth";
+import { submitMarketOrder as submitMarketOrderRest, lookupOrderFill } from "./bitfinex-auth";
 
 // ---------- Public order book (best bid/ask) ----------
 
@@ -101,7 +101,10 @@ let lastAuthMessageTime = Date.now();
 
 export type OrderFill = { orderId: number; execPrice: number; execAmount: number; fee: number; latencyMs: number };
 
-type PendingOrder = { resolve: (fill: OrderFill) => void; reject: (err: Error) => void; submitTime: number; timeout: NodeJS.Timeout };
+type PendingOrder = {
+  resolve: (fill: OrderFill) => void; reject: (err: Error) => void; submitTime: number; timeout: NodeJS.Timeout;
+  requestedAmount: number; filledAmount: number; notional: number; fee: number; orderId: number | null;
+};
 const pendingOrders = new Map<number, PendingOrder>(); // keyed by CID
 
 function authSig(nonce: string): string {
@@ -144,27 +147,45 @@ export function connectAuthenticated(): WebSocket {
       if (w[0] === "exchange") walletBalances.set(w[1], w[4] ?? w[2]);
     } else if (type === "te") {
       // trade executed -- fastest fill signal; te carries [ID,SYMBOL,MTS,ORDER_ID,EXEC_AMOUNT,
-      // EXEC_PRICE,ORDER_TYPE,ORDER_PRICE,MAKER,FEE,FEE_CURRENCY,CID]
+      // EXEC_PRICE,ORDER_TYPE,ORDER_PRICE,MAKER,FEE,FEE_CURRENCY,CID]. A single market order can
+      // fill across MULTIPLE te events (partial fills against different counterparties) -- must
+      // accumulate until the requested amount is fully filled, not resolve on the first one. A
+      // real stuck position happened from resolving too early: state recorded a dust-sized first
+      // partial fill as "the whole order" while the exchange kept filling the rest for real.
       const t = msg[2];
       const cid = t[11];
       const pending = pendingOrders.get(cid);
       if (pending) {
-        clearTimeout(pending.timeout);
-        pendingOrders.delete(cid);
-        pending.resolve({ orderId: t[3], execPrice: t[5], execAmount: t[4], fee: t[9] ?? 0, latencyMs: Date.now() - pending.submitTime });
+        pending.orderId = t[3];
+        pending.filledAmount += t[4];
+        pending.notional += t[4] * t[5];
+        pending.fee += t[9] ?? 0;
+        if (Math.abs(pending.filledAmount) >= Math.abs(pending.requestedAmount) - 1e-9) {
+          clearTimeout(pending.timeout);
+          pendingOrders.delete(cid);
+          const execPrice = pending.notional / pending.filledAmount;
+          pending.resolve({ orderId: pending.orderId ?? t[3], execPrice, execAmount: pending.filledAmount, fee: pending.fee, latencyMs: Date.now() - pending.submitTime });
+        }
       }
     } else if (type === "n") {
-      // notification -- catches submit-time errors (insufficient balance, invalid params, etc).
-      // notify array: [MTS, TYPE, MSG_ID, null, ORDER_ARRAY, CODE, STATUS, TEXT]; ORDER_ARRAY[2]=CID
+      // notification -- catches submit-time errors (insufficient balance, invalid params, etc),
+      // and on success, captures the real orderId early (ORDER_ARRAY[0]) even before any fill --
+      // gives the timeout handler a real order to look up via REST instead of assuming nothing
+      // happened, closing the gap that could otherwise risk a double-execution on timeout.
+      // notify array: [MTS, TYPE, MSG_ID, null, ORDER_ARRAY, CODE, STATUS, TEXT]; ORDER_ARRAY[0]=ID, ORDER_ARRAY[2]=CID
       const n = msg[2];
-      if (n[1] === "on-req" && n[6] === "ERROR") {
+      if (n[1] === "on-req") {
         const orderArr = n[4];
         const cid = orderArr?.[2];
         const pending = cid != null ? pendingOrders.get(cid) : undefined;
         if (pending) {
-          clearTimeout(pending.timeout);
-          pendingOrders.delete(cid);
-          pending.reject(new Error(`Order rejected: ${n[7]}`));
+          if (n[6] === "ERROR") {
+            clearTimeout(pending.timeout);
+            pendingOrders.delete(cid);
+            pending.reject(new Error(`Order rejected: ${n[7]}`));
+          } else if (n[6] === "SUCCESS" && pending.orderId === null) {
+            pending.orderId = orderArr[0];
+          }
         }
       }
     }
@@ -186,10 +207,14 @@ export function authMessageAge(): number { return Date.now() - lastAuthMessageTi
 
 let cidCounter = 0;
 
-// Submits an EXCHANGE MARKET order over the already-open authenticated WS and resolves the moment
-// the `te` fill event arrives (matched by CID) -- no REST round trip, no polling. Rejects if
-// Bitfinex sends an explicit error, or after timeoutMs with nothing back (caller's REST fallback,
-// submitMarketOrderSafe, should be used as the last-resort path on that rejection).
+// Submits an EXCHANGE MARKET order over the already-open authenticated WS and resolves once the
+// requested amount is fully accounted for via `te` fill events (matched by CID, accumulated
+// across however many partial fills it takes) -- no REST round trip, no polling for the common
+// case. On timeout: if a real orderId is already known (from an early `te` or the "SUCCESS"
+// order-ack), looks up that EXACT order's fills via REST instead of assuming nothing happened --
+// avoids risking a double-execution by blindly retrying a fresh order on top of one that may have
+// already partially or fully filled. Only rejects outright (safe to retry fresh) if no orderId
+// was ever learned at all.
 export function submitMarketOrderWs(symbol: string, amount: number, timeoutMs = 3000): Promise<OrderFill> {
   return new Promise((resolve, reject) => {
     if (!authWs || authWs.readyState !== WebSocket.OPEN) { reject(new Error("Auth WS not connected")); return; }
@@ -199,10 +224,19 @@ export function submitMarketOrderWs(symbol: string, amount: number, timeoutMs = 
     const cid = (Date.now() % 86_400_000) + (cidCounter++ % 1000);
     const submitTime = Date.now();
     const timeout = setTimeout(() => {
+      const pending = pendingOrders.get(cid);
       pendingOrders.delete(cid);
-      reject(new Error(`Order (cid=${cid}) submitted over WS but no fill/error within ${timeoutMs}ms`));
+      if (!pending) return;
+      if (pending.orderId !== null) {
+        console.error(`WS order (cid=${cid}, orderId=${pending.orderId}) didn't confirm fully filled within ${timeoutMs}ms -- looking up its real fills via REST instead of retrying fresh...`);
+        lookupOrderFill(symbol, pending.orderId)
+          .then((fill) => resolve({ ...fill, latencyMs: Date.now() - pending.submitTime }))
+          .catch(reject);
+      } else {
+        reject(new Error(`Order (cid=${cid}) submitted over WS but no ack/fill/error within ${timeoutMs}ms`));
+      }
     }, timeoutMs);
-    pendingOrders.set(cid, { resolve, reject, submitTime, timeout });
+    pendingOrders.set(cid, { resolve, reject, submitTime, timeout, requestedAmount: amount, filledAmount: 0, notional: 0, fee: 0, orderId: null });
     authWs.send(JSON.stringify([0, "on", null, { cid, type: "EXCHANGE MARKET", symbol, amount: amount.toString() }]));
   });
 }
