@@ -308,7 +308,8 @@ function connectBitfinex() {
       }
     } else if (meta.channel === "trades") {
       if (msg[1] === "te") {
-        const [, , mts, amount, price] = msg[2];
+        // te payload is [ID, MTS, AMOUNT, PRICE] -- only skip ID, not ID+MTS.
+        const [, mts, amount, price] = msg[2];
         state.trades.push({ ts: mts, price, amount });
       }
       // ignore "tu" (duplicate/updated copy of the same trade) and the initial snapshot array
