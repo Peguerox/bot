@@ -7,13 +7,13 @@ import { getSupabaseAdmin } from "@/lib/supabase-admin";
 // logic, compare aggregate stats). Turned into a standing dashboard feature instead of a one-off
 // script, per request, so it doesn't need to be re-asked for every time.
 //
-// As of 2026-09-07: both live bots run the same design -- Jump entry (jump>=0.02% in a rolling
-// window) + ratcheting stop exit (SL=ARM=0.1%). Worker 1 ("zscore" query param, kept for the
-// existing dashboard button) is BTC/tBTCUSD; Worker 2 ("jump-trail") is ETH/tETHUSD. Switched
-// Worker 2 off Z-score+OCO after real trading showed that config tracking its own backtest 2.18x
-// worse (a fixed SL is where a real fast-market gap hits hardest); Jump+ratchet on Worker 1
-// tracked its backtest almost exactly over the same kind of window, verified independently
-// trade-by-trade.
+// As of 2026-09-07 (updated): Worker 1 ("zscore" query param, kept for the existing dashboard
+// button) is BTC/tBTCUSD, running Jump entry + a PLAIN 0.1% trailing stop (no ratchet/breakeven
+// arm -- reverted the same day after the ratchet exit was found to whipsaw badly on real chop,
+// see project_ratchet_whipsaw_finding memory). Worker 2 ("jump-trail" config, ETH/tETHUSD) no
+// longer trades real money at all -- its Render service was repurposed into the market
+// microstructure logger (see project_market_ticks_logger memory) -- this config entry is now
+// unused/stale, kept only so the route doesn't 500 if something still calls it.
 //
 // Uses data-api.binance.vision, not api.binance.com -- Binance geo-blocks Vercel's server IPs
 // from api.binance.com directly (see app/api/buy-hold and app/api/eth-zscore-live for the same
@@ -21,7 +21,6 @@ import { getSupabaseAdmin } from "@/lib/supabase-admin";
 
 const JUMP_PCT = 0.02;
 const TRAIL_PCT = 0.1;
-const ARM_PCT = 0.1;
 
 const BOT_CONFIG = {
   "jump-trail": { table: "sol_jump_trail_bitfinex_trades", binanceSymbol: "ETHUSDT", bfxSymbol: "tETHUSD", halfSpreadPct: 0.0072 },
@@ -65,10 +64,7 @@ async function fetchBitfinex(symbol: string, start: number, end: number): Promis
 }
 
 function computeStop(entryPrice: number, extremePrice: number): number {
-  const armThreshold = entryPrice * (1 + ARM_PCT / 100);
-  if (extremePrice >= armThreshold) return extremePrice * (1 - TRAIL_PCT / 100);
-  if (extremePrice > entryPrice) return entryPrice;
-  return entryPrice * (1 - TRAIL_PCT / 100);
+  return extremePrice * (1 - TRAIL_PCT / 100);
 }
 
 function runBacktest(binance: Candle[], bfxByTime: Map<number, Candle>, bfxTimesSorted: number[], halfSpreadPct: number) {
