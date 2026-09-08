@@ -1124,7 +1124,11 @@ function EthZscoreBitfinexPanel({
       try {
         const res = await fetch("/api/bitfinex-price?symbol=tBTCUSD");
         const data = await res.json();
-        if (!cancelled && data.lastPrice != null) setLivePrice(data.lastPrice);
+        // Show the real bid, not lastPrice (last executed trade) -- the bot's own trail-stop
+        // check compares against the real bid, and last-trade price can drift meaningfully from
+        // it, especially during a fast move (confirmed: dashboard showed lastPrice ~$100 off from
+        // the price the bot actually exited at).
+        if (!cancelled && data.bid != null) setLivePrice(data.bid);
         if (!cancelled && data.spreadPct != null) setLiveSpreadPct(data.spreadPct);
       } catch {}
     };
