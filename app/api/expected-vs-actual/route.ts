@@ -111,6 +111,17 @@ export async function GET(req: NextRequest) {
   if (bot !== "jump-trail" && bot !== "zscore") {
     return NextResponse.json({ ok: false, error: "bot must be jump-trail or zscore" }, { status: 400 });
   }
+  if (bot === "zscore") {
+    // Worker 1 switched 2026-09-08 to a locked ML predictor (lib/btc-ml-predictor.ts) whose
+    // entry depends on binance_imbalance -- real order-book bid/ask sizes, which this route's
+    // 1-min OHLC candle data structurally cannot provide. No honest backtest replay is possible
+    // here anymore; report that plainly instead of silently comparing against a stale/wrong
+    // strategy (exactly the bug found and fixed earlier this session for the ratchet exit).
+    return NextResponse.json({
+      ok: false,
+      error: "Not available for the current BTC ML predictor strategy -- it needs live order-book data (bid/ask sizes) that 1-min candles can't reconstruct. See project_market_ticks_logger memory.",
+    });
+  }
   const cfg = BOT_CONFIG[bot];
 
   const sb = getSupabaseAdmin();

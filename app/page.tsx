@@ -1167,7 +1167,7 @@ function EthZscoreBitfinexPanel({
       <div className="space-y-1.5">
         <div className="flex items-center justify-between gap-2">
           <div className="flex items-center gap-2">
-            <h2 className="text-white font-bold text-lg">BTC Jump Trail Live (Worker 1)</h2>
+            <h2 className="text-white font-bold text-lg">BTC ML Predictor Live (Worker 1)</h2>
             <span className="text-xs font-bold px-2 py-0.5 rounded-full bg-red-500/20 text-red-400">LIVE</span>
             <span className={`text-xs font-bold px-2 py-0.5 rounded-full ${workerAlive ? "bg-green-500/20 text-green-400" : "bg-gray-700/40 text-gray-500"}`}>
               {workerAlive ? "worker alive" : "worker offline"}
@@ -1204,7 +1204,7 @@ function EthZscoreBitfinexPanel({
             </button>
           </div>
         </div>
-        <p className="text-gray-500 text-xs">Jump ≥0.02% (2s window) on Binance BTCUSDT → Bitfinex tBTCUSD real buy · plain 0.1% trailing stop, no ratchet/OCO · orders/fills over WS, bid/ask from the real order book · LIVE · REAL MONEY · $20 seed, compounds · long-only (no shorting on spot) · separate API key from Worker 2</p>
+        <p className="text-gray-500 text-xs">Locked logistic regression (binance_imbalance + binance_venueGapPct) → real buy on Bitfinex tBTCUSD when P(up in 15s)≥70% · plain 0.1% trailing stop, no ML on exit · orders/fills over WS, bid/ask from the real order book · LIVE · REAL MONEY · $20 seed, compounds · long-only (no shorting on spot) · same account as Worker 2, separate API key</p>
         {expVsActual && (
           expVsActual.ok ? (
             <div className="bg-gray-800/50 rounded-lg p-3 text-xs font-mono space-y-1">
@@ -1245,7 +1245,7 @@ function EthZscoreBitfinexPanel({
           <Stat
             label="Status"
             value={statusText}
-            sub={mode === "LONG" && st?.entry_price ? `entry $${parseFloat(st.entry_price).toFixed(2)}` : "watching for jump≥0.02%"}
+            sub={mode === "LONG" && st?.entry_price ? `entry $${parseFloat(st.entry_price).toFixed(2)}` : "watching for P(up)≥70%"}
             color={statusColor}
           />
           <Stat
@@ -1887,7 +1887,7 @@ export default function Dashboard() {
     const bots = [
       { name: "Surfer SOLBTC",  badge: "LIVE",  state: surferState,     runsTable: "surfer_runs",         pnlField: "realized_pnl_btc",  initial: SURFER_BTC_INITIAL, unit: "₿", venue: "us" as const, symbol: "SOLBTC" },
       { name: "Surfer SOLUSDT", badge: "LIVE",  state: surferUsdtState, runsTable: "surfer_usdt_runs",    pnlField: "realized_pnl_usdt", initial: 50, unit: "$", venue: "us" as const,       symbol: "SOLUSDT" },
-      { name: "BTC Jump Trail Live (Worker 1)", badge: "LIVE", state: ethZscoreState, runsTable: "eth_zscore_bitfinex_runs", pnlField: "realized_pnl_usd", initial: 20, unit: "$", venue: "bitfinex" as const, symbol: "tBTCUSD" },
+      { name: "BTC ML Predictor Live (Worker 1)", badge: "LIVE", state: ethZscoreState, runsTable: "eth_zscore_bitfinex_runs", pnlField: "realized_pnl_usd", initial: 20, unit: "$", venue: "bitfinex" as const, symbol: "tBTCUSD" },
       // Worker 2 dropped from this summary 2026-09-07 -- repurposed into the market data logger,
       // no longer a trading bot, sol_jump_trail_bitfinex_state is now frozen/historical only.
     ];
