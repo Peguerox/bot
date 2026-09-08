@@ -182,11 +182,12 @@ async function tick() {
   }
 }
 
+// Stopped 2026-09-08 per request -- dataset (67k+ rows) collected is enough for now, and
+// re-exporting an ever-growing table was getting slow. Idle on purpose rather than exit, so
+// Render doesn't crash-loop restarting it. Revert this to resume collection later.
 async function main() {
-  connectBitfinex();
-  connectBinance();
-  setInterval(() => { tick().catch((err) => console.error("tick error:", err)); }, 1_000);
-  console.log("Market microstructure logger running (BTC + ETH, no orders, no real money).");
+  console.log("Market microstructure logger STOPPED -- idling, not connecting to any feeds or writing any data.");
+  await new Promise(() => {}); // never resolves
 }
 
 main().catch((err) => { console.error(err); process.exit(1); });
