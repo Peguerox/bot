@@ -1,26 +1,28 @@
-// REAL MONEY — BTC Jump Trail, plain (no ratchet), Worker 1's existing Render service/API
-// key/DB tables (still named eth_zscore_bitfinex_* internally -- kept as-is, same precedent
-// used throughout this session). Converted 2026-09-07 from SOL Z-score to plain-trail Jump, then
-// to ratchet the same day (ratchet backtested stronger: $24,392.83 vs $15,742.80 over 2yr), then
-// back to plain-trail again a few hours later once ratchet's real trading badly diverged from
-// its own backtest (see project_ratchet_whipsaw_finding memory) -- the ratchet's breakeven-on-
-// touch stop was getting tripped by ordinary noise seconds after entry, causing rapid re-entry/
-// exit chop that a 1-min-candle backtest structurally can't represent (live jump signal runs on
-// a continuous 2s tick window, not 1-min closes). Reverting to plain trail because it's the
-// config that's actually been proven to track its own backtest closely in real trading (real
-// -1.624% vs backtest -1.658% over the same window, verified independently trade-by-trade).
+// REAL MONEY — BTC ML predictor entry + plain trail exit, Worker 1's existing Render
+// service/API key/DB tables (still named eth_zscore_bitfinex_* internally -- kept as-is, same
+// precedent used throughout this session). Converted 2026-09-08 from Jump entry to ML entry
+// after extensive backtesting (purged walk-forward CV, genuine forward tests on data the model
+// never trained on) found Jump's win rate underwhelming and a simple 2-feature logistic
+// regression (binance_imbalance + binance_venueGapPct) showed a real, statistically significant
+// edge at 5s/15s horizons -- see project_market_ticks_logger memory. Chose 15s over 5s: smaller
+// edge but far more stable across every test (lowest variance of any horizon). Chose plain-trail
+// exit over an ML exit or ML+trail-combo after testing showed the ML exit added no measurable
+// value over the trail alone, and simpler is safer for a first real-money test of this signal.
+// User's explicit framing: "the problem with backtesting is it never works... $20 is
+// insignificant... only testing will give us the truth" -- this IS that test.
 //
-// STRATEGY: jump>=0.02% in a 2s rolling window, exit on a plain trailing stop -- TRAIL_PCT below
-// the peak price since entry, no breakeven arm, no ratchet.
+// STRATEGY: entry when the locked model (lib/btc-ml-predictor.ts) predicts >=70% confidence of
+// price rising in the next 15s. Exit on a plain trailing stop -- TRAIL_PCT below the peak price
+// since entry, no breakeven arm, no ratchet, no ML on the exit side.
 //
-// EXECUTION: reuses the proven WS-native path from tonight's rewrite (lib/bitfinex-trading-ws.ts)
-// -- orders over the authenticated WS, fills accumulated across every `te` partial-fill event
-// (fixed after a real stuck-position incident on Worker 2), bid/ask from the real order book, not
-// the throttled ticker. Same latency logging as both other live bots.
+// EXECUTION: reuses the proven WS-native path (lib/bitfinex-trading-ws.ts) -- orders over the
+// authenticated WS, fills accumulated across every `te` partial-fill event, bid/ask from the real
+// order book, not the throttled ticker.
 //
-// SIGNAL: Binance BTCUSDT's own mid-price ((bestBid+bestAsk)/2 from bookTicker), not raw
-// last-trade price -- same reasoning as every other live bot this session (avoids biasing the
-// jump calc toward whichever side of the spread the last print hit).
+// FEATURES: computed via lib/market-features.ts's computeFeatures() -- the SAME function used to
+// generate the training data, via a dedicated public book WS connection separate from the
+// execution book connection (kept decoupled on purpose: feature computation vs order pricing are
+// different concerns, and this mirrors how the data logger worked).
 import dotenv from "dotenv";
 dotenv.config({ path: ".env.local" });
 
@@ -36,11 +38,12 @@ import {
   connectPublicBook, getBookBidAsk, isBookReady, bookMessageAge,
   connectAuthenticated, getLiveBalance, isWalletReady, submitMarketOrderFast,
 } from "../lib/bitfinex-trading-ws";
+import { createFeatureState, applyBookRow, computeFeatures, updateHistory, type FeatureState } from "../lib/market-features";
+import { predictUpProbability } from "../lib/btc-ml-predictor";
 
 const BFX_SYMBOL       = "tBTCUSD";
 const BINANCE_WS       = "wss://stream.binance.com:9443/ws/btcusdt@bookTicker";
-const JUMP_PCT         = 0.02;
-const ROLL_MS          = 2000;
+const CONF_THRESHOLD   = 0.70; // model must be >=70% confident UP to enter
 const TRAIL_PCT        = 0.1;
 const SEED_USD         = 20;
 const HEARTBEAT_MS     = 10_000;
@@ -50,6 +53,7 @@ const RUN_LOG_INTERVAL_MS  = 5 * 60_000;
 const WATCHDOG_INTERVAL_MS = 5_000;
 const BOOK_STALE_MS        = 15_000;
 const BOOK_EMERGENCY_MS    = 25_000;
+const FEATURE_TICK_MS      = 1_000;
 
 const INSTANCE_ID = `${os.hostname()}-${process.pid}-${crypto.randomBytes(3).toString("hex")}`;
 
@@ -60,7 +64,7 @@ let lastSkipLog = 0;
 const SKIP_LOG_THROTTLE_MS = 30_000;
 let orderInFlight = false;
 let emergencyInProgress = false;
-let binBuf: { t: number; p: number }[] = [];
+const featureState: FeatureState = createFeatureState();
 
 async function acquireLock(): Promise<boolean> {
   state = await getEthZscoreBitfinexState();
@@ -103,32 +107,32 @@ function computeStop(entryPrice: number, extremePrice: number): number {
   return extremePrice * (1 - TRAIL_PCT / 100);
 }
 
-function checkJump(): number | null {
-  if (binBuf.length < 2) return null;
-  const now = binBuf[binBuf.length - 1];
-  while (binBuf.length > 1 && now.t - binBuf[0].t > ROLL_MS) binBuf.shift();
-  const old = binBuf[0];
-  const pct = (now.p - old.p) / old.p * 100;
-  return pct >= JUMP_PCT ? pct : null; // long-only — spot can't short without margin
-}
+async function onFeatureTick() {
+  const now = Date.now();
+  if (!featureState.bookReady) return;
+  const result = computeFeatures(featureState, now);
+  if (!result) return;
+  const { mid, features } = result;
+  updateHistory(featureState, now, mid, features.spreadPct as number, features.imbalance as number);
 
-async function onBinTick(price: number) {
-  binBuf.push({ t: Date.now(), p: price });
+  const binance = features.binance as { imbalance: number | null; venueGapPct: number | null } | null;
+  const pUp = predictUpProbability({
+    binance_imbalance: binance?.imbalance ?? null,
+    binance_venueGapPct: binance?.venueGapPct ?? null,
+  });
+  if (pUp === null) return;
 
-  const jumpPct = checkJump();
-  if (jumpPct === null) return;
-  const signalTime = Date.now();
-
-  // Real signal from here on -- log WHY we don't act on it, instead of silently returning, so a
-  // signal that never results in a trade is never a mystery.
   if (!state.enabled || state.mode !== "FLAT" || orderInFlight) return; // expected/routine, not worth logging
   function logSkip(reason: string) {
     if (Date.now() - lastSkipLog > SKIP_LOG_THROTTLE_MS) {
-      console.log(`SIGNAL SKIPPED (jump=${jumpPct!.toFixed(4)}%): ${reason}`);
-      logEthZscoreBitfinexRun({ actions: [{ action: "SKIPPED", jumpPct, reason }] }).catch(() => {});
+      console.log(`SIGNAL SKIPPED (P(up)=${pUp!.toFixed(4)}): ${reason}`);
+      logEthZscoreBitfinexRun({ actions: [{ action: "SKIPPED", pUp, reason }] }).catch(() => {});
       lastSkipLog = Date.now();
     }
   }
+  if (pUp < CONF_THRESHOLD) return; // no signal, routine -- not worth logging every tick
+
+  const signalTime = Date.now();
   const { bid: bfxBid, ask: bfxAsk } = getBookBidAsk();
   if (!isBookReady() || bfxAsk === null || bfxBid === null) { logSkip("Order book not ready yet"); return; }
   if (!isWalletReady()) { logSkip("Wallet WS not authenticated/ready yet"); return; }
@@ -141,7 +145,7 @@ async function onBinTick(price: number) {
     const estQty = cappedPool / bfxAsk;
     if (estQty <= 0) { console.log(`BUY signal but no real USD available (real=${realUsd}) — skipping.`); return; }
     const entrySpreadPct = (bfxAsk - bfxBid) / bfxBid * 100;
-    console.log(`BUY signal (jump=${jumpPct.toFixed(4)}%) @ ask=${bfxAsk.toFixed(4)} qty~=${estQty.toFixed(6)} (real USD=${realUsd.toFixed(2)}) — submitting real order...`);
+    console.log(`BUY signal (P(up)=${pUp.toFixed(4)}) @ ask=${bfxAsk.toFixed(4)} qty~=${estQty.toFixed(6)} (real USD=${realUsd.toFixed(2)}) — submitting real order...`);
     const fill = await submitMarketOrderFast(BFX_SYMBOL, estQty);
     const totalLatencyMs = Date.now() - signalTime;
     const patch = {
@@ -152,10 +156,9 @@ async function onBinTick(price: number) {
     state = { ...state, ...patch };
     await updateEthZscoreBitfinexState(patch);
     lastDbWrite = Date.now();
-    console.log(`BUY FILLED price=${fill.execPrice.toFixed(4)} qty=${fill.execAmount.toFixed(6)} fee=${fill.fee} jump=${jumpPct.toFixed(4)}% fillLatencyMs=${fill.latencyMs} totalLatencyMs=${totalLatencyMs}`);
-    await logEthZscoreBitfinexRun({ actions: [{ action: "BUY", price: fill.execPrice, qty: fill.execAmount, orderId: fill.orderId, jumpPct, fillLatencyMs: fill.latencyMs, totalLatencyMs }] });
+    console.log(`BUY FILLED price=${fill.execPrice.toFixed(4)} qty=${fill.execAmount.toFixed(6)} fee=${fill.fee} pUp=${pUp.toFixed(4)} fillLatencyMs=${fill.latencyMs} totalLatencyMs=${totalLatencyMs}`);
+    await logEthZscoreBitfinexRun({ actions: [{ action: "BUY", price: fill.execPrice, qty: fill.execAmount, orderId: fill.orderId, pUp, fillLatencyMs: fill.latencyMs, totalLatencyMs }] });
     lastRunLog = Date.now();
-    binBuf = [binBuf[binBuf.length - 1]]; // reset jump window so we don't immediately re-trigger
   } catch (err) {
     console.error("BUY order failed:", err);
     await logEthZscoreBitfinexRun({ actions: [{ action: "ERROR", stage: "buy", error: String(err) }] });
@@ -234,16 +237,55 @@ async function onBookUpdate() {
 
 function connectBinance() {
   const ws = new WebSocket(BINANCE_WS);
-  ws.on("open", () => console.log("Binance WS connected (bookTicker, mid-price signal)"));
+  ws.on("open", () => console.log("Binance WS connected (bookTicker, feeds ML feature computation)"));
   ws.on("message", (raw: Buffer) => {
     try {
       const msg = JSON.parse(raw.toString());
       const bid = parseFloat(msg.b), ask = parseFloat(msg.a);
-      if (bid && ask) { const mid = (bid + ask) / 2; onBinTick(mid).catch((err) => console.error("onBinTick error:", err)); }
+      const bidQty = parseFloat(msg.B), askQty = parseFloat(msg.A);
+      if (bid && ask) {
+        featureState.binanceBid = bid;
+        featureState.binanceAsk = ask;
+        featureState.binanceBidQty = bidQty;
+        featureState.binanceAskQty = askQty;
+      }
     } catch {}
   });
   ws.on("error", (e) => console.error("Binance WS error:", e));
   ws.on("close", () => { console.log("Binance WS closed, reconnecting in 2s..."); setTimeout(connectBinance, 2000); });
+  return ws;
+}
+
+// Dedicated public book connection purely for feature computation (separate from the execution
+// book connection above, which lib/bitfinex-trading-ws.ts owns internally and doesn't expose raw
+// rows from) -- mirrors how the data logger tracked its own book state independently.
+function connectFeatureBook() {
+  const ws = new WebSocket("wss://api-pub.bitfinex.com/ws/2");
+  let chanId: number | null = null;
+  ws.on("open", () => {
+    ws.send(JSON.stringify({ event: "subscribe", channel: "book", symbol: BFX_SYMBOL, prec: "P0", freq: "F0", len: "25" }));
+  });
+  ws.on("message", (raw: Buffer) => {
+    let msg: any;
+    try { msg = JSON.parse(raw.toString()); } catch { return; }
+    if (msg.event === "subscribed" && msg.channel === "book") {
+      chanId = msg.chanId;
+      featureState.book.clear();
+      featureState.bookReady = false;
+      return;
+    }
+    if (!Array.isArray(msg) || msg[0] !== chanId || msg[1] === "hb") return;
+    const data = msg[1];
+    if (Array.isArray(data[0])) {
+      featureState.book.clear();
+      for (const row of data) applyBookRow(featureState, row);
+      featureState.bookReady = true;
+    } else {
+      applyBookRow(featureState, data);
+    }
+  });
+  ws.on("error", (e) => console.error("Feature book WS error:", e));
+  ws.on("close", () => { console.log("Feature book WS closed, reconnecting in 2s..."); featureState.bookReady = false; setTimeout(connectFeatureBook, 2000); });
   return ws;
 }
 
@@ -314,11 +356,13 @@ async function main() {
   process.on("SIGINT", shutdown);
   process.on("SIGTERM", shutdown);
 
-  console.log(`Starting LIVE BTC Jump Trail (plain trail, WS execution) worker (${INSTANCE_ID}), enabled=${state.enabled}, mode=${state.mode}`);
-  console.log(`REAL MONEY — jump>=${JUMP_PCT}% (2s window) triggers a real buy on ${BFX_SYMBOL}. Seed $${SEED_USD}, compounding, plain trailing stop -${TRAIL_PCT}% below peak since entry. Orders + fills over WS, bid/ask from the real order book.`);
+  console.log(`Starting LIVE BTC ML Predictor (15s, ${CONF_THRESHOLD * 100}% confidence entry, plain trail exit) worker (${INSTANCE_ID}), enabled=${state.enabled}, mode=${state.mode}`);
+  console.log(`REAL MONEY — locked logistic regression model (binance_imbalance + binance_venueGapPct) triggers a real buy on ${BFX_SYMBOL} when P(up in 15s)>=${CONF_THRESHOLD}. Seed $${SEED_USD}, compounding, plain trailing stop -${TRAIL_PCT}% below peak since entry. Orders + fills over WS, bid/ask from the real order book.`);
   connectBinance();
+  connectFeatureBook();
   connectPublicBook(BFX_SYMBOL, () => { onBookUpdate().catch((err) => console.error("onBookUpdate error:", err)); });
   connectAuthenticated();
+  setInterval(() => { onFeatureTick().catch((err) => console.error("onFeatureTick error:", err)); }, FEATURE_TICK_MS);
   startWatchdog();
 }
 
