@@ -1,4 +1,4 @@
-// REAL MONEY — SOL/USD DCA-martingale on Bitfinex, $1,000 seed.
+// REAL MONEY — SOL/USD DCA-martingale on Bitfinex, $500 seed.
 //
 // Entry (long only, flat, re-armed on every new closed 5-min candle): price > rolling 24h VWAP
 // AND EMA9 > EMA20 (both on 5-min bars, spans scaled to represent 9h/20h) AND previous candle's
@@ -20,14 +20,17 @@
 //
 // Backtested (Bitfinex SOL/USD, 5-min bars, 2 years, real spread not yet modeled here since
 // Bitfinex has no taker fee on this account): 254 trades, 100% eventual win rate, 70% 2yr return
-// compounding from a $1,000 seed. Cross-validated on two independent non-overlapping 1-year
-// halves before being chosen (worst-case-year ROI 23%, best-case-year 30%) over configs that
-// looked better on the full 2yr number but collapsed when tested out-of-sample.
+// compounding, at $1,000/$31,000 (base/worst-case-reserve) scale. Cross-validated on two
+// independent non-overlapping 1-year halves before being chosen (worst-case-year ROI 23%,
+// best-case-year 30%) over configs that looked better on the full 2yr number but collapsed when
+// tested out-of-sample. Live-deployed at $500 seed (balance/31 = $16.13 base per level 1), scaled
+// down linearly from the backtested reference — same ROI, 1/62nd the capital.
 //
 // KNOWN RISK: position size grows as the account compounds, so the worst-case capital needed
 // also grows over time — in the 2yr backtest the peak single-trade requirement reached ~$50k
-// against a $31k starting reserve. Monitor total_cost/balance ratio; consider periodically
-// withdrawing profit if it drifts far past the original 31x reserve target.
+// against a $31k starting reserve (same ~1.6x ratio at $500 seed: ~$800 peak against $500
+// starting reserve). Monitor total_cost/balance ratio; consider periodically withdrawing profit
+// if it drifts far past the original 31x reserve target.
 import { schedules } from "@trigger.dev/sdk/v3";
 import { getBitfinexCandlesOHLCV, getBitfinexBidAsk, type BitfinexOHLCV } from "../lib/bitfinex";
 import { submitMarketOrderSafe } from "../lib/bitfinex-auth";
@@ -47,7 +50,6 @@ const MULT             = 2.0;
 const TP_PCT           = 1.5;
 const TRAIL_PCT        = 2.5;
 const RESERVE_DIVISOR  = 31; // 1+2+4+8+16 — 5-level reserve at 2.0x
-const SEED_USD         = 1000;
 
 function rollingVWAP(candles: BitfinexOHLCV[], period: number): number[] {
   const out: number[] = new Array(candles.length).fill(NaN);

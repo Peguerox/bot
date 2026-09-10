@@ -1651,7 +1651,7 @@ function SolDcaBitfinexPanel({
   enabled: boolean; onToggle: () => void; toggling: boolean;
   onClearHistory: () => void; clearingHistory: boolean;
 }) {
-  const SEED = 1000;
+  const SEED = 500;
   const st = state;
   const balance = st?.balance ?? SEED;
   const totalPnl = st?.realized_pnl_usd ?? 0;
@@ -1722,7 +1722,7 @@ function SolDcaBitfinexPanel({
             </button>
           </div>
         </div>
-        <p className="text-gray-500 text-xs">VWAP(24h)+EMA(9/20)+volume-expansion entry on 5m candles, long-only · trail 2.5% (arms only once profitable) · DCA rescue at -6% per level, 2.0x size, +1.5% blended TP, uncapped · position size compounds: balance ÷ 31 per new trade · LIVE · REAL MONEY · $1,000 seed</p>
+        <p className="text-gray-500 text-xs">VWAP(24h)+EMA(9/20)+volume-expansion entry on 5m candles, long-only · trail 2.5% (arms only once profitable) · DCA rescue at -6% per level, 2.0x size, +1.5% blended TP, uncapped · position size compounds: balance ÷ 31 per new trade · LIVE · REAL MONEY · $500 seed</p>
       </div>
 
       {loading ? (
@@ -2114,7 +2114,7 @@ export default function Dashboard() {
       { name: "Surfer SOLUSDT", badge: "LIVE",  state: surferUsdtState, runsTable: "surfer_usdt_runs",    pnlField: "realized_pnl_usdt", initial: 50, unit: "$", venue: "us" as const,       symbol: "SOLUSDT" },
       { name: "BTC ML Predictor Live (Worker 1)", badge: "LIVE", state: ethZscoreState, runsTable: "eth_zscore_bitfinex_runs", pnlField: "realized_pnl_usd", initial: 20, unit: "$", venue: "bitfinex" as const, symbol: "tBTCUSD" },
       { name: "SOL Jump Trail Live (Worker 2)", badge: "LIVE", state: solJumpTrailState, runsTable: "sol_jump_trail_bitfinex_runs", pnlField: "realized_pnl_usd", initial: 20, unit: "$", venue: "bitfinex" as const, symbol: "tSOLUSD" },
-      { name: "SOL DCA-Martingale (Trigger.dev)", badge: "LIVE", state: solDcaState, runsTable: "sol_trail_bitfinex_runs", pnlField: "realized_pnl_usd", initial: 1000, unit: "$", venue: "bitfinex" as const, symbol: "tSOLUSD" },
+      { name: "SOL DCA-Martingale (Trigger.dev)", badge: "LIVE", state: solDcaState, runsTable: "sol_trail_bitfinex_runs", pnlField: "realized_pnl_usd", initial: 500, unit: "$", venue: "bitfinex" as const, symbol: "tSOLUSD" },
     ];
 
     const rows: SummaryRow[] = [];

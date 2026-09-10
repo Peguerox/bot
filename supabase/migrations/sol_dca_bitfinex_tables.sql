@@ -22,7 +22,7 @@ ALTER TABLE sol_trail_bitfinex_state
 UPDATE sol_trail_bitfinex_state SET
   enabled = false, mode = 'USD', positions = '[]', total_cost = 0, dca_count = 0,
   entry_price = NULL, last_entry_price = NULL, max_price = NULL, tp_target = NULL,
-  dca_triggered = false, balance = 1000
+  dca_triggered = false, balance = 500
 WHERE id = 1;
 
 ALTER TABLE sol_trail_bitfinex_trades
