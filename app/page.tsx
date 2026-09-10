@@ -1642,7 +1642,7 @@ function EthZscoreBitfinexPanel({
   );
 }
 
-function SolEmaVwapPanel({
+function SolDcaBitfinexPanel({
   trades, state, runs, loading,
   enabled, onToggle, toggling,
   onClearHistory, clearingHistory,
@@ -1651,15 +1651,17 @@ function SolEmaVwapPanel({
   enabled: boolean; onToggle: () => void; toggling: boolean;
   onClearHistory: () => void; clearingHistory: boolean;
 }) {
-  const INITIAL = 100;
+  const SEED = 1000;
   const st = state;
+  const balance = st?.balance ?? SEED;
   const totalPnl = st?.realized_pnl_usd ?? 0;
   const totalTrades = st?.total_trades ?? 0;
   const wins = st?.total_wins ?? 0;
   const losses = totalTrades - wins;
   const winRate = totalTrades > 0 ? (wins / totalTrades * 100).toFixed(1) : "—";
-  const posState: string = st?.position_state ?? "FLAT";
-  const holding = posState === "FULL" || posState === "HALF";
+  const mode = st?.mode ?? "USD";
+  const positions: any[] = st?.positions ?? [];
+  const dcaCount = st?.dca_count ?? 0;
 
   const [livePrice, setLivePrice] = useState<number | null>(null);
   useEffect(() => {
@@ -1668,7 +1670,7 @@ function SolEmaVwapPanel({
       try {
         const res = await fetch("/api/bitfinex-price?symbol=tSOLUSD");
         const data = await res.json();
-        if (!cancelled && data.lastPrice != null) setLivePrice(data.lastPrice);
+        if (!cancelled && data.bid != null) setLivePrice(data.bid);
       } catch {}
     };
     poll();
@@ -1676,40 +1678,33 @@ function SolEmaVwapPanel({
     return () => { cancelled = true; clearInterval(id); };
   }, []);
 
-  const statusText: Record<string, string> = { FLAT: "Watching", ARMED: "Armed (waiting for bounce)", FULL: "Holding (full)", HALF: "Holding (half, breakeven)" };
-  const statusColor: Record<string, string> = { FLAT: "text-gray-400", ARMED: "text-yellow-400", FULL: "text-green-400", HALF: "text-blue-400" };
+  const statusText = mode === "SOL" ? `Holding (${dcaCount} DCA level${dcaCount === 1 ? "" : "s"})` : "Watching (5m signal)";
+  const statusColor = mode === "SOL" ? (st?.dca_triggered ? "text-yellow-400" : "text-green-400") : "text-gray-400";
   const chartTrades = trades.map((t: any) => ({ ...t, pnl: t.pnl_usd, exit_time: t.exit_time }));
 
-  const entryValue = holding && st?.entry_price && st?.remaining_qty
-    ? parseFloat(st.entry_price) * parseFloat(st.remaining_qty) : null;
-  const currentValue = holding && livePrice && st?.remaining_qty
-    ? parseFloat(st.remaining_qty) * livePrice : null;
-  const openPnl = entryValue != null && currentValue != null ? currentValue - entryValue : null;
+  const totalCost = st?.total_cost ?? 0;
+  const totalSolQty = positions.reduce((s: number, p: any) => s + (p.sol_qty ?? 0), 0);
+  const portfolioValue = mode === "SOL" && livePrice ? totalSolQty * livePrice : null;
+  const openPnl = portfolioValue != null && totalCost > 0 ? portfolioValue - totalCost : null;
 
-  // Only meaningful state-change actions -- CHECK/WAITING fire every minute and would flood this.
-  const meaningfulActions = new Set(["ARM", "DISARM", "ENTER", "TP_PARTIAL", "BREAKEVEN_EXIT", "SL_FULL", "ERROR"]);
-  const activityRuns = runs.filter((r: any) => (r.data?.actions ?? []).some((a: any) => meaningfulActions.has(a.action)));
-
-  const lastRunAt = runs[0]?.run_at ? new Date(runs[0].run_at).getTime() : null;
-  const workerAlive = lastRunAt != null && Date.now() - lastRunAt < 3 * 60_000; // cron runs every 1min, allow some slack
+  const maxPrice = st?.max_price ? parseFloat(st.max_price) : null;
+  const trailStop = maxPrice != null ? maxPrice * (1 - 2.5 / 100) : null;
+  const tpTarget = st?.tp_target ? parseFloat(st.tp_target) : null;
 
   return (
     <div className="bg-gray-900 rounded-xl p-5 space-y-5 flex flex-col">
       <div className="space-y-1.5">
         <div className="flex items-center justify-between gap-2">
           <div className="flex items-center gap-2">
-            <h2 className="text-white font-bold text-lg">SOL EMA/VWAP Scalper</h2>
-            <span className="text-xs font-bold px-2 py-0.5 rounded-full bg-blue-500/20 text-blue-400">PAPER</span>
-            <span className={`text-xs font-bold px-2 py-0.5 rounded-full ${workerAlive ? "bg-green-500/20 text-green-400" : "bg-gray-700/40 text-gray-500"}`}>
-              {workerAlive ? "cron alive" : "cron offline"}
-            </span>
+            <h2 className="text-white font-bold text-lg">SOL DCA-Martingale (Trigger.dev)</h2>
+            <span className="text-xs font-bold px-2 py-0.5 rounded-full bg-red-500/20 text-red-400">LIVE</span>
           </div>
           <div className="flex items-center gap-1.5 shrink-0">
             <button
               onClick={onClearHistory}
               disabled={clearingHistory || enabled}
               className="text-xs font-medium px-2.5 py-1.5 rounded-md bg-gray-800 text-gray-400 hover:bg-gray-700 hover:text-gray-200 transition-all disabled:opacity-30 disabled:cursor-not-allowed"
-              title={enabled ? "Pause bot before clearing" : "Delete all trade history and run logs"}
+              title={enabled ? "Pause bot before clearing" : "Delete all trade history and run logs, reset balance to $1,000"}
             >
               {clearingHistory ? "Clearing…" : "Clear"}
             </button>
@@ -1727,7 +1722,7 @@ function SolEmaVwapPanel({
             </button>
           </div>
         </div>
-        <p className="text-gray-500 text-xs">EMA9/EMA21 cross arms the signal, entry on the retrace-and-bounce off VWAP (5m candles, 15m trend filter) · long-only · PAPER · $100 seed · SL = VWAP - 0.05%, TP = entry + 2x risk · half closed at TP, rest rides at breakeven · runs every 1min via cron, not a live worker</p>
+        <p className="text-gray-500 text-xs">VWAP(24h)+EMA(9/20)+volume-expansion entry on 5m candles, long-only · trail 2.5% (arms only once profitable) · DCA rescue at -6% per level, 2.0x size, +1.5% blended TP, uncapped · position size compounds: balance ÷ 31 per new trade · LIVE · REAL MONEY · $1,000 seed</p>
       </div>
 
       {loading ? (
@@ -1738,8 +1733,8 @@ function SolEmaVwapPanel({
         <div className="grid grid-cols-2 gap-2">
           <Stat
             label="PnL"
-            value={`${totalPnl >= 0 ? "+" : ""}${(totalPnl / INITIAL * 100).toFixed(2)}%`}
-            sub={`${totalPnl >= 0 ? "+" : ""}$${totalPnl.toFixed(2)} · ${totalTrades} trades (${wins}W/${losses}L)`}
+            value={`${totalPnl >= 0 ? "+" : ""}${(totalPnl / SEED * 100).toFixed(2)}%`}
+            sub={`${totalPnl >= 0 ? "+" : ""}$${totalPnl.toFixed(2)} · balance $${balance.toFixed(2)}`}
             color={totalPnl >= 0 ? "text-green-400" : "text-red-400"}
           />
           <Stat
@@ -1750,14 +1745,14 @@ function SolEmaVwapPanel({
           />
           <Stat
             label="Status"
-            value={statusText[posState] ?? posState}
-            sub={holding && st?.entry_price ? `entry $${parseFloat(st.entry_price).toFixed(2)}` : "watching for EMA cross"}
-            color={statusColor[posState] ?? "text-gray-400"}
+            value={statusText}
+            sub={mode === "SOL" ? `${totalSolQty.toFixed(4)} SOL, $${totalCost.toFixed(2)} deployed` : "flat"}
+            color={statusColor}
           />
           <Stat
             label="SOL/USD"
             value={livePrice != null ? `$${livePrice.toFixed(2)}` : "—"}
-            sub={holding && st?.remaining_qty ? `${parseFloat(st.remaining_qty).toFixed(3)} SOL held` : "no position"}
+            sub={mode === "SOL" && st?.dca_triggered ? `TP target $${tpTarget?.toFixed(2)}` : mode === "SOL" ? `trail stop $${trailStop?.toFixed(2)}` : "watching"}
             color="text-yellow-400"
           />
         </div>
@@ -1765,66 +1760,45 @@ function SolEmaVwapPanel({
 
       <div>
         <p className="text-gray-500 text-xs uppercase tracking-wide mb-2">Cumulative PnL (USD)</p>
-        <PnLChart trades={chartTrades} initial={INITIAL} />
+        <PnLChart trades={chartTrades} initial={SEED} />
       </div>
 
       <div>
-        <p className="text-gray-500 text-xs uppercase tracking-wide mb-2">Position</p>
-        <table className="w-full text-sm font-mono">
-          <thead>
-            <tr className="text-gray-600 border-b border-gray-800">
-              <th className="text-left pb-1 font-medium">Field</th>
-              <th className="text-right pb-1 font-medium">Value</th>
-            </tr>
-          </thead>
-          <tbody>
-            <tr className="border-b border-gray-800/50">
-              <td className="py-1.5 text-gray-400">Status</td>
-              <td className={`py-1.5 text-right font-bold ${statusColor[posState] ?? "text-gray-400"}`}>{statusText[posState] ?? posState}</td>
-            </tr>
-            <tr className="border-b border-gray-800/50">
-              <td className="py-1.5 text-gray-400">SOL held</td>
-              <td className="py-1.5 text-right text-white">
-                {holding && st?.remaining_qty ? `${parseFloat(st.remaining_qty).toFixed(3)} SOL` : "—"}
-              </td>
-            </tr>
-            <tr className="border-b border-gray-800/50">
-              <td className="py-1.5 text-gray-400">Entry price</td>
-              <td className="py-1.5 text-right text-white">
-                {holding && st?.entry_price ? `$${parseFloat(st.entry_price).toFixed(2)}` : "—"}
-              </td>
-            </tr>
-            <tr className="border-b border-gray-800/50">
-              <td className="py-1.5 text-gray-400">Current price</td>
-              <td className="py-1.5 text-right text-yellow-400">
-                {livePrice != null ? `$${livePrice.toFixed(2)}` : "—"}
-              </td>
-            </tr>
-            <tr className="border-b border-gray-800/50">
-              <td className="py-1.5 text-gray-400">Take profit</td>
-              <td className="py-1.5 text-right text-green-400">
-                {holding && st?.tp_price ? `$${parseFloat(st.tp_price).toFixed(2)}` : "—"}
-              </td>
-            </tr>
-            <tr className="border-b border-gray-800/50">
-              <td className="py-1.5 text-gray-400">Stop loss</td>
-              <td className="py-1.5 text-right text-red-400">
-                {holding && st?.sl_price ? `$${parseFloat(st.sl_price).toFixed(2)}` : "—"}
-              </td>
-            </tr>
-            <tr>
-              <td className="py-1.5 text-gray-400">Open PnL</td>
-              <td className={`py-1.5 text-right font-bold ${
-                openPnl == null ? "text-gray-600"
-                : openPnl >= 0 ? "text-green-400" : "text-red-400"
-              }`}>
-                {openPnl != null && entryValue
-                  ? `${openPnl >= 0 ? "+" : ""}${(openPnl / entryValue * 100).toFixed(2)}% (${openPnl >= 0 ? "+" : ""}$${openPnl.toFixed(2)})`
-                  : "—"}
-              </td>
-            </tr>
-          </tbody>
-        </table>
+        <p className="text-gray-500 text-xs uppercase tracking-wide mb-2">Open Position ({positions.length} leg{positions.length === 1 ? "" : "s"})</p>
+        {mode !== "SOL" || positions.length === 0 ? (
+          <p className="text-gray-600 text-sm">No open position — watching for entry signal</p>
+        ) : (
+          <table className="w-full text-sm font-mono">
+            <thead>
+              <tr className="text-gray-600 border-b border-gray-800">
+                <th className="text-left pb-1 font-medium">Level</th>
+                <th className="text-right pb-1 font-medium">Entry $</th>
+                <th className="text-right pb-1 font-medium">Size $</th>
+                <th className="text-right pb-1 font-medium">SOL Qty</th>
+              </tr>
+            </thead>
+            <tbody>
+              {positions.map((p: any, i: number) => (
+                <tr key={i} className="border-b border-gray-800/50">
+                  <td className="py-1.5 text-gray-400">{i + 1}</td>
+                  <td className="py-1.5 text-right text-white">${parseFloat(p.price).toFixed(2)}</td>
+                  <td className="py-1.5 text-right text-white">${parseFloat(p.usd_size).toFixed(2)}</td>
+                  <td className="py-1.5 text-right text-white">{parseFloat(p.sol_qty).toFixed(4)}</td>
+                </tr>
+              ))}
+              <tr>
+                <td className="py-1.5 text-gray-400 font-bold">Open PnL</td>
+                <td colSpan={3} className={`py-1.5 text-right font-bold ${
+                  openPnl == null ? "text-gray-600" : openPnl >= 0 ? "text-green-400" : "text-red-400"
+                }`}>
+                  {openPnl != null && totalCost > 0
+                    ? `${openPnl >= 0 ? "+" : ""}${(openPnl / totalCost * 100).toFixed(2)}% (${openPnl >= 0 ? "+" : ""}$${openPnl.toFixed(2)})`
+                    : "—"}
+                </td>
+              </tr>
+            </tbody>
+          </table>
+        )}
       </div>
 
       <div>
@@ -1840,9 +1814,8 @@ function SolEmaVwapPanel({
             <table className="w-full text-xs font-mono">
               <thead>
                 <tr className="text-gray-500 border-b border-gray-800">
-                  <th className="text-left pb-1">Reason</th>
-                  <th className="text-left pb-1">Entry</th>
-                  <th className="text-left pb-1">Exit</th>
+                  <th className="text-left pb-1">Levels</th>
+                  <th className="text-left pb-1">Exit reason</th>
                   <th className="text-right pb-1">PnL</th>
                   <th className="text-right pb-1">%</th>
                 </tr>
@@ -1852,9 +1825,8 @@ function SolEmaVwapPanel({
                   const isWin = (t.pnl_usd ?? 0) > 0;
                   return (
                     <tr key={t.id} className="hover:bg-gray-800/30">
-                      <td className={`py-1.5 ${t.exit_reason === "SL" ? "text-red-400" : "text-green-400"}`}>{t.exit_reason}</td>
-                      <td className="py-1.5 text-gray-300">${t.entry_price ? parseFloat(t.entry_price).toFixed(2) : "—"}</td>
-                      <td className="py-1.5 text-gray-300">${t.exit_price  ? parseFloat(t.exit_price).toFixed(2)  : "—"}</td>
+                      <td className="py-1.5 text-gray-300">{(t.dca_levels ?? 0) + 1}</td>
+                      <td className="py-1.5 text-gray-300">{t.exit_reason ?? "—"}</td>
                       <td className={`py-1.5 text-right ${isWin ? "text-green-400" : "text-red-400"}`}>
                         {isWin ? "+" : ""}${(t.pnl_usd ?? 0).toFixed(2)}
                       </td>
@@ -1871,11 +1843,11 @@ function SolEmaVwapPanel({
       </div>
 
       <div>
-        <p className="text-gray-500 text-xs uppercase tracking-wide mb-2">Activity (state changes only)</p>
+        <p className="text-gray-500 text-xs uppercase tracking-wide mb-2">Activity</p>
         <div className="h-56 overflow-y-auto space-y-0.5 font-mono text-sm pr-1">
-          {activityRuns.length === 0 && <p className="text-gray-600">No state changes yet — waiting for an EMA cross.</p>}
-          {activityRuns.map((r: any) => {
-            const actions: any[] = (r.data?.actions ?? []).filter((a: any) => meaningfulActions.has(a.action));
+          {runs.length === 0 && <p className="text-gray-600">No runs yet.</p>}
+          {runs.map((r: any) => {
+            const actions: any[] = r.data?.actions ?? [];
             const time = r.run_at
               ? new Date(r.run_at).toLocaleTimeString([], { hour: "2-digit", minute: "2-digit", second: "2-digit", hour12: false })
               : "";
@@ -1884,20 +1856,18 @@ function SolEmaVwapPanel({
                 <span className="text-gray-600 shrink-0">{time}</span>
                 <div className="flex flex-col gap-0">
                   {actions.map((a: any, i: number) => {
-                    const color = a.action === "ENTER" ? "text-yellow-400"
-                      : a.action === "ARM" ? "text-blue-400"
-                      : a.action === "DISARM" ? "text-gray-500"
-                      : a.action === "TP_PARTIAL" ? "text-green-400"
-                      : a.action === "BREAKEVEN_EXIT" ? "text-gray-400"
-                      : a.action === "SL_FULL" ? "text-red-400"
+                    const color = a.action === "ENTRY" ? "text-yellow-400"
+                      : a.action === "DCA_ADD" ? "text-orange-400"
+                      : a.action === "EXIT_TRAIL" || a.action === "EXIT_DCA_TP" ? (parseFloat(a.pnlUsd) >= 0 ? "text-green-400" : "text-red-400")
+                      : a.action === "HOLD_DCA" ? "text-gray-500"
+                      : a.action === "CHECK" ? "text-gray-600"
                       : a.action === "ERROR" ? "text-red-400"
                       : "text-gray-500";
-                    const text = a.action === "ENTER" ? `ENTER  qty=${parseFloat(a.qty).toFixed(3)} @ $${parseFloat(a.price).toFixed(2)}  SL=$${parseFloat(a.sl).toFixed(2)}  TP=$${parseFloat(a.tp).toFixed(2)}`
-                      : a.action === "ARM" ? `ARMED — EMA9 crossed above EMA21`
-                      : a.action === "DISARM" ? `DISARMED — ${a.reason}`
-                      : a.action === "TP_PARTIAL" ? `TP HIT (half closed)  @ $${parseFloat(a.price).toFixed(2)}  pnl=$${a.pnlUsd}`
-                      : a.action === "BREAKEVEN_EXIT" ? `BREAKEVEN EXIT (remaining half)  @ $${parseFloat(a.price).toFixed(2)}  pnl=$${a.pnlUsd}`
-                      : a.action === "SL_FULL" ? `STOP HIT  @ $${parseFloat(a.price).toFixed(2)}  pnl=$${a.pnlUsd}`
+                    const text = a.action === "ENTRY" ? `ENTRY  $${a.usdSize?.toFixed?.(2) ?? a.usdSize} @ $${parseFloat(a.price).toFixed(2)}`
+                      : a.action === "DCA_ADD" ? `DCA_ADD level=${a.level}  $${a.usdSize?.toFixed?.(2) ?? a.usdSize} @ $${parseFloat(a.price).toFixed(2)}  tpTarget=$${a.tpTarget?.toFixed?.(2) ?? a.tpTarget}`
+                      : a.action === "EXIT_TRAIL" ? `EXIT_TRAIL  @ $${parseFloat(a.price).toFixed(2)}  pnl $${a.pnlUsd}  balance=$${a.newBalance}`
+                      : a.action === "EXIT_DCA_TP" ? `EXIT_DCA_TP  @ $${parseFloat(a.price).toFixed(2)}  pnl $${a.pnlUsd}  balance=$${a.newBalance}`
+                      : a.action === "HOLD_DCA" ? `holding  dca=${a.dcaCount}  cost=$${a.totalCost?.toFixed?.(2) ?? a.totalCost}  target=$${a.tpTarget?.toFixed?.(2) ?? a.tpTarget}  value=$${a.portfolioValue?.toFixed?.(2) ?? a.portfolioValue}`
                       : a.action === "ERROR" ? `ERROR (${a.stage}): ${a.error}`
                       : a.action;
                     return <span key={i} className={color}>{text}</span>;
@@ -1945,11 +1915,11 @@ export default function Dashboard() {
   const [ethZscoreRuns,    setEthZscoreRuns]    = useState<any[]>([]);
   const [ethZscoreToggling, setEthZscoreToggling] = useState(false);
   const [ethZscoreClearing, setEthZscoreClearing] = useState(false);
-  const [solEmaVwapState,   setSolEmaVwapState]   = useState<any>(null);
-  const [solEmaVwapTrades,  setSolEmaVwapTrades]  = useState<any[]>([]);
-  const [solEmaVwapRuns,    setSolEmaVwapRuns]    = useState<any[]>([]);
-  const [solEmaVwapToggling, setSolEmaVwapToggling] = useState(false);
-  const [solEmaVwapClearing, setSolEmaVwapClearing] = useState(false);
+  const [solDcaState,   setSolDcaState]   = useState<any>(null);
+  const [solDcaTrades,  setSolDcaTrades]  = useState<any[]>([]);
+  const [solDcaRuns,    setSolDcaRuns]    = useState<any[]>([]);
+  const [solDcaToggling, setSolDcaToggling] = useState(false);
+  const [solDcaClearing, setSolDcaClearing] = useState(false);
 
   async function load() {
     const [
@@ -1965,9 +1935,9 @@ export default function Dashboard() {
       { data: solJumpTrailSt },
       { data: solJumpTrailTr },
       { data: solJumpTrailRs },
-      { data: solEmaVwapSt },
-      { data: solEmaVwapTr },
-      { data: solEmaVwapRs },
+      { data: solDcaSt },
+      { data: solDcaTr },
+      { data: solDcaRs },
       { data: ethZscoreSt },
       { data: ethZscoreTr },
       { data: ethZscoreRs },
@@ -1984,9 +1954,9 @@ export default function Dashboard() {
       getSupabase().from("sol_jump_trail_bitfinex_state").select("*").eq("id", 1).single(),
       getSupabase().from("sol_jump_trail_bitfinex_trades").select("*").order("exit_time", { ascending: false }).limit(5000),
       getSupabase().from("sol_jump_trail_bitfinex_runs").select("id,run_at,data").order("run_at", { ascending: false }).limit(120),
-      getSupabase().from("sol_ema_vwap_state").select("*").eq("id", 1).single(),
-      getSupabase().from("sol_ema_vwap_trades").select("*").order("exit_time", { ascending: false }).limit(5000),
-      getSupabase().from("sol_ema_vwap_runs").select("id,run_at,data").order("run_at", { ascending: false }).limit(120),
+      getSupabase().from("sol_trail_bitfinex_state").select("*").eq("id", 1).single(),
+      getSupabase().from("sol_trail_bitfinex_trades").select("*").order("exit_time", { ascending: false }).limit(5000),
+      getSupabase().from("sol_trail_bitfinex_runs").select("id,run_at,data").order("run_at", { ascending: false }).limit(120),
       getSupabase().from("eth_zscore_bitfinex_state").select("*").eq("id", 1).single(),
       getSupabase().from("eth_zscore_bitfinex_trades").select("*").order("exit_time", { ascending: false }).limit(5000),
       getSupabase().from("eth_zscore_bitfinex_runs").select("id,run_at,data").order("run_at", { ascending: false }).limit(120),
@@ -2003,9 +1973,9 @@ export default function Dashboard() {
     setSolJumpTrailState(solJumpTrailSt ?? null);
     setSolJumpTrailTrades(solJumpTrailTr ?? []);
     setSolJumpTrailRuns(solJumpTrailRs ?? []);
-    setSolEmaVwapState(solEmaVwapSt ?? null);
-    setSolEmaVwapTrades(solEmaVwapTr ?? []);
-    setSolEmaVwapRuns(solEmaVwapRs ?? []);
+    setSolDcaState(solDcaSt ?? null);
+    setSolDcaTrades(solDcaTr ?? []);
+    setSolDcaRuns(solDcaRs ?? []);
     setEthZscoreState(ethZscoreSt ?? null);
     setEthZscoreTrades(ethZscoreTr ?? []);
     setEthZscoreRuns(ethZscoreRs ?? []);
@@ -2104,19 +2074,19 @@ export default function Dashboard() {
     setSolJumpTrailClearing(false);
   }
 
-  async function handleSolEmaVwapToggle() {
-    setSolEmaVwapToggling(true);
-    await fetch("/api/sol-ema-vwap/toggle", { method: "POST" });
+  async function handleSolDcaToggle() {
+    setSolDcaToggling(true);
+    await fetch("/api/sol-dca-bitfinex/toggle", { method: "POST" });
     await load();
-    setSolEmaVwapToggling(false);
+    setSolDcaToggling(false);
   }
 
-  async function handleSolEmaVwapClearHistory() {
-    if (!confirm("Delete all EMA/VWAP trade history and run logs?")) return;
-    setSolEmaVwapClearing(true);
-    await fetch("/api/sol-ema-vwap/clear-history", { method: "POST" });
+  async function handleSolDcaClearHistory() {
+    if (!confirm("Delete all SOL DCA trade history and run logs, and reset balance to $1,000?")) return;
+    setSolDcaClearing(true);
+    await fetch("/api/sol-dca-bitfinex/clear-history", { method: "POST" });
     await load();
-    setSolEmaVwapClearing(false);
+    setSolDcaClearing(false);
   }
 
   function formatElapsed(ms: number): string {
@@ -2144,6 +2114,7 @@ export default function Dashboard() {
       { name: "Surfer SOLUSDT", badge: "LIVE",  state: surferUsdtState, runsTable: "surfer_usdt_runs",    pnlField: "realized_pnl_usdt", initial: 50, unit: "$", venue: "us" as const,       symbol: "SOLUSDT" },
       { name: "BTC ML Predictor Live (Worker 1)", badge: "LIVE", state: ethZscoreState, runsTable: "eth_zscore_bitfinex_runs", pnlField: "realized_pnl_usd", initial: 20, unit: "$", venue: "bitfinex" as const, symbol: "tBTCUSD" },
       { name: "SOL Jump Trail Live (Worker 2)", badge: "LIVE", state: solJumpTrailState, runsTable: "sol_jump_trail_bitfinex_runs", pnlField: "realized_pnl_usd", initial: 20, unit: "$", venue: "bitfinex" as const, symbol: "tSOLUSD" },
+      { name: "SOL DCA-Martingale (Trigger.dev)", badge: "LIVE", state: solDcaState, runsTable: "sol_trail_bitfinex_runs", pnlField: "realized_pnl_usd", initial: 1000, unit: "$", venue: "bitfinex" as const, symbol: "tSOLUSD" },
     ];
 
     const rows: SummaryRow[] = [];
@@ -2225,10 +2196,10 @@ export default function Dashboard() {
       .on("postgres_changes", { event: "*", schema: "public", table: "sol_jump_trail_bitfinex_trades" }, debouncedLoad)
       .on("postgres_changes", { event: "*", schema: "public", table: "sol_jump_trail_bitfinex_runs" }, debouncedLoad)
       .subscribe();
-    const ch19 = sb.channel("sol-ema-vwap")
-      .on("postgres_changes", { event: "*", schema: "public", table: "sol_ema_vwap_state" }, debouncedLoad)
-      .on("postgres_changes", { event: "*", schema: "public", table: "sol_ema_vwap_trades" }, debouncedLoad)
-      .on("postgres_changes", { event: "*", schema: "public", table: "sol_ema_vwap_runs" }, debouncedLoad)
+    const ch19 = sb.channel("sol-dca-bitfinex")
+      .on("postgres_changes", { event: "*", schema: "public", table: "sol_trail_bitfinex_state" }, debouncedLoad)
+      .on("postgres_changes", { event: "*", schema: "public", table: "sol_trail_bitfinex_trades" }, debouncedLoad)
+      .on("postgres_changes", { event: "*", schema: "public", table: "sol_trail_bitfinex_runs" }, debouncedLoad)
       .subscribe();
     return () => {
       if (debounceTimer) clearTimeout(debounceTimer);
@@ -2309,6 +2280,21 @@ export default function Dashboard() {
             toggling={ethZscoreToggling}
             onClearHistory={handleEthZscoreClearHistory}
             clearingHistory={ethZscoreClearing}
+          />
+        </div>
+
+        {/* ── SOL DCA-Martingale: Trigger.dev job, fourth live real-money bot ── */}
+        <div className="grid grid-cols-1 gap-6 items-start">
+          <SolDcaBitfinexPanel
+            trades={solDcaTrades}
+            state={solDcaState}
+            runs={solDcaRuns}
+            loading={loading}
+            enabled={solDcaState?.enabled ?? false}
+            onToggle={handleSolDcaToggle}
+            toggling={solDcaToggling}
+            onClearHistory={handleSolDcaClearHistory}
+            clearingHistory={solDcaClearing}
           />
         </div>
 
