@@ -42,6 +42,7 @@ import {
   connectPublicBook, getBookBidAsk, isBookReady, bookMessageAge,
   connectAuthenticated, getLiveBalance, isWalletReady, submitMarketOrderFast,
 } from "../lib/bitfinex-trading-ws";
+import { DCA_DROP_PCT, MULT, TP_PCT, TRAIL_PCT, RESERVE_DIVISOR } from "../lib/sol-dca-config";
 
 const BFX_SYMBOL       = "tSOLUSD";
 const VWAP_PERIOD      = 24 * 12; // 24h on 5-min bars
@@ -49,11 +50,6 @@ const EMA9_SPAN        = 9 * 12;
 const EMA20_SPAN       = 20 * 12;
 const VOLAVG_PERIOD    = 5 * 12;
 const C5_LIMIT         = VWAP_PERIOD + 320; // extra history so EMA20 has room to converge
-const DCA_DROP_PCT     = 6;
-const MULT             = 2.0;
-const TP_PCT           = 1.5;
-const TRAIL_PCT        = 2.5;
-const RESERVE_DIVISOR  = 31; // 1+2+4+8+16 — 5-level reserve at 2.0x
 const CANDLE_CHECK_MS  = 30_000; // 5-min candles only close every 5min; 30s is plenty responsive
 const HEARTBEAT_MS     = 10_000;
 const LOCK_STALE_MS    = 30_000;

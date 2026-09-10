@@ -3,6 +3,7 @@
 import { useEffect, useState } from "react";
 import { getSupabase } from "@/lib/supabase";
 import PnLChart from "@/components/PnLChart";
+import { SEED_USD as DCA_SEED_USD, TRAIL_PCT as DCA_TRAIL_PCT, DCA_DROP_PCT, MULT as DCA_MULT, TP_PCT as DCA_TP_PCT, RESERVE_DIVISOR as DCA_RESERVE_DIVISOR } from "@/lib/sol-dca-config";
 
 function Stat({ label, value, sub, color }: { label: string; value: string; sub: string; color: string }) {
   return (
@@ -1343,7 +1344,7 @@ function SolDcaBitfinexPanel({
   enabled: boolean; onToggle: () => void; toggling: boolean;
   onClearHistory: () => void; clearingHistory: boolean;
 }) {
-  const SEED = 500;
+  const SEED = DCA_SEED_USD;
   const st = state;
   const balance = st?.balance ?? SEED;
   const totalPnl = st?.realized_pnl_usd ?? 0;
@@ -1380,7 +1381,7 @@ function SolDcaBitfinexPanel({
   const openPnl = portfolioValue != null && totalCost > 0 ? portfolioValue - totalCost : null;
 
   const maxPrice = st?.max_price ? parseFloat(st.max_price) : null;
-  const trailStop = maxPrice != null ? maxPrice * (1 - 2.5 / 100) : null;
+  const trailStop = maxPrice != null ? maxPrice * (1 - DCA_TRAIL_PCT / 100) : null;
   const tpTarget = st?.tp_target ? parseFloat(st.tp_target) : null;
 
   const lockAge = st?.lock_heartbeat ? Date.now() - new Date(st.lock_heartbeat).getTime() : null;
@@ -1420,7 +1421,7 @@ function SolDcaBitfinexPanel({
             </button>
           </div>
         </div>
-        <p className="text-gray-500 text-xs">VWAP(24h)+EMA(9/20)+volume-expansion entry on 5m candles, long-only · trail 2.5% (arms only once profitable) · DCA rescue at -6% per level, 2.0x size, +1.5% blended TP, uncapped · position size compounds: balance ÷ 31 per new trade · orders + fills over WS (same fast path as Worker 2), bid/ask from the real order book · LIVE · REAL MONEY · $500 seed</p>
+        <p className="text-gray-500 text-xs">VWAP(24h)+EMA(9/20)+volume-expansion entry on 5m candles, long-only · trail {DCA_TRAIL_PCT}% (arms only once profitable) · DCA rescue at -{DCA_DROP_PCT}% per level, {DCA_MULT}x size, +{DCA_TP_PCT}% blended TP, uncapped · position size compounds: balance ÷ {DCA_RESERVE_DIVISOR} per new trade · orders + fills over WS (same fast path as Worker 2), bid/ask from the real order book · LIVE · REAL MONEY · ${DCA_SEED_USD} seed</p>
       </div>
 
       {loading ? (
@@ -1782,7 +1783,7 @@ export default function Dashboard() {
       { name: "Surfer SOLBTC",  badge: "LIVE",  state: surferState,     runsTable: "surfer_runs",         pnlField: "realized_pnl_btc",  initial: SURFER_BTC_INITIAL, unit: "₿", venue: "us" as const, symbol: "SOLBTC" },
       { name: "Surfer SOLUSDT", badge: "LIVE",  state: surferUsdtState, runsTable: "surfer_usdt_runs",    pnlField: "realized_pnl_usdt", initial: 50, unit: "$", venue: "us" as const,       symbol: "SOLUSDT" },
       { name: "SOL Jump Trail Live (Worker 2)", badge: "LIVE", state: solJumpTrailState, runsTable: "sol_jump_trail_bitfinex_runs", pnlField: "realized_pnl_usd", initial: 20, unit: "$", venue: "bitfinex" as const, symbol: "tSOLUSD" },
-      { name: "SOL DCA-Martingale Live (Worker 1)", badge: "LIVE", state: solDcaState, runsTable: "sol_trail_bitfinex_runs", pnlField: "realized_pnl_usd", initial: 500, unit: "$", venue: "bitfinex" as const, symbol: "tSOLUSD" },
+      { name: "SOL DCA-Martingale Live (Worker 1)", badge: "LIVE", state: solDcaState, runsTable: "sol_trail_bitfinex_runs", pnlField: "realized_pnl_usd", initial: DCA_SEED_USD, unit: "$", venue: "bitfinex" as const, symbol: "tSOLUSD" },
     ];
 
     const rows: SummaryRow[] = [];
