@@ -10,6 +10,7 @@ export type SolDcaBitfinexState = {
   total_cost: number;
   dca_count: number;
   entry_price: number | null;
+  entry_time: string | null;
   last_entry_price: number | null;
   max_price: number | null;
   tp_target: number | null;
@@ -19,6 +20,8 @@ export type SolDcaBitfinexState = {
   realized_pnl_usd: number;
   total_trades: number;
   total_wins: number;
+  lock_owner: string | null;
+  lock_heartbeat: string | null;
 };
 
 export async function getSolDcaBitfinexState(): Promise<SolDcaBitfinexState> {

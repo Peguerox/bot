@@ -7,21 +7,17 @@ import { getSupabaseAdmin } from "@/lib/supabase-admin";
 // logic, compare aggregate stats). Turned into a standing dashboard feature instead of a one-off
 // script, per request, so it doesn't need to be re-asked for every time.
 //
-// As of 2026-09-08 (updated): Worker 1 ("zscore" query param, kept for the existing dashboard
-// button) switched to a locked ML predictor -- no longer backtestable via this candle-based route
-// at all (see the early-return below). Worker 2 ("jump-trail" config) was the market microstructure
-// logger for a while, now repurposed back into a real SOL/tSOLUSD Jump Trail bot with a wider
-// 0.2% trail (testing whether that survives Jump's real overtrading tendency better than 0.1%).
+// Worker 2 ("jump-trail" config) was the market microstructure logger for a while, now
+// repurposed back into a real SOL/tSOLUSD Jump Trail bot with a wider 0.2% trail (testing
+// whether that survives Jump's real overtrading tendency better than 0.1%).
 //
 // Uses data-api.binance.vision, not api.binance.com -- Binance geo-blocks Vercel's server IPs
-// from api.binance.com directly (see app/api/buy-hold and app/api/eth-zscore-live for the same
-// fix applied earlier).
+// from api.binance.com directly (see app/api/buy-hold for the same fix applied earlier).
 
 const JUMP_PCT = 0.02;
 
 const BOT_CONFIG = {
   "jump-trail": { table: "sol_jump_trail_bitfinex_trades", binanceSymbol: "SOLUSDT", bfxSymbol: "tSOLUSD", halfSpreadPct: 0.00975, trailPct: 0.2 },
-  "zscore":     { table: "eth_zscore_bitfinex_trades",      binanceSymbol: "BTCUSDT", bfxSymbol: "tBTCUSD", halfSpreadPct: 0.00772, trailPct: 0.1 },
 } as const;
 
 type Candle = { time: number; open: number; close: number; high: number; low: number };
@@ -104,20 +100,9 @@ function runBacktest(binance: Candle[], bfxByTime: Map<number, Candle>, bfxTimes
 }
 
 export async function GET(req: NextRequest) {
-  const bot = req.nextUrl.searchParams.get("bot"); // "jump-trail" | "zscore"
-  if (bot !== "jump-trail" && bot !== "zscore") {
-    return NextResponse.json({ ok: false, error: "bot must be jump-trail or zscore" }, { status: 400 });
-  }
-  if (bot === "zscore") {
-    // Worker 1 switched 2026-09-08 to a locked ML predictor (lib/btc-ml-predictor.ts) whose
-    // entry depends on binance_imbalance -- real order-book bid/ask sizes, which this route's
-    // 1-min OHLC candle data structurally cannot provide. No honest backtest replay is possible
-    // here anymore; report that plainly instead of silently comparing against a stale/wrong
-    // strategy (exactly the bug found and fixed earlier this session for the ratchet exit).
-    return NextResponse.json({
-      ok: false,
-      error: "Not available for the current BTC ML predictor strategy -- it needs live order-book data (bid/ask sizes) that 1-min candles can't reconstruct. See project_market_ticks_logger memory.",
-    });
+  const bot = req.nextUrl.searchParams.get("bot"); // "jump-trail"
+  if (bot !== "jump-trail") {
+    return NextResponse.json({ ok: false, error: "bot must be jump-trail" }, { status: 400 });
   }
   const cfg = BOT_CONFIG[bot];
 
