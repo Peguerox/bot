@@ -9,20 +9,23 @@
 // volume below its own 5h rolling average (pullback) AND current candle's volume above that
 // average (expansion resuming).
 //
-// EXIT: a trailing stop (2.5% below the peak price since entry) that only ever arms once price is
-// at/above the original entry — it can never realize a loss. If price instead drops 6% from the
-// last entry before the trail arms, add another position (2.0x the size of the previous leg) and
-// switch to targeting +1.5% on the new blended cost; repeats on each further 6% drop, uncapped.
+// EXIT: a trailing stop (1% below the peak price since entry) that only ever arms once price is
+// at/above the original entry — it can never realize a loss. If price instead drops 10% from the
+// last entry before the trail arms, add another position (1.5x the size of the previous leg) and
+// switch to targeting +3% on the new blended cost; repeats on each further 10% drop, uncapped.
 //
 // Position sizing compounds: at the moment a new trade opens (flat -> entry), the base unit is
-// recalculated as current balance / 31 (31 = 1+2+4+8+16, the capital reserve ratio for 5 levels
-// at a 2.0x multiplier — the worst case seen in 2 years of backtesting). Each DCA leg after that
-// is 2.0x the previous leg's size.
+// recalculated as current balance / RESERVE_DIVISOR (lib/sol-dca-config.ts — geometric sum for
+// the worst-case DCA depth seen in backtesting at this multiplier). Each DCA leg after that is
+// MULT x the previous leg's size.
 //
-// Backtested at $1,000/$31,000 (base/worst-case-reserve) scale: 254 trades over 2yr, 100%
-// eventual win rate, 70% 2yr return compounding. Cross-validated on two independent
-// non-overlapping 1-year halves (worst-case-year ROI 23%) before being chosen over configs that
-// looked better on the full 2yr number but collapsed out-of-sample. Live-deployed at $500 seed.
+// Chosen via a 12-window cross-validation (3 exchanges -- Bitfinex, Binance Global, Binance US --
+// x 4 non-overlapping quarters each, 2yr SOL 5-min data), ranked by WORST-CASE ROI across all 12,
+// not average or best. This replaced an earlier config (6%/2.0x/1.5%TP/2.5%trail) that looked
+// better on coarser 2-6-window tests but turned out to need $255k worst-case capital once a
+// genuinely bad quarter was in the test set -- this config's worst case across the same 12
+// windows is $49,258 (5.2x less) with better worst-case ROI (+6.8% vs +2.2%). See
+// project_dca_martingale_sol memory for the full comparison table.
 //
 // EXECUTION: entries/DCA-adds/exits all submit via submitMarketOrderFast (WS-native, falls back
 // to REST if the WS path isn't ready) — same proven path as Worker 2. No taker fee on this

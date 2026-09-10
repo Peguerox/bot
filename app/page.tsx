@@ -1101,7 +1101,7 @@ function SolDcaBitfinexPanel({
               onClick={onClearHistory}
               disabled={clearingHistory || enabled}
               className="text-xs font-medium px-2.5 py-1.5 rounded-md bg-gray-800 text-gray-400 hover:bg-gray-700 hover:text-gray-200 transition-all disabled:opacity-30 disabled:cursor-not-allowed"
-              title={enabled ? "Pause bot before clearing" : "Delete all trade history and run logs, reset balance to $1,000"}
+              title={enabled ? "Pause bot before clearing" : `Delete all trade history and run logs, reset balance to $${DCA_SEED_USD}`}
             >
               {clearingHistory ? "Clearing…" : "Clear"}
             </button>
@@ -1485,7 +1485,7 @@ export default function Dashboard() {
   }
 
   async function handleSolDcaClearHistory() {
-    if (!confirm("Delete all SOL DCA trade history and run logs, and reset balance to $1,000?")) return;
+    if (!confirm(`Delete all SOL DCA trade history and run logs, and reset balance to $${DCA_SEED_USD}?`)) return;
     setSolDcaClearing(true);
     await fetch("/api/sol-dca-bitfinex/clear-history", { method: "POST" });
     await load();
