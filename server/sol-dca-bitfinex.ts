@@ -55,7 +55,11 @@ const VOLAVG_PERIOD    = 5 * 12;
 const C5_LIMIT         = VWAP_PERIOD + 320; // extra history so EMA20 has room to converge
 const CANDLE_CHECK_MS  = 30_000; // 5-min candles only close every 5min; 30s is plenty responsive
 const HEARTBEAT_MS     = 10_000;
-const LOCK_STALE_MS    = 30_000;
+// 15s (1.5x heartbeat interval) instead of 30s -- a real redeploy incident showed a stale lock
+// from a killed instance taking nearly a minute to expire, during which every restart attempt
+// refused to start and Render's own crash-loop backoff kept growing the gap between retries.
+// Shorter staleness means a stuck lock self-heals within 1-2 restart cycles instead of ~4+.
+const LOCK_STALE_MS    = 15_000;
 const DB_WRITE_THROTTLE_MS = 2_000;
 const RUN_LOG_INTERVAL_MS  = 5 * 60_000;
 const WATCHDOG_INTERVAL_MS = 5_000;
