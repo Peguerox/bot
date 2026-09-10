@@ -179,10 +179,36 @@ async function checkEntry() {
   const avgVol = rollingAvg(volumes, VOLAVG_PERIOD);
 
   const i = closed.length - 1;
-  const longTrend = closes[i] > vwap[i] && ema9[i] > ema20[i];
+  const priceAboveVwap = closes[i] > vwap[i];
+  const emaBullish = ema9[i] > ema20[i];
+  const longTrend = priceAboveVwap && emaBullish;
   const lowerVol = volumes[i - 1] < avgVol[i];
   const higherVol = volumes[i] > avgVol[i];
   const entrySignal = longTrend && lowerVol && higherVol;
+
+  // Fires once per closed 5-min candle (~every 5 min) regardless of whether the full signal
+  // triggers — without this, the Activity feed goes silent for hours/days between trades with
+  // nothing to show the bot is actually alive and evaluating candles, not just stalled.
+  let stage: string;
+  if (!longTrend) {
+    stage = !priceAboveVwap && !emaBullish ? "no trend (price below VWAP, EMA9<EMA20)"
+      : !priceAboveVwap ? "no trend (price below VWAP)"
+      : "no trend (EMA9<EMA20)";
+  } else if (!lowerVol) {
+    stage = "trend confirmed, waiting for volume pullback";
+  } else if (!higherVol) {
+    stage = "trend + pullback confirmed, waiting for volume expansion";
+  } else {
+    stage = "ARMED — all conditions met, entering";
+  }
+  await logSolDcaBitfinexRun({
+    actions: [{
+      action: "SIGNAL_CHECK", stage,
+      price: closes[i], vwap: vwap[i], ema9: ema9[i], ema20: ema20[i],
+      volume: volumes[i], avgVol: avgVol[i], prevVolume: volumes[i - 1],
+      longTrend, lowerVol, higherVol,
+    }],
+  });
 
   if (!entrySignal) return;
 

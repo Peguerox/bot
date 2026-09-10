@@ -1321,6 +1321,7 @@ function SolDcaBitfinexPanel({
                       : a.action === "DCA_ADD" ? "text-orange-400"
                       : a.action === "EXIT_TRAIL" || a.action === "EXIT_DCA_TP" ? (parseFloat(a.pnlUsd) >= 0 ? "text-green-400" : "text-red-400")
                       : a.action === "HOLD_DCA" ? "text-gray-500"
+                      : a.action === "SIGNAL_CHECK" ? (a.stage?.startsWith("ARMED") ? "text-yellow-400" : a.longTrend ? "text-blue-400" : "text-gray-600")
                       : a.action === "CHECK" ? "text-gray-600"
                       : a.action === "ERROR" ? "text-red-400"
                       : "text-gray-500";
@@ -1329,6 +1330,7 @@ function SolDcaBitfinexPanel({
                       : a.action === "EXIT_TRAIL" ? `EXIT_TRAIL  @ $${parseFloat(a.price).toFixed(2)}  pnl $${a.pnlUsd}  balance=$${a.newBalance}`
                       : a.action === "EXIT_DCA_TP" ? `EXIT_DCA_TP  @ $${parseFloat(a.price).toFixed(2)}  pnl $${a.pnlUsd}  balance=$${a.newBalance}`
                       : a.action === "HOLD_DCA" ? `holding  dca=${a.dcaCount}  cost=$${a.totalCost?.toFixed?.(2) ?? a.totalCost}  target=$${a.tpTarget?.toFixed?.(2) ?? a.tpTarget}  value=$${a.portfolioValue?.toFixed?.(2) ?? a.portfolioValue}`
+                      : a.action === "SIGNAL_CHECK" ? `5m check: ${a.stage}  ($${parseFloat(a.price).toFixed(2)}, vwap=$${parseFloat(a.vwap).toFixed(2)})`
                       : a.action === "ERROR" ? `ERROR (${a.stage}): ${a.error}`
                       : a.action;
                     return <span key={i} className={color}>{text}</span>;
