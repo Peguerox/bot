@@ -4,7 +4,7 @@ import { useEffect, useState } from "react";
 import { getSupabase } from "@/lib/supabase";
 import PnLChart from "@/components/PnLChart";
 import { SEED_USD as DCA_SEED_USD, TRAIL_PCT as DCA_TRAIL_PCT, DCA_DROP_PCT, MULT as DCA_MULT, TP_PCT as DCA_TP_PCT, RESERVE_DIVISOR as DCA_RESERVE_DIVISOR } from "@/lib/sol-dca-config";
-import { SEED_USD as HT_SEED_USD, DCA_STEP_PCT as HT_DCA_STEP_PCT, MULT as HT_MULT, TP_PCT as HT_TP_PCT, BASE_SIZE_USD as HT_BASE_SIZE_USD } from "@/lib/sol-hypertrade-config";
+import { SEED_USD as HT_SEED_USD, dropPctForLevel as htDropPctForLevel } from "@/lib/sol-hypertrade-config";
 
 function Stat({ label, value, sub, color }: { label: string; value: string; sub: string; color: string }) {
   return (
@@ -1109,7 +1109,7 @@ function SolHypertradePaperPanel({
   const totalSolQty = positions.reduce((s: number, p: any) => s + (p.sol_qty ?? 0), 0);
   const portfolioValue = inPosition && livePrice ? totalSolQty * livePrice : null;
   const openPnl = portfolioValue != null && totalCost > 0 ? portfolioValue - totalCost : null;
-  const nextDcaPrice = lastEntryPrice != null ? lastEntryPrice * (1 - HT_DCA_STEP_PCT / 100) : null;
+  const nextDcaPrice = lastEntryPrice != null ? lastEntryPrice * (1 - htDropPctForLevel(level + 1) / 100) : null;
 
   const chartTrades = trades.map((t: any) => ({ ...t, pnl: t.pnl_usd, exit_time: t.exit_time }));
 
@@ -1150,7 +1150,7 @@ function SolHypertradePaperPanel({
             </button>
           </div>
         </div>
-        <p className="text-gray-500 text-xs">Continuous grid, no directional signal · always re-enters after every close · DCA rescue at -{HT_DCA_STEP_PCT}% per level, {HT_MULT}x size, +{HT_TP_PCT}% blended TP · UNCAPPED depth (real worst-case being measured live) · fills use the real bid/ask spread, no assumed slippage · PAPER ONLY, no real orders · reference sizing ${HT_BASE_SIZE_USD.toFixed(2)}/level (${HT_SEED_USD} seed ÷ 10-level reserve)</p>
+        <p className="text-gray-500 text-xs">Continuous grid, no directional signal · always re-enters after every close · variable-rate formula: decaying size multiplier (~1.66x→1x), widening DCA gap (~8.03%→), shrinking TP target (~1.52%→0.05% floor) as levels stack · UNCAPPED depth, compounding base size · fills use the real bid/ask spread, no assumed slippage · PAPER ONLY, no real orders · verified worst-case ~9 levels / $2,535 per $100 base (Binance Global 5yr + Bitfinex 2yr) · ${HT_SEED_USD} starting seed</p>
       </div>
 
       {loading ? (

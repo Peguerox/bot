@@ -1,15 +1,23 @@
-// PAPER TRADING — SOL hypertrading continuous-grid DCA, Worker 2 replacement.
+// PAPER TRADING — SOL hypertrading continuous-grid DCA, variable-rate formula, Worker 2.
 //
 // No real orders, no real money. Runs against Bitfinex's live public order book (WebSocket) so
 // fills use the REAL bid/ask spread at the moment of each trade, not an assumed slippage %.
-// Position sizing is UNLIMITED (uncapped DCA depth) so we can observe the actual worst-case
-// martingale depth this strategy hits against live execution, separate from the $500-seed
-// dollar figures the dashboard reports (see lib/sol-hypertrade-config.ts for the sizing logic).
+// Position sizing is UNLIMITED (uncapped DCA depth) — see lib/sol-hypertrade-config.ts for the
+// formula and docs/hypertrade_variable_rate_formula_ORIGINAL.md for the derivation. Independently
+// re-verified: max level ever reached was 9 on both Binance Global (5yr) and Bitfinex (2yr), real
+// reserve $2,535.17 per $100 base bet, zero cycles closed at a realized loss in either test.
 //
-// STRATEGY (continuous grid, no directional entry signal — see conversation history for the
-// backtest that chose this over the alternatives): always in a position. Enter/re-enter
-// immediately after every close. DCA-add DCA_STEP_PCT below the last entry, size = MULT x the
-// previous add. Exit the whole position at a blended take-profit TP_PCT above total cost.
+// STRATEGY (continuous grid, no directional entry signal): always in a position, re-enter
+// immediately after every close. Unlike the earlier fixed-multiplier version, purchase size,
+// DCA drop gap, and take-profit target all vary by level (see lib/sol-hypertrade-config.ts):
+//   - size multiplier starts at ~1.66x and decays toward 1x as levels stack
+//   - drop gap starts at ~8.03% and widens slowly, so depth requires a real crash
+//   - TP target starts at ~1.52% and shrinks toward a 0.05% floor as levels stack, so a deep
+//     rescue only needs a small bounce to exit, not a full recovery
+//
+// COMPOUNDING: base bet size = current balance (SEED_USD + realized P&L) / RESERVE_DIVISOR, so
+// the position size grows with the account and the worst-case reserve requirement always scales
+// with what's actually available — confirmed self-sufficient in backtest across 2,087 cycles.
 import dotenv from "dotenv";
 dotenv.config({ path: ".env.local" });
 
@@ -20,7 +28,7 @@ import {
   logSolHypertradePaperRun, type SolHypertradePaperState, type HypertradePosition,
 } from "../lib/sol-hypertrade-paper-db";
 import { connectPublicBook, getBookBidAsk, isBookReady, bookMessageAge } from "../lib/bitfinex-trading-ws";
-import { DCA_STEP_PCT, MULT, TP_PCT, BASE_SIZE_USD } from "../lib/sol-hypertrade-config";
+import { multForLevel, dropPctForLevel, tpPctForLevel, RESERVE_DIVISOR, SEED_USD } from "../lib/sol-hypertrade-config";
 
 const BFX_SYMBOL = "tSOLUSD";
 const HEARTBEAT_MS = 10_000;
@@ -37,6 +45,11 @@ let positions: HypertradePosition[] = [];
 let lastDbWrite = 0;
 let lastRunLog = 0;
 let processing = false;
+
+function currentBaseSizeUsd(): number {
+  const balance = SEED_USD + (state.realized_pnl_usd ?? 0);
+  return balance / RESERVE_DIVISOR;
+}
 
 async function acquireLock(): Promise<boolean> {
   state = await getSolHypertradePaperState();
@@ -81,33 +94,41 @@ function totalQty(): number {
 }
 
 function tpExitPrice(): number {
-  const target = state.total_cost * (1 + TP_PCT / 100);
-  return target / totalQty();
+  const t = tpPctForLevel(state.level);
+  const avgCost = state.total_cost / totalQty();
+  return avgCost * (1 + t / 100);
+}
+
+function nextDcaTrigger(): number {
+  const d = dropPctForLevel(state.level + 1);
+  return state.last_entry_price! * (1 - d / 100);
 }
 
 async function enterFresh(ask: number) {
-  const solQty = BASE_SIZE_USD / ask;
-  positions = [{ price: ask, usd_size: BASE_SIZE_USD, sol_qty: solQty }];
+  const baseSize = currentBaseSizeUsd();
+  const solQty = baseSize / ask;
+  positions = [{ price: ask, usd_size: baseSize, sol_qty: solQty }];
   const patch = {
-    positions, total_cost: BASE_SIZE_USD, level: 1, last_entry_price: ask,
-    tp_target: BASE_SIZE_USD * (1 + TP_PCT / 100), cycle_start_time: new Date().toISOString(),
+    positions, total_cost: baseSize, level: 1, last_entry_price: ask,
+    tp_target: baseSize * (1 + tpPctForLevel(1) / 100), cycle_start_time: new Date().toISOString(),
   };
   state = { ...state, ...patch };
   await updateSolHypertradePaperState(patch);
   lastDbWrite = Date.now();
-  console.log(`ENTRY level=1 price=${ask.toFixed(4)} size=$${BASE_SIZE_USD.toFixed(2)}`);
-  await logSolHypertradePaperRun({ actions: [{ action: "ENTRY", level: 1, price: ask, size: BASE_SIZE_USD }] });
+  console.log(`ENTRY level=1 price=${ask.toFixed(4)} size=$${baseSize.toFixed(2)}`);
+  await logSolHypertradePaperRun({ actions: [{ action: "ENTRY", level: 1, price: ask, size: baseSize }] });
 }
 
 async function dcaAdd(ask: number) {
-  const nextSize = BASE_SIZE_USD * MULT ** state.level;
+  const newLevel = state.level + 1;
+  const lastLegSize = positions[positions.length - 1].usd_size;
+  const nextSize = lastLegSize * multForLevel(newLevel);
   const solQty = nextSize / ask;
   positions.push({ price: ask, usd_size: nextSize, sol_qty: solQty });
   const newCost = state.total_cost + nextSize;
-  const newLevel = state.level + 1;
   const patch = {
     positions, total_cost: newCost, level: newLevel, last_entry_price: ask,
-    tp_target: newCost * (1 + TP_PCT / 100),
+    tp_target: newCost * (1 + tpPctForLevel(newLevel) / 100),
     max_level_ever: Math.max(state.max_level_ever, newLevel),
     max_cost_ever: Math.max(state.max_cost_ever, newCost),
   };
@@ -131,8 +152,11 @@ async function exitCycle(bid: number) {
     levels, total_cost: state.total_cost, proceeds, pnl_usd: pnlUsd, pnl_pct: pnlPct,
     entry_time: entryTime, bars_held_ms: barsHeldMs,
   });
-  console.log(`EXIT levels=${levels} price=${bid.toFixed(4)} pnlUsd=${pnlUsd.toFixed(2)} pnlPct=${pnlPct.toFixed(2)}%`);
-  await logSolHypertradePaperRun({ actions: [{ action: "EXIT", levels, price: bid, pnlUsd, pnlPct } ] });
+  // realized_pnl_usd is bumped inside recordSolHypertradePaperTrade -- refresh state so the next
+  // cycle's compounded base size reflects the new balance
+  state = await getSolHypertradePaperState();
+  console.log(`EXIT levels=${levels} price=${bid.toFixed(4)} pnlUsd=${pnlUsd.toFixed(2)} pnlPct=${pnlPct.toFixed(2)}% newBalance=$${(SEED_USD + state.realized_pnl_usd).toFixed(2)}`);
+  await logSolHypertradePaperRun({ actions: [{ action: "EXIT", levels, price: bid, pnlUsd, pnlPct, newBalance: SEED_USD + state.realized_pnl_usd }] });
   lastRunLog = Date.now();
 
   // continuous grid: immediately re-enter at the same tick's ask
@@ -154,7 +178,7 @@ async function onBookUpdate() {
 
     // adverse fills first (DCA), then favorable (TP) -- matches the backtest's tie-break, though
     // on live ticks this is just a processing-order choice, not an OHLC approximation anymore
-    while (ask <= state.last_entry_price! * (1 - DCA_STEP_PCT / 100)) {
+    while (ask <= nextDcaTrigger()) {
       await dcaAdd(ask);
     }
 
@@ -164,7 +188,7 @@ async function onBookUpdate() {
     }
 
     if (Date.now() - lastRunLog > RUN_LOG_INTERVAL_MS) {
-      const distToDca = ((bid / state.last_entry_price!) - 1) * 100 + DCA_STEP_PCT;
+      const distToDca = ((bid / nextDcaTrigger()) - 1) * 100;
       const distToTp = ((tpExitPrice() / bid) - 1) * 100;
       console.log(`STATUS level=${state.level} bid=${bid.toFixed(4)} ask=${ask.toFixed(4)} distToNextDCA=${distToDca.toFixed(3)}% distToTP=${distToTp.toFixed(3)}%`);
       await logSolHypertradePaperRun({
@@ -205,7 +229,7 @@ async function main() {
   process.on("SIGTERM", shutdown);
 
   console.log(`Starting SOL Hypertrade PAPER worker (${INSTANCE_ID}), enabled=${state.enabled}, level=${state.level}`);
-  console.log(`PAPER ONLY — no real orders. DCA=${DCA_STEP_PCT}% mult=${MULT}x TP=${TP_PCT}%, unlimited depth, base=$${BASE_SIZE_USD.toFixed(2)}, real bid/ask fills from Bitfinex's live book.`);
+  console.log(`PAPER ONLY — no real orders. Variable-rate formula (decaying multiplier, widening DCA gap, shrinking TP), unlimited depth, compounding base=$${currentBaseSizeUsd().toFixed(2)}, real bid/ask fills from Bitfinex's live book.`);
   connectPublicBook(BFX_SYMBOL, () => { onBookUpdate().catch((err) => console.error("onBookUpdate error:", err)); });
   startWatchdog();
 }
