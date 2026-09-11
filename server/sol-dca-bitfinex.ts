@@ -372,7 +372,9 @@ async function exitPosition(expectedPrice: number, reason: "TRAIL" | "DCA_TP") {
     await updateSolDcaBitfinexState(patch);
     lastDbWrite = Date.now();
     await recordSolDcaBitfinexTrade({
-      positions: origPositions, dca_levels: origDcaCount, usd_in: usdIn, usd_out: usdOut,
+      positions: origPositions, dca_levels: origDcaCount,
+      entry_price: origTotalCost / trackedQty, exit_price: fill.execPrice, sol_quantity: trackedQty,
+      usd_in: usdIn, usd_out: usdOut,
       pnl_usd: pnlUsd, pnl_pct: pnlPct, exit_reason: reason, entry_time: origEntryTime,
     });
     console.log(`${reason} FILLED price=${fill.execPrice.toFixed(4)} pnlUsd=${pnlUsd.toFixed(4)} pnlPct=${pnlPct.toFixed(4)} newBalance=${newBalance.toFixed(2)} fillLatencyMs=${fill.latencyMs} totalLatencyMs=${totalLatencyMs}`);
@@ -413,7 +415,9 @@ async function emergencyFlatten(reason: string) {
       balance: newBalance, enabled: false,
     });
     await recordSolDcaBitfinexTrade({
-      positions: fresh.positions, dca_levels: fresh.dca_count, usd_in: usdIn, usd_out: usdOut,
+      positions: fresh.positions, dca_levels: fresh.dca_count,
+      entry_price: usdIn / qty, exit_price: fill.execPrice, sol_quantity: qty,
+      usd_in: usdIn, usd_out: usdOut,
       pnl_usd: pnlUsd, pnl_pct: pnlPct, exit_reason: "TRAIL", entry_time: fresh.entry_time!,
     });
     console.error(`EMERGENCY FLATTEN complete @ ${fill.execPrice}, pnlPct=${pnlPct.toFixed(4)}. Bot paused (enabled=false).`);

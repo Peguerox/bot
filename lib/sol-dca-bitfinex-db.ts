@@ -45,6 +45,9 @@ export async function updateSolDcaBitfinexState(patch: Record<string, unknown>) 
 export async function recordSolDcaBitfinexTrade(params: {
   positions: DcaPosition[];
   dca_levels: number;
+  entry_price: number;
+  exit_price: number;
+  sol_quantity: number;
   usd_in: number;
   usd_out: number;
   pnl_usd: number;
