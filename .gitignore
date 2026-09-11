@@ -42,3 +42,6 @@ next-env.d.ts
 
 # Trigger.dev
 .trigger/
+
+# scratch research scripts + cached market data, never imported by live code
+/research/
