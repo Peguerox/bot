@@ -6,7 +6,7 @@
 // formula and docs/hypertrade_variable_rate_formula_ORIGINAL.md for the derivation. Independently
 // re-verified: max level ever reached was 9 on both Binance Global (5yr) and Bitfinex (2yr), real
 // bare reserve $2,535.17 per $100 base bet (zero cushion), zero cycles closed at a realized loss
-// in either test. Deployed reserve is 30x, one level of margin beyond the bare historical max --
+// in either test. Deployed reserve is 35x, two levels of margin beyond the bare historical max --
 // see lib/sol-hypertrade-config.ts and docs/hypertrade_formula_database.md.
 //
 // STRATEGY (continuous grid, no directional entry signal): always in a position, re-enter
