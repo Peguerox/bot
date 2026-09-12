@@ -1,8 +1,9 @@
-// REAL MONEY — SOL/USD DCA-martingale, repurposing Worker 1's freed Render service/API key/DB
-// tables (sol_trail_bitfinex_*) after the BTC ML predictor was retired 2026-09-10. Rebuilt from
-// the Trigger.dev cron version to a persistent worker specifically to get the same proven
-// WS-native execution path as Worker 2 (lib/bitfinex-trading-ws.ts) — fast order fills and
-// continuous tick-by-tick trail/DCA/TP monitoring instead of once-per-minute REST checks.
+// PAPER TRADING — SOL/USD DCA-martingale, Worker 1. Converted from real money to paper on
+// 2026-09-12 when the real $500 was moved to Worker 2 (the variable-rate formula, independently
+// verified more robust — see docs/hypertrade_formula_database.md). This strategy and its
+// tracking tables (sol_trail_bitfinex_*) are kept running as paper so its own signal/config can
+// keep being observed without further real-money risk. No real orders are submitted anywhere in
+// this file; fills are simulated from the live public order book, same pattern as Worker 2.
 //
 // STRATEGY — entry (long only, flat, re-armed on every new closed 5-min candle): price > rolling
 // 24h VWAP AND EMA9 > EMA20 (5-min bars, spans scaled to represent 9h/20h) AND previous candle's
@@ -21,15 +22,10 @@
 //
 // Chosen via a 12-window cross-validation (3 exchanges -- Bitfinex, Binance Global, Binance US --
 // x 4 non-overlapping quarters each, 2yr SOL 5-min data), ranked by WORST-CASE ROI across all 12,
-// not average or best. This replaced an earlier config (6%/2.0x/1.5%TP/2.5%trail) that looked
-// better on coarser 2-6-window tests but turned out to need $255k worst-case capital once a
-// genuinely bad quarter was in the test set -- this config's worst case across the same 12
-// windows is $49,258 (5.2x less) with better worst-case ROI (+6.8% vs +2.2%). See
-// project_dca_martingale_sol memory for the full comparison table.
+// not average or best. See project_dca_martingale_sol memory for the full comparison table.
 //
-// EXECUTION: entries/DCA-adds/exits all submit via submitMarketOrderFast (WS-native, falls back
-// to REST if the WS path isn't ready) — same proven path as Worker 2. No taker fee on this
-// account, so plain EXCHANGE MARKET orders are used throughout, no maker/OCO complexity.
+// EXECUTION: entries/DCA-adds/exits all simulate fills using the live public order book (real
+// bid/ask spread, no assumed slippage), same as Worker 2. No real orders submitted.
 import dotenv from "dotenv";
 dotenv.config({ path: ".env.local" });
 
@@ -40,11 +36,7 @@ import {
   type SolDcaBitfinexState, type DcaPosition,
 } from "../lib/sol-dca-bitfinex-db";
 import { getBitfinexCandlesOHLCV, type BitfinexOHLCV } from "../lib/bitfinex";
-import { submitMarketOrderSafe } from "../lib/bitfinex-auth";
-import {
-  connectPublicBook, getBookBidAsk, isBookReady, bookMessageAge,
-  connectAuthenticated, getLiveBalance, isWalletReady, submitMarketOrderFast,
-} from "../lib/bitfinex-trading-ws";
+import { connectPublicBook, getBookBidAsk, isBookReady, bookMessageAge } from "../lib/bitfinex-trading-ws";
 import { DCA_DROP_PCT, MULT, TP_PCT, TRAIL_PCT, RESERVE_DIVISOR } from "../lib/sol-dca-config";
 
 const BFX_SYMBOL       = "tSOLUSD";
@@ -55,16 +47,11 @@ const VOLAVG_PERIOD    = 5 * 12;
 const C5_LIMIT         = VWAP_PERIOD + 320; // extra history so EMA20 has room to converge
 const CANDLE_CHECK_MS  = 30_000; // 5-min candles only close every 5min; 30s is plenty responsive
 const HEARTBEAT_MS     = 10_000;
-// 15s (1.5x heartbeat interval) instead of 30s -- a real redeploy incident showed a stale lock
-// from a killed instance taking nearly a minute to expire, during which every restart attempt
-// refused to start and Render's own crash-loop backoff kept growing the gap between retries.
-// Shorter staleness means a stuck lock self-heals within 1-2 restart cycles instead of ~4+.
-const LOCK_STALE_MS    = 15_000;
+const LOCK_STALE_MS    = 15_000; // 1.5x heartbeat -- see the Render redeploy crash-loop incident
 const DB_WRITE_THROTTLE_MS = 2_000;
 const RUN_LOG_INTERVAL_MS  = 5 * 60_000;
 const WATCHDOG_INTERVAL_MS = 5_000;
 const BOOK_STALE_MS        = 15_000;
-const BOOK_EMERGENCY_MS    = 25_000;
 
 const INSTANCE_ID = `${os.hostname()}-${process.pid}-${crypto.randomBytes(3).toString("hex")}`;
 
@@ -72,7 +59,6 @@ let state: SolDcaBitfinexState;
 let lastDbWrite = 0;
 let lastRunLog = 0;
 let orderInFlight = false;
-let emergencyInProgress = false;
 
 async function acquireLock(): Promise<boolean> {
   state = await getSolDcaBitfinexState();
@@ -110,7 +96,7 @@ async function heartbeat() {
   await updateSolDcaBitfinexState({ lock_heartbeat: new Date().toISOString() });
 }
 
-// ---------- Indicators (same formulas as the backtest / Trigger.dev predecessor) ----------
+// ---------- Indicators (same formulas as the backtest) ----------
 
 function rollingVWAP(candles: BitfinexOHLCV[], period: number): number[] {
   const out: number[] = new Array(candles.length).fill(NaN);
@@ -216,39 +202,35 @@ async function checkEntry() {
 
   if (!entrySignal) return;
 
-  const { bid, ask } = getBookBidAsk();
+  const { ask } = getBookBidAsk();
   if (!isBookReady() || ask === null) { console.log("Entry signal fired but order book not ready yet — skipping this candle."); return; }
-  if (!isWalletReady()) { console.log("Entry signal fired but wallet WS not ready yet — skipping this candle."); return; }
 
   orderInFlight = true;
-  const signalTime = Date.now();
   try {
     const baseSize = state.balance / RESERVE_DIVISOR;
-    const realUsd = getLiveBalance("USD");
-    const cappedSize = Math.min(baseSize, realUsd);
-    const qty = cappedSize / ask;
-    if (qty <= 0) { console.log(`Entry signal but no real USD available (real=${realUsd}) — skipping.`); return; }
+    const qty = baseSize / ask;
+    if (qty <= 0) return;
 
-    console.log(`ENTRY signal @ ask=${ask.toFixed(4)} size=$${cappedSize.toFixed(2)} qty~=${qty.toFixed(6)} (real USD=${realUsd.toFixed(2)}) — submitting real order...`);
-    const fill = await submitMarketOrderFast(BFX_SYMBOL, qty);
-    const totalLatencyMs = Date.now() - signalTime;
-    const usdSize = fill.execPrice * Math.abs(fill.execAmount);
+    console.log(`ENTRY signal (paper) @ ask=${ask.toFixed(4)} size=$${baseSize.toFixed(2)} qty~=${qty.toFixed(6)}`);
+    const execPrice = ask;
+    const execAmount = qty;
+    const usdSize = execPrice * execAmount;
 
-    const positions: DcaPosition[] = [{ price: fill.execPrice, usd_size: usdSize, sol_qty: Math.abs(fill.execAmount) }];
+    const positions: DcaPosition[] = [{ price: execPrice, usd_size: usdSize, sol_qty: execAmount }];
     const patch = {
       mode: "SOL" as const, positions, total_cost: usdSize, dca_count: 0,
-      entry_price: fill.execPrice, entry_time: new Date().toISOString(),
-      last_entry_price: fill.execPrice, max_price: fill.execPrice,
+      entry_price: execPrice, entry_time: new Date().toISOString(),
+      last_entry_price: execPrice, max_price: execPrice,
       tp_target: null, dca_triggered: false,
     };
     state = { ...state, ...patch };
     await updateSolDcaBitfinexState(patch);
     lastDbWrite = Date.now();
-    console.log(`ENTRY FILLED price=${fill.execPrice.toFixed(4)} qty=${fill.execAmount.toFixed(6)} fee=${fill.fee} fillLatencyMs=${fill.latencyMs} totalLatencyMs=${totalLatencyMs}`);
-    await logSolDcaBitfinexRun({ actions: [{ action: "ENTRY", price: fill.execPrice, usdSize, qty: fill.execAmount, fillLatencyMs: fill.latencyMs, totalLatencyMs }] });
+    console.log(`ENTRY FILLED (paper) price=${execPrice.toFixed(4)} qty=${execAmount.toFixed(6)}`);
+    await logSolDcaBitfinexRun({ actions: [{ action: "ENTRY", price: execPrice, usdSize, qty: execAmount }] });
     lastRunLog = Date.now();
   } catch (err) {
-    console.error("ENTRY order failed:", err);
+    console.error("ENTRY (paper) failed:", err);
     await logSolDcaBitfinexRun({ actions: [{ action: "ERROR", stage: "entry", error: String(err) }] });
   } finally {
     orderInFlight = false;
@@ -305,36 +287,33 @@ async function onBookUpdate() {
 
 async function dcaAdd(askPrice: number) {
   orderInFlight = true;
-  const signalTime = Date.now();
   try {
     const lastLeg = state.positions[state.positions.length - 1];
     const nextSize = lastLeg.usd_size * MULT;
-    const realUsd = getLiveBalance("USD");
-    const cappedSize = Math.min(nextSize, realUsd);
-    const qty = cappedSize / askPrice;
-    if (qty <= 0) { console.log(`DCA trigger but no real USD available (real=${realUsd}) — skipping this tick.`); return; }
+    const qty = nextSize / askPrice;
+    if (qty <= 0) return;
 
-    console.log(`DCA_ADD level=${state.dca_count + 1} @ ask=${askPrice.toFixed(4)} size=$${cappedSize.toFixed(2)} qty~=${qty.toFixed(6)} (real USD=${realUsd.toFixed(2)}) — submitting real order...`);
-    const fill = await submitMarketOrderFast(BFX_SYMBOL, qty);
-    const totalLatencyMs = Date.now() - signalTime;
-    const usdSize = fill.execPrice * Math.abs(fill.execAmount);
+    console.log(`DCA_ADD (paper) level=${state.dca_count + 1} @ ask=${askPrice.toFixed(4)} size=$${nextSize.toFixed(2)} qty~=${qty.toFixed(6)}`);
+    const execPrice = askPrice;
+    const execAmount = qty;
+    const usdSize = execPrice * execAmount;
 
-    const newPositions = [...state.positions, { price: fill.execPrice, usd_size: usdSize, sol_qty: Math.abs(fill.execAmount) }];
+    const newPositions = [...state.positions, { price: execPrice, usd_size: usdSize, sol_qty: execAmount }];
     const newTotalCost = state.total_cost + usdSize;
     const tpTarget = newTotalCost * (1 + TP_PCT / 100);
 
     const patch = {
       positions: newPositions, total_cost: newTotalCost, dca_count: state.dca_count + 1,
-      last_entry_price: fill.execPrice, dca_triggered: true, tp_target: tpTarget,
+      last_entry_price: execPrice, dca_triggered: true, tp_target: tpTarget,
     };
     state = { ...state, ...patch };
     await updateSolDcaBitfinexState(patch);
     lastDbWrite = Date.now();
-    console.log(`DCA_ADD FILLED level=${state.dca_count} price=${fill.execPrice.toFixed(4)} qty=${fill.execAmount.toFixed(6)} tpTarget=${tpTarget.toFixed(2)} fillLatencyMs=${fill.latencyMs} totalLatencyMs=${totalLatencyMs}`);
-    await logSolDcaBitfinexRun({ actions: [{ action: "DCA_ADD", level: state.dca_count, price: fill.execPrice, usdSize, tpTarget, fillLatencyMs: fill.latencyMs, totalLatencyMs }] });
+    console.log(`DCA_ADD FILLED (paper) level=${state.dca_count} price=${execPrice.toFixed(4)} qty=${execAmount.toFixed(6)} tpTarget=${tpTarget.toFixed(2)}`);
+    await logSolDcaBitfinexRun({ actions: [{ action: "DCA_ADD", level: state.dca_count, price: execPrice, usdSize, tpTarget }] });
     lastRunLog = Date.now();
   } catch (err) {
-    console.error("DCA_ADD order failed:", err);
+    console.error("DCA_ADD (paper) failed:", err);
     await logSolDcaBitfinexRun({ actions: [{ action: "ERROR", stage: "dca_add", error: String(err) }] });
   } finally {
     orderInFlight = false;
@@ -343,21 +322,18 @@ async function dcaAdd(askPrice: number) {
 
 async function exitPosition(expectedPrice: number, reason: "TRAIL" | "DCA_TP") {
   orderInFlight = true;
-  const signalTime = Date.now();
   try {
     const origPositions = state.positions;
     const origTotalCost = state.total_cost;
     const origDcaCount = state.dca_count;
     const origEntryTime = state.entry_time!;
     const trackedQty = origPositions.reduce((s, p) => s + p.sol_qty, 0);
-    const realSol = getLiveBalance("SOL");
-    const sellQty = isWalletReady() ? Math.min(trackedQty, realSol) : trackedQty;
-    if (sellQty <= 0) throw new Error(`No real SOL available to sell (tracked=${trackedQty}, real=${realSol})`);
+    if (trackedQty <= 0) throw new Error("No tracked SOL to sell (paper)");
 
-    console.log(`${reason} signal, selling ${sellQty.toFixed(6)} SOL (tracked=${trackedQty.toFixed(6)}, real=${realSol.toFixed(6)}) — submitting real order...`);
-    const fill = await submitMarketOrderFast(BFX_SYMBOL, -sellQty);
-    const totalLatencyMs = Date.now() - signalTime;
-    const usdOut = fill.execPrice * Math.abs(fill.execAmount);
+    console.log(`${reason} signal (paper), selling ${trackedQty.toFixed(6)} SOL @ ~${expectedPrice.toFixed(4)}`);
+    const execPrice = expectedPrice;
+    const execAmount = trackedQty;
+    const usdOut = execPrice * execAmount;
     const usdIn  = origTotalCost;
     const pnlUsd = usdOut - usdIn;
     const pnlPct = (pnlUsd / usdIn) * 100;
@@ -373,74 +349,29 @@ async function exitPosition(expectedPrice: number, reason: "TRAIL" | "DCA_TP") {
     lastDbWrite = Date.now();
     await recordSolDcaBitfinexTrade({
       positions: origPositions, dca_levels: origDcaCount,
-      entry_price: origTotalCost / trackedQty, exit_price: fill.execPrice, sol_quantity: trackedQty,
+      entry_price: origTotalCost / trackedQty, exit_price: execPrice, sol_quantity: trackedQty,
       usd_in: usdIn, usd_out: usdOut,
       pnl_usd: pnlUsd, pnl_pct: pnlPct, exit_reason: reason, entry_time: origEntryTime,
     });
-    console.log(`${reason} FILLED price=${fill.execPrice.toFixed(4)} pnlUsd=${pnlUsd.toFixed(4)} pnlPct=${pnlPct.toFixed(4)} newBalance=${newBalance.toFixed(2)} fillLatencyMs=${fill.latencyMs} totalLatencyMs=${totalLatencyMs}`);
-    await logSolDcaBitfinexRun({ actions: [{ action: `EXIT_${reason}`, price: fill.execPrice, pnlUsd, pnlPct, newBalance, fillLatencyMs: fill.latencyMs, totalLatencyMs }] });
+    console.log(`${reason} FILLED (paper) price=${execPrice.toFixed(4)} pnlUsd=${pnlUsd.toFixed(4)} pnlPct=${pnlPct.toFixed(4)} newBalance=${newBalance.toFixed(2)}`);
+    await logSolDcaBitfinexRun({ actions: [{ action: `EXIT_${reason}`, price: execPrice, pnlUsd, pnlPct, newBalance }] });
     lastRunLog = Date.now();
   } catch (err) {
-    console.error(`${reason} order failed:`, err);
+    console.error(`${reason} (paper) failed:`, err);
     await logSolDcaBitfinexRun({ actions: [{ action: "ERROR", stage: "exit", error: String(err) }] });
   } finally {
     orderInFlight = false;
   }
 }
 
-// ---------- Watchdog: book feed staleness -> emergency flatten ----------
-
-async function emergencyFlatten(reason: string) {
-  if (emergencyInProgress) return;
-  emergencyInProgress = true;
-  try {
-    console.error(`EMERGENCY FLATTEN triggered: ${reason}`);
-    await logSolDcaBitfinexRun({ actions: [{ action: "ERROR", stage: "watchdog", error: reason }] }).catch(() => {});
-    const fresh = await getSolDcaBitfinexState();
-    if (fresh.mode !== "SOL" || fresh.positions.length === 0) {
-      console.error("Watchdog: not holding per DB state, nothing to flatten.");
-      return;
-    }
-    const qty = fresh.positions.reduce((s, p) => s + p.sol_qty, 0);
-    const fill = await submitMarketOrderSafe(BFX_SYMBOL, -qty, "SOL");
-    const usdOut = fill.execPrice * Math.abs(fill.execAmount);
-    const usdIn = fresh.total_cost;
-    const pnlUsd = usdOut - usdIn;
-    const pnlPct = (pnlUsd / usdIn) * 100;
-    const newBalance = fresh.balance + pnlUsd;
-
-    await updateSolDcaBitfinexState({
-      mode: "USD", positions: [], total_cost: 0, dca_count: 0,
-      entry_price: null, last_entry_price: null, max_price: null, tp_target: null, dca_triggered: false,
-      balance: newBalance, enabled: false,
-    });
-    await recordSolDcaBitfinexTrade({
-      positions: fresh.positions, dca_levels: fresh.dca_count,
-      entry_price: usdIn / qty, exit_price: fill.execPrice, sol_quantity: qty,
-      usd_in: usdIn, usd_out: usdOut,
-      pnl_usd: pnlUsd, pnl_pct: pnlPct, exit_reason: "TRAIL", entry_time: fresh.entry_time!,
-    });
-    console.error(`EMERGENCY FLATTEN complete @ ${fill.execPrice}, pnlPct=${pnlPct.toFixed(4)}. Bot paused (enabled=false).`);
-    await logSolDcaBitfinexRun({ actions: [{ action: "EXIT_TRAIL", price: fill.execPrice, pnlUsd, pnlPct, newBalance, emergency: true }] }).catch(() => {});
-  } catch (err) {
-    console.error("EMERGENCY FLATTEN FAILED:", err);
-    await logSolDcaBitfinexRun({ actions: [{ action: "ERROR", stage: "watchdog-flatten-failed", error: String(err) }] }).catch(() => {});
-  } finally {
-    process.exit(1);
-  }
-}
+// ---------- Watchdog: book feed staleness (log-only, nothing real to protect) ----------
 
 function startWatchdog() {
   setInterval(() => {
     const staleMs = bookMessageAge();
-    if (staleMs < BOOK_STALE_MS) return;
-
-    if (state.mode === "SOL" && staleMs >= BOOK_EMERGENCY_MS && !emergencyInProgress) {
-      emergencyFlatten(`Order book feed silent for ${Math.round(staleMs / 1000)}s while holding SOL`)
-        .catch((err) => console.error("emergencyFlatten error:", err));
-      return;
+    if (staleMs >= BOOK_STALE_MS) {
+      console.error(`Watchdog: order book feed silent for ${Math.round(staleMs / 1000)}s.`);
     }
-    console.error(`Watchdog: order book feed silent for ${Math.round(staleMs / 1000)}s.`);
   }, WATCHDOG_INTERVAL_MS);
 }
 
@@ -464,10 +395,9 @@ async function main() {
   process.on("SIGINT", shutdown);
   process.on("SIGTERM", shutdown);
 
-  console.log(`Starting LIVE SOL DCA-Martingale (WS execution) worker (${INSTANCE_ID}), enabled=${state.enabled}, mode=${state.mode}, balance=${state.balance}`);
-  console.log(`REAL MONEY — VWAP(24h)+EMA(9/20)+volume-expansion entry on 5m candles, trail ${TRAIL_PCT}% (arms only if profitable), DCA rescue at -${DCA_DROP_PCT}%/${MULT}x uncapped, +${TP_PCT}% blended TP. Orders + fills over WS, bid/ask from the real order book.`);
+  console.log(`Starting PAPER SOL DCA-Martingale worker (${INSTANCE_ID}), enabled=${state.enabled}, mode=${state.mode}, balance=${state.balance}`);
+  console.log(`PAPER ONLY — no real orders. VWAP(24h)+EMA(9/20)+volume-expansion entry on 5m candles, trail ${TRAIL_PCT}% (arms only if profitable), DCA rescue at -${DCA_DROP_PCT}%/${MULT}x uncapped, +${TP_PCT}% blended TP. Fills simulated from the live public order book.`);
   connectPublicBook(BFX_SYMBOL, () => { onBookUpdate().catch((err) => console.error("onBookUpdate error:", err)); });
-  connectAuthenticated();
   checkEntry().catch((err) => console.error("checkEntry error:", err)); // initial check, don't wait for first timer tick
   startWatchdog();
 }
