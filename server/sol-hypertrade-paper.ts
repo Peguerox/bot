@@ -1,25 +1,35 @@
-// PAPER TRADING — SOL hypertrading continuous-grid DCA, variable-rate formula, Worker 2.
+// REAL MONEY — SOL hypertrading continuous-grid DCA, variable-rate formula, Worker 2. Filename
+// and DB tables (sol_hypertrade_paper_*) are historical from when this ran paper-only; kept
+// as-is on the 2026-09-12 swap rather than renamed, same call made for Worker 1's real->paper
+// conversion on the same day (see server/sol-dca-bitfinex.ts).
 //
-// No real orders, no real money. Runs against Bitfinex's live public order book (WebSocket) so
-// fills use the REAL bid/ask spread at the moment of each trade, not an assumed slippage %.
-// Position sizing is UNLIMITED (uncapped DCA depth) — see lib/sol-hypertrade-config.ts for the
-// formula and docs/hypertrade_variable_rate_formula_ORIGINAL.md for the derivation. Independently
-// re-verified: max level ever reached was 9 on both Binance Global (5yr) and Bitfinex (2yr), real
-// bare reserve $2,535.17 per $100 base bet (zero cushion), zero cycles closed at a realized loss
-// in either test. Deployed reserve is 35x, two levels of margin beyond the bare historical max --
-// see lib/sol-hypertrade-config.ts and docs/hypertrade_formula_database.md.
+// Real money moved here FROM Worker 1 because this formula is the more thoroughly stress-tested
+// of the two — see docs/hypertrade_formula_database.md and
+// docs/hypertrade_sensitivity_good_bad_news.md for the full robustness case (0/48 coefficient-
+// perturbation failures, 0/57 start-date failures at this reserve level, zero closed losses in
+// every independent backtest run against it).
+//
+// Runs against Bitfinex's live public order book (WebSocket) for the best bid/ask, and the
+// authenticated wallet+trading WS (lib/bitfinex-trading-ws.ts) for real balances and order
+// submission/fills -- same WS-native execution path as Worker 1 used. Position sizing is
+// UNLIMITED (uncapped DCA depth) -- see lib/sol-hypertrade-config.ts for the formula and
+// docs/hypertrade_variable_rate_formula_ORIGINAL.md for the derivation. Independently re-verified:
+// max level ever reached was 9 on both Binance Global (5yr) and Bitfinex (2yr), real bare reserve
+// $2,535.17 per $100 base bet (zero cushion), zero cycles closed at a realized loss in either
+// test. Deployed reserve is 35x, two levels of margin beyond the bare historical max.
 //
 // STRATEGY (continuous grid, no directional entry signal): always in a position, re-enter
-// immediately after every close. Unlike the earlier fixed-multiplier version, purchase size,
-// DCA drop gap, and take-profit target all vary by level (see lib/sol-hypertrade-config.ts):
+// immediately after every close. Purchase size, DCA drop gap, and take-profit target all vary by
+// level (see lib/sol-hypertrade-config.ts):
 //   - size multiplier starts at ~1.66x and decays toward 1x as levels stack
 //   - drop gap starts at ~8.03% and widens slowly, so depth requires a real crash
 //   - TP target starts at ~1.52% and shrinks toward a 0.05% floor as levels stack, so a deep
 //     rescue only needs a small bounce to exit, not a full recovery
 //
-// COMPOUNDING: base bet size = current balance (SEED_USD + realized P&L) / RESERVE_DIVISOR, so
-// the position size grows with the account and the worst-case reserve requirement always scales
-// with what's actually available — confirmed self-sufficient in backtest across 2,087 cycles.
+// COMPOUNDING: base bet size = current balance (SEED_USD + realized P&L) / RESERVE_DIVISOR,
+// capped to the real live USD/SOL wallet balance at order time (same shared-wallet-safe pattern
+// as Worker 1) so a tracking drift or a concurrent real trade elsewhere on this account can never
+// submit an order bigger than what's actually available.
 import dotenv from "dotenv";
 dotenv.config({ path: ".env.local" });
 
@@ -29,7 +39,11 @@ import {
   getSolHypertradePaperState, updateSolHypertradePaperState, recordSolHypertradePaperTrade,
   logSolHypertradePaperRun, type SolHypertradePaperState, type HypertradePosition,
 } from "../lib/sol-hypertrade-paper-db";
-import { connectPublicBook, getBookBidAsk, isBookReady, bookMessageAge } from "../lib/bitfinex-trading-ws";
+import { submitMarketOrderSafe } from "../lib/bitfinex-auth";
+import {
+  connectPublicBook, getBookBidAsk, isBookReady, bookMessageAge,
+  connectAuthenticated, getLiveBalance, isWalletReady, submitMarketOrderFast,
+} from "../lib/bitfinex-trading-ws";
 import { multForLevel, dropPctForLevel, tpPctForLevel, RESERVE_DIVISOR, SEED_USD } from "../lib/sol-hypertrade-config";
 
 const BFX_SYMBOL = "tSOLUSD";
@@ -39,6 +53,7 @@ const DB_WRITE_THROTTLE_MS = 2_000;
 const RUN_LOG_INTERVAL_MS = 5 * 60_000;
 const WATCHDOG_INTERVAL_MS = 5_000;
 const BOOK_STALE_MS = 15_000;
+const BOOK_EMERGENCY_MS = 25_000;
 
 const INSTANCE_ID = `${os.hostname()}-${process.pid}-${crypto.randomBytes(3).toString("hex")}`;
 
@@ -47,6 +62,7 @@ let positions: HypertradePosition[] = [];
 let lastDbWrite = 0;
 let lastRunLog = 0;
 let processing = false;
+let emergencyInProgress = false;
 
 function currentBaseSizeUsd(): number {
   const balance = SEED_USD + (state.realized_pnl_usd ?? 0);
@@ -108,28 +124,42 @@ function nextDcaTrigger(): number {
 
 async function enterFresh(ask: number) {
   const baseSize = currentBaseSizeUsd();
-  const solQty = baseSize / ask;
-  positions = [{ price: ask, usd_size: baseSize, sol_qty: solQty }];
+  const realUsd = getLiveBalance("USD");
+  const cappedSize = Math.min(baseSize, realUsd);
+  const qty = cappedSize / ask;
+  if (qty <= 0) { console.log(`ENTRY due but no real USD available (real=${realUsd}) — skipping this tick.`); return; }
+
+  console.log(`ENTRY level=1 @ ask=${ask.toFixed(4)} size=$${cappedSize.toFixed(2)} qty~=${qty.toFixed(6)} (real USD=${realUsd.toFixed(2)}) — submitting real order...`);
+  const fill = await submitMarketOrderFast(BFX_SYMBOL, qty);
+  const usdSize = fill.execPrice * Math.abs(fill.execAmount);
+  positions = [{ price: fill.execPrice, usd_size: usdSize, sol_qty: Math.abs(fill.execAmount) }];
   const patch = {
-    positions, total_cost: baseSize, level: 1, last_entry_price: ask,
-    tp_target: baseSize * (1 + tpPctForLevel(1) / 100), cycle_start_time: new Date().toISOString(),
+    positions, total_cost: usdSize, level: 1, last_entry_price: fill.execPrice,
+    tp_target: usdSize * (1 + tpPctForLevel(1) / 100), cycle_start_time: new Date().toISOString(),
   };
   state = { ...state, ...patch };
   await updateSolHypertradePaperState(patch);
   lastDbWrite = Date.now();
-  console.log(`ENTRY level=1 price=${ask.toFixed(4)} size=$${baseSize.toFixed(2)}`);
-  await logSolHypertradePaperRun({ actions: [{ action: "ENTRY", level: 1, price: ask, size: baseSize }] });
+  console.log(`ENTRY FILLED price=${fill.execPrice.toFixed(4)} qty=${fill.execAmount.toFixed(6)} fee=${fill.fee} fillLatencyMs=${fill.latencyMs}`);
+  await logSolHypertradePaperRun({ actions: [{ action: "ENTRY", level: 1, price: fill.execPrice, size: usdSize, fillLatencyMs: fill.latencyMs }] });
 }
 
 async function dcaAdd(ask: number) {
   const newLevel = state.level + 1;
   const lastLegSize = positions[positions.length - 1].usd_size;
   const nextSize = lastLegSize * multForLevel(newLevel);
-  const solQty = nextSize / ask;
-  positions.push({ price: ask, usd_size: nextSize, sol_qty: solQty });
-  const newCost = state.total_cost + nextSize;
+  const realUsd = getLiveBalance("USD");
+  const cappedSize = Math.min(nextSize, realUsd);
+  const qty = cappedSize / ask;
+  if (qty <= 0) { console.log(`DCA level=${newLevel} due but no real USD available (real=${realUsd}) — skipping this tick.`); return; }
+
+  console.log(`DCA level=${newLevel} @ ask=${ask.toFixed(4)} size=$${cappedSize.toFixed(2)} qty~=${qty.toFixed(6)} (real USD=${realUsd.toFixed(2)}) — submitting real order...`);
+  const fill = await submitMarketOrderFast(BFX_SYMBOL, qty);
+  const usdSize = fill.execPrice * Math.abs(fill.execAmount);
+  positions.push({ price: fill.execPrice, usd_size: usdSize, sol_qty: Math.abs(fill.execAmount) });
+  const newCost = state.total_cost + usdSize;
   const patch = {
-    positions, total_cost: newCost, level: newLevel, last_entry_price: ask,
+    positions, total_cost: newCost, level: newLevel, last_entry_price: fill.execPrice,
     tp_target: newCost * (1 + tpPctForLevel(newLevel) / 100),
     max_level_ever: Math.max(state.max_level_ever, newLevel),
     max_cost_ever: Math.max(state.max_cost_ever, newCost),
@@ -137,39 +167,47 @@ async function dcaAdd(ask: number) {
   state = { ...state, ...patch };
   await updateSolHypertradePaperState(patch);
   lastDbWrite = Date.now();
-  console.log(`DCA level=${newLevel} price=${ask.toFixed(4)} size=$${nextSize.toFixed(2)} totalCost=$${newCost.toFixed(2)}`);
-  await logSolHypertradePaperRun({ actions: [{ action: "DCA", level: newLevel, price: ask, size: nextSize, totalCost: newCost }] });
+  console.log(`DCA FILLED level=${newLevel} price=${fill.execPrice.toFixed(4)} qty=${fill.execAmount.toFixed(6)} totalCost=$${newCost.toFixed(2)} fillLatencyMs=${fill.latencyMs}`);
+  await logSolHypertradePaperRun({ actions: [{ action: "DCA", level: newLevel, price: fill.execPrice, size: usdSize, totalCost: newCost, fillLatencyMs: fill.latencyMs }] });
 }
 
-async function exitCycle(bid: number) {
-  const qty = totalQty();
-  const proceeds = qty * bid;
-  const pnlUsd = proceeds - state.total_cost;
-  const pnlPct = (pnlUsd / state.total_cost) * 100;
+async function exitCycle() {
+  const trackedQty = totalQty();
+  const realSol = getLiveBalance("SOL");
+  const sellQty = isWalletReady() ? Math.min(trackedQty, realSol) : trackedQty;
+  if (sellQty <= 0) throw new Error(`No real SOL available to sell (tracked=${trackedQty}, real=${realSol})`);
+
+  const origTotalCost = state.total_cost;
   const entryTime = state.cycle_start_time!;
-  const barsHeldMs = Date.now() - new Date(entryTime).getTime();
   const levels = state.level;
 
+  console.log(`EXIT levels=${levels} selling ${sellQty.toFixed(6)} SOL (tracked=${trackedQty.toFixed(6)}, real=${realSol.toFixed(6)}) — submitting real order...`);
+  const fill = await submitMarketOrderFast(BFX_SYMBOL, -sellQty);
+  const proceeds = fill.execPrice * Math.abs(fill.execAmount);
+  const pnlUsd = proceeds - origTotalCost;
+  const pnlPct = (pnlUsd / origTotalCost) * 100;
+  const barsHeldMs = Date.now() - new Date(entryTime).getTime();
+
   await recordSolHypertradePaperTrade({
-    levels, total_cost: state.total_cost, proceeds, pnl_usd: pnlUsd, pnl_pct: pnlPct,
+    levels, total_cost: origTotalCost, proceeds, pnl_usd: pnlUsd, pnl_pct: pnlPct,
     entry_time: entryTime, bars_held_ms: barsHeldMs,
   });
   // realized_pnl_usd is bumped inside recordSolHypertradePaperTrade -- refresh state so the next
   // cycle's compounded base size reflects the new balance
   state = await getSolHypertradePaperState();
-  console.log(`EXIT levels=${levels} price=${bid.toFixed(4)} pnlUsd=${pnlUsd.toFixed(2)} pnlPct=${pnlPct.toFixed(2)}% newBalance=$${(SEED_USD + state.realized_pnl_usd).toFixed(2)}`);
-  await logSolHypertradePaperRun({ actions: [{ action: "EXIT", levels, price: bid, pnlUsd, pnlPct, newBalance: SEED_USD + state.realized_pnl_usd }] });
+  console.log(`EXIT FILLED levels=${levels} price=${fill.execPrice.toFixed(4)} pnlUsd=${pnlUsd.toFixed(2)} pnlPct=${pnlPct.toFixed(2)}% newBalance=$${(SEED_USD + state.realized_pnl_usd).toFixed(2)} fillLatencyMs=${fill.latencyMs}`);
+  await logSolHypertradePaperRun({ actions: [{ action: "EXIT", levels, price: fill.execPrice, pnlUsd, pnlPct, newBalance: SEED_USD + state.realized_pnl_usd, fillLatencyMs: fill.latencyMs }] });
   lastRunLog = Date.now();
 
   // continuous grid: immediately re-enter at the same tick's ask
   const { ask } = getBookBidAsk();
-  if (ask !== null) await enterFresh(ask);
+  if (ask !== null && isWalletReady()) await enterFresh(ask);
 }
 
 async function onBookUpdate() {
   if (!state.enabled || processing) return;
   const { bid, ask } = getBookBidAsk();
-  if (bid === null || ask === null) return;
+  if (bid === null || ask === null || !isWalletReady()) return;
 
   processing = true;
   try {
@@ -179,13 +217,18 @@ async function onBookUpdate() {
     }
 
     // adverse fills first (DCA), then favorable (TP) -- matches the backtest's tie-break, though
-    // on live ticks this is just a processing-order choice, not an OHLC approximation anymore
+    // on live ticks this is just a processing-order choice, not an OHLC approximation anymore.
+    // Guards against a real-USD shortfall turning this into an infinite loop: if dcaAdd can't
+    // fill (no real balance available), level doesn't advance and nextDcaTrigger() never moves,
+    // so the loop must break on a no-op instead of spinning forever.
     while (ask <= nextDcaTrigger()) {
+      const levelBefore = state.level;
       await dcaAdd(ask);
+      if (state.level === levelBefore) break;
     }
 
     if (bid >= tpExitPrice()) {
-      await exitCycle(bid);
+      await exitCycle();
       return;
     }
 
@@ -200,17 +243,61 @@ async function onBookUpdate() {
     }
   } catch (err) {
     console.error("onBookUpdate error:", err);
+    await logSolHypertradePaperRun({ actions: [{ action: "ERROR", stage: "onBookUpdate", error: String(err) }] }).catch(() => {});
   } finally {
     processing = false;
+  }
+}
+
+// ---------- Watchdog: book feed staleness -> emergency flatten ----------
+
+async function emergencyFlatten(reason: string) {
+  if (emergencyInProgress) return;
+  emergencyInProgress = true;
+  try {
+    console.error(`EMERGENCY FLATTEN triggered: ${reason}`);
+    await logSolHypertradePaperRun({ actions: [{ action: "ERROR", stage: "watchdog", error: reason }] }).catch(() => {});
+    const fresh = await getSolHypertradePaperState();
+    if (fresh.level === 0 || fresh.positions.length === 0) {
+      console.error("Watchdog: not holding per DB state, nothing to flatten.");
+      return;
+    }
+    const qty = fresh.positions.reduce((s, p) => s + p.sol_qty, 0);
+    const fill = await submitMarketOrderSafe(BFX_SYMBOL, -qty, "SOL");
+    const proceeds = fill.execPrice * Math.abs(fill.execAmount);
+    const pnlUsd = proceeds - fresh.total_cost;
+    const pnlPct = (pnlUsd / fresh.total_cost) * 100;
+    const barsHeldMs = Date.now() - new Date(fresh.cycle_start_time!).getTime();
+
+    await updateSolHypertradePaperState({
+      positions: [], total_cost: 0, level: 0, last_entry_price: null, tp_target: null,
+      cycle_start_time: null, enabled: false,
+    });
+    await recordSolHypertradePaperTrade({
+      levels: fresh.level, total_cost: fresh.total_cost, proceeds, pnl_usd: pnlUsd, pnl_pct: pnlPct,
+      entry_time: fresh.cycle_start_time!, bars_held_ms: barsHeldMs,
+    });
+    console.error(`EMERGENCY FLATTEN complete @ ${fill.execPrice}, pnlPct=${pnlPct.toFixed(4)}. Bot paused (enabled=false).`);
+    await logSolHypertradePaperRun({ actions: [{ action: "EXIT", levels: fresh.level, price: fill.execPrice, pnlUsd, pnlPct, emergency: true }] }).catch(() => {});
+  } catch (err) {
+    console.error("EMERGENCY FLATTEN FAILED:", err);
+    await logSolHypertradePaperRun({ actions: [{ action: "ERROR", stage: "watchdog-flatten-failed", error: String(err) }] }).catch(() => {});
+  } finally {
+    process.exit(1);
   }
 }
 
 function startWatchdog() {
   setInterval(() => {
     const staleMs = bookMessageAge();
-    if (staleMs >= BOOK_STALE_MS) {
-      console.error(`Watchdog: order book feed silent for ${Math.round(staleMs / 1000)}s.`);
+    if (staleMs < BOOK_STALE_MS) return;
+
+    if (state.level > 0 && staleMs >= BOOK_EMERGENCY_MS && !emergencyInProgress) {
+      emergencyFlatten(`Order book feed silent for ${Math.round(staleMs / 1000)}s while holding SOL`)
+        .catch((err) => console.error("emergencyFlatten error:", err));
+      return;
     }
+    console.error(`Watchdog: order book feed silent for ${Math.round(staleMs / 1000)}s.`);
   }, WATCHDOG_INTERVAL_MS);
 }
 
@@ -230,9 +317,10 @@ async function main() {
   process.on("SIGINT", shutdown);
   process.on("SIGTERM", shutdown);
 
-  console.log(`Starting SOL Hypertrade PAPER worker (${INSTANCE_ID}), enabled=${state.enabled}, level=${state.level}`);
-  console.log(`PAPER ONLY — no real orders. Variable-rate formula (decaying multiplier, widening DCA gap, shrinking TP), unlimited depth, compounding base=$${currentBaseSizeUsd().toFixed(2)}, real bid/ask fills from Bitfinex's live book.`);
+  console.log(`Starting SOL Hypertrade LIVE worker (${INSTANCE_ID}), enabled=${state.enabled}, level=${state.level}`);
+  console.log(`REAL MONEY — Variable-rate formula (decaying multiplier, widening DCA gap, shrinking TP), unlimited depth, compounding base=$${currentBaseSizeUsd().toFixed(2)}, orders + fills over WS, bid/ask from the real order book.`);
   connectPublicBook(BFX_SYMBOL, () => { onBookUpdate().catch((err) => console.error("onBookUpdate error:", err)); });
+  connectAuthenticated();
   startWatchdog();
 }
 

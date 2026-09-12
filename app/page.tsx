@@ -1125,8 +1125,8 @@ function SolHypertradePaperPanel({
       <div className="space-y-1.5">
         <div className="flex items-center justify-between gap-2">
           <div className="flex items-center gap-2">
-            <h2 className="text-white font-bold text-lg">SOL Hypertrade Paper (Worker 2)</h2>
-            <span className="text-xs font-bold px-2 py-0.5 rounded-full bg-blue-500/20 text-blue-400">PAPER</span>
+            <h2 className="text-white font-bold text-lg">SOL Hypertrade Live (Worker 2)</h2>
+            <span className="text-xs font-bold px-2 py-0.5 rounded-full bg-red-500/20 text-red-400">LIVE</span>
             <span className={`text-xs font-bold px-2 py-0.5 rounded-full ${workerAlive ? "bg-green-500/20 text-green-400" : "bg-gray-700/40 text-gray-500"}`}>
               {workerAlive ? "worker alive" : "worker offline"}
             </span>
@@ -1154,7 +1154,7 @@ function SolHypertradePaperPanel({
             </button>
           </div>
         </div>
-        <p className="text-gray-500 text-xs">Continuous grid, no directional signal · always re-enters after every close · variable-rate formula: decaying size multiplier (~1.66x→1x), widening DCA gap (~8.03%→), shrinking TP target (~1.52%→0.05% floor) as levels stack · UNCAPPED depth, compounding base size · fills use the real bid/ask spread, no assumed slippage · PAPER ONLY, no real orders · verified worst-case ~9 levels / $2,535 bare reserve per $100 base (Binance Global 5yr + Bitfinex 2yr) · deployed at 35x reserve (2 levels of margin, confirmed robust to start-date sensitivity) · ${HT_SEED_USD} starting seed</p>
+        <p className="text-gray-500 text-xs">Continuous grid, no directional signal · always re-enters after every close · variable-rate formula: decaying size multiplier (~1.66x→1x), widening DCA gap (~8.03%→), shrinking TP target (~1.52%→0.05% floor) as levels stack · UNCAPPED depth, compounding base size capped to real wallet balance · orders + fills over WS, real bid/ask spread · LIVE · REAL MONEY · verified worst-case ~9 levels / $2,535 bare reserve per $100 base (Binance Global 5yr + Bitfinex 2yr) · deployed at 35x reserve (2 levels of margin, confirmed robust to start-date sensitivity) · ${HT_SEED_USD} seed</p>
       </div>
 
       {loading ? (
@@ -1668,7 +1668,7 @@ export default function Dashboard() {
           />
         </div>
 
-        {/* ── SOL Hypertrade Paper: Worker 2 (replaced Jump Trail), paper-only continuous-grid DCA ── */}
+        {/* ── SOL Hypertrade: Worker 2 (replaced Jump Trail), LIVE real-money continuous-grid DCA since 2026-09-12 */}
         <div className="grid grid-cols-1 gap-6 items-start">
           <SolHypertradePaperPanel
             trades={htTrades}
