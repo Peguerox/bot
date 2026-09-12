@@ -1154,7 +1154,7 @@ function SolHypertradePaperPanel({
             </button>
           </div>
         </div>
-        <p className="text-gray-500 text-xs">Continuous grid, no directional signal · always re-enters after every close · variable-rate formula: decaying size multiplier (~1.66x→1x), widening DCA gap (~8.03%→), shrinking TP target (~1.52%→0.05% floor) as levels stack · UNCAPPED depth, compounding base size · fills use the real bid/ask spread, no assumed slippage · PAPER ONLY, no real orders · verified worst-case ~9 levels / $2,535 per $100 base (Binance Global 5yr + Bitfinex 2yr) · ${HT_SEED_USD} starting seed</p>
+        <p className="text-gray-500 text-xs">Continuous grid, no directional signal · always re-enters after every close · variable-rate formula: decaying size multiplier (~1.66x→1x), widening DCA gap (~8.03%→), shrinking TP target (~1.52%→0.05% floor) as levels stack · UNCAPPED depth, compounding base size · fills use the real bid/ask spread, no assumed slippage · PAPER ONLY, no real orders · verified worst-case ~9 levels / $2,535 bare reserve per $100 base (Binance Global 5yr + Bitfinex 2yr) · deployed at 30x reserve (1 level of margin) · ${HT_SEED_USD} starting seed</p>
       </div>
 
       {loading ? (

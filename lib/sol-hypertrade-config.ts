@@ -2,13 +2,15 @@
 // server/sol-hypertrade-paper.ts (the paper worker) and app/page.tsx (the dashboard panel).
 //
 // VARIABLE-RATE FORMULA (replaces the earlier fixed-multiplier version) -- see
-// docs/hypertrade_variable_rate_formula_ORIGINAL.md for the full derivation and problem
-// write-up this was produced from. Independently re-verified against our own 1-min OHLC engine
-// on both Binance Global (full ~5yr) and Bitfinex (~2yr): max level ever reached was 9 on both,
-// real reserve needed $2,535.17 per $100 base bet, zero cycles ever closed at a realized loss.
-// Binance US (deliberately excluded from sizing decisions -- known liquidity problems) needed
-// 26 levels / $12,981 in the same test, so this is NOT assumed to hold everywhere; it's the
-// two exchanges we trust.
+// docs/hypertrade_variable_rate_formula_ORIGINAL.md for the derivation and
+// docs/hypertrade_formula_database.md for the full catalog of alternatives considered (and why
+// they were rejected -- the higher-return ones are dramatically more fragile to small coefficient
+// changes). Independently re-verified against our own 1-min OHLC engine on both Binance Global
+// (full ~5yr) and Bitfinex (~2yr): max level ever reached was 9 on both, bare reserve needed
+// $2,535.17 per $100 base bet (zero cushion), zero cycles ever closed at a realized loss. Binance
+// US (deliberately excluded from sizing decisions -- known liquidity problems) needed 26 levels /
+// $12,981 in the same test, so this is NOT assumed to hold everywhere; it's the two exchanges we
+// trust. Actual deployed reserve is 30x, not the bare 25.35x -- see RESERVE_DIVISOR below.
 //
 // Continuous grid, no directional entry signal: always in a position, re-enter immediately
 // after every close. Unlike the old fixed-MULT version, purchase size, drop gap, and take-profit
@@ -35,11 +37,14 @@ export function tpPctForLevel(i: number): number {
   return Math.max(0.05, (0.0152177 * 100) / Math.pow(i, 0.539209));
 }
 
-// Empirically verified worst-case reserve: $2,535.17 needed per $100 base bet (9 levels, cross-
-// validated on Binance Global 5yr + Bitfinex 2yr). This is the real number, not a reference
-// assumption -- unlike the old config, there's no "unlimited, we'll find out" framing needed
-// here since we already found it.
-export const RESERVE_DIVISOR = 2535.17 / 100; // ~25.3517
+// Bare historical worst case (9 levels) needs 25.3517x base -- zero cushion beyond exactly what
+// was observed. Sized here at 30x instead, buying one extra level of margin (survives a level 10
+// event, something slightly worse than anything in the historical data) at a real, quantified
+// cost: 334.31% zero-commission historical ROI at 25.3517x drops to 245.95% at 30x. See
+// docs/hypertrade_formula_database.md for the full reserve-vs-ROI table and the reasoning for
+// picking 30x specifically (a deliberate middle ground, not derived -- revisit if you want more
+// or less margin).
+export const RESERVE_DIVISOR = 30;
 
 export const SEED_USD = 500;
 export const BASE_SIZE_USD = SEED_USD / RESERVE_DIVISOR; // ~$19.72 per level-1 entry, scales with balance (compounding)
