@@ -789,7 +789,7 @@ function SolDcaBitfinexPanel({
     return () => { cancelled = true; clearInterval(id); };
   }, []);
 
-  const statusText = mode === "SOL" ? `Holding (${dcaCount} DCA level${dcaCount === 1 ? "" : "s"})` : "Watching (5m signal)";
+  const statusText = mode === "SOL" ? `Holding (level ${dcaCount + 1})` : "Watching (5m signal)";
   const statusColor = mode === "SOL" ? (st?.dca_triggered ? "text-yellow-400" : "text-green-400") : "text-gray-400";
   const chartTrades = trades.map((t: any) => ({ ...t, pnl: t.pnl_usd, exit_time: t.exit_time }));
 
@@ -932,7 +932,11 @@ function SolDcaBitfinexPanel({
             <tr className="border-b border-gray-800/50">
               <td className="py-1.5 text-gray-400">DCA level / TP target</td>
               <td className="py-1.5 text-right text-orange-400">
-                {mode === "SOL" && st?.dca_triggered ? `level ${dcaCount}, target $${tpTarget?.toFixed(2)}` : "—"}
+                {mode === "SOL"
+                  ? st?.dca_triggered
+                    ? `level ${dcaCount + 1}, target $${tpTarget?.toFixed(2)}`
+                    : `level 1 (no DCA yet)`
+                  : "—"}
               </td>
             </tr>
             <tr>
