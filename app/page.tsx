@@ -1494,9 +1494,13 @@ export default function Dashboard() {
   }
 
   async function handleHtClearHistory() {
-    if (!confirm("Delete all hypertrade paper trade history and run logs, and reset state?")) return;
+    if (!confirm("Delete all hypertrade trade history and run logs, and reset state? Any open real position will be sold first.")) return;
     setHtClearing(true);
-    await fetch("/api/sol-hypertrade-paper/clear-history", { method: "POST" });
+    const res = await fetch("/api/sol-hypertrade-paper/clear-history", { method: "POST" });
+    if (!res.ok) {
+      const body = await res.json().catch(() => ({}));
+      alert(body.error ?? "Failed to clear history.");
+    }
     await load();
     setHtClearing(false);
   }
