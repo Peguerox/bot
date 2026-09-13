@@ -136,6 +136,8 @@ async function enterFresh(ask: number) {
   const patch = {
     positions, total_cost: usdSize, level: 1, last_entry_price: fill.execPrice,
     tp_target: usdSize * (1 + tpPctForLevel(1) / 100), cycle_start_time: new Date().toISOString(),
+    max_level_ever: Math.max(state.max_level_ever, 1),
+    max_cost_ever: Math.max(state.max_cost_ever, usdSize),
   };
   state = { ...state, ...patch };
   await updateSolHypertradePaperState(patch);
