@@ -4,7 +4,7 @@ import { useEffect, useState } from "react";
 import { getSupabase } from "@/lib/supabase";
 import PnLChart from "@/components/PnLChart";
 import { SEED_USD as HT_SEED_USD, dropPctForLevel as htDropPctForLevel } from "@/lib/sol-hypertrade-config";
-import { SEED_USD as DCX_SEED_USD, targetFraction as dcxTargetFraction } from "@/lib/sol-double-crossover-config";
+import { SEED_USD as DCX_SEED_USD, targetFraction as dcxTargetFraction, DEADBAND_MULT as DCX_DEADBAND_MULT } from "@/lib/sol-double-crossover-config";
 
 // Mirrors trigger/live-bot-surfer-solbtc.ts BUF_UP/BUF_DN/ARM/GIVEBACK -- keep in sync if that changes.
 const SURFER_BUF_UP = 0.0025;
@@ -1176,6 +1176,17 @@ function SolDoubleCrossoverPanel({
   const workerAlive = lockAge != null && lockAge < 30_000;
   const lastMinuteAgeMs = st?.last_minute_ts ? Date.now() - new Date(st.last_minute_ts).getTime() : null;
   const lastMinuteText = lastMinuteAgeMs != null ? formatDurationShort(lastMinuteAgeMs) : null;
+  const freshnessColor = lastMinuteAgeMs == null ? "text-gray-600"
+    : lastMinuteAgeMs <= 180_000 ? "text-green-400"
+    : lastMinuteAgeMs <= 600_000 ? "text-yellow-400" : "text-red-400";
+
+  // Distance to the next rebalance trigger: |weight - target| > DEADBAND_MULT * target * (1-target).
+  // Mirrors server/sol-dca-bitfinex.ts's scheduling condition exactly.
+  const targetFrac = target != null ? target / 100 : null;
+  const weightFrac = weight != null ? weight / 100 : null;
+  const deadband = targetFrac != null ? DCX_DEADBAND_MULT * targetFrac * (1 - targetFrac) : null;
+  const drift = targetFrac != null && weightFrac != null ? Math.abs(weightFrac - targetFrac) : null;
+  const rebalanceRoom = deadband != null && drift != null ? deadband - drift : null;
 
   return (
     <div className="bg-gray-900 rounded-xl p-5 space-y-5 flex flex-col">
@@ -1216,7 +1227,7 @@ function SolDoubleCrossoverPanel({
 
       {loading ? (
         <div className="grid grid-cols-2 gap-2 animate-pulse">
-          {[...Array(4)].map((_, i) => <div key={i} className="h-16 bg-gray-800 rounded-lg" />)}
+          {[...Array(6)].map((_, i) => <div key={i} className="h-16 bg-gray-800 rounded-lg" />)}
         </div>
       ) : (
         <div className="grid grid-cols-2 gap-2">
@@ -1244,12 +1255,19 @@ function SolDoubleCrossoverPanel({
             sub={trendShort == null ? "6h/72h · 1d/7d" : trendShort && trendSlow ? "both agree — sizing intensity" : "disagree — waiting for both to align"}
             color={trendShort && trendSlow ? "text-green-400" : "text-gray-400"}
           />
+          <Stat
+            label="Last Check"
+            value={lastMinuteText ? `${lastMinuteText} ago` : "no data yet"}
+            sub={workerAlive ? "worker alive" : "worker offline"}
+            color={freshnessColor}
+          />
+          <Stat
+            label="Rebalance"
+            value={rebalanceRoom == null ? "—" : rebalanceRoom <= 0 ? "triggering now" : `${(rebalanceRoom * 100).toFixed(2)}pp room`}
+            sub={deadband != null ? `deadband ±${(deadband * 100).toFixed(2)}pp` : "—"}
+            color={rebalanceRoom != null && rebalanceRoom <= 0 ? "text-orange-400" : "text-purple-400"}
+          />
         </div>
-      )}
-      {!loading && (
-        <p className="text-gray-600 text-xs -mt-3">
-          {lastMinuteText ? `Checking every completed minute · last check ${lastMinuteText} ago` : "Waiting for first signal check…"}
-        </p>
       )}
 
       <div>
