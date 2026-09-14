@@ -4,6 +4,7 @@ import { useEffect, useState } from "react";
 import { getSupabase } from "@/lib/supabase";
 import PnLChart from "@/components/PnLChart";
 import { SEED_USD as HT_SEED_USD, dropPctForLevel as htDropPctForLevel } from "@/lib/sol-hypertrade-config";
+import { SEED_USD as DCX_SEED_USD, targetFraction as dcxTargetFraction } from "@/lib/sol-double-crossover-config";
 
 function Stat({ label, value, sub, color }: { label: string; value: string; sub: string; color: string }) {
   return (
@@ -1033,6 +1034,246 @@ function SolHypertradePaperPanel({
   );
 }
 
+function SolDoubleCrossoverPanel({
+  trades, state, runs, loading,
+  enabled, onToggle, toggling,
+  onClearHistory, clearingHistory,
+}: {
+  trades: any[]; state: any; runs: any[]; loading: boolean;
+  enabled: boolean; onToggle: () => void; toggling: boolean;
+  onClearHistory: () => void; clearingHistory: boolean;
+}) {
+  const st = state;
+  const cash = st?.cash ?? DCX_SEED_USD;
+  const solQty = st?.sol_qty ?? 0;
+  const avgCost = st?.avg_cost ? parseFloat(st.avg_cost) : null;
+  const totalPnl = st?.realized_pnl_usd ?? 0;
+  const totalTrades = st?.total_trades ?? 0;
+  const wins = st?.total_wins ?? 0;
+  const winRate = totalTrades > 0 ? (wins / totalTrades * 100).toFixed(1) : "—";
+
+  const [livePrice, setLivePrice] = useState<number | null>(null);
+  useEffect(() => {
+    let cancelled = false;
+    const poll = async () => {
+      try {
+        const res = await fetch("/api/bitfinex-price?symbol=tSOLUSD");
+        const data = await res.json();
+        if (!cancelled && data.bid != null) setLivePrice(data.bid);
+      } catch {}
+    };
+    poll();
+    const id = setInterval(poll, 5000);
+    return () => { cancelled = true; clearInterval(id); };
+  }, []);
+
+  const solValue = livePrice != null ? solQty * livePrice : null;
+  const equity = solValue != null ? cash + solValue : null;
+  const weight = equity && equity > 0 && solValue != null ? (solValue / equity) * 100 : null;
+  const openPnl = solValue != null && avgCost != null ? solValue - solQty * avgCost : null;
+
+  const target = st?.ema_360 && st?.ema_4320 && st?.ema_1440 && st?.ema_10080 && st?.r_bar != null
+    ? dcxTargetFraction({
+        ema360: parseFloat(st.ema_360), ema4320: parseFloat(st.ema_4320),
+        ema1440: parseFloat(st.ema_1440), ema10080: parseFloat(st.ema_10080), rBar: parseFloat(st.r_bar),
+      }) * 100
+    : null;
+  const trendShort = st?.ema_360 && st?.ema_4320 ? parseFloat(st.ema_360) > parseFloat(st.ema_4320) : null;
+  const trendSlow = st?.ema_1440 && st?.ema_10080 ? parseFloat(st.ema_1440) > parseFloat(st.ema_10080) : null;
+
+  const chartTrades = trades.filter((t: any) => t.side === "sell").map((t: any) => ({ ...t, pnl: t.pnl_usd, exit_time: t.trade_time }));
+
+  const lockAge = st?.lock_heartbeat ? Date.now() - new Date(st.lock_heartbeat).getTime() : null;
+  const workerAlive = lockAge != null && lockAge < 30_000;
+
+  return (
+    <div className="bg-gray-900 rounded-xl p-5 space-y-5 flex flex-col">
+      <div className="space-y-1.5">
+        <div className="flex items-center justify-between gap-2">
+          <div className="flex items-center gap-2">
+            <h2 className="text-white font-bold text-lg">SOL Double-Crossover (Worker 1)</h2>
+            <span className="text-xs font-bold px-2 py-0.5 rounded-full bg-blue-500/20 text-blue-400">PAPER</span>
+            <span className={`text-xs font-bold px-2 py-0.5 rounded-full ${workerAlive ? "bg-green-500/20 text-green-400" : "bg-gray-700/40 text-gray-500"}`}>
+              {workerAlive ? "worker alive" : "worker offline"}
+            </span>
+          </div>
+          <div className="flex items-center gap-1.5 shrink-0">
+            <button
+              onClick={onClearHistory}
+              disabled={clearingHistory || enabled}
+              className="text-xs font-medium px-2.5 py-1.5 rounded-md bg-gray-800 text-gray-400 hover:bg-gray-700 hover:text-gray-200 transition-all disabled:opacity-30 disabled:cursor-not-allowed"
+              title={enabled ? "Pause bot before clearing" : `Delete all trade history and run logs, reset balance to $${DCX_SEED_USD}`}
+            >
+              {clearingHistory ? "Clearing…" : "Clear"}
+            </button>
+            <button
+              onClick={onToggle}
+              disabled={toggling}
+              className={`flex items-center gap-2 text-xs font-semibold px-3 py-1.5 rounded-md transition-all disabled:opacity-50 disabled:cursor-not-allowed ${
+                enabled
+                  ? "bg-green-500/20 text-green-400 hover:bg-green-500/30"
+                  : "bg-gray-800 text-gray-400 hover:bg-gray-700 hover:text-gray-200"
+              }`}
+            >
+              <span className={`w-1.5 h-1.5 rounded-full ${enabled ? "bg-green-400" : "bg-gray-600"}`} />
+              {toggling ? "…" : enabled ? "Running" : "Paused"}
+            </button>
+          </div>
+        </div>
+        <p className="text-gray-500 text-xs">Continuous variable exposure (0-53% of equity in SOL), not a DCA grid · two hard trend crossovers (6h/72h, 1d/7d) gate direction, soft acceleration gate sizes intensity · rebalances toward target whenever live weight drifts past a deadband · PAPER ONLY, no real orders · won a $1,000/2yr bake-off vs the deployed DCA grid (+24.64% vs +23.24%) at ~36x the trade count · ${DCX_SEED_USD} seed (above the real Bitfinex minimum-order cliff)</p>
+      </div>
+
+      {loading ? (
+        <div className="grid grid-cols-2 gap-2 animate-pulse">
+          {[...Array(4)].map((_, i) => <div key={i} className="h-16 bg-gray-800 rounded-lg" />)}
+        </div>
+      ) : (
+        <div className="grid grid-cols-2 gap-2">
+          <Stat
+            label="Realized PnL"
+            value={`${totalPnl >= 0 ? "+" : ""}${(totalPnl / DCX_SEED_USD * 100).toFixed(2)}%`}
+            sub={`${totalPnl >= 0 ? "+" : ""}$${totalPnl.toFixed(2)} on $${DCX_SEED_USD} seed`}
+            color={totalPnl >= 0 ? "text-green-400" : "text-red-400"}
+          />
+          <Stat
+            label="Win Rate"
+            value={`${winRate}%`}
+            sub={`${totalTrades} fills (${wins}W)`}
+            color="text-blue-400"
+          />
+          <Stat
+            label="Current weight"
+            value={weight != null ? `${weight.toFixed(1)}%` : "—"}
+            sub={target != null ? `target ${target.toFixed(1)}%` : "—"}
+            color="text-yellow-400"
+          />
+          <Stat
+            label="Trend gates"
+            value={trendShort == null ? "—" : `${trendShort ? "UP" : "DN"} / ${trendSlow ? "UP" : "DN"}`}
+            sub="6h/72h · 1d/7d"
+            color={trendShort && trendSlow ? "text-green-400" : "text-gray-400"}
+          />
+        </div>
+      )}
+
+      <div>
+        <p className="text-gray-500 text-xs uppercase tracking-wide mb-2">Position</p>
+        <table className="w-full text-sm font-mono">
+          <thead>
+            <tr className="text-gray-600 border-b border-gray-800">
+              <th className="text-left pb-1 font-medium">Field</th>
+              <th className="text-right pb-1 font-medium">Value</th>
+            </tr>
+          </thead>
+          <tbody>
+            <tr className="border-b border-gray-800/50">
+              <td className="py-1.5 text-gray-400">Cash</td>
+              <td className="py-1.5 text-right text-white">${cash.toFixed(2)}</td>
+            </tr>
+            <tr className="border-b border-gray-800/50">
+              <td className="py-1.5 text-gray-400">SOL held</td>
+              <td className="py-1.5 text-right text-white">{solQty.toFixed(6)} SOL{solValue != null ? ` ($${solValue.toFixed(2)})` : ""}</td>
+            </tr>
+            <tr className="border-b border-gray-800/50">
+              <td className="py-1.5 text-gray-400">Avg cost</td>
+              <td className="py-1.5 text-right text-white">{avgCost != null ? `$${avgCost.toFixed(4)}` : "—"}</td>
+            </tr>
+            <tr className="border-b border-gray-800/50">
+              <td className="py-1.5 text-gray-400">Current price</td>
+              <td className="py-1.5 text-right text-yellow-400">{livePrice != null ? `$${livePrice.toFixed(4)}` : "—"}</td>
+            </tr>
+            <tr className="border-b border-gray-800/50">
+              <td className="py-1.5 text-gray-400">Equity</td>
+              <td className="py-1.5 text-right text-white">{equity != null ? `$${equity.toFixed(2)}` : "—"}</td>
+            </tr>
+            <tr>
+              <td className="py-1.5 text-gray-400">Open PnL (SOL held)</td>
+              <td className={`py-1.5 text-right font-bold ${
+                openPnl == null ? "text-gray-600" : openPnl >= 0 ? "text-green-400" : "text-red-400"
+              }`}>
+                {openPnl != null ? `${openPnl >= 0 ? "+" : ""}$${openPnl.toFixed(2)}` : "—"}
+              </td>
+            </tr>
+          </tbody>
+        </table>
+      </div>
+
+      <div>
+        <p className="text-gray-500 text-xs uppercase tracking-wide mb-2">Cumulative Realized PnL ($, reference sizing)</p>
+        <PnLChart trades={chartTrades} initial={DCX_SEED_USD} />
+      </div>
+
+      <div>
+        <p className="text-gray-500 text-xs uppercase tracking-wide mb-2">Recent Fills</p>
+        {loading ? (
+          <div className="animate-pulse space-y-2">
+            {[...Array(3)].map((_, i) => <div key={i} className="h-8 bg-gray-800 rounded" />)}
+          </div>
+        ) : trades.length === 0 ? (
+          <p className="text-gray-600 text-sm">No fills yet</p>
+        ) : (
+          <div className="overflow-auto">
+            <table className="w-full text-xs font-mono">
+              <thead>
+                <tr className="text-gray-500 border-b border-gray-800">
+                  <th className="text-left pb-1">Side</th>
+                  <th className="text-right pb-1">Price</th>
+                  <th className="text-right pb-1">Qty</th>
+                  <th className="text-right pb-1">PnL</th>
+                </tr>
+              </thead>
+              <tbody className="divide-y divide-gray-800/50">
+                {trades.slice(0, 8).map((t: any) => {
+                  const isBuy = t.side === "buy";
+                  const pnl = t.pnl_usd != null ? parseFloat(t.pnl_usd) : null;
+                  return (
+                    <tr key={t.id} className="hover:bg-gray-800/30">
+                      <td className={`py-1.5 ${isBuy ? "text-blue-400" : "text-orange-400"}`}>{t.side.toUpperCase()}</td>
+                      <td className="py-1.5 text-right text-gray-300">${parseFloat(t.price).toFixed(4)}</td>
+                      <td className="py-1.5 text-right text-gray-300">{parseFloat(t.qty).toFixed(6)}</td>
+                      <td className={`py-1.5 text-right ${pnl == null ? "text-gray-600" : pnl >= 0 ? "text-green-400" : "text-red-400"}`}>
+                        {pnl != null ? `${pnl >= 0 ? "+" : ""}$${pnl.toFixed(2)}` : "—"}
+                      </td>
+                    </tr>
+                  );
+                })}
+              </tbody>
+            </table>
+          </div>
+        )}
+      </div>
+
+      <div>
+        <p className="text-gray-500 text-xs uppercase tracking-wide mb-2">Activity</p>
+        <div className="h-56 overflow-y-auto space-y-0.5 font-mono text-sm pr-1">
+          {runs.length === 0 && <p className="text-gray-600">No runs yet.</p>}
+          {runs.map((r: any) => {
+            const actions: any[] = r.data?.actions ?? [];
+            const time = r.run_at
+              ? new Date(r.run_at).toLocaleTimeString([], { hour: "2-digit", minute: "2-digit", second: "2-digit", hour12: false })
+              : "";
+            return (
+              <div key={r.id} className="flex gap-2 items-start">
+                <span className="text-gray-600 shrink-0">{time}</span>
+                <div className="flex flex-col gap-0">
+                  {actions.map((a: any, i: number) => {
+                    const color = a.action === "STATUS" ? "text-gray-500" : a.action === "ERROR" ? "text-red-400" : "text-gray-500";
+                    const text = a.action === "STATUS"
+                      ? `price=$${parseFloat(a.price).toFixed(4)}  target=${(a.target * 100).toFixed(2)}%  weight=${(a.weight * 100).toFixed(2)}%  equity=$${a.equity?.toFixed?.(2) ?? a.equity}${a.scheduled ? "  [rebalance scheduled]" : ""}`
+                      : a.action === "ERROR" ? `ERROR (${a.stage}): ${a.error}`
+                      : a.action;
+                    return <span key={i} className={color}>{text}</span>;
+                  })}
+                </div>
+              </div>
+            );
+          })}
+        </div>
+      </div>
+    </div>
+  );
+}
+
 // ── Dashboard ───────────────────────────────────────────────────────────────
 
 export default function Dashboard() {
@@ -1056,6 +1297,11 @@ export default function Dashboard() {
   const [htRuns,    setHtRuns]    = useState<any[]>([]);
   const [htToggling, setHtToggling] = useState(false);
   const [htClearing, setHtClearing] = useState(false);
+  const [dcxState,   setDcxState]   = useState<any>(null);
+  const [dcxTrades,  setDcxTrades]  = useState<any[]>([]);
+  const [dcxRuns,    setDcxRuns]    = useState<any[]>([]);
+  const [dcxToggling, setDcxToggling] = useState(false);
+  const [dcxClearing, setDcxClearing] = useState(false);
 
   async function load() {
     const [
@@ -1068,6 +1314,9 @@ export default function Dashboard() {
       { data: htSt },
       { data: htTr },
       { data: htRs },
+      { data: dcxSt },
+      { data: dcxTr },
+      { data: dcxRs },
     ] = await Promise.all([
       getSupabase().from("surfer_state").select("*").eq("id", 1).single(),
       getSupabase().from("surfer_trades").select("*").order("exit_time", { ascending: false }).limit(5000),
@@ -1078,6 +1327,9 @@ export default function Dashboard() {
       getSupabase().from("sol_hypertrade_paper_state").select("*").eq("id", 1).single(),
       getSupabase().from("sol_hypertrade_paper_trades").select("*").order("exit_time", { ascending: false }).limit(5000),
       getSupabase().from("sol_hypertrade_paper_runs").select("id,run_at,data").order("run_at", { ascending: false }).limit(120),
+      getSupabase().from("sol_double_crossover_state").select("*").eq("id", 1).single(),
+      getSupabase().from("sol_double_crossover_trades").select("*").order("trade_time", { ascending: false }).limit(5000),
+      getSupabase().from("sol_double_crossover_runs").select("id,run_at,data").order("run_at", { ascending: false }).limit(120),
     ]);
     setSurferState(surferSt ?? null);
     setSurferTrades(surferTr ?? []);
@@ -1088,6 +1340,9 @@ export default function Dashboard() {
     setHtState(htSt ?? null);
     setHtTrades(htTr ?? []);
     setHtRuns(htRs ?? []);
+    setDcxState(dcxSt ?? null);
+    setDcxTrades(dcxTr ?? []);
+    setDcxRuns(dcxRs ?? []);
     setLoading(false);
   }
 
@@ -1155,6 +1410,21 @@ export default function Dashboard() {
     }
     await load();
     setHtClearing(false);
+  }
+
+  async function handleDcxToggle() {
+    setDcxToggling(true);
+    await fetch("/api/sol-double-crossover/toggle", { method: "POST" });
+    await load();
+    setDcxToggling(false);
+  }
+
+  async function handleDcxClearHistory() {
+    if (!confirm("Delete all double-crossover trade history and run logs, and reset state?")) return;
+    setDcxClearing(true);
+    await fetch("/api/sol-double-crossover/clear-history", { method: "POST" });
+    await load();
+    setDcxClearing(false);
   }
 
   function formatElapsed(ms: number): string {
@@ -1256,9 +1526,14 @@ export default function Dashboard() {
       .on("postgres_changes", { event: "*", schema: "public", table: "sol_hypertrade_paper_trades" }, debouncedLoad)
       .on("postgres_changes", { event: "*", schema: "public", table: "sol_hypertrade_paper_runs" }, debouncedLoad)
       .subscribe();
+    const ch4 = sb.channel("sol-double-crossover")
+      .on("postgres_changes", { event: "*", schema: "public", table: "sol_double_crossover_state" }, debouncedLoad)
+      .on("postgres_changes", { event: "*", schema: "public", table: "sol_double_crossover_trades" }, debouncedLoad)
+      .on("postgres_changes", { event: "*", schema: "public", table: "sol_double_crossover_runs" }, debouncedLoad)
+      .subscribe();
     return () => {
       if (debounceTimer) clearTimeout(debounceTimer);
-      sb.removeChannel(ch1); sb.removeChannel(ch2); sb.removeChannel(ch3);
+      sb.removeChannel(ch1); sb.removeChannel(ch2); sb.removeChannel(ch3); sb.removeChannel(ch4);
     };
   }, []);
 
@@ -1320,6 +1595,21 @@ export default function Dashboard() {
             toggling={htToggling}
             onClearHistory={handleHtClearHistory}
             clearingHistory={htClearing}
+          />
+        </div>
+
+        {/* ── SOL Double-Crossover: Worker 1 (replaced the old VWAP+EMA DCA grid), PAPER since 2026-09-13 */}
+        <div className="grid grid-cols-1 gap-6 items-start">
+          <SolDoubleCrossoverPanel
+            trades={dcxTrades}
+            state={dcxState}
+            runs={dcxRuns}
+            loading={loading}
+            enabled={dcxState?.enabled ?? false}
+            onToggle={handleDcxToggle}
+            toggling={dcxToggling}
+            onClearHistory={handleDcxClearHistory}
+            clearingHistory={dcxClearing}
           />
         </div>
 

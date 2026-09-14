@@ -3,8 +3,8 @@ import { getSupabaseAdmin } from "@/lib/supabase-admin";
 
 export async function POST() {
   const sb = getSupabaseAdmin();
-  const { data } = await sb.from("sol_trail_bitfinex_state").select("enabled").eq("id", 1).single();
+  const { data } = await sb.from("sol_double_crossover_state").select("enabled").eq("id", 1).single();
   const newState = !data?.enabled;
-  await sb.from("sol_trail_bitfinex_state").update({ enabled: newState }).eq("id", 1);
+  await sb.from("sol_double_crossover_state").update({ enabled: newState }).eq("id", 1);
   return NextResponse.json({ enabled: newState });
 }
