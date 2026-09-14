@@ -172,6 +172,8 @@ function actionColor(action: string) {
   if (action === "BUY_CANCELED")     return "text-orange-400";
   if (action === "SELL_CANCELED")    return "text-orange-400";
   if (action === "CHECK")            return "text-gray-500";
+  if (action === "SELL_TRIGGER")     return "text-orange-400";
+  if (action === "WAIT_HISTORY")     return "text-gray-600";
   return "text-gray-400";
 }
 
@@ -210,6 +212,13 @@ function formatAction(a: any): string {
   if (a.action === "SKIP_NO_FUNDS")       return `NO FUNDS  $${parseFloat(a.balance).toFixed(2)} USDT`;
   if (a.action === "ERROR")               return `ERROR (${a.stage}): ${a.error}`;
   // Surfer-specific (both SOLBTC and SOLUSDT bots)
+  if (a.action === "CHECK" && a.R != null) {
+    // SOL/BTC buffered rotation (new strategy) -- R/H/L/C shape, not RSI/EMA
+    const pct = (x: number) => (x * 100).toFixed(3);
+    return a.mode === "BTC"
+      ? `WATCH  R=${a.R}  H=${a.H} (${pct(a.R / a.H - 1)}% to breakout)  BTC  ${a.status}`
+      : `WATCH  R=${a.R}  anchor=${a.anchor}  peak=${a.peak}  g=${a.g ?? "0"}  SOL  ${a.status}`;
+  }
   if (a.action === "CHECK")             return `WATCH  rsi=${a.rsi}  ${a.emaBullish ? "bullish" : "bearish"}  ${a.mode}  ${a.status}`;
   if (a.action === "ARM_BUY")           return `ARM BUY  RSI↑${a.curRSI} (was ${a.prevRSI})`;
   if (a.action === "ARM_SELL")          return `ARM SELL  RSI↓${a.curRSI} (was ${a.prevRSI})`;
@@ -251,6 +260,8 @@ function formatAction(a: any): string {
   }
   if (a.action === "SKIP_BUY")          return `SKIP BUY  ${a.reason}`;
   if (a.action === "SKIP_SELL")         return `SKIP SELL  ${a.reason}`;
+  if (a.action === "SELL_TRIGGER")      return `SELL TRIGGER  ${a.reason}  M=${a.M}  g=${a.g}`;
+  if (a.action === "WAIT_HISTORY")      return `WAITING FOR HISTORY  ${a.have}/${a.need} candles`;
   return a.action;
 }
 
