@@ -6,6 +6,12 @@ import PnLChart from "@/components/PnLChart";
 import { SEED_USD as HT_SEED_USD, dropPctForLevel as htDropPctForLevel } from "@/lib/sol-hypertrade-config";
 import { SEED_USD as DCX_SEED_USD, targetFraction as dcxTargetFraction } from "@/lib/sol-double-crossover-config";
 
+// Mirrors trigger/live-bot-surfer-solbtc.ts BUF_UP/BUF_DN/ARM/GIVEBACK -- keep in sync if that changes.
+const SURFER_BUF_UP = 0.0025;
+const SURFER_BUF_DN = 0.0020;
+const SURFER_ARM = 0.18;
+const SURFER_GIVEBACK = 0.15;
+
 function formatDurationShort(ms: number): string {
   if (ms <= 0) return "0m";
   const mins = Math.floor(ms / 60000);
@@ -213,11 +219,22 @@ function formatAction(a: any): string {
   if (a.action === "ERROR")               return `ERROR (${a.stage}): ${a.error}`;
   // Surfer-specific (both SOLBTC and SOLUSDT bots)
   if (a.action === "CHECK" && a.R != null) {
-    // SOL/BTC buffered rotation (new strategy) -- R/H/L/C shape, not RSI/EMA
+    // SOL/BTC buffered rotation (new strategy) -- R/H/L/C shape, not RSI/EMA.
+    // Thresholds mirror trigger/live-bot-surfer-solbtc.ts exactly (BUF_UP/BUF_DN/ARM/GIVEBACK/FAIL).
     const pct = (x: number) => (x * 100).toFixed(3);
-    return a.mode === "BTC"
-      ? `WATCH  R=${a.R}  H=${a.H} (${pct(a.R / a.H - 1)}% to breakout)  BTC  ${a.status}`
-      : `WATCH  R=${a.R}  anchor=${a.anchor}  peak=${a.peak}  g=${a.g ?? "0"}  SOL  ${a.status}`;
+    if (a.mode === "BTC") {
+      const breakoutPrice = a.H * (1 + SURFER_BUF_UP);
+      const toBreakout = pct(a.R / breakoutPrice - 1);
+      const cNote = a.R > a.C ? "" : ", lag not confirmed";
+      return `WATCH  R=${a.R}  H=${a.H} (${toBreakout}% to breakout${cNote})  BTC  ${a.status}`;
+    }
+    const anchor = a.anchor, peak = a.peak ?? anchor;
+    const gg = anchor ? peak / anchor - 1 : 0;
+    let stopPrice: number, label: string;
+    if (gg >= SURFER_ARM) { stopPrice = anchor * (1 + (1 - SURFER_GIVEBACK) * gg); label = "giveback stop"; }
+    else { stopPrice = a.L * (1 - SURFER_BUF_DN); label = "stop"; }
+    const toStop = anchor ? pct(a.R / stopPrice - 1) : "—";
+    return `WATCH  R=${a.R}  gain=${pct(gg)}%  ${label}=${stopPrice.toFixed(8)} (${toStop}% away)  SOL  ${a.status}`;
   }
   if (a.action === "CHECK")             return `WATCH  rsi=${a.rsi}  ${a.emaBullish ? "bullish" : "bearish"}  ${a.mode}  ${a.status}`;
   if (a.action === "ARM_BUY")           return `ARM BUY  RSI↑${a.curRSI} (was ${a.prevRSI})`;
@@ -535,16 +552,46 @@ function SurferPanel({
   const armedSol     = st?.armed_for_sol ?? false;
   const armedBtc     = st?.armed_for_btc ?? false;
 
-  // Derive SOLBTC price from latest run's CHECK action
-  const latestSolPrice: number | null = (() => {
+  // Derive SOLBTC price + latest signal snapshot from the most recent CHECK action
+  const latestCheck: any | null = (() => {
     for (const r of runs) {
       const actions: any[] = r.data?.actions ?? [];
       for (let i = actions.length - 1; i >= 0; i--) {
-        const p = actions[i].price;
-        if (p != null) return parseFloat(p);
+        if (actions[i].action === "CHECK" && actions[i].R != null) return actions[i];
       }
     }
     return null;
+  })();
+  const latestSolPrice: number | null = latestCheck ? parseFloat(latestCheck.R) : null;
+
+  // Freshness: cron runs every 5min, so this bot should never go quiet for long while enabled
+  const [nowTick, setNowTick] = useState(Date.now());
+  useEffect(() => {
+    const id = setInterval(() => setNowTick(Date.now()), 30_000);
+    return () => clearInterval(id);
+  }, []);
+  const lastRunAt = runs.length > 0 ? runs[0].run_at : null;
+  const minsSinceCheck = lastRunAt ? Math.floor((nowTick - new Date(lastRunAt).getTime()) / 60_000) : null;
+  const freshnessText = minsSinceCheck == null ? "no data yet"
+    : minsSinceCheck <= 0 ? "just now" : `${minsSinceCheck}m ago`;
+  const freshnessColor = minsSinceCheck == null ? "text-gray-600"
+    : minsSinceCheck <= 10 ? "text-green-400" : minsSinceCheck <= 20 ? "text-yellow-400" : "text-red-400";
+
+  // Distance to the next signal event, so the panel proves the bot is computing correctly without
+  // needing to scroll/parse the Activity log.
+  const signalText: string | null = (() => {
+    if (!latestCheck) return null;
+    const pct = (x: number) => (x * 100).toFixed(2);
+    if (latestCheck.mode === "BTC") {
+      const breakoutPrice = latestCheck.H * (1 + SURFER_BUF_UP);
+      return `${pct(latestCheck.R / breakoutPrice - 1)}% to breakout`;
+    }
+    const anchor = latestCheck.anchor, peak = latestCheck.peak ?? anchor;
+    const gg = anchor ? peak / anchor - 1 : 0;
+    let stopPrice: number;
+    if (gg >= SURFER_ARM) stopPrice = anchor * (1 + (1 - SURFER_GIVEBACK) * gg);
+    else stopPrice = latestCheck.L * (1 - SURFER_BUF_DN);
+    return anchor ? `${pct(latestCheck.R / stopPrice - 1)}% above stop` : null;
   })();
 
   const statusLabel = () => {
@@ -603,13 +650,13 @@ function SurferPanel({
             </button>
           </div>
         </div>
-        <p className="text-gray-500 text-xs">SOL/BTC · $50 BTC · 15m · RSI 30/70 · 12h EMA(7/25) · limit chase</p>
+        <p className="text-gray-500 text-xs">SOL/BTC · buffered rotation · 4.3d high / 36.7h low / 12.4h lag · never holds USD · 5m cron</p>
       </div>
 
       {/* Stats */}
       {loading ? (
         <div className="grid grid-cols-2 gap-2 animate-pulse">
-          {[...Array(4)].map((_, i) => <div key={i} className="h-16 bg-gray-800 rounded-lg" />)}
+          {[...Array(6)].map((_, i) => <div key={i} className="h-16 bg-gray-800 rounded-lg" />)}
         </div>
       ) : (
         <div className="grid grid-cols-2 gap-2">
@@ -636,6 +683,18 @@ function SurferPanel({
             value={latestSolPrice != null ? latestSolPrice.toFixed(8) : "—"}
             sub={mode === "SOL" && st?.sol_quantity ? `${parseFloat(st.sol_quantity).toFixed(2)} SOL held` : "no position"}
             color="text-yellow-400"
+          />
+          <Stat
+            label="Last Check"
+            value={freshnessText}
+            sub={enabled ? "cron runs every 5m" : "paused"}
+            color={freshnessColor}
+          />
+          <Stat
+            label="Signal"
+            value={signalText ?? "—"}
+            sub={mode === "BTC" ? "distance to entry" : "distance to stop"}
+            color="text-purple-400"
           />
         </div>
       )}
