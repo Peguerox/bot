@@ -6,6 +6,17 @@ import PnLChart from "@/components/PnLChart";
 import { SEED_USD as HT_SEED_USD, dropPctForLevel as htDropPctForLevel } from "@/lib/sol-hypertrade-config";
 import { SEED_USD as DCX_SEED_USD, targetFraction as dcxTargetFraction } from "@/lib/sol-double-crossover-config";
 
+function formatDurationShort(ms: number): string {
+  if (ms <= 0) return "0m";
+  const mins = Math.floor(ms / 60000);
+  const days = Math.floor(mins / 1440);
+  const hours = Math.floor((mins % 1440) / 60);
+  const remMins = mins % 60;
+  if (days > 0) return `${days}d ${hours}h`;
+  if (hours > 0) return `${hours}h ${remMins}m`;
+  return `${remMins}m`;
+}
+
 function Stat({ label, value, sub, color }: { label: string; value: string; sub: string; color: string }) {
   return (
     <div className="bg-gray-800/60 rounded-lg p-3">
@@ -796,6 +807,10 @@ function SolHypertradePaperPanel({
   const portfolioValue = inPosition && livePrice ? totalSolQty * livePrice : null;
   const openPnl = portfolioValue != null && totalCost > 0 ? portfolioValue - totalCost : null;
   const nextDcaPrice = lastEntryPrice != null ? lastEntryPrice * (1 - htDropPctForLevel(level + 1) / 100) : null;
+  const pctToTp = tpTarget != null && portfolioValue != null && portfolioValue > 0 ? ((tpTarget / portfolioValue) - 1) * 100 : null;
+  const pctToDca = nextDcaPrice != null && livePrice != null ? ((livePrice / nextDcaPrice) - 1) * 100 : null;
+  const cycleElapsedMs = st?.cycle_start_time ? Date.now() - new Date(st.cycle_start_time).getTime() : null;
+  const cycleElapsedText = cycleElapsedMs != null ? formatDurationShort(cycleElapsedMs) : null;
 
   const chartTrades = trades.map((t: any) => ({ ...t, pnl: t.pnl_usd, exit_time: t.exit_time }));
 
@@ -859,8 +874,8 @@ function SolHypertradePaperPanel({
           />
           <Stat
             label="Status"
-            value={inPosition ? `Level ${level}` : "Entering…"}
-            sub={inPosition ? `${totalSolQty.toFixed(4)} SOL, $${totalCost.toFixed(2)} deployed` : "—"}
+            value={inPosition ? `Watching, level ${level}` : "Entering…"}
+            sub={inPosition && cycleElapsedText ? `${cycleElapsedText} in this cycle — needs ${pctToTp != null ? `+${pctToTp.toFixed(2)}%` : "?"} to exit or ${pctToDca != null ? `${pctToDca.toFixed(2)}%` : "?"} to add` : "—"}
             color={inPosition ? "text-yellow-400" : "text-gray-400"}
           />
           <Stat
@@ -899,12 +914,16 @@ function SolHypertradePaperPanel({
             </tr>
             <tr className="border-b border-gray-800/50">
               <td className="py-1.5 text-gray-400">Next DCA trigger</td>
-              <td className="py-1.5 text-right text-red-400">{nextDcaPrice != null ? `$${nextDcaPrice.toFixed(4)}` : "—"}</td>
+              <td className="py-1.5 text-right text-red-400">
+                {nextDcaPrice != null ? `$${nextDcaPrice.toFixed(4)}` : "—"}
+                {pctToDca != null ? <span className="text-gray-500"> ({pctToDca.toFixed(2)}% away)</span> : null}
+              </td>
             </tr>
             <tr className="border-b border-gray-800/50">
               <td className="py-1.5 text-gray-400">TP target (price)</td>
               <td className="py-1.5 text-right text-green-400">
                 {tpTarget != null && totalSolQty > 0 ? `$${(tpTarget / totalSolQty).toFixed(4)}` : "—"}
+                {pctToTp != null ? <span className="text-gray-500"> (+{pctToTp.toFixed(2)}% away)</span> : null}
               </td>
             </tr>
             <tr>
@@ -1085,6 +1104,8 @@ function SolDoubleCrossoverPanel({
 
   const lockAge = st?.lock_heartbeat ? Date.now() - new Date(st.lock_heartbeat).getTime() : null;
   const workerAlive = lockAge != null && lockAge < 30_000;
+  const lastMinuteAgeMs = st?.last_minute_ts ? Date.now() - new Date(st.last_minute_ts).getTime() : null;
+  const lastMinuteText = lastMinuteAgeMs != null ? formatDurationShort(lastMinuteAgeMs) : null;
 
   return (
     <div className="bg-gray-900 rounded-xl p-5 space-y-5 flex flex-col">
@@ -1150,10 +1171,15 @@ function SolDoubleCrossoverPanel({
           <Stat
             label="Trend gates"
             value={trendShort == null ? "—" : `${trendShort ? "UP" : "DN"} / ${trendSlow ? "UP" : "DN"}`}
-            sub="6h/72h · 1d/7d"
+            sub={trendShort == null ? "6h/72h · 1d/7d" : trendShort && trendSlow ? "both agree — sizing intensity" : "disagree — waiting for both to align"}
             color={trendShort && trendSlow ? "text-green-400" : "text-gray-400"}
           />
         </div>
+      )}
+      {!loading && (
+        <p className="text-gray-600 text-xs -mt-3">
+          {lastMinuteText ? `Checking every completed minute · last check ${lastMinuteText} ago` : "Waiting for first signal check…"}
+        </p>
       )}
 
       <div>
