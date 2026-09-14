@@ -18,6 +18,8 @@ export type SurferState = {
   realized_pnl_btc: number;
   total_trades: number;
   total_wins: number;
+  anchor: number | null;
+  peak: number | null;
 };
 
 export async function getSurferState(): Promise<SurferState> {

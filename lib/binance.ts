@@ -537,6 +537,31 @@ export async function getKlines(symbol: string, interval: string, limit: number)
   }));
 }
 
+// Same shape as getKlines, but paginates past Binance's 1000-candle single-request cap by
+// walking startTime forward. Used by strategies that need a rolling window wider than 1000
+// candles (e.g. the SOL/BTC buffered rotation's ~4.3-day, ~6190-minute high lookback).
+export async function getKlinesRange(symbol: string, interval: string, startMs: number, endMs: number) {
+  const out: { time: number; open: number; high: number; low: number; close: number; volume: number }[] = [];
+  let cursor = startMs;
+  while (cursor < endMs) {
+    const url = `${BASE}/klines?symbol=${symbol}&interval=${interval}&startTime=${cursor}&endTime=${endMs}&limit=1000`;
+    const res = await fetch(url, { headers: { "X-MBX-APIKEY": API_KEY }, cache: "no-store" });
+    if (!res.ok) throw new Error(`Binance API error: ${res.status}`);
+    const raw = await res.json() as string[][];
+    if (raw.length === 0) break;
+    for (const c of raw) {
+      out.push({
+        time: Number(c[0]), open: parseFloat(c[1]), high: parseFloat(c[2]),
+        low: parseFloat(c[3]), close: parseFloat(c[4]), volume: parseFloat(c[5]),
+      });
+    }
+    const newest = Number(raw[raw.length - 1][0]);
+    if (raw.length < 1000 || newest >= endMs) break;
+    cursor = newest + 1;
+  }
+  return out;
+}
+
 export async function getKlinesGlobal(symbol: string, interval: string, limit: number) {
   const url = `${BASE_GL}/klines?symbol=${symbol}&interval=${interval}&limit=${limit}`;
   const res = await fetch(url, { cache: "no-store" });
