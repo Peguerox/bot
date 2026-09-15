@@ -879,12 +879,21 @@ function SolHypertradePaperPanel({
   const nextDcaPrice = lastEntryPrice != null ? lastEntryPrice * (1 - htDropPctForLevel(level + 1) / 100) : null;
   const pctToTp = tpTarget != null && portfolioValue != null && portfolioValue > 0 ? ((tpTarget / portfolioValue) - 1) * 100 : null;
   const pctToDca = nextDcaPrice != null && livePrice != null ? ((livePrice / nextDcaPrice) - 1) * 100 : null;
-  const cycleElapsedMs = st?.cycle_start_time ? Date.now() - new Date(st.cycle_start_time).getTime() : null;
+
+  // Ticking clock so workerAlive/cycleElapsedText stay fresh even when the DB row itself hasn't
+  // changed in a while (otherwise these froze at whatever Date.now() was at the last re-render,
+  // sometimes showing stale "worker offline" for a perfectly healthy worker).
+  const [nowTick, setNowTick] = useState(Date.now());
+  useEffect(() => {
+    const id = setInterval(() => setNowTick(Date.now()), 5_000);
+    return () => clearInterval(id);
+  }, []);
+  const cycleElapsedMs = st?.cycle_start_time ? nowTick - new Date(st.cycle_start_time).getTime() : null;
   const cycleElapsedText = cycleElapsedMs != null ? formatDurationShort(cycleElapsedMs) : null;
 
   const chartTrades = trades.map((t: any) => ({ ...t, pnl: t.pnl_usd, exit_time: t.exit_time }));
 
-  const lockAge = st?.lock_heartbeat ? Date.now() - new Date(st.lock_heartbeat).getTime() : null;
+  const lockAge = st?.lock_heartbeat ? nowTick - new Date(st.lock_heartbeat).getTime() : null;
   const workerAlive = lockAge != null && lockAge < 30_000;
 
   return (
@@ -1172,9 +1181,17 @@ function SolDoubleCrossoverPanel({
 
   const chartTrades = trades.filter((t: any) => t.side === "sell").map((t: any) => ({ ...t, pnl: t.pnl_usd, exit_time: t.trade_time }));
 
-  const lockAge = st?.lock_heartbeat ? Date.now() - new Date(st.lock_heartbeat).getTime() : null;
+  // Ticking clock so workerAlive/lastMinuteText stay fresh even when the DB row itself hasn't
+  // changed in a while (otherwise these froze at whatever Date.now() was at the last re-render,
+  // sometimes showing stale "worker offline" for a perfectly healthy worker).
+  const [nowTick, setNowTick] = useState(Date.now());
+  useEffect(() => {
+    const id = setInterval(() => setNowTick(Date.now()), 5_000);
+    return () => clearInterval(id);
+  }, []);
+  const lockAge = st?.lock_heartbeat ? nowTick - new Date(st.lock_heartbeat).getTime() : null;
   const workerAlive = lockAge != null && lockAge < 30_000;
-  const lastMinuteAgeMs = st?.last_minute_ts ? Date.now() - new Date(st.last_minute_ts).getTime() : null;
+  const lastMinuteAgeMs = st?.last_minute_ts ? nowTick - new Date(st.last_minute_ts).getTime() : null;
   const lastMinuteText = lastMinuteAgeMs != null ? formatDurationShort(lastMinuteAgeMs) : null;
   const freshnessColor = lastMinuteAgeMs == null ? "text-gray-600"
     : lastMinuteAgeMs <= 180_000 ? "text-green-400"
