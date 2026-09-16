@@ -1,0 +1,174 @@
+// Surfer SOLBTC on Bitfinex — same buffered rotation formula as trigger/live-bot-surfer-solbtc.ts
+// (the real-money Binance.US version), ported to Bitfinex execution to fix two problems found
+// 2026-09-15/16: (1) Binance.US SOLBTC liquidity is ~19 trades/day, 99.2% zero-volume 1m candles
+// -- barely tradeable; (2) Trigger.dev's scheduled-task dispatch adds ~50s of queue delay on top
+// of the 5-minute cron before a run even starts, and the old limit-chase execution took further
+// ticks to fill -- worst case ~6 minutes of real reaction lag on a strategy where one entry's
+// timing cost ~10.5pp on a single trade (see the Aug 17-18 real-vs-backtest comparison).
+//
+// This version: a 30s timer refetches recent 1m candles via REST (well inside the strategy's own
+// 1-minute-candle granularity), computes the exact same R/H/L/C signal, and executes with a real
+// Bitfinex EXCHANGE MARKET order over the authenticated WS (instant, no limit-chase, no multi-
+// tick delay) when a decision fires. NOT ENABLED — state starts enabled=false. Runs in the same
+// process as server/surfer-bfx-solusd.ts (started together from server/sol-dca-bitfinex.ts).
+import { getBitfinexCandlesOHLCV } from "../lib/bitfinex";
+import { submitMarketOrderFast, getLiveBalance, isWalletReady } from "../lib/bitfinex-trading-ws";
+import {
+  getSurferBfxSolbtcState, updateSurferBfxSolbtcState, recordSurferBfxSolbtcTrade,
+  logSurferBfxSolbtcRun, type SurferBfxSolbtcState,
+} from "../lib/surfer-bfx-solbtc-db";
+
+const SYMBOL = "tSOLBTC";
+const BUF_UP = 0.0025, BUF_DN = 0.0020;
+const ARM = 0.18, GIVEBACK = 0.15, FAIL = 0.09;
+const H_WINDOW_MIN = 6190;
+const L_WINDOW_MIN = 2200;
+const C_LAG_MIN = 747;
+const CANDLE_LIMIT = 6500; // > H_WINDOW_MIN with padding; Bitfinex allows up to 10,000/request
+const CHECK_INTERVAL_MS = 30_000;
+const RUN_LOG_INTERVAL_MS = 5 * 60_000;
+
+// Same seed as the Binance.US version (~$50-equivalent at deployment) -- this is a SEPARATE
+// tracked balance from that bot's real BTC; this one starts at 0 real activity until enabled.
+const SEED_BTC = 0.00075241;
+
+function tradingCapitalBtc(state: { realized_pnl_btc?: number | null }): number {
+  return SEED_BTC + (state.realized_pnl_btc ?? 0);
+}
+
+type Candle = { time: number; close: number };
+
+function computeHLC(closed: Candle[]) {
+  const lastTs = closed[closed.length - 1].time;
+  const prior = closed.slice(0, -1); // strictly before the latest closed candle
+  const cutoffH = lastTs - H_WINDOW_MIN * 60_000;
+  const cutoffL = lastTs - L_WINDOW_MIN * 60_000;
+  const cutoffC = lastTs - C_LAG_MIN * 60_000;
+
+  const forH = prior.filter((c) => c.time >= cutoffH);
+  const forL = prior.filter((c) => c.time >= cutoffL);
+  const H = forH.length ? Math.max(...forH.map((c) => c.close)) : NaN;
+  const L = forL.length ? Math.min(...forL.map((c) => c.close)) : NaN;
+
+  let C = NaN;
+  for (let i = prior.length - 1; i >= 0; i--) {
+    if (prior[i].time <= cutoffC) { C = prior[i].close; break; }
+  }
+  return { H, L, C, R: closed[closed.length - 1].close, lastTs };
+}
+
+let lastRunLog = 0;
+
+async function checkOnce() {
+  let state: SurferBfxSolbtcState;
+  try {
+    state = await getSurferBfxSolbtcState();
+  } catch (err) {
+    await logSurferBfxSolbtcRun({ actions: [{ action: "ERROR", stage: "state", error: String(err) }] }).catch(() => {});
+    return;
+  }
+  if (!state.enabled) return;
+  if (!isWalletReady()) return;
+
+  try {
+    const raw = await getBitfinexCandlesOHLCV(SYMBOL, "1m", CANDLE_LIMIT);
+    const closed = raw.slice(0, -1).map((c) => ({ time: c.time, close: c.close })); // drop forming candle
+
+    if (closed.length < H_WINDOW_MIN) {
+      await logSurferBfxSolbtcRun({ actions: [{ action: "WAIT_HISTORY", have: closed.length, need: H_WINDOW_MIN }] });
+      return;
+    }
+
+    const { H, L, C, R, lastTs } = computeHLC(closed);
+    const isNewCandle = lastTs > (state.last_candle_ts ?? 0);
+
+    let anchor = state.anchor ?? null;
+    let peak = state.peak ?? null;
+    const g = state.mode === "SOL" && anchor ? (peak ?? anchor) / anchor - 1 : null;
+
+    const shouldLog = isNewCandle || Date.now() - lastRunLog > RUN_LOG_INTERVAL_MS;
+    if (shouldLog) {
+      await logSurferBfxSolbtcRun({
+        actions: [{ action: "CHECK", mode: state.mode, R, H, L, C, anchor, peak, g: g?.toFixed(4), isNewCandle }],
+      });
+      lastRunLog = Date.now();
+    }
+
+    if (!isNewCandle) return;
+
+    const updates: Record<string, unknown> = { last_candle_ts: lastTs };
+    if (state.mode === "SOL" && anchor !== null) {
+      const newPeak = Math.max(peak ?? anchor, R);
+      if (newPeak !== peak) { peak = newPeak; updates.peak = newPeak; }
+    }
+    await updateSurferBfxSolbtcState(updates);
+
+    // ── Entry: BTC -> SOL ──────────────────────────────────────────────
+    if (state.mode === "BTC") {
+      const breakout = R > H * (1 + BUF_UP);
+      const confirmed = breakout && R > C;
+      if (confirmed) {
+        const btcFree = getLiveBalance("BTC");
+        const btcToSpend = Math.min(tradingCapitalBtc(state), btcFree);
+        if (btcToSpend > 0) {
+          console.log(`SOLBTC ENTRY R=${R} H=${H} C=${C} btcToSpend=${btcToSpend.toFixed(8)} — submitting real market order...`);
+          const qty = btcToSpend / R;
+          const fill = await submitMarketOrderFast(SYMBOL, qty);
+          await updateSurferBfxSolbtcState({
+            mode: "SOL", sol_quantity: Math.abs(fill.execAmount), entry_price: fill.execPrice,
+            entry_btc: fill.execPrice * Math.abs(fill.execAmount), entry_time: new Date().toISOString(),
+            anchor: fill.execPrice, peak: fill.execPrice,
+          });
+          await logSurferBfxSolbtcRun({ actions: [{ action: "BUY_FILLED", price: fill.execPrice, qty: fill.execAmount, btcSpent: btcToSpend, fillLatencyMs: fill.latencyMs }] });
+        }
+      }
+    }
+
+    // ── Exit: SOL -> BTC ───────────────────────────────────────────────
+    if (state.mode === "SOL" && anchor !== null) {
+      const M = R / anchor;
+      const gg = (peak ?? anchor) / anchor - 1;
+      let triggered = false;
+      let reason = "";
+      if (M < 1 - FAIL) { triggered = true; reason = "failed_campaign"; }
+      else if (gg >= ARM) { if (M <= 1 + (1 - GIVEBACK) * gg) { triggered = true; reason = "giveback"; } }
+      else if (R < L * (1 - BUF_DN)) { triggered = true; reason = "buffered_stop"; }
+
+      if (triggered && R < C) {
+        const trackedQty = state.sol_quantity ?? 0;
+        const solFree = getLiveBalance("SOL");
+        const sellQty = Math.min(trackedQty, solFree);
+        if (sellQty > 0) {
+          console.log(`SOLBTC EXIT reason=${reason} M=${M.toFixed(4)} g=${gg.toFixed(4)} sellQty=${sellQty.toFixed(8)} — submitting real market order...`);
+          const fill = await submitMarketOrderFast(SYMBOL, -sellQty);
+          const btcOut = fill.execPrice * Math.abs(fill.execAmount);
+          const btcIn = state.entry_btc ?? 0;
+          const pnlBtc = btcOut - btcIn;
+          const pnlPct = btcIn > 0 ? (pnlBtc / btcIn) * 100 : 0;
+          await recordSurferBfxSolbtcTrade({
+            buy_price: state.entry_price!, sell_price: fill.execPrice, sol_quantity: state.sol_quantity!,
+            btc_in: btcIn, btc_out: btcOut, pnl_btc: pnlBtc, pnl_pct: pnlPct, entry_time: state.entry_time!,
+          });
+          await updateSurferBfxSolbtcState({
+            mode: "BTC", sol_quantity: null, entry_price: null, entry_btc: null, entry_time: null,
+            anchor: null, peak: null,
+          });
+          await logSurferBfxSolbtcRun({ actions: [{ action: "SELL_FILLED", reason, price: fill.execPrice, btcOut, pnlBtc, pnlPct, fillLatencyMs: fill.latencyMs }] });
+        }
+      }
+    }
+  } catch (err) {
+    console.error("Surfer BFX SOLBTC checkOnce error:", err);
+    await logSurferBfxSolbtcRun({ actions: [{ action: "ERROR", stage: "check", error: String(err) }] }).catch(() => {});
+  }
+}
+
+export function startSurferBfxSolbtc() {
+  console.log("Surfer SOLBTC (Bitfinex) engine starting — checking every 30s, NOT ENABLED until state.enabled=true.");
+  checkOnce().catch((err) => console.error(err));
+  setInterval(() => { checkOnce().catch((err) => console.error(err)); }, CHECK_INTERVAL_MS);
+}
+
+export async function surferBfxSolbtcHeartbeat(instanceId: string) {
+  await updateSurferBfxSolbtcState({ lock_owner: instanceId, lock_heartbeat: new Date().toISOString() });
+}

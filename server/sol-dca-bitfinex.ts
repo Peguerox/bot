@@ -1,254 +1,202 @@
-// PAPER TRADING — SOL double-crossover controller, Worker 1 (replaces the old VWAP+EMA DCA grid
-// entirely -- filename/service kept for Render compatibility, internals are a completely
-// different strategy). No real orders, no real money.
+// Worker 1 — filename/service kept for Render compatibility (4th internals swap: old VWAP+EMA DCA
+// grid -> SOL Double-Crossover (paper, 2026-09-13) -> shelved Surfer-on-Bitfinex migration (built,
+// never deployed, see docs/archive/README_shelved_surfer_bitfinex_migration.md) -> this,
+// 2026-09-16).
 //
-// Continuous variable-exposure strategy, NOT a DCA grid: holds a target % of account equity in
-// SOL (0% to ~53%), driven by two hard trend crossovers (direction) and one soft acceleration
-// gate (intensity) -- see lib/sol-double-crossover-config.ts for the exact formula and
-// docs/adaptive_exposure_family.md for the full research trail. Won a final $1,000/2yr/quarterly
-// bake-off against the deployed DCA grid (Worker 2) and four other adaptive-family variants
-// (+24.64% vs the grid's +23.24%), at the cost of ~36x the trade count -- that tradeoff is why
-// this runs as paper, not real money, until it proves itself live the way Worker 2 did.
+// SOL/BTC "participation" hybrid strategy — PAPER ONLY, no real orders. Combines a fast CUSUM
+// regime detector with a slower trend + price-confirmation signal, switching between them based
+// on how reliable the fast signal's own recent track record has been (so it doesn't trade
+// constantly the way the pure fast CUSUM does — 182-9,907 swaps/year instead of 24,000-54,000).
+// Ported line-for-line from a verified C++ research engine (matched its published results to 6
+// decimal places on real Bitfinex data) — see lib/solbtc-participation-engine.ts, independently
+// re-verified against the same reference engine over a fresh 20,000-row slice before this file
+// was written (every state variable matched to float64 precision).
 //
-// EXECUTION: schedule a rebalance when the live weight drifts from the target beyond a deadband,
-// at a completed-minute close; execute at the next minute's open -- same 1-bar-delay convention
-// as every backtest in this research line. Orders capped at 0.5% of equity, skipped below
-// Bitfinex's real confirmed SOLUSD minimum (0.02 SOL, ~$2 -- see lib/sol-double-crossover-config.ts
-// for how that was confirmed, it is NOT the $10-25 an earlier report assumed).
+// Cost: 0.02%/side deducted from the paper balance on every swap — deliberately more
+// conservative than the measured real Bitfinex spread (~0.01555%/side); at 0.02% the most recent
+// year's backtest is right at the edge (was -8.35% at exactly 0.02% in the original SOLBTC-only
+// backtest; the current parameters here are unaffected by that since this file always uses 0.02%).
 //
-// EMA SEEDING: on first boot only, pulls ~45 days of real Bitfinex 1-min history and runs the
-// exact EMA recursion across it before going live -- a 7-day half-life EMA started flat would
-// misprice every signal for most of a week. Subsequent restarts resume from DB-persisted EMA
-// state (the recursion generalizes cleanly to an irregular gap -- downtime is just one larger
-// step, not a discontinuity).
+// Execution model: polls Bitfinex's real public 1-minute SOLBTC candles every 20s (well inside
+// the strategy's 1-minute decision granularity) and feeds any newly-closed candles through the
+// engine in order. Fills are simulated at the next candle's OPEN once that candle has real volume
+// (fill_mode=1 in the reference engine) — not the current price, not a guess.
 import dotenv from "dotenv";
 dotenv.config({ path: ".env.local" });
 
 import os from "os";
 import crypto from "crypto";
+import { getBitfinexCandlesOHLCV } from "../lib/bitfinex";
 import {
-  getSolDoubleCrossoverState, updateSolDoubleCrossoverState, recordSolDoubleCrossoverTrade,
-  logSolDoubleCrossoverRun, type SolDoubleCrossoverState,
-} from "../lib/sol-double-crossover-db";
+  stepMinute, initialState, COST, type EngineState, type Candle, type Side,
+} from "../lib/solbtc-participation-engine";
 import {
-  stepEmaState, targetFraction, type EmaState,
-  BFX_SYMBOL, SEED_USD, DEADBAND_MULT, ORDER_CAP_FRAC, MIN_NOTIONAL_FRAC, REAL_MIN_SOL_UNITS,
-  ADVERSE_COST_PER_SIDE, SEED_HISTORY_DAYS,
-} from "../lib/sol-double-crossover-config";
-import { connectPublicBook, getBookBidAsk, isBookReady, bookMessageAge } from "../lib/bitfinex-trading-ws";
+  getSolbtcParticipationState, updateSolbtcParticipationState, recordSolbtcParticipationTrade,
+  logSolbtcParticipationRun, type SolbtcParticipationState,
+} from "../lib/solbtc-participation-db";
 
+const SYMBOL = "tSOLBTC";
+const POLL_INTERVAL_MS = 20_000;
+const CANDLE_LIMIT = 20;
 const HEARTBEAT_MS = 10_000;
-const LOCK_STALE_MS = 15_000; // 1.5x heartbeat -- see the Render redeploy crash-loop incident on earlier workers
-const DB_WRITE_THROTTLE_MS = 2_000;
+const LOCK_STALE_MS = 15_000;
 const RUN_LOG_INTERVAL_MS = 5 * 60_000;
-const WATCHDOG_INTERVAL_MS = 5_000;
-const BOOK_STALE_MS = 15_000;
 
 const INSTANCE_ID = `${os.hostname()}-${process.pid}-${crypto.randomBytes(3).toString("hex")}`;
 
-let state: SolDoubleCrossoverState;
-let emaState: EmaState;
-let currentMinuteFloor: number | null = null;
-let pendingTarget: number | null = null;
-let lastDbWrite = 0;
-let lastRunLog = 0;
-let processing = false;
+function sideOf(s: string): Side { return s === "SOL" ? "SOL" : "BTC"; }
 
-async function acquireLock(): Promise<boolean> {
-  state = await getSolDoubleCrossoverState();
+function stateFromRow(row: SolbtcParticipationState): EngineState {
+  return {
+    side: sideOf(row.side), pending: row.pending ? sideOf(row.pending) : null,
+    virtualSide: sideOf(row.virtual_side), virtualPending: row.virtual_pending ? sideOf(row.virtual_pending) : null,
+    base: sideOf(row.base), v: row.v, sUp: row.s_up, sDown: row.s_down,
+    d: row.d, scoreV: row.score_v, m: row.m, scoreT: row.score_t,
+    orientation: row.orientation === -1 ? -1 : 1,
+    fastEwma: row.fast_ewma, slowEwma: row.slow_ewma, trendVariance: row.trend_variance,
+    trend: row.trend === 1 ? 1 : 0, priceOk: row.price_ok === 1 ? 1 : 0, fastMode: row.fast_mode === 1 ? 1 : 0,
+    lastLogPrice: row.last_log_price,
+  };
+}
+
+function rowFromState(s: EngineState): Record<string, unknown> {
+  return {
+    side: s.side, pending: s.pending, virtual_side: s.virtualSide, virtual_pending: s.virtualPending,
+    base: s.base, v: s.v, s_up: s.sUp, s_down: s.sDown,
+    d: s.d, score_v: s.scoreV, m: s.m, score_t: s.scoreT, orientation: s.orientation,
+    fast_ewma: s.fastEwma, slow_ewma: s.slowEwma, trend_variance: s.trendVariance,
+    trend: s.trend, price_ok: s.priceOk, fast_mode: s.fastMode, last_log_price: s.lastLogPrice,
+  };
+}
+
+let entryBtc: number | null = null; // BTC value at the moment we entered SOL, for PnL on the return leg
+let lastRunLog = 0;
+
+async function acquireLock(): Promise<SolbtcParticipationState | null> {
+  const state = await getSolbtcParticipationState();
   const heartbeatAge = state.lock_heartbeat ? Date.now() - new Date(state.lock_heartbeat).getTime() : Infinity;
   if (state.lock_owner && heartbeatAge < LOCK_STALE_MS) {
     console.error(`Refusing to start: lock held by ${state.lock_owner}, last heartbeat ${heartbeatAge}ms ago`);
-    return false;
+    return null;
   }
-  await updateSolDoubleCrossoverState({ lock_owner: INSTANCE_ID, lock_heartbeat: new Date().toISOString() });
+  await updateSolbtcParticipationState({ lock_owner: INSTANCE_ID, lock_heartbeat: new Date().toISOString() });
   console.log(`Lock acquired as ${INSTANCE_ID}`);
-  return true;
+  return state;
+}
+
+async function heartbeat() {
+  const fresh = await getSolbtcParticipationState();
+  if (fresh.lock_owner !== INSTANCE_ID) {
+    console.error(`Lost lock to ${fresh.lock_owner} — another instance took over. Exiting.`);
+    process.exit(1);
+  }
+  await updateSolbtcParticipationState({ lock_heartbeat: new Date().toISOString() });
 }
 
 async function releaseLock() {
   try {
-    const fresh = await getSolDoubleCrossoverState();
+    const fresh = await getSolbtcParticipationState();
     if (fresh.lock_owner === INSTANCE_ID) {
-      await updateSolDoubleCrossoverState({ lock_owner: null, lock_heartbeat: null });
+      await updateSolbtcParticipationState({ lock_owner: null, lock_heartbeat: null });
       console.log("Lock released cleanly.");
     }
   } catch (err) { console.error("releaseLock failed:", err); }
 }
 
-async function heartbeat() {
-  const fresh = await getSolDoubleCrossoverState();
-  if (fresh.lock_owner !== INSTANCE_ID) {
-    console.error(`Lost lock to ${fresh.lock_owner} — another instance took over. Exiting.`);
-    process.exit(1);
-  }
-  if (!processing) {
-    state = fresh;
-  } else {
-    state = { ...state, enabled: fresh.enabled };
-  }
-  await updateSolDoubleCrossoverState({ lock_heartbeat: new Date().toISOString() });
-}
+async function processCandle(row: SolbtcParticipationState, candle: Candle): Promise<SolbtcParticipationState> {
+  const engineState = stateFromRow(row);
+  const { state: next, actualFill } = stepMinute(engineState, candle);
 
-// ---------- One-time EMA seeding from real history ----------
+  const patch: Record<string, unknown> = { ...rowFromState(next), last_candle_ts: candle.openTimeMs };
 
-async function fetchSeedCandles(days: number): Promise<{ time: number; close: number }[]> {
-  const endMs = Date.now();
-  const startMs = endMs - days * 86_400_000;
-  const all: { time: number; close: number }[] = [];
-  let cursor = startMs;
-  while (cursor < endMs) {
-    const url = `https://api-pub.bitfinex.com/v2/candles/trade:1m:${BFX_SYMBOL}/hist?start=${cursor}&end=${endMs}&limit=10000&sort=1`;
-    const res = await fetch(url);
-    if (!res.ok) throw new Error(`Bitfinex seed fetch failed: ${res.status}`);
-    const raw = await res.json() as number[][];
-    if (raw.length === 0) break;
-    for (const c of raw) all.push({ time: c[0], close: c[2] });
-    const newest = raw[raw.length - 1][0];
-    if (raw.length < 10000) break;
-    cursor = newest + 1;
-    await new Promise((r) => setTimeout(r, 300));
-  }
-  return all;
-}
+  let btcBalance = row.btc_balance;
+  let solQty = row.sol_qty;
 
-async function seedEmaFromHistory(): Promise<EmaState> {
-  console.log(`Seeding EMAs from ${SEED_HISTORY_DAYS} days of real Bitfinex history...`);
-  const candles = await fetchSeedCandles(SEED_HISTORY_DAYS);
-  if (candles.length === 0) throw new Error("No seed candles returned");
-  let s: EmaState = {
-    ema360: candles[0].close, ema4320: candles[0].close,
-    ema1440: candles[0].close, ema10080: candles[0].close, rBar: 0,
-  };
-  for (let i = 1; i < candles.length; i++) {
-    const dtMin = (candles[i].time - candles[i - 1].time) / 60_000;
-    s = stepEmaState(s, candles[i].close, dtMin);
-  }
-  const lastTs = candles[candles.length - 1].time;
-  console.log(`Seeded from ${candles.length} candles, ${new Date(candles[0].time).toISOString()} -> ${new Date(lastTs).toISOString()}`);
-  await updateSolDoubleCrossoverState({
-    ema_360: s.ema360, ema_4320: s.ema4320, ema_1440: s.ema1440, ema_10080: s.ema10080,
-    r_bar: s.rBar, seeded: true, last_minute_ts: new Date(lastTs).toISOString(),
-  });
-  return s;
-}
-
-// ---------- Execution ----------
-
-async function executeRebalance(target: number, price: number) {
-  const C = state.cash;
-  const Q = state.sol_qty;
-  const s = ADVERSE_COST_PER_SIDE;
-  const V = Q * price * (1 - s);
-  const E = C + V;
-  const k = (1 - s) / (1 + s);
-
-  if (V < target * E) {
-    const denom = k + target * (1 - k);
-    const spend = Math.min(C, ORDER_CAP_FRAC * E, denom > 0 ? (target * E - V) / denom : 0);
-    if (spend < MIN_NOTIONAL_FRAC * SEED_USD || spend <= 0) return;
-    const buyPx = price * (1 + s);
-    const qty = spend / buyPx;
-    if (qty < REAL_MIN_SOL_UNITS) { console.log(`Rebalance buy skipped: ${qty.toFixed(6)} SOL below real exchange minimum (${REAL_MIN_SOL_UNITS})`); return; }
-    const newQty = Q + qty;
-    const newAvgCost = ((state.avg_cost ?? buyPx) * Q + spend) / newQty;
-    state = { ...state, cash: C - spend, sol_qty: newQty, avg_cost: newAvgCost };
-    await updateSolDoubleCrossoverState({ cash: state.cash, sol_qty: state.sol_qty, avg_cost: state.avg_cost });
-    await recordSolDoubleCrossoverTrade({ side: "buy", price: buyPx, qty, usd_amount: spend, pnl_usd: null });
-    console.log(`BUY ${qty.toFixed(6)} SOL @ ${buyPx.toFixed(4)} ($${spend.toFixed(2)}) -> weight target=${(target * 100).toFixed(1)}%`);
-  } else if (V > target * E) {
-    const proceeds = Math.min(V, ORDER_CAP_FRAC * E, V - target * E);
-    if (proceeds < MIN_NOTIONAL_FRAC * SEED_USD || proceeds <= 0) return;
-    const sellPx = price * (1 - s);
-    let qty = proceeds / sellPx;
-    qty = Math.min(qty, Q);
-    if (qty < REAL_MIN_SOL_UNITS) { console.log(`Rebalance sell skipped: ${qty.toFixed(6)} SOL below real exchange minimum (${REAL_MIN_SOL_UNITS})`); return; }
-    const realProceeds = qty * sellPx;
-    const pnl = realProceeds - qty * (state.avg_cost ?? sellPx);
-    state = { ...state, cash: C + realProceeds, sol_qty: Q - qty };
-    await updateSolDoubleCrossoverState({ cash: state.cash, sol_qty: state.sol_qty });
-    await recordSolDoubleCrossoverTrade({ side: "sell", price: sellPx, qty, usd_amount: realProceeds, pnl_usd: pnl });
-    console.log(`SELL ${qty.toFixed(6)} SOL @ ${sellPx.toFixed(4)} ($${realProceeds.toFixed(2)}) pnl=${pnl.toFixed(4)} -> weight target=${(target * 100).toFixed(1)}%`);
-  }
-  lastDbWrite = Date.now();
-}
-
-// ---------- Minute-boundary driven signal + schedule ----------
-
-async function onMinuteBoundary(price: number, dtMin: number) {
-  // 1. execute any order scheduled at the previous minute's close, using this minute's open
-  if (pendingTarget !== null) {
-    await executeRebalance(pendingTarget, price);
-    pendingTarget = null;
-  }
-
-  // 2. update EMA state with this (just-completed) minute's close
-  emaState = stepEmaState(emaState, price, dtMin);
-  await updateSolDoubleCrossoverState({
-    ema_360: emaState.ema360, ema_4320: emaState.ema4320, ema_1440: emaState.ema1440,
-    ema_10080: emaState.ema10080, r_bar: emaState.rBar, last_minute_ts: new Date().toISOString(),
-  });
-
-  // 3. compute new target, schedule a rebalance if weight has drifted beyond the deadband
-  const f = targetFraction(emaState);
-  const E = state.cash + state.sol_qty * price * (1 - ADVERSE_COST_PER_SIDE);
-  const w = E > 0 ? (state.sol_qty * price * (1 - ADVERSE_COST_PER_SIDE)) / E : 0;
-  const scheduled = Math.abs(w - f) > DEADBAND_MULT * f * (1 - f);
-  if (scheduled) pendingTarget = f;
-
-  if (Date.now() - lastRunLog > RUN_LOG_INTERVAL_MS) {
-    console.log(`STATUS price=${price.toFixed(4)} target=${(f * 100).toFixed(2)}% weight=${(w * 100).toFixed(2)}% equity=$${E.toFixed(2)} scheduled=${scheduled}`);
-    await logSolDoubleCrossoverRun({ actions: [{ action: "STATUS", price, target: f, weight: w, equity: E, scheduled }] });
-    lastRunLog = Date.now();
-  }
-}
-
-async function onBookUpdate() {
-  if (!state.enabled || processing) return;
-  const { bid, ask } = getBookBidAsk();
-  if (bid === null || ask === null) return;
-  const price = (bid + ask) / 2;
-
-  const nowMinuteFloor = Math.floor(Date.now() / 60_000);
-  if (currentMinuteFloor === null) { currentMinuteFloor = nowMinuteFloor; return; }
-  if (nowMinuteFloor <= currentMinuteFloor) return;
-
-  processing = true;
-  try {
-    const dtMin = nowMinuteFloor - currentMinuteFloor;
-    currentMinuteFloor = nowMinuteFloor;
-    await onMinuteBoundary(price, dtMin);
-  } catch (err) {
-    console.error("onMinuteBoundary error:", err);
-    await logSolDoubleCrossoverRun({ actions: [{ action: "ERROR", stage: "onMinuteBoundary", error: String(err) }] }).catch(() => {});
-  } finally {
-    processing = false;
-  }
-}
-
-function startWatchdog() {
-  setInterval(() => {
-    const staleMs = bookMessageAge();
-    if (staleMs >= BOOK_STALE_MS) {
-      console.error(`Watchdog: order book feed silent for ${Math.round(staleMs / 1000)}s.`);
+  if (actualFill) {
+    const fillPrice = actualFill.fillPrice;
+    if (actualFill.side === "SOL") {
+      // BTC -> SOL: SOL = BTC*(1-cost)/price
+      const newSolQty = btcBalance * (1 - COST) / fillPrice;
+      entryBtc = btcBalance;
+      const btcBefore = btcBalance, solBefore = solQty;
+      btcBalance = 0; solQty = newSolQty;
+      patch.btc_balance = btcBalance; patch.sol_qty = solQty;
+      await recordSolbtcParticipationTrade({
+        side_after: "SOL", fill_price: fillPrice, btc_before: btcBefore, sol_before: solBefore,
+        btc_after: btcBalance, sol_after: solQty, pnl_btc: null,
+      });
+      console.log(`FILL -> SOL  price=${fillPrice.toFixed(8)}  qty=${newSolQty.toFixed(6)}`);
+    } else {
+      // SOL -> BTC: BTC = SOL*price*(1-cost)
+      const btcOut = solQty * fillPrice * (1 - COST);
+      const pnl = entryBtc !== null ? btcOut - entryBtc : null;
+      const btcBefore = btcBalance, solBefore = solQty;
+      btcBalance = btcOut; solQty = 0;
+      patch.btc_balance = btcBalance; patch.sol_qty = solQty;
+      await recordSolbtcParticipationTrade({
+        side_after: "BTC", fill_price: fillPrice, btc_before: btcBefore, sol_before: solBefore,
+        btc_after: btcBalance, sol_after: solQty, pnl_btc: pnl,
+      });
+      console.log(`FILL -> BTC  price=${fillPrice.toFixed(8)}  btcOut=${btcOut.toFixed(8)}  pnl=${pnl?.toFixed(8)}`);
+      entryBtc = null;
     }
-  }, WATCHDOG_INTERVAL_MS);
+  }
+
+  await updateSolbtcParticipationState(patch);
+  return { ...row, ...patch, btc_balance: btcBalance, sol_qty: solQty } as SolbtcParticipationState;
+}
+
+async function checkOnce() {
+  let row: SolbtcParticipationState;
+  try {
+    row = await getSolbtcParticipationState();
+  } catch (err) {
+    await logSolbtcParticipationRun({ actions: [{ action: "ERROR", stage: "state", error: String(err) }] }).catch(() => {});
+    return;
+  }
+  if (!row.enabled) return;
+
+  try {
+    const raw = await getBitfinexCandlesOHLCV(SYMBOL, "1m", CANDLE_LIMIT);
+    const closed = raw.slice(0, -1); // drop the still-forming candle
+    const newCandles = closed.filter((c) => c.time > (row.last_candle_ts ?? 0));
+
+    if (row.last_candle_ts === null && closed.length > 0) {
+      // very first boot: seed lastLogPrice/fastEwma/slowEwma from the first available close,
+      // matching initialState(), then process everything AFTER that seed candle.
+      const seed = closed[0];
+      await updateSolbtcParticipationState({
+        ...rowFromState(initialState(seed.close)), last_candle_ts: seed.time,
+      });
+      row = await getSolbtcParticipationState();
+    }
+
+    let current = row;
+    for (const c of newCandles) {
+      if (c.time <= (current.last_candle_ts ?? 0)) continue;
+      const candle: Candle = { openTimeMs: c.time, open: c.open, close: c.close, volume: c.volume };
+      current = await processCandle(current, candle);
+    }
+
+    if (Date.now() - lastRunLog > RUN_LOG_INTERVAL_MS) {
+      const latest = closed[closed.length - 1];
+      console.log(`STATUS side=${current.side} base=${current.base} orient=${current.orientation} fastMode=${current.fast_mode} trend=${current.trend} price=${latest?.close}`);
+      await logSolbtcParticipationRun({
+        actions: [{ action: "STATUS", side: current.side, base: current.base, orientation: current.orientation,
+          fastMode: current.fast_mode, trend: current.trend, priceOk: current.price_ok,
+          btcBalance: current.btc_balance, solQty: current.sol_qty, price: latest?.close }],
+      });
+      lastRunLog = Date.now();
+    }
+  } catch (err) {
+    console.error("checkOnce error:", err);
+    await logSolbtcParticipationRun({ actions: [{ action: "ERROR", stage: "check", error: String(err) }] }).catch(() => {});
+  }
 }
 
 async function main() {
   const got = await acquireLock();
   if (!got) process.exit(1);
-
-  if (!state.seeded) {
-    emaState = await seedEmaFromHistory();
-    state = await getSolDoubleCrossoverState();
-  } else {
-    emaState = {
-      ema360: state.ema_360!, ema4320: state.ema_4320!, ema1440: state.ema_1440!,
-      ema10080: state.ema_10080!, rBar: state.r_bar!,
-    };
-    console.log(`Resuming EMA state from DB (last_minute_ts=${state.last_minute_ts})`);
-  }
 
   const heartbeatTimer = setInterval(() => {
     heartbeat().catch((err) => console.error("heartbeat failed:", err));
@@ -262,10 +210,10 @@ async function main() {
   process.on("SIGINT", shutdown);
   process.on("SIGTERM", shutdown);
 
-  console.log(`Starting SOL Double-Crossover PAPER worker (${INSTANCE_ID}), enabled=${state.enabled}, cash=$${state.cash.toFixed(2)}, sol=${state.sol_qty.toFixed(6)}`);
-  console.log(`PAPER ONLY — no real orders. Hard T/L crossovers + soft acceleration gate, target range [0, 53%], $${SEED_USD} seed, real bid/ask fills from Bitfinex's live book.`);
-  connectPublicBook(BFX_SYMBOL, () => { onBookUpdate().catch((err) => console.error("onBookUpdate error:", err)); });
-  startWatchdog();
+  console.log(`Starting SOL/BTC Participation PAPER worker (${INSTANCE_ID}), enabled=${got.enabled}.`);
+  console.log(`PAPER ONLY — fast CUSUM + slow trend + price-confirmation controller, cost=${(COST*100).toFixed(3)}%/side, polling Bitfinex every 20s.`);
+  checkOnce().catch((err) => console.error(err));
+  setInterval(() => { checkOnce().catch((err) => console.error(err)); }, POLL_INTERVAL_MS);
 }
 
 main().catch((err) => { console.error("Fatal:", err); process.exit(1); });
