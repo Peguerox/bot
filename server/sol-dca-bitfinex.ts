@@ -37,7 +37,7 @@ import {
 
 const SYMBOL = "tSOLBTC";
 const POLL_INTERVAL_MS = 20_000;
-const CANDLE_LIMIT = 20;
+const CANDLE_LIMIT = 200; // real trades are sparse (gaps up to 14+ min observed) -- fetch generously
 const HEARTBEAT_MS = 10_000;
 const LOCK_STALE_MS = 15_000;
 const RUN_LOG_INTERVAL_MS = 5 * 60_000;
@@ -157,14 +157,24 @@ async function checkOnce() {
   if (!row.enabled) return;
 
   try {
+    // Bitfinex's candle history is SPARSE -- it only returns a row for a minute where a real
+    // trade happened (confirmed: SOLBTC regularly goes 5-14+ minutes between trades). The
+    // verified formula requires stepping through EVERY clock minute, forward-filling the last
+    // known close through quiet gaps (same "filled one-minute grid" methodology the reference
+    // engine's spec requires -- flat minutes still decay the CUSUM volatility/score EWMAs and
+    // still land on hourly/15-min review boundaries). Fetching sparse candles and only
+    // processing the ones that exist would silently skip those boundaries and diverge from the
+    // verified backtest. So: build the full continuous grid here, synthesizing flat/zero-volume
+    // candles for any minute Bitfinex didn't report a trade for.
+    const currentMinuteFloor = Math.floor(Date.now() / 60_000) * 60_000;
     const raw = await getBitfinexCandlesOHLCV(SYMBOL, "1m", CANDLE_LIMIT);
-    const closed = raw.slice(0, -1); // drop the still-forming candle
-    const newCandles = closed.filter((c) => c.time > (row.last_candle_ts ?? 0));
+    const closedReal = raw.filter((c) => c.time < currentMinuteFloor); // definitely-closed real trades
+    const byMinute = new Map(closedReal.map((c) => [c.time, c]));
 
-    if (row.last_candle_ts === null && closed.length > 0) {
+    if (row.last_candle_ts === null && closedReal.length > 0) {
       // very first boot: seed lastLogPrice/fastEwma/slowEwma from the first available close,
       // matching initialState(), then process everything AFTER that seed candle.
-      const seed = closed[0];
+      const seed = closedReal[0];
       await updateSolbtcParticipationState({
         ...rowFromState(initialState(seed.close)), last_candle_ts: seed.time,
       });
@@ -172,14 +182,20 @@ async function checkOnce() {
     }
 
     let current = row;
-    for (const c of newCandles) {
-      if (c.time <= (current.last_candle_ts ?? 0)) continue;
-      const candle: Candle = { openTimeMs: c.time, open: c.open, close: c.close, volume: c.volume };
-      current = await processCandle(current, candle);
+    let lastKnownClose = current.last_log_price !== null ? Math.exp(current.last_log_price) : closedReal[0]?.close;
+    if (lastKnownClose !== undefined && current.last_candle_ts !== null) {
+      for (let t = current.last_candle_ts + 60_000; t < currentMinuteFloor; t += 60_000) {
+        const real = byMinute.get(t);
+        const candle: Candle = real
+          ? { openTimeMs: t, open: real.open, close: real.close, volume: real.volume }
+          : { openTimeMs: t, open: lastKnownClose, close: lastKnownClose, volume: 0 };
+        current = await processCandle(current, candle);
+        lastKnownClose = candle.close;
+      }
     }
 
     if (Date.now() - lastRunLog > RUN_LOG_INTERVAL_MS) {
-      const latest = closed[closed.length - 1];
+      const latest = closedReal[closedReal.length - 1];
       console.log(`STATUS side=${current.side} base=${current.base} orient=${current.orientation} fastMode=${current.fast_mode} trend=${current.trend} price=${latest?.close}`);
       await logSolbtcParticipationRun({
         actions: [{ action: "STATUS", side: current.side, base: current.base, orientation: current.orientation,

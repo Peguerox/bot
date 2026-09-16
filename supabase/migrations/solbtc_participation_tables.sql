@@ -67,3 +67,15 @@ create table if not exists public.solbtc_participation_runs (
   run_at timestamptz not null default now(),
   data jsonb
 );
+
+alter publication supabase_realtime add table solbtc_participation_state;
+alter publication supabase_realtime add table solbtc_participation_trades;
+alter publication supabase_realtime add table solbtc_participation_runs;
+
+alter table public.solbtc_participation_state  enable row level security;
+alter table public.solbtc_participation_trades enable row level security;
+alter table public.solbtc_participation_runs   enable row level security;
+
+create policy "anon_read" on public.solbtc_participation_state  for select to anon using (true);
+create policy "anon_read" on public.solbtc_participation_trades for select to anon using (true);
+create policy "anon_read" on public.solbtc_participation_runs   for select to anon using (true);
