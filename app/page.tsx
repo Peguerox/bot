@@ -1274,6 +1274,7 @@ function SolbtcSizeconfPanel({
                   <th className="text-left pb-1">Side</th>
                   <th className="text-right pb-1">Price</th>
                   <th className="text-right pb-1">Cost</th>
+                  <th className="text-right pb-1">Latency</th>
                   <th className="text-right pb-1">PnL BTC</th>
                 </tr>
               </thead>
@@ -1281,12 +1282,16 @@ function SolbtcSizeconfPanel({
                 {trades.slice(0, 8).map((t: any) => {
                   const pnl = t.pnl_btc != null ? parseFloat(t.pnl_btc) : null;
                   const costPct = t.cost_pct != null ? parseFloat(t.cost_pct) : null;
+                  const latency = t.latency_s != null ? parseFloat(t.latency_s) : null;
                   return (
                     <tr key={t.id} className="hover:bg-gray-800/30">
                       <td className={`py-1.5 ${t.side_after === "SOL" ? "text-blue-400" : "text-orange-400"}`}>{t.side_after}</td>
                       <td className="py-1.5 text-right text-gray-300">{parseFloat(t.fill_price).toFixed(8)}</td>
                       <td className="py-1.5 text-right text-gray-500" title={costPct == null ? "flat fallback, book not ready yet" : "live measured bid/ask half-spread"}>
                         {costPct != null ? `${(costPct*100).toFixed(3)}%` : "~0.020%*"}
+                      </td>
+                      <td className={`py-1.5 text-right ${latency == null ? "text-gray-600" : latency < 1.0 ? "text-red-400" : "text-gray-500"}`} title="signal -> fill gap; must be >= 1s per the verified rule">
+                        {latency != null ? `${latency.toFixed(2)}s` : "—"}
                       </td>
                       <td className={`py-1.5 text-right ${pnl == null ? "text-gray-600" : pnl >= 0 ? "text-green-400" : "text-red-400"}`}>
                         {pnl != null ? `${pnl >= 0 ? "+" : ""}${pnl.toFixed(8)}` : "—"}

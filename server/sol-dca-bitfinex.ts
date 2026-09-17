@@ -135,10 +135,12 @@ function liveCostPct(): number | null {
   return (ask - bid) / (ask + bid); // half-spread as a fraction of mid
 }
 
-async function applyFill(fill: { side: Side; fillPrice: number }) {
+async function applyFill(fill: { side: Side; fillPrice: number; signalTs: number; latencyS: number }) {
   const btcBefore = btcBalance, solBefore = solQty;
   const costPct = liveCostPct();
   const cost = costPct ?? COST;
+  const signal_time = new Date(fill.signalTs * 1000).toISOString();
+  const latencyNote = `latency=${fill.latencyS.toFixed(3)}s${fill.latencyS < 1.0 ? " *** BELOW 1s MINIMUM, INVESTIGATE ***" : ""}`;
   if (fill.side === "SOL") {
     const newSolQty = btcBalance * (1 - cost) / fill.fillPrice;
     entryBtc = btcBalance;
@@ -146,8 +148,9 @@ async function applyFill(fill: { side: Side; fillPrice: number }) {
     await recordSolbtcSizeconfTrade({
       side_after: "SOL", fill_price: fill.fillPrice, btc_before: btcBefore, sol_before: solBefore,
       btc_after: btcBalance, sol_after: solQty, pnl_btc: null, cost_pct: costPct,
+      signal_time, latency_s: fill.latencyS,
     });
-    console.log(`FILL -> SOL  price=${fill.fillPrice.toFixed(8)}  qty=${newSolQty.toFixed(6)}  cost=${(cost*100).toFixed(4)}%${costPct===null?" (fallback, no book yet)":" (live spread)"}`);
+    console.log(`FILL -> SOL  price=${fill.fillPrice.toFixed(8)}  qty=${newSolQty.toFixed(6)}  cost=${(cost*100).toFixed(4)}%${costPct===null?" (fallback, no book yet)":" (live spread)"}  ${latencyNote}`);
   } else {
     const btcOut = solQty * fill.fillPrice * (1 - cost);
     const pnl = entryBtc !== null ? btcOut - entryBtc : null;
@@ -155,8 +158,9 @@ async function applyFill(fill: { side: Side; fillPrice: number }) {
     await recordSolbtcSizeconfTrade({
       side_after: "BTC", fill_price: fill.fillPrice, btc_before: btcBefore, sol_before: solBefore,
       btc_after: btcBalance, sol_after: solQty, pnl_btc: pnl, cost_pct: costPct,
+      signal_time, latency_s: fill.latencyS,
     });
-    console.log(`FILL -> BTC  price=${fill.fillPrice.toFixed(8)}  btcOut=${btcOut.toFixed(8)}  pnl=${pnl?.toFixed(8)}  cost=${(cost*100).toFixed(4)}%${costPct===null?" (fallback, no book yet)":" (live spread)"}`);
+    console.log(`FILL -> BTC  price=${fill.fillPrice.toFixed(8)}  btcOut=${btcOut.toFixed(8)}  pnl=${pnl?.toFixed(8)}  cost=${(cost*100).toFixed(4)}%${costPct===null?" (fallback, no book yet)":" (live spread)"}  ${latencyNote}`);
     entryBtc = null;
   }
 }

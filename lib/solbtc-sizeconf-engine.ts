@@ -77,7 +77,7 @@ export function initialState(): EngineState {
 
 export type BatchResult = {
   state: EngineState;
-  fill: { side: Side; fillPrice: number } | null;
+  fill: { side: Side; fillPrice: number; signalTs: number; latencyS: number } | null;
   q: number;
   tinyQ: number;
   response: number;
@@ -91,10 +91,10 @@ export function processBatch(s: EngineState, b: Batch): BatchResult {
   let pending = s.pending;
   let queuedTs = s.queuedTs;
   let lastFillTs = s.lastFillTs;
-  let fill: { side: Side; fillPrice: number } | null = null;
+  let fill: { side: Side; fillPrice: number; signalTs: number; latencyS: number } | null = null;
 
   if (pending !== null && queuedTs !== null && tsS >= queuedTs + MIN_FILL_DELAY_S && tsS > queuedTs) {
-    fill = { side: pending, fillPrice: b.firstPrice };
+    fill = { side: pending, fillPrice: b.firstPrice, signalTs: queuedTs, latencyS: tsS - queuedTs };
     side = pending; pending = null; lastFillTs = tsS;
   }
 
