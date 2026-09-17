@@ -165,7 +165,20 @@ async function applyFill(fill: { side: Side; fillPrice: number; signalTs: number
   }
 }
 
+// Real bug found 2026-09-17 via the backtest comparison: a batch used to only flush when a NEW,
+// different-timestamp tick arrived -- meaning the most recent real trade always sat unprocessed
+// until some future, unrelated trade happened to show up. On a thin pair like this, that future
+// trade can be many minutes away (a real 8-minute gap caused a live fill to be recorded 8 minutes
+// late, at a stale price, versus what a continuous backtest replay determined). Fixed by flushing
+// on a short quiet-timer instead of waiting indefinitely for the next tick -- 300ms is far longer
+// than any two real prints sharing the exact same millisecond would need, but short enough that a
+// real trade is processed within a fraction of a second of happening, not whenever the next
+// arbitrary future trade shows up.
+const BATCH_FLUSH_QUIET_MS = 300;
+let batchFlushTimer: NodeJS.Timeout | null = null;
+
 function flushBatch() {
+  if (batchFlushTimer) { clearTimeout(batchFlushTimer); batchFlushTimer = null; }
   if (!pendingBatch || !enabled) { pendingBatch = null; return; }
   const batch = pendingBatch;
   pendingBatch = null;
@@ -199,6 +212,9 @@ function onTick(t: Tick) {
     pendingBatch.tinySignedCount += sign;
     pendingBatch.tinyCount += 1;
   }
+
+  if (batchFlushTimer) clearTimeout(batchFlushTimer);
+  batchFlushTimer = setTimeout(flushBatch, BATCH_FLUSH_QUIET_MS);
 }
 
 function advanceMinutes() {
@@ -276,6 +292,7 @@ async function main() {
   const shutdown = async () => {
     clearInterval(heartbeatTimer);
     clearInterval(tickTimer);
+    if (pendingBatch) flushBatch(); // don't strand the last batch across a redeploy
     if (dirty) await persist().catch((err) => console.error("final persist failed:", err));
     await releaseLock();
     process.exit(0);
