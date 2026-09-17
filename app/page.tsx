@@ -1241,7 +1241,7 @@ function SolbtcSizeconfPanel({
         <div className="grid grid-cols-2 gap-2">
           <Stat
             label="PnL (BTC)"
-            value={`${totalPnl >= 0 ? "+" : ""}${totalPnl.toFixed(8)}`}
+            value={`${totalPnl >= 0 ? "+" : ""}${totalPnl.toFixed(8)} (${totalPnl >= 0 ? "+" : ""}${(totalPnl * 100).toFixed(3)}%)`}
             sub={`${totalTrades} round trips`}
             color={totalPnl >= 0 ? "text-green-400" : "text-red-400"}
           />
@@ -1306,6 +1306,8 @@ function SolbtcSizeconfPanel({
               <tbody className="divide-y divide-gray-800/50">
                 {trades.slice(0, 8).map((t: any) => {
                   const pnl = t.pnl_btc != null ? parseFloat(t.pnl_btc) : null;
+                  const entryBtcForTrip = pnl != null ? parseFloat(t.btc_after) - pnl : null;
+                  const pnlPct = pnl != null && entryBtcForTrip ? (pnl / entryBtcForTrip) * 100 : null;
                   const costPct = t.cost_pct != null ? parseFloat(t.cost_pct) : null;
                   const latency = t.latency_s != null ? parseFloat(t.latency_s) : null;
                   return (
@@ -1319,7 +1321,7 @@ function SolbtcSizeconfPanel({
                         {latency != null ? `${latency.toFixed(2)}s` : "—"}
                       </td>
                       <td className={`py-1.5 text-right ${pnl == null ? "text-gray-600" : pnl >= 0 ? "text-green-400" : "text-red-400"}`}>
-                        {pnl != null ? `${pnl >= 0 ? "+" : ""}${pnl.toFixed(8)}` : "—"}
+                        {pnl != null ? `${pnl >= 0 ? "+" : ""}${pnl.toFixed(8)} (${pnl >= 0 ? "+" : ""}${pnlPct!.toFixed(3)}%)` : "—"}
                       </td>
                     </tr>
                   );
