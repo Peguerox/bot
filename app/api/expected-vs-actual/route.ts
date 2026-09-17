@@ -1,5 +1,7 @@
 import { NextRequest, NextResponse } from "next/server";
 import { getSupabaseAdmin } from "@/lib/supabase-admin";
+import { getBitfinexTradesRange } from "@/lib/bitfinex";
+import { initialState, processBatch, closeMinute, TINY_SOL, type Batch, type EngineState } from "@/lib/solbtc-sizeconf-engine";
 
 // Compares REAL live trade results against what the backtest would have predicted for the exact
 // same real historical window -- same methodology used manually throughout this session (fetch
@@ -99,10 +101,132 @@ function runBacktest(binance: Candle[], bfxByTime: Map<number, Candle>, bfxTimes
   return { trades, wins, totalPnlPct };
 }
 
+// SOL/BTC Size Confirmation: replays the EXACT SAME verified engine module the live worker uses
+// (lib/solbtc-sizeconf-engine.ts) over Bitfinex's real trade tape for the live bot's actual
+// window, batch-for-batch and minute-close-for-minute-close the same way the live worker does it
+// (see server/sol-dca-bitfinex.ts). No separate/approximate backtest implementation -- if this
+// diverges from what actually happened live, it's a real signal, not implementation drift between
+// two different codebases. Starts the replay from the bot's actual first recorded activity (its
+// earliest run log -- run logs are written every 5min from boot once enabled) rather than a fixed
+// buffer before the first trade: an early version used "60min before the first trade" and it
+// produced a real, understandable false divergence on fill #1 -- the live worker had actually
+// been running for ~1h28m before that trade with a real 30-minute activity-gate history already
+// built up, which a shorter replay window couldn't reproduce. Using the true known start fixes
+// that class of mismatch instead of just guessing a bigger buffer.
+async function runSizeconfComparison() {
+  const sb = getSupabaseAdmin();
+  const [{ data: trades, error }, { data: earliestRun }] = await Promise.all([
+    sb.from("solbtc_sizeconf_trades").select("*").order("fill_time", { ascending: true }),
+    sb.from("solbtc_sizeconf_runs").select("run_at").order("run_at", { ascending: true }).limit(1).maybeSingle(),
+  ]);
+  if (error) return NextResponse.json({ ok: false, error: error.message }, { status: 500 });
+  if (!trades || trades.length === 0) {
+    return NextResponse.json({ ok: false, error: "No real trades yet for this bot" });
+  }
+
+  const fallbackWarmupMs = 60 * 60_000;
+  const firstTradeMs = new Date(trades[0].fill_time).getTime();
+  const earliestRunMs = earliestRun?.run_at ? new Date(earliestRun.run_at).getTime() : null;
+  const start = earliestRunMs !== null ? Math.min(earliestRunMs, firstTradeMs - fallbackWarmupMs) : firstTradeMs - fallbackWarmupMs;
+  const end = Date.now();
+
+  const rawTrades = await getBitfinexTradesRange("tSOLBTC", start, end);
+  if (rawTrades.length === 0) {
+    return NextResponse.json({ ok: false, error: "No real Bitfinex trade data returned for this window" });
+  }
+
+  // group into same-millisecond-timestamp batches, preserving source order -- identical
+  // convention to the research CSVs and to the live worker's own batch buffering.
+  const batches: Batch[] = [];
+  let i = 0;
+  while (i < rawTrades.length) {
+    const tsMs = rawTrades[i].tsMs;
+    let j = i;
+    let firstPrice = rawTrades[i].price, lastPrice = rawTrades[i].price;
+    let signedCount = 0, count = 0, tinySignedCount = 0, tinyCount = 0;
+    while (j < rawTrades.length && rawTrades[j].tsMs === tsMs) {
+      const sign = Math.sign(rawTrades[j].amount);
+      signedCount += sign; count += 1;
+      if (Math.abs(rawTrades[j].amount) < TINY_SOL) { tinySignedCount += sign; tinyCount += 1; }
+      lastPrice = rawTrades[j].price;
+      j++;
+    }
+    batches.push({ tsMs, firstPrice, lastPrice, signedCount, count, tinySignedCount, tinyCount });
+    i = j;
+  }
+
+  // forward-filled minute grid, same as verify_ts_engine.ts / the live worker's advanceMinutes()
+  const firstMinute = Math.floor(batches[0].tsMs / 60_000);
+  const lastMinute = Math.floor(batches[batches.length - 1].tsMs / 60_000);
+  const minuteClose = new Map<number, number>();
+  const minuteCount = new Map<number, number>();
+  for (const b of batches) {
+    const mi = Math.floor(b.tsMs / 60_000);
+    minuteClose.set(mi, b.lastPrice);
+    minuteCount.set(mi, (minuteCount.get(mi) ?? 0) + b.count);
+  }
+  let lastC = minuteClose.get(firstMinute) ?? batches[0].firstPrice;
+  const filledClose = new Map<number, number>();
+  for (let m = firstMinute; m <= lastMinute; m++) {
+    if (minuteClose.has(m)) lastC = minuteClose.get(m)!;
+    filledClose.set(m, lastC);
+  }
+
+  let state: EngineState = initialState();
+  let lastMinuteClosed = firstMinute - 1;
+  const backtestFills: { side: string; fillPrice: number; fillTime: string }[] = [];
+
+  for (const b of batches) {
+    const batchMinute = Math.floor(b.tsMs / 60_000);
+    while (lastMinuteClosed + 1 < batchMinute) {
+      const m = lastMinuteClosed + 1;
+      state = closeMinute(state, filledClose.get(m)!, minuteCount.get(m) ?? 0);
+      lastMinuteClosed = m;
+    }
+    const res = processBatch(state, b);
+    state = res.state;
+    if (res.fill) {
+      backtestFills.push({ side: res.fill.side, fillPrice: res.fill.fillPrice, fillTime: new Date(b.tsMs).toISOString() });
+    }
+  }
+
+  const realFills = trades.map((t: any) => ({ side: t.side_after, fillPrice: parseFloat(t.fill_price), fillTime: t.fill_time }));
+
+  // Side+price is the correctness check -- fill TIME can legitimately drift by up to a couple
+  // minutes without indicating a bug: the live worker misses whatever real trades happen during
+  // a brief Render restart (deploys happened multiple times today) and can't backfill that gap,
+  // while this replay reads the full continuous historical record with no gaps. Surfaced as
+  // timeDeltaS per pair rather than hidden, instead of only checking side+price silently.
+  let firstDivergenceIndex: number | null = null;
+  const n = Math.min(realFills.length, backtestFills.length);
+  const timeDeltasS: (number | null)[] = [];
+  for (let k = 0; k < n; k++) {
+    if (realFills[k].side !== backtestFills[k].side || Math.abs(realFills[k].fillPrice - backtestFills[k].fillPrice) > 1e-9) {
+      firstDivergenceIndex = k;
+      timeDeltasS.push(null);
+      break;
+    }
+    timeDeltasS.push((new Date(realFills[k].fillTime).getTime() - new Date(backtestFills[k].fillTime).getTime()) / 1000);
+  }
+  if (firstDivergenceIndex === null && realFills.length !== backtestFills.length) firstDivergenceIndex = n;
+
+  return NextResponse.json({
+    ok: true,
+    windowStart: new Date(start).toISOString(),
+    windowEnd: new Date(end).toISOString(),
+    real: { trades: realFills.length, fills: realFills },
+    backtest: { trades: backtestFills.length, fills: backtestFills },
+    exactMatch: firstDivergenceIndex === null,
+    firstDivergenceIndex,
+    timeDeltasS,
+  });
+}
+
 export async function GET(req: NextRequest) {
-  const bot = req.nextUrl.searchParams.get("bot"); // "jump-trail"
+  const bot = req.nextUrl.searchParams.get("bot"); // "jump-trail" | "solbtc-sizeconf"
+  if (bot === "solbtc-sizeconf") return runSizeconfComparison();
   if (bot !== "jump-trail") {
-    return NextResponse.json({ ok: false, error: "bot must be jump-trail" }, { status: 400 });
+    return NextResponse.json({ ok: false, error: "bot must be jump-trail or solbtc-sizeconf" }, { status: 400 });
   }
   const cfg = BOT_CONFIG[bot];
 

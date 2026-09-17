@@ -1171,6 +1171,23 @@ function SolbtcSizeconfPanel({
     : null;
   const unrealizedPct = unrealizedBtc != null && st?.entry_btc ? (unrealizedBtc / st.entry_btc) * 100 : null;
 
+  const [btLoading, setBtLoading] = useState(false);
+  const [btResult, setBtResult] = useState<any>(null);
+  const [btError, setBtError] = useState<string | null>(null);
+  async function handleCompareBacktest() {
+    setBtLoading(true); setBtError(null);
+    try {
+      const res = await fetch("/api/expected-vs-actual?bot=solbtc-sizeconf");
+      const data = await res.json();
+      if (!data.ok) { setBtError(data.error ?? "Failed to compare."); setBtResult(null); }
+      else setBtResult(data);
+    } catch (e: any) {
+      setBtError(String(e?.message ?? e));
+    } finally {
+      setBtLoading(false);
+    }
+  }
+
   const chartTrades = trades.filter((t: any) => t.pnl_btc != null).map((t: any) => ({ ...t, pnl: t.pnl_btc, exit_time: t.fill_time }));
 
   return (
@@ -1185,6 +1202,14 @@ function SolbtcSizeconfPanel({
             </span>
           </div>
           <div className="flex items-center gap-1.5 shrink-0">
+            <button
+              onClick={handleCompareBacktest}
+              disabled={btLoading}
+              className="text-xs font-medium px-2.5 py-1.5 rounded-md bg-gray-800 text-gray-400 hover:bg-gray-700 hover:text-gray-200 transition-all disabled:opacity-50 disabled:cursor-not-allowed"
+              title="Replay the exact verified engine over Bitfinex's real trade tape for this bot's actual window, and compare against what really happened"
+            >
+              {btLoading ? "Comparing…" : "Compare to Backtest"}
+            </button>
             <button
               onClick={onClearHistory}
               disabled={clearingHistory || enabled}
@@ -1304,6 +1329,67 @@ function SolbtcSizeconfPanel({
           </div>
         )}
       </div>
+
+      {(btResult || btError) && (
+        <div className="border-t border-gray-800 pt-4 space-y-2">
+          <p className="text-gray-500 text-xs uppercase tracking-wide">Backtest Comparison</p>
+          {btError ? (
+            <p className="text-red-400 text-sm">{btError}</p>
+          ) : (
+            <div className="space-y-2">
+              <p className={`text-sm font-semibold ${btResult.exactMatch ? "text-green-400" : "text-yellow-400"}`}>
+                {btResult.exactMatch
+                  ? `✓ Exact match — real and replayed trades agree on all ${btResult.real.trades} fills`
+                  : `⚠ Diverges at fill #${(btResult.firstDivergenceIndex ?? 0) + 1} — real=${btResult.real.trades} trades, backtest=${btResult.backtest.trades} trades`}
+              </p>
+              <p className="text-gray-600 text-xs">
+                Window: {new Date(btResult.windowStart).toLocaleString()} → {new Date(btResult.windowEnd).toLocaleString()}
+                {" · replayed via the same engine module the live worker runs, over Bitfinex's real trade tape"}
+              </p>
+              <div className="overflow-auto">
+                <table className="w-full font-mono text-xs">
+                  <thead>
+                    <tr className="text-gray-500 border-b border-gray-800">
+                      <th className="text-left pb-1">Side</th>
+                      <th className="text-right pb-1">Price (real / backtest)</th>
+                      <th className="text-right pb-1">Real time</th>
+                      <th className="text-right pb-1">Δt vs backtest</th>
+                    </tr>
+                  </thead>
+                  <tbody className="divide-y divide-gray-800/50">
+                    {btResult.real.fills.map((f: any, i: number) => {
+                      const bf = btResult.backtest.fills[i];
+                      const isDivergent = btResult.firstDivergenceIndex === i;
+                      const dt = btResult.timeDeltasS?.[i];
+                      return (
+                        <tr key={i} className={isDivergent ? "bg-red-500/10" : ""}>
+                          <td className={`py-1.5 ${f.side === "SOL" ? "text-blue-400" : "text-orange-400"}`}>{f.side}</td>
+                          <td className="py-1.5 text-right text-gray-300">
+                            {f.fillPrice.toFixed(8)}{bf ? ` / ${bf.fillPrice.toFixed(8)}` : " / —"}
+                          </td>
+                          <td className="py-1.5 text-right text-gray-500">{new Date(f.fillTime).toLocaleTimeString([], { hour: "2-digit", minute: "2-digit", second: "2-digit", hour12: false })}</td>
+                          <td className={`py-1.5 text-right ${dt == null ? "text-gray-700" : Math.abs(dt) > 30 ? "text-yellow-400" : "text-gray-500"}`} title="Positive means the real fill happened after the backtest replay's -- expected after a worker restart, which misses trades live but not in the replay">
+                            {dt != null ? `${dt >= 0 ? "+" : ""}${dt.toFixed(1)}s` : "—"}
+                          </td>
+                        </tr>
+                      );
+                    })}
+                    {btResult.backtest.fills.slice(btResult.real.fills.length).map((f: any, i: number) => (
+                      <tr key={`extra-${i}`} className="bg-yellow-500/10">
+                        <td className={`py-1.5 ${f.side === "SOL" ? "text-blue-400" : "text-orange-400"}`}>{f.side}</td>
+                        <td className="py-1.5 text-right text-gray-300">— / {f.fillPrice.toFixed(8)}</td>
+                        <td className="py-1.5 text-right text-gray-600">backtest-only</td>
+                        <td className="py-1.5 text-right text-gray-700">—</td>
+                      </tr>
+                    ))}
+                  </tbody>
+                </table>
+              </div>
+              <p className="text-gray-600 text-xs">Δt drift (not counted as a mismatch) is expected after a worker restart — the live bot can&apos;t backfill trades missed while it was redeploying, the replay has no such gap.</p>
+            </div>
+          )}
+        </div>
+      )}
 
       <div>
         <p className="text-gray-500 text-xs uppercase tracking-wide mb-2">Activity</p>

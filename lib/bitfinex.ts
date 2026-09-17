@@ -39,3 +39,29 @@ export async function getBitfinexBidAsk(symbol: string): Promise<{ bid: number; 
   const data = await res.json() as number[];
   return { bid: data[0], ask: data[2] };
 }
+
+export type BitfinexTrade = { id: number; tsMs: number; amount: number; price: number };
+
+// Real individual executed trades (not candles) for a window -- used to replay trade-tape-driven
+// strategies (e.g. lib/solbtc-sizeconf-engine.ts) exactly, not approximate them off 1-min OHLC.
+// Paginates forward via sort=1 + advancing `start` past the last returned trade's timestamp.
+// Bounded to a reasonable number of pages since callers here compare recent live-bot windows
+// (hours, not years) -- for multi-year historical fetches, use the scratchpad research scripts.
+export async function getBitfinexTradesRange(symbol: string, startMs: number, endMs: number, maxPages = 50): Promise<BitfinexTrade[]> {
+  const all: BitfinexTrade[] = [];
+  let cursor = startMs;
+  for (let page = 0; page < maxPages && cursor < endMs; page++) {
+    const url = `${BASE}/trades/${symbol}/hist?start=${cursor}&end=${endMs}&limit=10000&sort=1`;
+    const res = await fetch(url, { cache: "no-store" });
+    if (res.status === 429) { await new Promise((r) => setTimeout(r, 2000)); page--; continue; }
+    if (!res.ok) throw new Error(`Bitfinex trades error: ${res.status}`);
+    const raw = await res.json() as number[][];
+    if (raw.length === 0) break;
+    for (const [id, mts, amount, price] of raw) all.push({ id, tsMs: mts, amount, price });
+    const last = raw[raw.length - 1][1];
+    if (last <= cursor) break;
+    cursor = last + 1;
+    if (raw.length < 10000) break;
+  }
+  return all;
+}
