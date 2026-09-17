@@ -1160,14 +1160,16 @@ function SolbtcSizeconfPanel({
   }, []);
   const lockAge = st?.lock_heartbeat ? nowTick - new Date(st.lock_heartbeat).getTime() : null;
   const workerAlive = lockAge != null && lockAge < 30_000;
-  const tickAge = st?.last_tick_at ? nowTick - new Date(st.last_tick_at).getTime() : null;
-  const freshnessText = tickAge == null ? "no trades yet" : `${formatDurationShort(tickAge)} ago`;
-  const freshnessColor = tickAge == null ? "text-gray-600"
-    : tickAge <= 30_000 ? "text-green-400" : tickAge <= 180_000 ? "text-yellow-400" : "text-red-400";
 
   const q = st?.w > 0 ? st.u / st.w : 0;
   const tinyQ = st?.wt >= 0.5 ? st.ut / st.wt : 0;
   const active = st?.active ?? false;
+
+  const currentPrice = st?.current_minute_last_price ?? (st?.last_log_price != null ? Math.exp(st.last_log_price) : null);
+  const unrealizedBtc = side === "SOL" && st?.entry_btc != null && currentPrice != null
+    ? solQty * currentPrice - st.entry_btc
+    : null;
+  const unrealizedPct = unrealizedBtc != null && st?.entry_btc ? (unrealizedBtc / st.entry_btc) * 100 : null;
 
   const chartTrades = trades.filter((t: any) => t.pnl_btc != null).map((t: any) => ({ ...t, pnl: t.pnl_btc, exit_time: t.fill_time }));
 
@@ -1237,10 +1239,10 @@ function SolbtcSizeconfPanel({
             color={q > 0 ? "text-green-400" : q < 0 ? "text-red-400" : "text-gray-400"}
           />
           <Stat
-            label="Last Trade Seen"
-            value={freshnessText}
-            sub={enabled ? "live trade tape" : "paused"}
-            color={freshnessColor}
+            label="Unrealized PnL"
+            value={unrealizedBtc == null ? "—" : `${unrealizedBtc >= 0 ? "+" : ""}${unrealizedBtc.toFixed(8)}`}
+            sub={unrealizedPct == null ? "flat (in BTC)" : `${unrealizedPct >= 0 ? "+" : ""}${unrealizedPct.toFixed(3)}%`}
+            color={unrealizedBtc == null ? "text-gray-400" : unrealizedBtc >= 0 ? "text-green-400" : "text-red-400"}
           />
           <Stat
             label="Activity Gate"
