@@ -1205,7 +1205,7 @@ function SolbtcSizeconfPanel({
             </button>
           </div>
         </div>
-        <p className="text-gray-500 text-xs">Trade-tape count pressure + tiny-trade (&lt;0.1 SOL) confirmation + 30-min activity gate · PAPER ONLY · live Bitfinex trade-tape WebSocket, not polling · 0.02%/side simulated cost · verified event-for-event against the reference formula on 50,000 real batches · 1 BTC seed</p>
+        <p className="text-gray-500 text-xs">Trade-tape count pressure + tiny-trade (&lt;0.1 SOL) confirmation + 30-min activity gate · PAPER ONLY · live Bitfinex trade-tape WebSocket, not polling · cost = real live bid/ask half-spread at fill time, not an assumed flat rate · verified event-for-event against the reference formula on 50,000 real batches · 1 BTC seed</p>
       </div>
 
       {loading ? (
@@ -1273,16 +1273,21 @@ function SolbtcSizeconfPanel({
                 <tr className="text-gray-500 border-b border-gray-800">
                   <th className="text-left pb-1">Side</th>
                   <th className="text-right pb-1">Price</th>
+                  <th className="text-right pb-1">Cost</th>
                   <th className="text-right pb-1">PnL BTC</th>
                 </tr>
               </thead>
               <tbody className="divide-y divide-gray-800/50">
                 {trades.slice(0, 8).map((t: any) => {
                   const pnl = t.pnl_btc != null ? parseFloat(t.pnl_btc) : null;
+                  const costPct = t.cost_pct != null ? parseFloat(t.cost_pct) : null;
                   return (
                     <tr key={t.id} className="hover:bg-gray-800/30">
                       <td className={`py-1.5 ${t.side_after === "SOL" ? "text-blue-400" : "text-orange-400"}`}>{t.side_after}</td>
                       <td className="py-1.5 text-right text-gray-300">{parseFloat(t.fill_price).toFixed(8)}</td>
+                      <td className="py-1.5 text-right text-gray-500" title={costPct == null ? "flat fallback, book not ready yet" : "live measured bid/ask half-spread"}>
+                        {costPct != null ? `${(costPct*100).toFixed(3)}%` : "~0.020%*"}
+                      </td>
                       <td className={`py-1.5 text-right ${pnl == null ? "text-gray-600" : pnl >= 0 ? "text-green-400" : "text-red-400"}`}>
                         {pnl != null ? `${pnl >= 0 ? "+" : ""}${pnl.toFixed(8)}` : "—"}
                       </td>

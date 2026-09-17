@@ -56,6 +56,7 @@ export async function recordSolbtcSizeconfTrade(params: {
   btc_after: number;
   sol_after: number;
   pnl_btc: number | null;
+  cost_pct: number | null;
 }) {
   const { error } = await getSupabaseAdmin()
     .from("solbtc_sizeconf_trades")

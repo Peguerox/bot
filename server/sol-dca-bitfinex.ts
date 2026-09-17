@@ -17,6 +17,14 @@
 // advances the 30-minute activity window across real UTC minute boundaries (forward-filling
 // through minutes with zero trades) and periodically persists state.
 //
+// Cost model (2026-09-17): fill PRICE and TIMING still come from the trade tape exactly as
+// verified against the reference formula (untouched) -- only the COST deducted on each fill was
+// changed from a flat 0.02% assumption to the real live half-spread read off Bitfinex's public
+// order book at the moment of the fill ((ask-bid)/(ask+bid)), via the same connectPublicBook()
+// used by Worker 2. Falls back to the flat COST constant only if the book WS hasn't produced a
+// snapshot yet (e.g. the first few seconds after boot) -- those fills are marked cost_pct=null
+// in solbtc_sizeconf_trades so it's visible in the data which ones used a real measured spread.
+//
 // Known limitation: no historical backfill on restart. If the process is down, that gap in trade
 // history and minute-activity data is simply missed (the engine picks back up live from wherever
 // it left off) — acceptable for this feasibility test, not yet a production guarantee.
@@ -26,6 +34,7 @@ dotenv.config({ path: ".env.local" });
 import os from "os";
 import crypto from "crypto";
 import { connectPublicTrades, tradesMessageAge, type Tick } from "../lib/bitfinex-public-trades-ws";
+import { connectPublicBook, getBookBidAsk, isBookReady } from "../lib/bitfinex-trading-ws";
 import {
   initialState, processBatch, closeMinute, COST,
   type EngineState, type Batch, type Side,
@@ -117,26 +126,37 @@ async function releaseLock() {
   } catch (err) { console.error("releaseLock failed:", err); }
 }
 
+// Real live half-spread at the moment of the fill, replacing the flat 0.02% assumption. Returns
+// null (caller falls back to the flat COST constant) if the book WS hasn't snapshotted yet.
+function liveCostPct(): number | null {
+  if (!isBookReady()) return null;
+  const { bid, ask } = getBookBidAsk();
+  if (bid === null || ask === null || ask <= bid || bid <= 0) return null;
+  return (ask - bid) / (ask + bid); // half-spread as a fraction of mid
+}
+
 async function applyFill(fill: { side: Side; fillPrice: number }) {
   const btcBefore = btcBalance, solBefore = solQty;
+  const costPct = liveCostPct();
+  const cost = costPct ?? COST;
   if (fill.side === "SOL") {
-    const newSolQty = btcBalance * (1 - COST) / fill.fillPrice;
+    const newSolQty = btcBalance * (1 - cost) / fill.fillPrice;
     entryBtc = btcBalance;
     btcBalance = 0; solQty = newSolQty;
     await recordSolbtcSizeconfTrade({
       side_after: "SOL", fill_price: fill.fillPrice, btc_before: btcBefore, sol_before: solBefore,
-      btc_after: btcBalance, sol_after: solQty, pnl_btc: null,
+      btc_after: btcBalance, sol_after: solQty, pnl_btc: null, cost_pct: costPct,
     });
-    console.log(`FILL -> SOL  price=${fill.fillPrice.toFixed(8)}  qty=${newSolQty.toFixed(6)}`);
+    console.log(`FILL -> SOL  price=${fill.fillPrice.toFixed(8)}  qty=${newSolQty.toFixed(6)}  cost=${(cost*100).toFixed(4)}%${costPct===null?" (fallback, no book yet)":" (live spread)"}`);
   } else {
-    const btcOut = solQty * fill.fillPrice * (1 - COST);
+    const btcOut = solQty * fill.fillPrice * (1 - cost);
     const pnl = entryBtc !== null ? btcOut - entryBtc : null;
     btcBalance = btcOut; solQty = 0;
     await recordSolbtcSizeconfTrade({
       side_after: "BTC", fill_price: fill.fillPrice, btc_before: btcBefore, sol_before: solBefore,
-      btc_after: btcBalance, sol_after: solQty, pnl_btc: pnl,
+      btc_after: btcBalance, sol_after: solQty, pnl_btc: pnl, cost_pct: costPct,
     });
-    console.log(`FILL -> BTC  price=${fill.fillPrice.toFixed(8)}  btcOut=${btcOut.toFixed(8)}  pnl=${pnl?.toFixed(8)}`);
+    console.log(`FILL -> BTC  price=${fill.fillPrice.toFixed(8)}  btcOut=${btcOut.toFixed(8)}  pnl=${pnl?.toFixed(8)}  cost=${(cost*100).toFixed(4)}%${costPct===null?" (fallback, no book yet)":" (live spread)"}`);
     entryBtc = null;
   }
 }
@@ -262,6 +282,7 @@ async function main() {
   console.log(`Starting SOL/BTC Size-Confirmation PAPER worker (${INSTANCE_ID}), enabled=${enabled}.`);
   console.log(`PAPER ONLY — trade-tape pressure + tiny-trade confirmation + activity gate, cost=${(COST*100).toFixed(3)}%/side, live WS trade tape.`);
   connectPublicTrades(SYMBOL, onTick);
+  connectPublicBook(SYMBOL);
 }
 
 // react to enabled/disabled toggles from the dashboard without a restart
