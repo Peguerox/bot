@@ -1,235 +1,278 @@
-// Worker 1 — filename/service kept for Render compatibility (4th internals swap: old VWAP+EMA DCA
-// grid -> SOL Double-Crossover (paper, 2026-09-13) -> shelved Surfer-on-Bitfinex migration (built,
-// never deployed, see docs/archive/README_shelved_surfer_bitfinex_migration.md) -> this,
-// 2026-09-16).
+// Worker 1 — filename/service kept for Render compatibility (5th internals swap: old VWAP+EMA DCA
+// grid -> SOL Double-Crossover (paper) -> shelved Surfer-on-Bitfinex migration (never deployed) ->
+// SOL/BTC Participation hybrid (archived 2026-09-17, see docs/archive/README_shelved_participation_bot.md)
+// -> this, 2026-09-17).
 //
-// SOL/BTC "participation" hybrid strategy — PAPER ONLY, no real orders. Combines a fast CUSUM
-// regime detector with a slower trend + price-confirmation signal, switching between them based
-// on how reliable the fast signal's own recent track record has been (so it doesn't trade
-// constantly the way the pure fast CUSUM does — 182-9,907 swaps/year instead of 24,000-54,000).
-// Ported line-for-line from a verified C++ research engine (matched its published results to 6
-// decimal places on real Bitfinex data) — see lib/solbtc-participation-engine.ts, independently
-// re-verified against the same reference engine over a fresh 20,000-row slice before this file
-// was written (every state variable matched to float64 precision).
+// SOL/BTC "size confirmation" strategy — PAPER ONLY, no real orders. Original trade-count pressure
+// signal (U/W) gated by a 30-minute activity filter, with a separate tiny-trade (<0.1 SOL)
+// pressure signal that lowers the entry threshold from 0.60 to 0.50 when small-trade direction
+// agrees. Independently verified against the reference CSV replay (see chat, ~0.24% headline
+// discrepancy) and separately verified event-for-event against a from-scratch reproduction on
+// 50,000 real trade batches (100% match on every side/pending/swap decision). Approved to build
+// against while further improvements are researched — see lib/solbtc-sizeconf-engine.ts.
 //
-// Cost: 0.02%/side deducted from the paper balance on every swap — deliberately more
-// conservative than the measured real Bitfinex spread (~0.01555%/side); at 0.02% the most recent
-// year's backtest is right at the edge (was -8.35% at exactly 0.02% in the original SOLBTC-only
-// backtest; the current parameters here are unaffected by that since this file always uses 0.02%).
+// Execution model: driven by Bitfinex's real-time public trade tape (lib/bitfinex-public-trades-ws.ts),
+// NOT periodic polling — trades are buffered into same-millisecond batches exactly like the
+// research CSVs, and fed through the engine as each batch closes. A 1-second wall-clock timer
+// advances the 30-minute activity window across real UTC minute boundaries (forward-filling
+// through minutes with zero trades) and periodically persists state.
 //
-// Execution model: polls Bitfinex's real public 1-minute SOLBTC candles every 20s (well inside
-// the strategy's 1-minute decision granularity) and feeds any newly-closed candles through the
-// engine in order. Fills are simulated at the next candle's OPEN once that candle has real volume
-// (fill_mode=1 in the reference engine) — not the current price, not a guess.
+// Known limitation: no historical backfill on restart. If the process is down, that gap in trade
+// history and minute-activity data is simply missed (the engine picks back up live from wherever
+// it left off) — acceptable for this feasibility test, not yet a production guarantee.
 import dotenv from "dotenv";
 dotenv.config({ path: ".env.local" });
 
 import os from "os";
 import crypto from "crypto";
-import { getBitfinexCandlesOHLCV } from "../lib/bitfinex";
+import { connectPublicTrades, tradesMessageAge, type Tick } from "../lib/bitfinex-public-trades-ws";
 import {
-  stepMinute, initialState, COST, type EngineState, type Candle, type Side,
-} from "../lib/solbtc-participation-engine";
+  initialState, processBatch, closeMinute, COST,
+  type EngineState, type Batch, type Side,
+} from "../lib/solbtc-sizeconf-engine";
 import {
-  getSolbtcParticipationState, updateSolbtcParticipationState, recordSolbtcParticipationTrade,
-  logSolbtcParticipationRun, type SolbtcParticipationState,
-} from "../lib/solbtc-participation-db";
+  getSolbtcSizeconfState, updateSolbtcSizeconfState, recordSolbtcSizeconfTrade,
+  logSolbtcSizeconfRun, type SolbtcSizeconfState,
+} from "../lib/solbtc-sizeconf-db";
 
 const SYMBOL = "tSOLBTC";
-const POLL_INTERVAL_MS = 20_000;
-const CANDLE_LIMIT = 200; // real trades are sparse (gaps up to 14+ min observed) -- fetch generously
+const TINY_SOL = 0.1;
 const HEARTBEAT_MS = 10_000;
 const LOCK_STALE_MS = 15_000;
+const TICK_MS = 1_000; // wall-clock cadence for minute-boundary + persistence checks
+const PERSIST_INTERVAL_MS = 2_000;
 const RUN_LOG_INTERVAL_MS = 5 * 60_000;
 
 const INSTANCE_ID = `${os.hostname()}-${process.pid}-${crypto.randomBytes(3).toString("hex")}`;
 
 function sideOf(s: string): Side { return s === "SOL" ? "SOL" : "BTC"; }
 
-function stateFromRow(row: SolbtcParticipationState): EngineState {
+function engineFromRow(row: SolbtcSizeconfState): EngineState {
   return {
     side: sideOf(row.side), pending: row.pending ? sideOf(row.pending) : null,
-    virtualSide: sideOf(row.virtual_side), virtualPending: row.virtual_pending ? sideOf(row.virtual_pending) : null,
-    base: sideOf(row.base), v: row.v, sUp: row.s_up, sDown: row.s_down,
-    d: row.d, scoreV: row.score_v, m: row.m, scoreT: row.score_t,
-    orientation: row.orientation === -1 ? -1 : 1,
-    fastEwma: row.fast_ewma, slowEwma: row.slow_ewma, trendVariance: row.trend_variance,
-    trend: row.trend === 1 ? 1 : 0, priceOk: row.price_ok === 1 ? 1 : 0, fastMode: row.fast_mode === 1 ? 1 : 0,
-    lastLogPrice: row.last_log_price,
+    queuedTs: row.queued_ts, lastFillTs: row.last_fill_ts,
+    U: row.u, W: row.w, Ut: row.ut, Wt: row.wt, lastTinyTs: row.last_tiny_ts,
+    lastLogPrice: row.last_log_price, qLagPrev: row.q_lag_prev,
+    respNum: row.resp_num, respDen: row.resp_den, respBuf: row.resp_buf ?? [],
+    active: row.active, minuteBuf: row.minute_buf ?? [],
+    windowMv: row.window_mv, windowCt: row.window_ct, prevMinuteClose: row.prev_minute_close,
   };
 }
 
-function rowFromState(s: EngineState): Record<string, unknown> {
+function rowFromEngine(s: EngineState): Record<string, unknown> {
   return {
-    side: s.side, pending: s.pending, virtual_side: s.virtualSide, virtual_pending: s.virtualPending,
-    base: s.base, v: s.v, s_up: s.sUp, s_down: s.sDown,
-    d: s.d, score_v: s.scoreV, m: s.m, score_t: s.scoreT, orientation: s.orientation,
-    fast_ewma: s.fastEwma, slow_ewma: s.slowEwma, trend_variance: s.trendVariance,
-    trend: s.trend, price_ok: s.priceOk, fast_mode: s.fastMode, last_log_price: s.lastLogPrice,
+    side: s.side, pending: s.pending, queued_ts: s.queuedTs, last_fill_ts: s.lastFillTs,
+    u: s.U, w: s.W, ut: s.Ut, wt: s.Wt, last_tiny_ts: s.lastTinyTs,
+    last_log_price: s.lastLogPrice, q_lag_prev: s.qLagPrev,
+    resp_num: s.respNum, resp_den: s.respDen, resp_buf: s.respBuf,
+    active: s.active, minute_buf: s.minuteBuf,
+    window_mv: s.windowMv, window_ct: s.windowCt, prev_minute_close: s.prevMinuteClose,
   };
 }
 
-let entryBtc: number | null = null; // BTC value at the moment we entered SOL, for PnL on the return leg
+let engine: EngineState = initialState();
+let enabled = false;
+let btcBalance = 1;
+let solQty = 0;
+let entryBtc: number | null = null;
+
+let pendingBatch: Batch | null = null;
+let lastClosedMinute: number | null = null;
+let currentMinuteCount = 0;
+let currentMinuteLastPrice: number | null = null;
+let lastTickAt: number | null = null;
+
+let dirty = false;
+let lastPersist = 0;
 let lastRunLog = 0;
 
-async function acquireLock(): Promise<SolbtcParticipationState | null> {
-  const state = await getSolbtcParticipationState();
+async function acquireLock(): Promise<SolbtcSizeconfState | null> {
+  const state = await getSolbtcSizeconfState();
   const heartbeatAge = state.lock_heartbeat ? Date.now() - new Date(state.lock_heartbeat).getTime() : Infinity;
   if (state.lock_owner && heartbeatAge < LOCK_STALE_MS) {
     console.error(`Refusing to start: lock held by ${state.lock_owner}, last heartbeat ${heartbeatAge}ms ago`);
     return null;
   }
-  await updateSolbtcParticipationState({ lock_owner: INSTANCE_ID, lock_heartbeat: new Date().toISOString() });
+  await updateSolbtcSizeconfState({ lock_owner: INSTANCE_ID, lock_heartbeat: new Date().toISOString() });
   console.log(`Lock acquired as ${INSTANCE_ID}`);
   return state;
 }
 
 async function heartbeat() {
-  const fresh = await getSolbtcParticipationState();
+  const fresh = await getSolbtcSizeconfState();
   if (fresh.lock_owner !== INSTANCE_ID) {
     console.error(`Lost lock to ${fresh.lock_owner} — another instance took over. Exiting.`);
     process.exit(1);
   }
-  await updateSolbtcParticipationState({ lock_heartbeat: new Date().toISOString() });
+  await updateSolbtcSizeconfState({ lock_heartbeat: new Date().toISOString() });
 }
 
 async function releaseLock() {
   try {
-    const fresh = await getSolbtcParticipationState();
+    const fresh = await getSolbtcSizeconfState();
     if (fresh.lock_owner === INSTANCE_ID) {
-      await updateSolbtcParticipationState({ lock_owner: null, lock_heartbeat: null });
+      await updateSolbtcSizeconfState({ lock_owner: null, lock_heartbeat: null });
       console.log("Lock released cleanly.");
     }
   } catch (err) { console.error("releaseLock failed:", err); }
 }
 
-async function processCandle(row: SolbtcParticipationState, candle: Candle): Promise<SolbtcParticipationState> {
-  const engineState = stateFromRow(row);
-  const { state: next, actualFill } = stepMinute(engineState, candle);
-
-  const patch: Record<string, unknown> = { ...rowFromState(next), last_candle_ts: candle.openTimeMs };
-
-  let btcBalance = row.btc_balance;
-  let solQty = row.sol_qty;
-
-  if (actualFill) {
-    const fillPrice = actualFill.fillPrice;
-    if (actualFill.side === "SOL") {
-      // BTC -> SOL: SOL = BTC*(1-cost)/price
-      const newSolQty = btcBalance * (1 - COST) / fillPrice;
-      entryBtc = btcBalance;
-      const btcBefore = btcBalance, solBefore = solQty;
-      btcBalance = 0; solQty = newSolQty;
-      patch.btc_balance = btcBalance; patch.sol_qty = solQty;
-      await recordSolbtcParticipationTrade({
-        side_after: "SOL", fill_price: fillPrice, btc_before: btcBefore, sol_before: solBefore,
-        btc_after: btcBalance, sol_after: solQty, pnl_btc: null,
-      });
-      console.log(`FILL -> SOL  price=${fillPrice.toFixed(8)}  qty=${newSolQty.toFixed(6)}`);
-    } else {
-      // SOL -> BTC: BTC = SOL*price*(1-cost)
-      const btcOut = solQty * fillPrice * (1 - COST);
-      const pnl = entryBtc !== null ? btcOut - entryBtc : null;
-      const btcBefore = btcBalance, solBefore = solQty;
-      btcBalance = btcOut; solQty = 0;
-      patch.btc_balance = btcBalance; patch.sol_qty = solQty;
-      await recordSolbtcParticipationTrade({
-        side_after: "BTC", fill_price: fillPrice, btc_before: btcBefore, sol_before: solBefore,
-        btc_after: btcBalance, sol_after: solQty, pnl_btc: pnl,
-      });
-      console.log(`FILL -> BTC  price=${fillPrice.toFixed(8)}  btcOut=${btcOut.toFixed(8)}  pnl=${pnl?.toFixed(8)}`);
-      entryBtc = null;
-    }
+async function applyFill(fill: { side: Side; fillPrice: number }) {
+  const btcBefore = btcBalance, solBefore = solQty;
+  if (fill.side === "SOL") {
+    const newSolQty = btcBalance * (1 - COST) / fill.fillPrice;
+    entryBtc = btcBalance;
+    btcBalance = 0; solQty = newSolQty;
+    await recordSolbtcSizeconfTrade({
+      side_after: "SOL", fill_price: fill.fillPrice, btc_before: btcBefore, sol_before: solBefore,
+      btc_after: btcBalance, sol_after: solQty, pnl_btc: null,
+    });
+    console.log(`FILL -> SOL  price=${fill.fillPrice.toFixed(8)}  qty=${newSolQty.toFixed(6)}`);
+  } else {
+    const btcOut = solQty * fill.fillPrice * (1 - COST);
+    const pnl = entryBtc !== null ? btcOut - entryBtc : null;
+    btcBalance = btcOut; solQty = 0;
+    await recordSolbtcSizeconfTrade({
+      side_after: "BTC", fill_price: fill.fillPrice, btc_before: btcBefore, sol_before: solBefore,
+      btc_after: btcBalance, sol_after: solQty, pnl_btc: pnl,
+    });
+    console.log(`FILL -> BTC  price=${fill.fillPrice.toFixed(8)}  btcOut=${btcOut.toFixed(8)}  pnl=${pnl?.toFixed(8)}`);
+    entryBtc = null;
   }
-
-  await updateSolbtcParticipationState(patch);
-  return { ...row, ...patch, btc_balance: btcBalance, sol_qty: solQty } as SolbtcParticipationState;
 }
 
-async function checkOnce() {
-  let row: SolbtcParticipationState;
-  try {
-    row = await getSolbtcParticipationState();
-  } catch (err) {
-    await logSolbtcParticipationRun({ actions: [{ action: "ERROR", stage: "state", error: String(err) }] }).catch(() => {});
-    return;
+function flushBatch() {
+  if (!pendingBatch || !enabled) { pendingBatch = null; return; }
+  const batch = pendingBatch;
+  pendingBatch = null;
+  const res = processBatch(engine, batch);
+  engine = res.state;
+  dirty = true;
+  if (res.fill) {
+    applyFill(res.fill).catch((err) => console.error("applyFill failed:", err));
   }
-  if (!row.enabled) return;
+}
 
+function onTick(t: Tick) {
+  if (!enabled) return;
+  currentMinuteCount += 1;
+  currentMinuteLastPrice = t.price;
+  lastTickAt = Date.now();
+
+  if (pendingBatch && pendingBatch.tsMs !== t.tsMs) flushBatch();
+
+  if (!pendingBatch) {
+    pendingBatch = {
+      tsMs: t.tsMs, firstPrice: t.price, lastPrice: t.price,
+      signedCount: 0, count: 0, tinySignedCount: 0, tinyCount: 0,
+    };
+  }
+  const sign = Math.sign(t.amount);
+  pendingBatch.lastPrice = t.price;
+  pendingBatch.signedCount += sign;
+  pendingBatch.count += 1;
+  if (Math.abs(t.amount) < TINY_SOL) {
+    pendingBatch.tinySignedCount += sign;
+    pendingBatch.tinyCount += 1;
+  }
+}
+
+function advanceMinutes() {
+  if (!enabled) return;
+  const nowMinute = Math.floor(Date.now() / 60_000);
+  if (lastClosedMinute === null) { lastClosedMinute = nowMinute - 1; return; } // don't retroactively close minutes before boot
+  let closed = lastClosedMinute;
+  while (closed < nowMinute - 1) {
+    const closingMinute = closed + 1;
+    const closePrice = currentMinuteLastPrice ?? (engine.lastLogPrice !== null ? Math.exp(engine.lastLogPrice) : null);
+    if (closePrice !== null) {
+      const count = closingMinute === Math.floor(Date.now() / 60_000) - 1 ? currentMinuteCount : 0;
+      engine = closeMinute(engine, closePrice, count);
+      dirty = true;
+    }
+    closed = closingMinute;
+    currentMinuteCount = 0;
+  }
+  lastClosedMinute = closed;
+}
+
+async function persist() {
+  const patch: Record<string, unknown> = {
+    ...rowFromEngine(engine), btc_balance: btcBalance, sol_qty: solQty, entry_btc: entryBtc,
+    last_closed_minute: lastClosedMinute, current_minute_count: currentMinuteCount,
+    current_minute_last_price: currentMinuteLastPrice,
+    last_tick_at: lastTickAt !== null ? new Date(lastTickAt).toISOString() : null,
+  };
+  await updateSolbtcSizeconfState(patch);
+  dirty = false;
+}
+
+async function tick() {
   try {
-    // Bitfinex's candle history is SPARSE -- it only returns a row for a minute where a real
-    // trade happened (confirmed: SOLBTC regularly goes 5-14+ minutes between trades). The
-    // verified formula requires stepping through EVERY clock minute, forward-filling the last
-    // known close through quiet gaps (same "filled one-minute grid" methodology the reference
-    // engine's spec requires -- flat minutes still decay the CUSUM volatility/score EWMAs and
-    // still land on hourly/15-min review boundaries). Fetching sparse candles and only
-    // processing the ones that exist would silently skip those boundaries and diverge from the
-    // verified backtest. So: build the full continuous grid here, synthesizing flat/zero-volume
-    // candles for any minute Bitfinex didn't report a trade for.
-    const currentMinuteFloor = Math.floor(Date.now() / 60_000) * 60_000;
-    const raw = await getBitfinexCandlesOHLCV(SYMBOL, "1m", CANDLE_LIMIT);
-    const closedReal = raw.filter((c) => c.time < currentMinuteFloor); // definitely-closed real trades
-    const byMinute = new Map(closedReal.map((c) => [c.time, c]));
-
-    if (row.last_candle_ts === null && closedReal.length > 0) {
-      // very first boot: seed lastLogPrice/fastEwma/slowEwma from the first available close,
-      // matching initialState(), then process everything AFTER that seed candle.
-      const seed = closedReal[0];
-      await updateSolbtcParticipationState({
-        ...rowFromState(initialState(seed.close)), last_candle_ts: seed.time,
-      });
-      row = await getSolbtcParticipationState();
+    advanceMinutes();
+    const now = Date.now();
+    if (dirty && now - lastPersist > PERSIST_INTERVAL_MS) {
+      await persist();
+      lastPersist = now;
     }
-
-    let current = row;
-    let lastKnownClose = current.last_log_price !== null ? Math.exp(current.last_log_price) : closedReal[0]?.close;
-    if (lastKnownClose !== undefined && current.last_candle_ts !== null) {
-      for (let t = current.last_candle_ts + 60_000; t < currentMinuteFloor; t += 60_000) {
-        const real = byMinute.get(t);
-        const candle: Candle = real
-          ? { openTimeMs: t, open: real.open, close: real.close, volume: real.volume }
-          : { openTimeMs: t, open: lastKnownClose, close: lastKnownClose, volume: 0 };
-        current = await processCandle(current, candle);
-        lastKnownClose = candle.close;
-      }
-    }
-
-    if (Date.now() - lastRunLog > RUN_LOG_INTERVAL_MS) {
-      const latest = closedReal[closedReal.length - 1];
-      console.log(`STATUS side=${current.side} base=${current.base} orient=${current.orientation} fastMode=${current.fast_mode} trend=${current.trend} price=${latest?.close}`);
-      await logSolbtcParticipationRun({
-        actions: [{ action: "STATUS", side: current.side, base: current.base, orientation: current.orientation,
-          fastMode: current.fast_mode, trend: current.trend, priceOk: current.price_ok,
-          btcBalance: current.btc_balance, solQty: current.sol_qty, price: latest?.close }],
+    if (now - lastRunLog > RUN_LOG_INTERVAL_MS) {
+      console.log(`STATUS side=${engine.side} pending=${engine.pending} active=${engine.active} `
+        + `btc=${btcBalance.toFixed(8)} sol=${solQty.toFixed(6)} tradesWsAge=${tradesMessageAge()}ms`);
+      await logSolbtcSizeconfRun({
+        actions: [{ action: "STATUS", side: engine.side, pending: engine.pending, active: engine.active,
+          btcBalance, solQty, tradesWsAgeMs: tradesMessageAge() }],
       });
-      lastRunLog = Date.now();
+      lastRunLog = now;
     }
   } catch (err) {
-    console.error("checkOnce error:", err);
-    await logSolbtcParticipationRun({ actions: [{ action: "ERROR", stage: "check", error: String(err) }] }).catch(() => {});
+    console.error("tick error:", err);
   }
 }
 
 async function main() {
-  const got = await acquireLock();
-  if (!got) process.exit(1);
+  const row = await acquireLock();
+  if (!row) process.exit(1);
+
+  enabled = row.enabled;
+  btcBalance = row.btc_balance ?? 1;
+  solQty = row.sol_qty ?? 0;
+  entryBtc = row.entry_btc;
+  lastClosedMinute = row.last_closed_minute;
+  currentMinuteCount = row.current_minute_count ?? 0;
+  currentMinuteLastPrice = row.current_minute_last_price;
+
+  // fresh boot (never initialized) vs resuming from a saved state
+  engine = row.last_log_price !== null ? engineFromRow(row) : initialState();
 
   const heartbeatTimer = setInterval(() => {
     heartbeat().catch((err) => console.error("heartbeat failed:", err));
   }, HEARTBEAT_MS);
+  const tickTimer = setInterval(() => { tick(); }, TICK_MS);
 
   const shutdown = async () => {
     clearInterval(heartbeatTimer);
+    clearInterval(tickTimer);
+    if (dirty) await persist().catch((err) => console.error("final persist failed:", err));
     await releaseLock();
     process.exit(0);
   };
   process.on("SIGINT", shutdown);
   process.on("SIGTERM", shutdown);
 
-  console.log(`Starting SOL/BTC Participation PAPER worker (${INSTANCE_ID}), enabled=${got.enabled}.`);
-  console.log(`PAPER ONLY — fast CUSUM + slow trend + price-confirmation controller, cost=${(COST*100).toFixed(3)}%/side, polling Bitfinex every 20s.`);
-  checkOnce().catch((err) => console.error(err));
-  setInterval(() => { checkOnce().catch((err) => console.error(err)); }, POLL_INTERVAL_MS);
+  console.log(`Starting SOL/BTC Size-Confirmation PAPER worker (${INSTANCE_ID}), enabled=${enabled}.`);
+  console.log(`PAPER ONLY — trade-tape pressure + tiny-trade confirmation + activity gate, cost=${(COST*100).toFixed(3)}%/side, live WS trade tape.`);
+  connectPublicTrades(SYMBOL, onTick);
 }
+
+// react to enabled/disabled toggles from the dashboard without a restart
+setInterval(async () => {
+  try {
+    const fresh = await getSolbtcSizeconfState();
+    if (fresh.lock_owner === INSTANCE_ID && fresh.enabled !== enabled) {
+      enabled = fresh.enabled;
+      console.log(`enabled toggled -> ${enabled}`);
+    }
+  } catch (err) { console.error("enabled-poll failed:", err); }
+}, 5_000);
 
 main().catch((err) => { console.error("Fatal:", err); process.exit(1); });

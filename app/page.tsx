@@ -1131,9 +1131,9 @@ function SolHypertradePaperPanel({
   );
 }
 
-// ── SOL/BTC Participation panel (Worker 1, paper) ──────────────────────────
+// ── SOL/BTC Size Confirmation panel (Worker 1, paper) ──────────────────────
 
-function SolbtcParticipationPanel({
+function SolbtcSizeconfPanel({
   trades, state, runs, loading,
   enabled, onToggle, toggling,
   onClearHistory, clearingHistory,
@@ -1146,6 +1146,7 @@ function SolbtcParticipationPanel({
   const btcBalance = st?.btc_balance ?? 1;
   const solQty = st?.sol_qty ?? 0;
   const side = st?.side ?? "BTC";
+  const pending = st?.pending ?? null;
   const totalPnl = st?.realized_pnl_btc ?? 0;
   const totalTrades = st?.total_trades ?? 0;
   const wins = st?.total_wins ?? 0;
@@ -1159,15 +1160,14 @@ function SolbtcParticipationPanel({
   }, []);
   const lockAge = st?.lock_heartbeat ? nowTick - new Date(st.lock_heartbeat).getTime() : null;
   const workerAlive = lockAge != null && lockAge < 30_000;
-  const candleAge = st?.last_candle_ts ? nowTick - Number(st.last_candle_ts) : null;
-  const freshnessText = candleAge == null ? "no data yet" : `${formatDurationShort(candleAge)} ago`;
-  const freshnessColor = candleAge == null ? "text-gray-600"
-    : candleAge <= 180_000 ? "text-green-400" : candleAge <= 600_000 ? "text-yellow-400" : "text-red-400";
+  const tickAge = st?.last_tick_at ? nowTick - new Date(st.last_tick_at).getTime() : null;
+  const freshnessText = tickAge == null ? "no trades yet" : `${formatDurationShort(tickAge)} ago`;
+  const freshnessColor = tickAge == null ? "text-gray-600"
+    : tickAge <= 30_000 ? "text-green-400" : tickAge <= 180_000 ? "text-yellow-400" : "text-red-400";
 
-  const fastMode = st?.fast_mode === 1;
-  const trend = st?.trend === 1;
-  const orientation = st?.orientation ?? 1;
-  const base = st?.base ?? "BTC";
+  const q = st?.w > 0 ? st.u / st.w : 0;
+  const tinyQ = st?.wt >= 0.5 ? st.ut / st.wt : 0;
+  const active = st?.active ?? false;
 
   const chartTrades = trades.filter((t: any) => t.pnl_btc != null).map((t: any) => ({ ...t, pnl: t.pnl_btc, exit_time: t.fill_time }));
 
@@ -1176,7 +1176,7 @@ function SolbtcParticipationPanel({
       <div className="space-y-1.5">
         <div className="flex items-center justify-between gap-2">
           <div className="flex items-center gap-2">
-            <h2 className="text-white font-bold text-lg">SOL/BTC Participation (Worker 1)</h2>
+            <h2 className="text-white font-bold text-lg">SOL/BTC Size Confirmation (Worker 1)</h2>
             <span className="text-xs font-bold px-2 py-0.5 rounded-full bg-blue-500/20 text-blue-400">PAPER</span>
             <span className={`text-xs font-bold px-2 py-0.5 rounded-full ${workerAlive ? "bg-green-500/20 text-green-400" : "bg-gray-700/40 text-gray-500"}`}>
               {workerAlive ? "worker alive" : "worker offline"}
@@ -1203,7 +1203,7 @@ function SolbtcParticipationPanel({
             </button>
           </div>
         </div>
-        <p className="text-gray-500 text-xs">Fast CUSUM regime detector + slow trend/price-confirmation, mode-switching controller · PAPER ONLY · 0.02%/side simulated cost (conservative vs the real ~0.01555% Bitfinex spread) · verified against the exact C++ research engine (matched to float64 precision) · 1 BTC seed</p>
+        <p className="text-gray-500 text-xs">Trade-tape count pressure + tiny-trade (&lt;0.1 SOL) confirmation + 30-min activity gate · PAPER ONLY · live Bitfinex trade-tape WebSocket, not polling · 0.02%/side simulated cost · verified event-for-event against the reference formula on 50,000 real batches · 1 BTC seed</p>
       </div>
 
       {loading ? (
@@ -1226,27 +1226,27 @@ function SolbtcParticipationPanel({
           />
           <Stat
             label="Position"
-            value={side}
+            value={pending ? `${side}→${pending}` : side}
             sub={side === "SOL" ? `${solQty.toFixed(6)} SOL` : `${btcBalance.toFixed(8)} BTC`}
             color={side === "SOL" ? "text-green-400" : "text-gray-400"}
           />
           <Stat
-            label="Signal"
-            value={fastMode ? "fast" : "slow"}
-            sub={fastMode ? `base=${base} orient=${orientation > 0 ? "+" : "-"}` : `trend=${trend ? "up" : "down"}`}
-            color={fastMode ? "text-purple-400" : "text-yellow-400"}
+            label="Pressure"
+            value={q.toFixed(2)}
+            sub={`tiny=${tinyQ.toFixed(2)}`}
+            color={q > 0 ? "text-green-400" : q < 0 ? "text-red-400" : "text-gray-400"}
           />
           <Stat
-            label="Last Check"
+            label="Last Trade Seen"
             value={freshnessText}
-            sub={enabled ? "polling every 20s" : "paused"}
+            sub={enabled ? "live trade tape" : "paused"}
             color={freshnessColor}
           />
           <Stat
-            label="Controller"
-            value={fastMode ? "fast CUSUM" : "slow trend"}
-            sub={`${st?.price_ok === 1 ? "price OK" : "price not OK"}`}
-            color="text-gray-300"
+            label="Activity Gate"
+            value={active ? "active" : "inactive"}
+            sub={active ? "entries allowed" : "SOL entries blocked"}
+            color={active ? "text-green-400" : "text-yellow-400"}
           />
         </div>
       )}
@@ -1309,7 +1309,7 @@ function SolbtcParticipationPanel({
                   {actions.map((a: any, i: number) => {
                     const color = a.action === "ERROR" ? "text-red-400" : "text-gray-500";
                     const text = a.action === "STATUS"
-                      ? `WATCH  side=${a.side}  base=${a.base}  orient=${a.orientation > 0 ? "+" : "-"}  mode=${a.fastMode ? "fast" : "slow"}  trend=${a.trend ? "up" : "down"}  price=${a.price}`
+                      ? `WATCH  side=${a.side}  pending=${a.pending ?? "-"}  active=${a.active}  btc=${a.btcBalance?.toFixed?.(6)}  sol=${a.solQty?.toFixed?.(4)}  wsAge=${a.tradesWsAgeMs}ms`
                       : a.action === "ERROR" ? `ERROR (${a.stage}): ${a.error}`
                       : a.action;
                     return <span key={i} className={color}>{text}</span>;
@@ -1347,11 +1347,11 @@ export default function Dashboard() {
   const [htRuns,    setHtRuns]    = useState<any[]>([]);
   const [htToggling, setHtToggling] = useState(false);
   const [htClearing, setHtClearing] = useState(false);
-  const [pState,   setPState]   = useState<any>(null);
-  const [pTrades,  setPTrades]  = useState<any[]>([]);
-  const [pRuns,    setPRuns]    = useState<any[]>([]);
-  const [pToggling, setPToggling] = useState(false);
-  const [pClearing, setPClearing] = useState(false);
+  const [szState,   setSzState]   = useState<any>(null);
+  const [szTrades,  setSzTrades]  = useState<any[]>([]);
+  const [szRuns,    setSzRuns]    = useState<any[]>([]);
+  const [szToggling, setSzToggling] = useState(false);
+  const [szClearing, setSzClearing] = useState(false);
 
   async function load() {
     const [
@@ -1364,9 +1364,9 @@ export default function Dashboard() {
       { data: htSt },
       { data: htTr },
       { data: htRs },
-      { data: pSt },
-      { data: pTr },
-      { data: pRs },
+      { data: szSt },
+      { data: szTr },
+      { data: szRs },
     ] = await Promise.all([
       getSupabase().from("surfer_state").select("*").eq("id", 1).single(),
       getSupabase().from("surfer_trades").select("*").order("exit_time", { ascending: false }).limit(5000),
@@ -1377,9 +1377,9 @@ export default function Dashboard() {
       getSupabase().from("sol_hypertrade_paper_state").select("*").eq("id", 1).single(),
       getSupabase().from("sol_hypertrade_paper_trades").select("*").order("exit_time", { ascending: false }).limit(5000),
       getSupabase().from("sol_hypertrade_paper_runs").select("id,run_at,data").order("run_at", { ascending: false }).limit(120),
-      getSupabase().from("solbtc_participation_state").select("*").eq("id", 1).single(),
-      getSupabase().from("solbtc_participation_trades").select("*").order("fill_time", { ascending: false }).limit(5000),
-      getSupabase().from("solbtc_participation_runs").select("id,run_at,data").order("run_at", { ascending: false }).limit(120),
+      getSupabase().from("solbtc_sizeconf_state").select("*").eq("id", 1).single(),
+      getSupabase().from("solbtc_sizeconf_trades").select("*").order("fill_time", { ascending: false }).limit(5000),
+      getSupabase().from("solbtc_sizeconf_runs").select("id,run_at,data").order("run_at", { ascending: false }).limit(120),
     ]);
     setSurferState(surferSt ?? null);
     setSurferTrades(surferTr ?? []);
@@ -1390,9 +1390,9 @@ export default function Dashboard() {
     setHtState(htSt ?? null);
     setHtTrades(htTr ?? []);
     setHtRuns(htRs ?? []);
-    setPState(pSt ?? null);
-    setPTrades(pTr ?? []);
-    setPRuns(pRs ?? []);
+    setSzState(szSt ?? null);
+    setSzTrades(szTr ?? []);
+    setSzRuns(szRs ?? []);
     setLoading(false);
   }
 
@@ -1462,23 +1462,23 @@ export default function Dashboard() {
     setHtClearing(false);
   }
 
-  async function handlePToggle() {
-    setPToggling(true);
-    await fetch("/api/solbtc-participation/toggle", { method: "POST" });
+  async function handleSzToggle() {
+    setSzToggling(true);
+    await fetch("/api/solbtc-sizeconf/toggle", { method: "POST" });
     await load();
-    setPToggling(false);
+    setSzToggling(false);
   }
 
-  async function handlePClearHistory() {
-    if (!confirm("Delete all participation-bot trade history and run logs, and reset state?")) return;
-    setPClearing(true);
-    const res = await fetch("/api/solbtc-participation/clear-history", { method: "POST" });
+  async function handleSzClearHistory() {
+    if (!confirm("Delete all size-confirmation-bot trade history and run logs, and reset state?")) return;
+    setSzClearing(true);
+    const res = await fetch("/api/solbtc-sizeconf/clear-history", { method: "POST" });
     if (!res.ok) {
       const body = await res.json().catch(() => ({}));
       alert(body.error ?? "Failed to clear history.");
     }
     await load();
-    setPClearing(false);
+    setSzClearing(false);
   }
 
   function formatElapsed(ms: number): string {
@@ -1580,10 +1580,10 @@ export default function Dashboard() {
       .on("postgres_changes", { event: "*", schema: "public", table: "sol_hypertrade_paper_trades" }, debouncedLoad)
       .on("postgres_changes", { event: "*", schema: "public", table: "sol_hypertrade_paper_runs" }, debouncedLoad)
       .subscribe();
-    const ch4 = sb.channel("solbtc-participation")
-      .on("postgres_changes", { event: "*", schema: "public", table: "solbtc_participation_state" }, debouncedLoad)
-      .on("postgres_changes", { event: "*", schema: "public", table: "solbtc_participation_trades" }, debouncedLoad)
-      .on("postgres_changes", { event: "*", schema: "public", table: "solbtc_participation_runs" }, debouncedLoad)
+    const ch4 = sb.channel("solbtc-sizeconf")
+      .on("postgres_changes", { event: "*", schema: "public", table: "solbtc_sizeconf_state" }, debouncedLoad)
+      .on("postgres_changes", { event: "*", schema: "public", table: "solbtc_sizeconf_trades" }, debouncedLoad)
+      .on("postgres_changes", { event: "*", schema: "public", table: "solbtc_sizeconf_runs" }, debouncedLoad)
       .subscribe();
     return () => {
       if (debounceTimer) clearTimeout(debounceTimer);
@@ -1652,18 +1652,18 @@ export default function Dashboard() {
           />
         </div>
 
-        {/* ── SOL/BTC Participation: Worker 1 (replaced the shelved Surfer-Bitfinex migration), PAPER since 2026-09-16 */}
+        {/* ── SOL/BTC Size Confirmation: Worker 1 (replaced the archived Participation bot), PAPER since 2026-09-17 */}
         <div className="grid grid-cols-1 gap-6 items-start">
-          <SolbtcParticipationPanel
-            trades={pTrades}
-            state={pState}
-            runs={pRuns}
+          <SolbtcSizeconfPanel
+            trades={szTrades}
+            state={szState}
+            runs={szRuns}
             loading={loading}
-            enabled={pState?.enabled ?? false}
-            onToggle={handlePToggle}
-            toggling={pToggling}
-            onClearHistory={handlePClearHistory}
-            clearingHistory={pClearing}
+            enabled={szState?.enabled ?? false}
+            onToggle={handleSzToggle}
+            toggling={szToggling}
+            onClearHistory={handleSzClearHistory}
+            clearingHistory={szClearing}
           />
         </div>
 
