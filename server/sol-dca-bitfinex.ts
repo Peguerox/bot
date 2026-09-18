@@ -1,7 +1,8 @@
 // Worker 1 — filename/service kept for Render compatibility (5th internals swap: old VWAP+EMA DCA
 // grid -> SOL Double-Crossover (paper) -> shelved Surfer-on-Bitfinex migration (never deployed) ->
 // SOL/BTC Participation hybrid (archived 2026-09-17, see docs/archive/README_shelved_participation_bot.md)
-// -> this, 2026-09-17).
+// -> this, 2026-09-17). GitHub account migrated 2026-09-18, Render reconnected -- this comment
+// line is the test marker for confirming auto-deploy actually fires through the new connection.
 //
 // SOL/BTC "size confirmation" strategy — PAPER ONLY, no real orders. Original trade-count pressure
 // signal (U/W) gated by a 30-minute activity filter, with a separate tiny-trade (<0.1 SOL)
