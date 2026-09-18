@@ -18,7 +18,15 @@ export type HypertradeFill = { action: "ENTRY" | "DCA" | "EXIT"; level: number; 
 
 type Position = { price: number; usdSize: number };
 
-export function runHypertradeReplay(candles: Candle[], seedUsd: number): { fills: HypertradeFill[]; totalReturnPct: number } {
+// `firstEntry`, when given, seeds the very first position directly at the bot's REAL first entry
+// time+price instead of letting the loop auto-enter at candles[0]. This matters: the live worker
+// process can boot (and start logging runs) well before it places its first real trade -- e.g. a
+// wallet/book-WS readiness wait, or a deliberate delay before real money was moved onto it. Found
+// via a real ~18-hour gap between this bot's process-boot timestamp and its actual first fill;
+// seeding at the arbitrary boot-time candle instead of the real entry cascaded into many extra
+// spurious cycles by the time the replay reached "now", since every subsequent cycle's timing
+// depends on where the previous one exited.
+export function runHypertradeReplay(candles: Candle[], seedUsd: number, firstEntry?: { time: number; price: number }): { fills: HypertradeFill[]; totalReturnPct: number } {
   const fills: HypertradeFill[] = [];
   if (candles.length === 0) return { fills, totalReturnPct: 0 };
 
@@ -67,7 +75,16 @@ export function runHypertradeReplay(candles: Candle[], seedUsd: number): { fills
     positions = []; level = 0; lastEntryPrice = null; totalCost = 0;
   }
 
+  let seeded = false;
   for (const c of candles) {
+    if (!seeded) {
+      if (firstEntry) {
+        if (c.time < firstEntry.time) continue; // skip candles before the real first entry
+        enter(firstEntry.price, firstEntry.time);
+      }
+      seeded = true;
+      if (firstEntry) continue;
+    }
     if (level === 0) { enter(c.open, c.time); continue; }
 
     // Conservative tie-break within this candle: keep DCA-adding while the low has breached the

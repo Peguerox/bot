@@ -397,23 +397,32 @@ async function runSurferSolusdtComparison() {
 // Hypertrade DCA -- continuous grid, live since 2026-09-11 (real money moved here on 2026-09-12).
 async function runHypertradeComparison() {
   const sb = getSupabaseAdmin();
-  const [{ data: state }, { data: firstRun }] = await Promise.all([
+  const [{ data: state }, { data: firstTrade }] = await Promise.all([
     sb.from("sol_hypertrade_paper_state").select("*").eq("id", 1).single(),
-    sb.from("sol_hypertrade_paper_runs").select("run_at").order("run_at", { ascending: true }).limit(1).maybeSingle(),
+    sb.from("sol_hypertrade_paper_trades").select("entry_time").order("entry_time", { ascending: true }).limit(1).maybeSingle(),
   ]);
   if (!state) return NextResponse.json({ ok: false, error: "No sol_hypertrade_paper_state row" });
   const realTotalReturnPct = ((state.realized_pnl_usd ?? 0) / HT_SEED_USD) * 100;
 
-  const botStartMs = firstRun?.run_at ? new Date(firstRun.run_at).getTime() : Date.now() - 14 * 86400_000;
+  // Seed from the bot's REAL first trade, not its process-boot run-log timestamp -- those can be
+  // many hours apart (wallet/book-WS readiness, or a deliberate delay before real money moved
+  // onto this worker), and starting the replay's own first entry at an arbitrary boot-time candle
+  // instead of the real one cascades into a drifting, increasingly-wrong cycle timeline. See the
+  // comment in lib/hypertrade-replay.ts for how this was found.
+  if (!firstTrade?.entry_time) return NextResponse.json({ ok: false, error: "No real trades yet for this bot" });
+  const firstEntryMs = new Date(firstTrade.entry_time).getTime();
   const end = Date.now();
-  const candles = await fetchBitfinex1mCandles("tSOLUSD", botStartMs, end);
+  const candles = await fetchBitfinex1mCandles("tSOLUSD", firstEntryMs - 5 * 60_000, end);
   if (candles.length === 0) return NextResponse.json({ ok: false, error: "No candle data returned" });
 
-  const { fills, totalReturnPct: backtestTotalReturnPct } = runHypertradeReplay(candles, HT_SEED_USD);
+  const entryCandle = candles.find((c) => c.time >= firstEntryMs) ?? candles[0];
+  const { fills, totalReturnPct: backtestTotalReturnPct } = runHypertradeReplay(
+    candles, HT_SEED_USD, { time: entryCandle.time, price: entryCandle.open }
+  );
 
   return NextResponse.json({
     ok: true,
-    windowStart: new Date(botStartMs).toISOString(),
+    windowStart: new Date(firstEntryMs).toISOString(),
     windowEnd: new Date(end).toISOString(),
     note: "No real multi-level DCA cycle has happened yet to verify the DCA-add path against -- only the single-level entry/exit path has been checked against real fills. The size/drop/TP formulas themselves are imported directly from the live bot's own config file, not re-derived.",
     realTotalReturnPct,
