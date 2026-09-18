@@ -197,23 +197,37 @@ async function runSizeconfComparison() {
   // a brief Render restart (deploys happened multiple times today) and can't backfill that gap,
   // while this replay reads the full continuous historical record with no gaps. Surfaced as
   // timeDeltaS per pair rather than hidden, instead of only checking side+price silently.
-  let firstDivergenceIndex: number | null = null;
+  //
+  // Checks EVERY row, not just up to the first mismatch -- an earlier version stopped at the
+  // first divergence and let the frontend silently assume every later row matched (it hadn't
+  // actually been checked). Found by the user noticing the summary count ("6 of 10") didn't
+  // match the number of checkmarks actually shown (9 of 10) in the per-row table.
   const n = Math.min(realFills.length, backtestFills.length);
+  const rowMatches: boolean[] = [];
   const timeDeltasS: (number | null)[] = [];
+  let firstDivergenceIndex: number | null = null;
+  let matchedCount = 0;
   for (let k = 0; k < n; k++) {
-    if (realFills[k].side !== backtestFills[k].side || Math.abs(realFills[k].fillPrice - backtestFills[k].fillPrice) > 1e-9) {
-      firstDivergenceIndex = k;
+    const isMatch = realFills[k].side === backtestFills[k].side && Math.abs(realFills[k].fillPrice - backtestFills[k].fillPrice) <= 1e-9;
+    rowMatches.push(isMatch);
+    if (isMatch) {
+      matchedCount++;
+      timeDeltasS.push((new Date(realFills[k].fillTime).getTime() - new Date(backtestFills[k].fillTime).getTime()) / 1000);
+    } else {
+      if (firstDivergenceIndex === null) firstDivergenceIndex = k;
       timeDeltasS.push(null);
-      break;
     }
-    timeDeltasS.push((new Date(realFills[k].fillTime).getTime() - new Date(backtestFills[k].fillTime).getTime()) / 1000);
   }
-  if (firstDivergenceIndex === null && realFills.length !== backtestFills.length) firstDivergenceIndex = n;
+  if (realFills.length !== backtestFills.length) {
+    if (firstDivergenceIndex === null) firstDivergenceIndex = n;
+  }
 
   return NextResponse.json({
     ok: true,
     windowStart: new Date(start).toISOString(),
     windowEnd: new Date(end).toISOString(),
+    matchedCount,
+    rowMatches,
     real: { trades: realFills.length, fills: realFills },
     backtest: { trades: backtestFills.length, fills: backtestFills },
     exactMatch: firstDivergenceIndex === null,

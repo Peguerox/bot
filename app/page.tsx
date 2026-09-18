@@ -1340,12 +1340,7 @@ function SolbtcSizeconfPanel({
           ) : (
             <div className="space-y-2">
               <p className="text-gray-600 text-xs">
-                {(() => {
-                  const total = btResult.real.trades;
-                  const divergeAt = btResult.firstDivergenceIndex;
-                  const matched = divergeAt == null ? total : divergeAt;
-                  return `${matched} of ${total} fills match the replay exactly`;
-                })()}
+                {btResult.matchedCount ?? btResult.real.trades} of {btResult.real.trades} fills match the replay exactly
                 {" · "}{new Date(btResult.windowStart).toLocaleDateString()} → {new Date(btResult.windowEnd).toLocaleDateString()}
                 {" · replayed via the same engine module the live worker runs, over Bitfinex's real trade tape"}
               </p>
@@ -1363,7 +1358,7 @@ function SolbtcSizeconfPanel({
                   <tbody className="divide-y divide-gray-800/50">
                     {btResult.real.fills.map((f: any, i: number) => {
                       const bf = btResult.backtest.fills[i];
-                      const isDivergent = btResult.firstDivergenceIndex === i;
+                      const isDivergent = btResult.rowMatches ? !btResult.rowMatches[i] : btResult.firstDivergenceIndex === i;
                       const dt = btResult.timeDeltasS?.[i];
                       return (
                         <tr key={i}>
@@ -1377,7 +1372,7 @@ function SolbtcSizeconfPanel({
                           </td>
                           <td className="py-1.5 text-right">
                             {isDivergent
-                              ? <span className="text-amber-500/80" title="Price differs from the replay -- from before a real fix was deployed the same day; see chat">pre-fix</span>
+                              ? <span className="text-amber-500/80" title="Side or price differs from the replay">diverges</span>
                               : <span className="text-gray-600">✓</span>}
                           </td>
                         </tr>
