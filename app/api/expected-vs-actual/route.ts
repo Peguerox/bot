@@ -362,14 +362,15 @@ async function runSurferSolbtcComparison() {
 // Surfer SOLUSDT -- RSI(14)-arm + EMA(7,25)-liveMode, unchanged since deployment.
 async function runSurferSolusdtComparison() {
   const sb = getSupabaseAdmin();
-  const [{ data: state }, { data: firstRun }] = await Promise.all([
+  const [{ data: state }, { data: firstTrade }] = await Promise.all([
     sb.from("surfer_usdt_state").select("*").eq("id", 1).single(),
-    sb.from("surfer_usdt_runs").select("run_at").order("run_at", { ascending: true }).limit(1).maybeSingle(),
+    sb.from("surfer_usdt_trades").select("entry_time").order("entry_time", { ascending: true }).limit(1).maybeSingle(),
   ]);
   if (!state) return NextResponse.json({ ok: false, error: "No surfer_usdt_state row" });
   const realTotalReturnPct = ((state.realized_pnl_usdt ?? 0) / 50) * 100;
+  if (!firstTrade?.entry_time) return NextResponse.json({ ok: false, error: "No real trades yet for this bot" });
+  const botStartMs = new Date(firstTrade.entry_time).getTime();
 
-  const botStartMs = firstRun?.run_at ? new Date(firstRun.run_at).getTime() : Date.now() - 90 * 86400_000;
   const warmupMs = 55 * 86400_000; // ~55 days, covers 12h EMA(25) warmup (needs ~50 days of 12h candles)
   const start = botStartMs - warmupMs;
   const end = Date.now();
@@ -382,7 +383,10 @@ async function runSurferSolusdtComparison() {
   const c12h: Candle15m[] = c12hraw.map((c) => ({ time: c.time, close: c.close }));
   if (c15.length === 0 || c12h.length === 0) return NextResponse.json({ ok: false, error: "No candle data returned" });
 
-  const { fills, totalReturnPct: backtestTotalReturnPct } = runSurferSolusdtReplay(c15, c12h);
+  // startMs gates actual fills to on-or-after the bot's real first trade -- the candles before
+  // that only prime RSI/EMA indicators, matching the fix in lib/surfer-solusdt-replay.ts (a
+  // phantom pre-deployment fill on 2026-05-07 was found before this, desyncing everything after).
+  const { fills, totalReturnPct: backtestTotalReturnPct } = runSurferSolusdtReplay(c15, c12h, botStartMs);
 
   return NextResponse.json({
     ok: true,

@@ -54,7 +54,12 @@ function calcRSISeries(candles: Candle15m[], period = 14): number[] {
 // warm-up before it (RSI(14) + a little slack). `c12hByTime` maps each 12h candle's OPEN time
 // (ms) to its close, covering the same window plus ~100 candles of warm-up for EMA(25) -- must
 // include enough history for both series to be defined by the start of the window you care about.
-export function runSurferSolusdtReplay(c15: Candle15m[], c12h: Candle15m[]): { fills: SurferUsdtFill[]; totalReturnPct: number } {
+// `startMs`, when given, primes RSI/EMA indicators through the full candle history but only lets
+// actual fills happen at or after this time -- without it, the replay would "trade" phantom
+// signals during its own warmup period, before the bot existed, and that phantom position desyncs
+// every real decision downstream of it. Found via a replay firing a fill on 2026-05-07, when the
+// bot's real first trade wasn't until 2026-06-18.
+export function runSurferSolusdtReplay(c15: Candle15m[], c12h: Candle15m[], startMs = -Infinity): { fills: SurferUsdtFill[]; totalReturnPct: number } {
   const fills: SurferUsdtFill[] = [];
   const rsiArr = calcRSISeries(c15);
   const ema7Full = calcEMASeries(c12h, MA_FAST);
@@ -110,7 +115,7 @@ export function runSurferSolusdtReplay(c15: Candle15m[], c12h: Candle15m[]): { f
     }
 
     // ── Entry ──
-    if (mode === "USDT" && armedForSol && emaBullish && emaSloping) {
+    if (tick >= startMs && mode === "USDT" && armedForSol && emaBullish && emaSloping) {
       sol = usdt / livePrice; usdt = 0;
       entryPrice = livePrice; bestPct = 0; armedForSol = false;
       mode = "SOL";
@@ -120,7 +125,7 @@ export function runSurferSolusdtReplay(c15: Candle15m[], c12h: Candle15m[]): { f
 
     // ── Exit ──
     const trendExit = !emaBullish && curRSI < 50;
-    if (mode === "SOL" && (hardStopHit || trailHit || trendExit)) {
+    if (tick >= startMs && mode === "SOL" && (hardStopHit || trailHit || trendExit)) {
       usdt = sol * livePrice; sol = 0;
       entryPrice = null;
       mode = "USDT";
