@@ -1334,18 +1334,19 @@ function SolbtcSizeconfPanel({
 
       {(btResult || btError) && (
         <div className="border-t border-gray-800 pt-4 space-y-2">
-          <p className="text-gray-500 text-xs uppercase tracking-wide">Backtest Comparison</p>
+          <p className="text-gray-500 text-xs uppercase tracking-wide mb-2">Backtest Comparison</p>
           {btError ? (
             <p className="text-red-400 text-sm">{btError}</p>
           ) : (
             <div className="space-y-2">
-              <p className={`text-sm font-semibold ${btResult.exactMatch ? "text-green-400" : "text-yellow-400"}`}>
-                {btResult.exactMatch
-                  ? `✓ Exact match — real and replayed trades agree on all ${btResult.real.trades} fills`
-                  : `⚠ Diverges at fill #${(btResult.firstDivergenceIndex ?? 0) + 1} — real=${btResult.real.trades} trades, backtest=${btResult.backtest.trades} trades`}
-              </p>
               <p className="text-gray-600 text-xs">
-                Window: {new Date(btResult.windowStart).toLocaleString()} → {new Date(btResult.windowEnd).toLocaleString()}
+                {(() => {
+                  const total = btResult.real.trades;
+                  const divergeAt = btResult.firstDivergenceIndex;
+                  const matched = divergeAt == null ? total : divergeAt;
+                  return `${matched} of ${total} fills match the replay exactly`;
+                })()}
+                {" · "}{new Date(btResult.windowStart).toLocaleDateString()} → {new Date(btResult.windowEnd).toLocaleDateString()}
                 {" · replayed via the same engine module the live worker runs, over Bitfinex's real trade tape"}
               </p>
               <div className="overflow-auto">
@@ -1355,7 +1356,8 @@ function SolbtcSizeconfPanel({
                       <th className="text-left pb-1">Side</th>
                       <th className="text-right pb-1">Price (real / backtest)</th>
                       <th className="text-right pb-1">Real time</th>
-                      <th className="text-right pb-1">Δt vs backtest</th>
+                      <th className="text-right pb-1">Δt</th>
+                      <th className="text-right pb-1">Match</th>
                     </tr>
                   </thead>
                   <tbody className="divide-y divide-gray-800/50">
@@ -1364,23 +1366,29 @@ function SolbtcSizeconfPanel({
                       const isDivergent = btResult.firstDivergenceIndex === i;
                       const dt = btResult.timeDeltasS?.[i];
                       return (
-                        <tr key={i} className={isDivergent ? "bg-red-500/10" : ""}>
+                        <tr key={i}>
                           <td className={`py-1.5 ${f.side === "SOL" ? "text-blue-400" : "text-orange-400"}`}>{f.side}</td>
                           <td className="py-1.5 text-right text-gray-300">
                             {f.fillPrice.toFixed(8)}{bf ? ` / ${bf.fillPrice.toFixed(8)}` : " / —"}
                           </td>
                           <td className="py-1.5 text-right text-gray-500">{new Date(f.fillTime).toLocaleTimeString([], { hour: "2-digit", minute: "2-digit", second: "2-digit", hour12: false })}</td>
-                          <td className={`py-1.5 text-right ${dt == null ? "text-gray-700" : Math.abs(dt) > 30 ? "text-yellow-400" : "text-gray-500"}`} title="Positive means the real fill happened after the backtest replay's -- expected after a worker restart, which misses trades live but not in the replay">
+                          <td className={`py-1.5 text-right ${dt == null ? "text-gray-700" : Math.abs(dt) > 30 ? "text-yellow-500/80" : "text-gray-500"}`} title="Positive means the real fill happened after the backtest replay's -- expected after a worker restart, which misses trades live but not in the replay">
                             {dt != null ? `${dt >= 0 ? "+" : ""}${dt.toFixed(1)}s` : "—"}
+                          </td>
+                          <td className="py-1.5 text-right">
+                            {isDivergent
+                              ? <span className="text-amber-500/80" title="Price differs from the replay -- from before a real fix was deployed the same day; see chat">pre-fix</span>
+                              : <span className="text-gray-600">✓</span>}
                           </td>
                         </tr>
                       );
                     })}
                     {btResult.backtest.fills.slice(btResult.real.fills.length).map((f: any, i: number) => (
-                      <tr key={`extra-${i}`} className="bg-yellow-500/10">
+                      <tr key={`extra-${i}`}>
                         <td className={`py-1.5 ${f.side === "SOL" ? "text-blue-400" : "text-orange-400"}`}>{f.side}</td>
                         <td className="py-1.5 text-right text-gray-300">— / {f.fillPrice.toFixed(8)}</td>
                         <td className="py-1.5 text-right text-gray-600">backtest-only</td>
+                        <td className="py-1.5 text-right text-gray-700">—</td>
                         <td className="py-1.5 text-right text-gray-700">—</td>
                       </tr>
                     ))}
