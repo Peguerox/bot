@@ -5,6 +5,8 @@
 // line is the test marker for confirming auto-deploy actually fires through the new connection.
 // Retest 2026-09-18 #2: toggled the Render GitHub App between all-repos/select-repos to force a
 // fresh authorization after the first reconnect silently stopped triggering auto-deploy.
+// Retest #3: fully uninstalled and reinstalled the Render GitHub App from scratch after #2 also
+// didn't fix it.
 //
 // SOL/BTC "size confirmation" strategy — PAPER ONLY, no real orders. Original trade-count pressure
 // signal (U/W) gated by a 30-minute activity filter, with a separate tiny-trade (<0.1 SOL)
