@@ -1605,8 +1605,10 @@ export default function Dashboard() {
 
     // venue/symbol for the buy-and-hold comparison — the asset each bot actually trades
     const bots = [
-      { name: "Surfer SOLBTC",  badge: "LIVE",  state: surferState,     runsTable: "surfer_runs",         pnlField: "realized_pnl_btc",  initial: SURFER_BTC_INITIAL, unit: "₿", venue: "us" as const, symbol: "SOLBTC" },
+      { name: "Surfer SOLBTC",  badge: "LIVE",  state: surferState,     runsTable: "surfer_runs",         pnlField: "realized_pnl_btc",  initial: SURFER_BTC_INITIAL, unit: "₿", venue: "us" as const,       symbol: "SOLBTC" },
       { name: "Surfer SOLUSDT", badge: "LIVE",  state: surferUsdtState, runsTable: "surfer_usdt_runs",    pnlField: "realized_pnl_usdt", initial: 50, unit: "$", venue: "us" as const,       symbol: "SOLUSDT" },
+      { name: "Hypertrade DCA", badge: "LIVE",  state: htState,        runsTable: "sol_hypertrade_paper_runs", pnlField: "realized_pnl_usd",  initial: 50, unit: "$", venue: "bitfinex" as const, symbol: "tSOLUSD", tradesField: "total_cycles" },
+      { name: "SOL/BTC SizeConf", badge: "PAPER", state: szState,      runsTable: "solbtc_sizeconf_runs",      pnlField: "realized_pnl_btc",  initial: 1,  unit: "₿", venue: "bitfinex" as const, symbol: "tSOLBTC" },
     ];
 
     const rows: SummaryRow[] = [];
@@ -1618,7 +1620,7 @@ export default function Dashboard() {
       const running = startMs ? formatElapsed(elapsedMs) : "unknown";
       const days = Math.max(elapsedMs / 86400000, 1 / 24); // floor at 1 hour to avoid divide-by-near-zero
       const pnl = b.state?.[b.pnlField] ?? 0;
-      const trades = b.state?.total_trades ?? 0;
+      const trades = b.state?.[(b as any).tradesField ?? "total_trades"] ?? 0;
       const wins = b.state?.total_wins ?? 0;
       const winRateNum = trades > 0 ? (wins / trades * 100) : -1;
       const winRate = trades > 0 ? `${winRateNum.toFixed(1)}%` : "—";
