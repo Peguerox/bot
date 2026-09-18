@@ -2,6 +2,10 @@ import { NextRequest, NextResponse } from "next/server";
 import { getSupabaseAdmin } from "@/lib/supabase-admin";
 import { getBitfinexTradesRange } from "@/lib/bitfinex";
 import { initialState, processBatch, closeMinute, TINY_SOL, type Batch, type EngineState } from "@/lib/solbtc-sizeconf-engine";
+import { runSurferSolbtcReplay, type Candle as SolbtcCandle } from "@/lib/surfer-solbtc-replay";
+import { runSurferSolusdtReplay, type Candle15m } from "@/lib/surfer-solusdt-replay";
+import { runHypertradeReplay, type Candle as HtCandle } from "@/lib/hypertrade-replay";
+import { SEED_USD as HT_SEED_USD } from "@/lib/sol-hypertrade-config";
 
 // Compares REAL live trade results against what the backtest would have predicted for the exact
 // same real historical window -- same methodology used manually throughout this session (fetch
@@ -267,11 +271,165 @@ async function runSizeconfComparison() {
   });
 }
 
+async function fetchBinanceUsCandles(symbol: string, interval: string, startMs: number, endMs: number): Promise<{ time: number; open: number; high: number; low: number; close: number }[]> {
+  const out: { time: number; open: number; high: number; low: number; close: number }[] = [];
+  let cursor = startMs;
+  while (cursor < endMs) {
+    const url = `https://api.binance.us/api/v3/klines?symbol=${symbol}&interval=${interval}&startTime=${cursor}&endTime=${endMs}&limit=1000`;
+    const res = await fetch(url, { cache: "no-store" });
+    if (!res.ok) break;
+    const raw = await res.json() as any[];
+    if (!Array.isArray(raw) || raw.length === 0) break;
+    for (const c of raw) out.push({ time: Number(c[0]), open: parseFloat(c[1]), high: parseFloat(c[2]), low: parseFloat(c[3]), close: parseFloat(c[4]) });
+    const newest = Number(raw[raw.length - 1][0]);
+    if (raw.length < 1000 || newest >= endMs) break;
+    cursor = newest + 1;
+  }
+  return out;
+}
+
+async function fetchBitfinex1mCandles(symbol: string, startMs: number, endMs: number): Promise<HtCandle[]> {
+  const out: HtCandle[] = [];
+  let cursor = startMs;
+  while (cursor < endMs) {
+    const url = `https://api-pub.bitfinex.com/v2/candles/trade:1m:${symbol}/hist?start=${cursor}&end=${endMs}&limit=1000&sort=1`;
+    const res = await fetch(url, { cache: "no-store" });
+    if (!res.ok) break;
+    const raw = await res.json() as number[][];
+    if (!Array.isArray(raw) || raw.length === 0) break;
+    for (const c of raw) out.push({ time: c[0], open: c[1], high: c[3], low: c[4], close: c[2] });
+    const newest = raw[raw.length - 1][0];
+    if (raw.length < 1000 || newest >= endMs) break;
+    cursor = newest + 1;
+  }
+  return out;
+}
+
+// Surfer SOLBTC -- "buffered rotation" v2, live since 2026-09-14. Needs H_WINDOW_MIN (6190min,
+// ~4.3 days) of 1-min-candle history BEFORE the window being judged, so the fetch always starts
+// that much earlier than the bot's real first run -- otherwise the replay would spuriously "miss"
+// signals the live bot could actually see (it has been running since well before its first v2
+// trade and had that history available).
+async function runSurferSolbtcComparison() {
+  const sb = getSupabaseAdmin();
+  const [{ data: state }, { data: allTrades }] = await Promise.all([
+    sb.from("surfer_state").select("*").eq("id", 1).single(),
+    sb.from("surfer_trades").select("*").order("exit_time", { ascending: true }),
+  ]);
+  if (!state) return NextResponse.json({ ok: false, error: "No surfer_state row" });
+  const SEED_BTC = 0.00075241;
+
+  // Only replay from the v2 "buffered rotation" strategy's actual deploy date -- trades before
+  // that were made under a completely different (RSI+EMA) strategy, comparing them against this
+  // replay would be meaningless (same class of issue found earlier with the SOL/BTC
+  // size-confirmation bot's mid-history strategy swap). Both real and backtest returns below are
+  // computed v2-only, relative to whatever trading capital existed right at the v2 deploy moment,
+  // so they're a genuine apples-to-apples pair.
+  const v2DeployMs = new Date("2026-09-14T00:00:00Z").getTime();
+  const trades = allTrades ?? [];
+  const preV2Trades = trades.filter((t: any) => new Date(t.exit_time).getTime() < v2DeployMs);
+  const v2Trades = trades.filter((t: any) => new Date(t.exit_time).getTime() >= v2DeployMs);
+  const capitalAtV2Start = SEED_BTC + preV2Trades.reduce((s: number, t: any) => s + t.pnl_btc, 0);
+  let realV2PnlBtc = v2Trades.reduce((s: number, t: any) => s + t.pnl_btc, 0);
+
+  const H_WINDOW_MIN = 6190;
+  const start = v2DeployMs - (H_WINDOW_MIN + 500) * 60_000;
+  const end = Date.now();
+  const rawCandles = await fetchBinanceUsCandles("SOLBTC", "1m", start, end);
+  const candles: SolbtcCandle[] = rawCandles.map((c) => ({ time: c.time, close: c.close }));
+  if (candles.length === 0) return NextResponse.json({ ok: false, error: "No candle data returned" });
+
+  // mark any still-open real position to the last known real price
+  if (state.mode === "SOL" && state.entry_price && state.entry_btc && candles.length) {
+    const lastPrice = candles[candles.length - 1].close;
+    realV2PnlBtc += state.sol_quantity * lastPrice - state.entry_btc;
+  }
+  const realTotalReturnPct = (realV2PnlBtc / capitalAtV2Start) * 100;
+
+  const { fills, totalReturnPct: backtestTotalReturnPct } = runSurferSolbtcReplay(candles);
+
+  return NextResponse.json({
+    ok: true,
+    windowStart: new Date(v2DeployMs).toISOString(),
+    windowEnd: new Date(end).toISOString(),
+    note: "Both numbers are v2 'buffered rotation' only (deployed 2026-09-14) -- pre-v2 trades under the old RSI+EMA strategy are excluded from both sides so this is a genuine apples-to-apples comparison, not the bot's full lifetime return.",
+    realTotalReturnPct,
+    backtestTotalReturnPct,
+    backtest: { trades: fills.length, fills },
+  });
+}
+
+// Surfer SOLUSDT -- RSI(14)-arm + EMA(7,25)-liveMode, unchanged since deployment.
+async function runSurferSolusdtComparison() {
+  const sb = getSupabaseAdmin();
+  const [{ data: state }, { data: firstRun }] = await Promise.all([
+    sb.from("surfer_usdt_state").select("*").eq("id", 1).single(),
+    sb.from("surfer_usdt_runs").select("run_at").order("run_at", { ascending: true }).limit(1).maybeSingle(),
+  ]);
+  if (!state) return NextResponse.json({ ok: false, error: "No surfer_usdt_state row" });
+  const realTotalReturnPct = ((state.realized_pnl_usdt ?? 0) / 50) * 100;
+
+  const botStartMs = firstRun?.run_at ? new Date(firstRun.run_at).getTime() : Date.now() - 90 * 86400_000;
+  const warmupMs = 55 * 86400_000; // ~55 days, covers 12h EMA(25) warmup (needs ~50 days of 12h candles)
+  const start = botStartMs - warmupMs;
+  const end = Date.now();
+
+  const [c15raw, c12hraw] = await Promise.all([
+    fetchBinanceUsCandles("SOLUSDT", "15m", start, end),
+    fetchBinanceUsCandles("SOLUSDT", "12h", start, end),
+  ]);
+  const c15: Candle15m[] = c15raw.map((c) => ({ time: c.time, close: c.close }));
+  const c12h: Candle15m[] = c12hraw.map((c) => ({ time: c.time, close: c.close }));
+  if (c15.length === 0 || c12h.length === 0) return NextResponse.json({ ok: false, error: "No candle data returned" });
+
+  const { fills, totalReturnPct: backtestTotalReturnPct } = runSurferSolusdtReplay(c15, c12h);
+
+  return NextResponse.json({
+    ok: true,
+    windowStart: new Date(botStartMs).toISOString(),
+    windowEnd: new Date(end).toISOString(),
+    realTotalReturnPct,
+    backtestTotalReturnPct,
+    backtest: { trades: fills.length, fills },
+  });
+}
+
+// Hypertrade DCA -- continuous grid, live since 2026-09-11 (real money moved here on 2026-09-12).
+async function runHypertradeComparison() {
+  const sb = getSupabaseAdmin();
+  const [{ data: state }, { data: firstRun }] = await Promise.all([
+    sb.from("sol_hypertrade_paper_state").select("*").eq("id", 1).single(),
+    sb.from("sol_hypertrade_paper_runs").select("run_at").order("run_at", { ascending: true }).limit(1).maybeSingle(),
+  ]);
+  if (!state) return NextResponse.json({ ok: false, error: "No sol_hypertrade_paper_state row" });
+  const realTotalReturnPct = ((state.realized_pnl_usd ?? 0) / HT_SEED_USD) * 100;
+
+  const botStartMs = firstRun?.run_at ? new Date(firstRun.run_at).getTime() : Date.now() - 14 * 86400_000;
+  const end = Date.now();
+  const candles = await fetchBitfinex1mCandles("tSOLUSD", botStartMs, end);
+  if (candles.length === 0) return NextResponse.json({ ok: false, error: "No candle data returned" });
+
+  const { fills, totalReturnPct: backtestTotalReturnPct } = runHypertradeReplay(candles, HT_SEED_USD);
+
+  return NextResponse.json({
+    ok: true,
+    windowStart: new Date(botStartMs).toISOString(),
+    windowEnd: new Date(end).toISOString(),
+    note: "No real multi-level DCA cycle has happened yet to verify the DCA-add path against -- only the single-level entry/exit path has been checked against real fills. The size/drop/TP formulas themselves are imported directly from the live bot's own config file, not re-derived.",
+    realTotalReturnPct,
+    backtestTotalReturnPct,
+    backtest: { trades: fills.length, fills },
+  });
+}
+
 export async function GET(req: NextRequest) {
-  const bot = req.nextUrl.searchParams.get("bot"); // "jump-trail" | "solbtc-sizeconf"
+  const bot = req.nextUrl.searchParams.get("bot"); // "jump-trail" | "solbtc-sizeconf" | "surfer-solbtc" | "surfer-solusdt" | "hypertrade"
   if (bot === "solbtc-sizeconf") return runSizeconfComparison();
+  if (bot === "surfer-solbtc") return runSurferSolbtcComparison();
+  if (bot === "surfer-solusdt") return runSurferSolusdtComparison();
+  if (bot === "hypertrade") return runHypertradeComparison();
   if (bot !== "jump-trail") {
-    return NextResponse.json({ ok: false, error: "bot must be jump-trail or solbtc-sizeconf" }, { status: 400 });
+    return NextResponse.json({ ok: false, error: "bot must be jump-trail, solbtc-sizeconf, surfer-solbtc, surfer-solusdt, or hypertrade" }, { status: 400 });
   }
   const cfg = BOT_CONFIG[bot];
 
