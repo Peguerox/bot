@@ -1,10 +1,14 @@
 // Pure replay of server/sol-hypertrade-paper.ts's exact DCA-grid decision logic, for the
-// dashboard's Backtest comparison column. The live bot reacts to every real order-book tick;
-// this replay uses 1-min OHLC (high/low, not just close) so within-candle DCA/TP crossings aren't
-// missed -- matching this session's established "1-min HL execution" backtest convention. Ties
-// within the same candle resolve DCA-before-TP, exactly matching the live code's own documented
-// tie-break ("adverse fills first (DCA), then favorable (TP)"). Assumes fills AT the crossed
-// trigger price (not the candle close). Zero cost per fill -- verified against a real completed
+// dashboard's Backtest comparison column. The live bot's DCA/TP conditions check the real order
+// book's best bid/ask continuously -- this replay uses 1-min candle CLOSE only (NOT high/low)
+// as an approximation of that. High/low was tried first (matching this session's established
+// "1-min HL execution" convention from the original multi-year statistical backtest) but proved
+// too eager here: verified against a real cycle where the high/low version exited a full HOUR
+// before the real bot did, because a single small trade briefly printed at the TP price without
+// the actual best bid sustaining there. Close is a closer (if imperfect) proxy for what a
+// continuously-monitoring real order book actually sustained. Ties within the same candle resolve
+// DCA-before-TP, matching the live code's own documented tie-break ("adverse fills first (DCA),
+// then favorable (TP)"). Zero cost per fill -- verified against a real completed
 // cycle (entry cost=$14.3232, exit proceeds=$14.5447): real proceeds matches
 // total_cost*(1+tpPct/100) almost exactly (within $0.0035, pure execution noise), meaning the
 // recorded total_cost/proceeds are already effectively fee-exclusive (matches the strategy docs'
@@ -85,21 +89,23 @@ export function runHypertradeReplay(candles: Candle[], seedUsd: number, firstEnt
       seeded = true;
       if (firstEntry) continue;
     }
-    if (level === 0) { enter(c.open, c.time); continue; }
+    if (level === 0) { enter(c.close, c.time); continue; }
 
-    // Conservative tie-break within this candle: keep DCA-adding while the low has breached the
-    // next trigger, THEN check TP against the high -- matches the live comment's own documented
-    // ordering. A single big-range candle can cross multiple DCA levels in one pass, same as the
-    // live "while (ask <= nextDcaTrigger())" loop.
+    // Uses CLOSE, not high/low, to detect crossings -- verified against real fills that using the
+    // candle's high/low fires early: a real trade can briefly print at a price without the order
+    // book's actual best bid/ask (what the live bot's DCA/TP conditions check) sustaining there.
+    // Found via a real cycle where the high/low version exited a full HOUR before the real bot did
+    // (a momentary trade spike, not a real bid-side move) -- close is a closer proxy for "the
+    // price a continuously-monitoring real order book actually sustained."
     let guard = 0;
-    while (c.low <= nextDcaTrigger() && guard++ < 50) {
+    while (c.close <= nextDcaTrigger() && guard++ < 50) {
       dcaAdd(nextDcaTrigger(), c.time);
     }
     if (level > 0) {
       const tp = tpExitPrice();
-      if (c.high >= tp) {
+      if (c.close >= tp) {
         exit(tp, c.time);
-        enter(c.open, c.time); // continuous grid: immediately re-enter, matches live exitCycle()
+        enter(c.close, c.time); // continuous grid: immediately re-enter, matches live exitCycle()
       }
     }
   }
