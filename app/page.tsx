@@ -49,9 +49,11 @@ type SummaryRow = {
   elapsedMs: number;
   holdReturnPctNum: number | null;
   holdReturnDisplay: string;
+  backtestReturnPctNum: number | null;
+  backtestReturnDisplay: string;
 };
 
-type SortKey = "name" | "pnl" | "returnPctNum" | "ratePerDay" | "winRateNum" | "trades" | "elapsedMs" | "holdReturnPctNum";
+type SortKey = "name" | "pnl" | "returnPctNum" | "ratePerDay" | "winRateNum" | "trades" | "elapsedMs" | "holdReturnPctNum" | "backtestReturnPctNum";
 
 function SummaryCards({ rows }: { rows: SummaryRow[] }) {
   const [sortKey, setSortKey] = useState<SortKey>("ratePerDay");
@@ -96,6 +98,7 @@ function SummaryCards({ rows }: { rows: SummaryRow[] }) {
             <SortHeader label="PnL" sortKey="pnl" />
             <SortHeader label="Return" sortKey="returnPctNum" />
             <SortHeader label="Buy & Hold" sortKey="holdReturnPctNum" />
+            <SortHeader label="Backtest" sortKey="backtestReturnPctNum" />
             <SortHeader label="Speed" sortKey="ratePerDay" />
             <SortHeader label="Win Rate" sortKey="winRateNum" />
             <SortHeader label="Trades" sortKey="trades" />
@@ -128,6 +131,18 @@ function SummaryCards({ rows }: { rows: SummaryRow[] }) {
                     {r.returnPctNum >= r.holdReturnPctNum
                       ? <span className="text-green-500 ml-1" title="Beating buy &amp; hold">▲</span>
                       : <span className="text-red-500 ml-1" title="Lagging buy &amp; hold">▼</span>}
+                  </span>
+                )}
+              </td>
+              <td className="text-right py-3 px-4">
+                {r.backtestReturnPctNum == null ? (
+                  <span className="text-gray-600" title="No replay engine built for this bot yet">—</span>
+                ) : (
+                  <span className={r.backtestReturnPctNum >= 0 ? "text-gray-400" : "text-gray-500"}>
+                    {r.backtestReturnDisplay}
+                    {Math.abs(r.returnPctNum - r.backtestReturnPctNum) > 0.2
+                      ? <span className="text-yellow-500 ml-1" title="Live and backtest diverge by more than 0.2pp -- worth investigating">⚠</span>
+                      : <span className="text-green-500 ml-1" title="Live matches backtest closely">✓</span>}
                   </span>
                 )}
               </td>
@@ -1609,7 +1624,7 @@ export default function Dashboard() {
       { name: "Surfer SOLUSDT", badge: "LIVE",  state: surferUsdtState, runsTable: "surfer_usdt_runs",          pnlField: "realized_pnl_usdt", initial: 50, unit: "$", venue: "us" as const,       symbol: "SOLUSDT" },
       { name: "Surfer SOLBTC",  badge: "LIVE",  state: surferState,     runsTable: "surfer_runs",               pnlField: "realized_pnl_btc",  initial: SURFER_BTC_INITIAL, unit: "₿", venue: "us" as const,       symbol: "SOLBTC" },
       { name: "Hypertrade DCA", badge: "LIVE",  state: htState,         runsTable: "sol_hypertrade_paper_runs", pnlField: "realized_pnl_usd",  initial: HT_SEED_USD, unit: "$", venue: "bitfinex" as const, symbol: "tSOLUSD", tradesField: "total_cycles" },
-      { name: "SOL/BTC SizeConf", badge: "PAPER", state: szState,       runsTable: "solbtc_sizeconf_runs",      pnlField: "realized_pnl_btc",  initial: 1,  unit: "₿", venue: "bitfinex" as const, symbol: "tSOLBTC" },
+      { name: "SOL/BTC SizeConf", badge: "PAPER", state: szState,       runsTable: "solbtc_sizeconf_runs",      pnlField: "realized_pnl_btc",  initial: 1,  unit: "₿", venue: "bitfinex" as const, symbol: "tSOLBTC", backtestBotKey: "solbtc-sizeconf" },
     ];
 
     const rows: SummaryRow[] = [];
@@ -1644,12 +1659,28 @@ export default function Dashboard() {
         } catch { /* leave as unknown */ }
       }
 
+      let backtestReturnPctNum: number | null = null;
+      let backtestReturnDisplay = "—";
+      const backtestBotKey = (b as any).backtestBotKey as string | undefined;
+      if (backtestBotKey) {
+        try {
+          const res = await fetch(`/api/expected-vs-actual?bot=${backtestBotKey}`);
+          const data = await res.json();
+          if (data.ok && typeof data.backtestTotalReturnPct === "number") {
+            const pct: number = data.backtestTotalReturnPct;
+            backtestReturnPctNum = pct;
+            backtestReturnDisplay = `${pct >= 0 ? "+" : ""}${pct.toFixed(2)}%`;
+          }
+        } catch { /* leave as unavailable */ }
+      }
+
       rows.push({
         name: b.name, badge: b.badge, trades, winRate, winRateNum, running, elapsedMs,
         pnl,
         pnlDisplay: b.unit === "₿" ? `${pnl >= 0 ? "+" : ""}${pnl.toFixed(8)}₿` : `${pnl >= 0 ? "+" : ""}$${pnl.toFixed(2)}`,
         positive: pnl >= 0, returnPct, returnPctNum, ratePerDay, ratePerDayDisplay,
         holdReturnPctNum, holdReturnDisplay,
+        backtestReturnPctNum, backtestReturnDisplay,
       });
     }
 

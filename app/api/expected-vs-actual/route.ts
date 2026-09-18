@@ -231,10 +231,32 @@ async function runSizeconfComparison() {
     if (firstDivergenceIndex === null) firstDivergenceIndex = n;
   }
 
+  // Total return comparison (the actual point of the "Backtest" column) -- not just per-fill
+  // side/price matching, but the real question: over this exact real window, did replaying the
+  // same code produce the same overall P&L as what actually happened live? Reconstructs a
+  // portfolio for each fill sequence independently (real fills/costs vs backtest fills/costs,
+  // same cost_pct reused per index per the comment above) and marks any still-open position to
+  // the last known real price, so an in-progress cycle doesn't get silently dropped.
+  const currentPrice = batches[batches.length - 1].lastPrice;
+  function totalReturnPct(fills: { side: string; fillPrice: number }[], costs: (number | null)[]): number {
+    let btc = 1, sol = 0;
+    for (let k = 0; k < fills.length; k++) {
+      const cost = costs[k] ?? 0.0002;
+      if (fills[k].side === "SOL") { sol = btc * (1 - cost) / fills[k].fillPrice; btc = 0; }
+      else { btc = sol * fills[k].fillPrice * (1 - cost); sol = 0; }
+    }
+    const finalValue = btc + sol * currentPrice;
+    return (finalValue - 1) * 100;
+  }
+  const realTotalReturnPct = totalReturnPct(realFills, realCostSequence);
+  const backtestTotalReturnPct = totalReturnPct(backtestFills, realCostSequence);
+
   return NextResponse.json({
     ok: true,
     windowStart: new Date(start).toISOString(),
     windowEnd: new Date(end).toISOString(),
+    realTotalReturnPct,
+    backtestTotalReturnPct,
     matchedCount,
     rowMatches,
     real: { trades: realFills.length, fills: realFills },
