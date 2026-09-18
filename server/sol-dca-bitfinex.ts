@@ -3,6 +3,8 @@
 // SOL/BTC Participation hybrid (archived 2026-09-17, see docs/archive/README_shelved_participation_bot.md)
 // -> this, 2026-09-17). GitHub account migrated 2026-09-18, Render reconnected -- this comment
 // line is the test marker for confirming auto-deploy actually fires through the new connection.
+// Retest 2026-09-18 #2: toggled the Render GitHub App between all-repos/select-repos to force a
+// fresh authorization after the first reconnect silently stopped triggering auto-deploy.
 //
 // SOL/BTC "size confirmation" strategy — PAPER ONLY, no real orders. Original trade-count pressure
 // signal (U/W) gated by a 30-minute activity filter, with a separate tiny-trade (<0.1 SOL)
