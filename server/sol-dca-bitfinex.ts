@@ -9,8 +9,13 @@
 // pressure signal that lowers the entry threshold from 0.60 to 0.50 when small-trade direction
 // agrees. Independently verified against the reference CSV replay (see chat, ~0.24% headline
 // discrepancy) and separately verified event-for-event against a from-scratch reproduction on
-// 50,000 real trade batches (100% match on every side/pending/swap decision). Approved to build
-// against while further improvements are researched — see lib/solbtc-sizeconf-engine.ts.
+// 50,000 real trade batches (100% match on every side/pending/swap decision).
+//
+// 2026-09-18: upgraded to the "protection" candidate — drawdown-gated asymmetric threshold
+// tightening, an ER30 path-efficiency trail exit, 20s SOL-request expiry, and a failed-entry
+// forced exit. This is the best-verified strategy found so far, including on a genuine
+// out-of-sample window untouched by any tuning — see lib/solbtc-sizeconf-engine.ts for the
+// mechanism-by-mechanism verification notes.
 //
 // Execution model: driven by Bitfinex's real-time public trade tape (lib/bitfinex-public-trades-ws.ts),
 // NOT periodic polling — trades are buffered into same-millisecond batches exactly like the
@@ -18,13 +23,16 @@
 // advances the 30-minute activity window across real UTC minute boundaries (forward-filling
 // through minutes with zero trades) and periodically persists state.
 //
-// Cost model (2026-09-17): fill PRICE and TIMING still come from the trade tape exactly as
-// verified against the reference formula (untouched) -- only the COST deducted on each fill was
-// changed from a flat 0.02% assumption to the real live half-spread read off Bitfinex's public
-// order book at the moment of the fill ((ask-bid)/(ask+bid)), via the same connectPublicBook()
-// used by Worker 2. Falls back to the flat COST constant only if the book WS hasn't produced a
-// snapshot yet (e.g. the first few seconds after boot) -- those fills are marked cost_pct=null
-// in solbtc_sizeconf_trades so it's visible in the data which ones used a real measured spread.
+// Cost model (2026-09-17, extended 2026-09-18): fill PRICE and TIMING still come from the trade
+// tape exactly as verified against the reference formula (untouched) -- the COST deducted on each
+// fill is the real live half-spread read off Bitfinex's public order book at the moment of the
+// fill ((ask-bid)/(ask+bid)), via the same connectPublicBook() used by Worker 2. This same real
+// cost now also feeds the engine's internal drawdown-tightening math (previously that used a
+// separate flat assumption) -- one real number driving both what gets recorded AND how the
+// strategy behaves, instead of two different cost assumptions. Falls back to the flat COST
+// constant only if the book WS hasn't produced a snapshot yet (e.g. the first few seconds after
+// boot) -- those fills are marked cost_pct=null in solbtc_sizeconf_trades so it's visible in the
+// data which ones used a real measured spread.
 //
 // Known limitation: no historical backfill on restart. If the process is down, that gap in trade
 // history and minute-activity data is simply missed (the engine picks back up live from wherever
@@ -60,23 +68,33 @@ function sideOf(s: string): Side { return s === "SOL" ? "SOL" : "BTC"; }
 function engineFromRow(row: SolbtcSizeconfState): EngineState {
   return {
     side: sideOf(row.side), pending: row.pending ? sideOf(row.pending) : null,
-    queuedTs: row.queued_ts, lastFillTs: row.last_fill_ts,
+    queuedTs: row.queued_ts, lastFillTs: row.last_fill_ts, pendingRequestQ: row.pending_request_q,
     U: row.u, W: row.w, Ut: row.ut, Wt: row.wt, lastTinyTs: row.last_tiny_ts,
     lastLogPrice: row.last_log_price, qLagPrev: row.q_lag_prev,
     respNum: row.resp_num, respDen: row.resp_den, respBuf: row.resp_buf ?? [],
     active: row.active, minuteBuf: row.minute_buf ?? [],
-    windowMv: row.window_mv, windowCt: row.window_ct, prevMinuteClose: row.prev_minute_close,
+    windowMv: row.window_mv, windowSg: row.window_sg ?? 0, windowCt: row.window_ct,
+    prevMinuteClose: row.prev_minute_close, er30: row.er30 ?? 1.0,
+    logEquity: row.log_equity ?? 0, peakLogEquity: row.peak_log_equity ?? 0,
+    tightened: row.tightened ?? false,
+    peakSinceEntry: row.peak_since_entry, entryPrice: row.entry_price,
+    entryFillTs: row.entry_fill_ts, entryReached10bps: row.entry_reached_10bps ?? false,
   };
 }
 
 function rowFromEngine(s: EngineState): Record<string, unknown> {
   return {
     side: s.side, pending: s.pending, queued_ts: s.queuedTs, last_fill_ts: s.lastFillTs,
+    pending_request_q: s.pendingRequestQ,
     u: s.U, w: s.W, ut: s.Ut, wt: s.Wt, last_tiny_ts: s.lastTinyTs,
     last_log_price: s.lastLogPrice, q_lag_prev: s.qLagPrev,
     resp_num: s.respNum, resp_den: s.respDen, resp_buf: s.respBuf,
     active: s.active, minute_buf: s.minuteBuf,
-    window_mv: s.windowMv, window_ct: s.windowCt, prev_minute_close: s.prevMinuteClose,
+    window_mv: s.windowMv, window_sg: s.windowSg, window_ct: s.windowCt,
+    prev_minute_close: s.prevMinuteClose, er30: s.er30,
+    log_equity: s.logEquity, peak_log_equity: s.peakLogEquity, tightened: s.tightened,
+    peak_since_entry: s.peakSinceEntry, entry_price: s.entryPrice,
+    entry_fill_ts: s.entryFillTs, entry_reached_10bps: s.entryReached10bps,
   };
 }
 
@@ -136,9 +154,8 @@ function liveCostPct(): number | null {
   return (ask - bid) / (ask + bid); // half-spread as a fraction of mid
 }
 
-async function applyFill(fill: { side: Side; fillPrice: number; signalTs: number; latencyS: number }) {
+async function applyFill(fill: { side: Side; fillPrice: number; signalTs: number; latencyS: number }, costPct: number | null) {
   const btcBefore = btcBalance, solBefore = solQty;
-  const costPct = liveCostPct();
   const cost = costPct ?? COST;
   const signal_time = new Date(fill.signalTs * 1000).toISOString();
   const latencyNote = `latency=${fill.latencyS.toFixed(3)}s${fill.latencyS < 1.0 ? " *** BELOW 1s MINIMUM, INVESTIGATE ***" : ""}`;
@@ -183,11 +200,16 @@ function flushBatch() {
   if (!pendingBatch || !enabled) { pendingBatch = null; return; }
   const batch = pendingBatch;
   pendingBatch = null;
-  const res = processBatch(engine, batch);
+  // Real live half-spread, computed once and used consistently for BOTH the engine's internal
+  // drawdown-tightening math and the recorded trade cost -- previously these could see two
+  // different cost values (a separate liveCostPct() call inside applyFill, racing against book
+  // updates between the two calls).
+  const costPct = liveCostPct();
+  const res = processBatch(engine, batch, costPct ?? COST);
   engine = res.state;
   dirty = true;
   if (res.fill) {
-    applyFill(res.fill).catch((err) => console.error("applyFill failed:", err));
+    applyFill(res.fill, costPct).catch((err) => console.error("applyFill failed:", err));
   }
 }
 
@@ -302,7 +324,7 @@ async function main() {
   process.on("SIGTERM", shutdown);
 
   console.log(`Starting SOL/BTC Size-Confirmation PAPER worker (${INSTANCE_ID}), enabled=${enabled}.`);
-  console.log(`PAPER ONLY — trade-tape pressure + tiny-trade confirmation + activity gate, cost=${(COST*100).toFixed(3)}%/side, live WS trade tape.`);
+  console.log(`PAPER ONLY — protection strategy: pressure + tiny-trade confirmation + activity gate + DD-tightening + ER30 trail + failed-entry exit, cost=${(COST*100).toFixed(3)}%/side, live WS trade tape.`);
   connectPublicTrades(SYMBOL, onTick);
   connectPublicBook(SYMBOL);
 }

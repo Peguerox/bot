@@ -172,6 +172,14 @@ async function runSizeconfComparison() {
     filledClose.set(m, lastC);
   }
 
+  // The live worker's internal drawdown-tightening math now uses the REAL measured spread at
+  // each fill (see server/sol-dca-bitfinex.ts), not a flat assumption -- so this replay needs the
+  // same real per-fill costs to stay a faithful comparison, not an approximation drifting on its
+  // own flat guess. Since historical order-book depth isn't stored, use the actual recorded
+  // cost_pct from each real fill, in order, falling back to the flat COST constant for whichever
+  // fill(s) didn't have a live book snapshot yet (recorded as cost_pct=null).
+  const realCostSequence: (number | null)[] = trades.map((t: any) => t.cost_pct !== null ? parseFloat(t.cost_pct) : null);
+
   let state: EngineState = initialState();
   let lastMinuteClosed = firstMinute - 1;
   const backtestFills: { side: string; fillPrice: number; fillTime: string }[] = [];
@@ -183,7 +191,8 @@ async function runSizeconfComparison() {
       state = closeMinute(state, filledClose.get(m)!, minuteCount.get(m) ?? 0);
       lastMinuteClosed = m;
     }
-    const res = processBatch(state, b);
+    const costPct = realCostSequence[backtestFills.length] ?? undefined;
+    const res = processBatch(state, b, costPct);
     state = res.state;
     if (res.fill) {
       backtestFills.push({ side: res.fill.side, fillPrice: res.fill.fillPrice, fillTime: new Date(b.tsMs).toISOString() });

@@ -15,9 +15,14 @@ export type SolbtcSizeconfState = {
   resp_num: number; resp_den: number;
   resp_buf: { ts: number; num: number; den: number }[];
   active: boolean;
-  minute_buf: { movementBps: number; count: number }[];
-  window_mv: number; window_ct: number;
+  minute_buf: { movementBps: number; movementSigned: number; count: number }[];
+  window_mv: number; window_sg: number; window_ct: number;
   prev_minute_close: number | null;
+  er30: number;
+  log_equity: number; peak_log_equity: number; tightened: boolean;
+  peak_since_entry: number | null; entry_price: number | null;
+  entry_fill_ts: number | null; entry_reached_10bps: boolean;
+  pending_request_q: number | null;
   last_closed_minute: number | null;
   current_minute_count: number;
   current_minute_last_price: number | null;
