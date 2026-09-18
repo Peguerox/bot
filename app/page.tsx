@@ -1603,12 +1603,13 @@ export default function Dashboard() {
     // same $50 seed as every other bot, just BTC-denominated.
     const SURFER_BTC_INITIAL = 0.00075241;
 
-    // venue/symbol for the buy-and-hold comparison — the asset each bot actually trades
+    // venue/symbol for the buy-and-hold comparison — the asset each bot actually trades.
+    // Order matches the panels top-to-bottom: SurferUsdt, Surfer, Hypertrade, SizeConf.
     const bots = [
-      { name: "Surfer SOLBTC",  badge: "LIVE",  state: surferState,     runsTable: "surfer_runs",         pnlField: "realized_pnl_btc",  initial: SURFER_BTC_INITIAL, unit: "₿", venue: "us" as const,       symbol: "SOLBTC" },
-      { name: "Surfer SOLUSDT", badge: "LIVE",  state: surferUsdtState, runsTable: "surfer_usdt_runs",    pnlField: "realized_pnl_usdt", initial: 50, unit: "$", venue: "us" as const,       symbol: "SOLUSDT" },
-      { name: "Hypertrade DCA", badge: "LIVE",  state: htState,        runsTable: "sol_hypertrade_paper_runs", pnlField: "realized_pnl_usd",  initial: 50, unit: "$", venue: "bitfinex" as const, symbol: "tSOLUSD", tradesField: "total_cycles" },
-      { name: "SOL/BTC SizeConf", badge: "PAPER", state: szState,      runsTable: "solbtc_sizeconf_runs",      pnlField: "realized_pnl_btc",  initial: 1,  unit: "₿", venue: "bitfinex" as const, symbol: "tSOLBTC" },
+      { name: "Surfer SOLUSDT", badge: "LIVE",  state: surferUsdtState, runsTable: "surfer_usdt_runs",          pnlField: "realized_pnl_usdt", initial: 50, unit: "$", venue: "us" as const,       symbol: "SOLUSDT" },
+      { name: "Surfer SOLBTC",  badge: "LIVE",  state: surferState,     runsTable: "surfer_runs",               pnlField: "realized_pnl_btc",  initial: SURFER_BTC_INITIAL, unit: "₿", venue: "us" as const,       symbol: "SOLBTC" },
+      { name: "Hypertrade DCA", badge: "LIVE",  state: htState,         runsTable: "sol_hypertrade_paper_runs", pnlField: "realized_pnl_usd",  initial: HT_SEED_USD, unit: "$", venue: "bitfinex" as const, symbol: "tSOLUSD", tradesField: "total_cycles" },
+      { name: "SOL/BTC SizeConf", badge: "PAPER", state: szState,       runsTable: "solbtc_sizeconf_runs",      pnlField: "realized_pnl_btc",  initial: 1,  unit: "₿", venue: "bitfinex" as const, symbol: "tSOLBTC" },
     ];
 
     const rows: SummaryRow[] = [];
