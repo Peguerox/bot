@@ -246,7 +246,7 @@ async def tick():
 
         if side is not None:
             ae = avg_entry(legs)
-            tp = round_trigger(ae * (1 + TP_PCT / 100), up=(side == "long"))
+            tp = round_trigger(ae * (1 + TP_PCT / 100 if side == "long" else 1 - TP_PCT / 100), up=(side == "long"))
             sl = round_trigger(state["first_entry_price"] * (1 - SL_PCT / 100 if side == "long" else 1 + SL_PCT / 100), up=(side != "long"))
             deadline = (state.get("first_entry_time") or now_ms) + TIME_LIMIT_MIN * 60_000
 
