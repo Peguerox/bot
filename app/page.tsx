@@ -1442,6 +1442,97 @@ function SolbtcSizeconfPanel({
   );
 }
 
+function LighterOcoBtcPanel({
+  state, trades, runs, currentPrice, loading,
+}: {
+  state: any; trades: any[]; runs: any[]; currentPrice: number | null; loading: boolean;
+}) {
+  const side = state?.side ?? null;
+  const entryPrice = state?.entry_price ?? null;
+  const baseAmount = state?.base_amount_btc ?? null;
+  const seedUsd = state?.seed_usd ?? 20;
+  const realizedPnl = state?.realized_pnl_usd ?? 0;
+  const equity = seedUsd + realizedPnl;
+
+  const unrealizedUsd = side && entryPrice && baseAmount && currentPrice
+    ? (side === "long" ? (currentPrice - entryPrice) : (entryPrice - currentPrice)) * baseAmount
+    : null;
+
+  const closedTrades = trades.filter((t) => t.pnl_usd != null);
+  const wins = closedTrades.filter((t) => t.pnl_usd > 0).length;
+  const winRate = closedTrades.length > 0 ? (wins / closedTrades.length * 100).toFixed(1) : "—";
+
+  const [nowTick, setNowTick] = useState(Date.now());
+  useEffect(() => {
+    const id = setInterval(() => setNowTick(Date.now()), 5_000);
+    return () => clearInterval(id);
+  }, []);
+  const lastRunAge = runs?.[0]?.ran_at ? nowTick - new Date(runs[0].ran_at).getTime() : null;
+  const workerAlive = lastRunAge != null && lastRunAge < 90_000;
+
+  return (
+    <div className="bg-gray-900 rounded-xl p-5 space-y-5 flex flex-col">
+      <div className="space-y-1.5">
+        <div className="flex items-center gap-2">
+          <h2 className="text-white font-bold text-lg">Lighter BTC OCO (Worker 3)</h2>
+          <span className="text-xs font-bold px-2 py-0.5 rounded-full bg-red-500/20 text-red-400">REAL MONEY</span>
+          <span className={`text-xs font-bold px-2 py-0.5 rounded-full ${workerAlive ? "bg-green-500/20 text-green-400" : "bg-gray-700/40 text-gray-500"}`}>
+            {workerAlive ? "worker alive" : "worker offline"}
+          </span>
+        </div>
+        <p className="text-gray-500 text-xs">VWAP 15m mean-reversion, band 0% · TP 1.5% / SL 0.03% · real OCO bracket on Lighter · $20 seed, compounding · moved from SOL after real slippage on tight stops</p>
+      </div>
+
+      {loading ? (
+        <div className="grid grid-cols-2 gap-2 animate-pulse">
+          {[...Array(4)].map((_, i) => <div key={i} className="h-16 bg-gray-800 rounded-lg" />)}
+        </div>
+      ) : (
+        <div className="grid grid-cols-2 gap-2">
+          <Stat
+            label="Equity"
+            value={`$${equity.toFixed(4)}`}
+            sub={`${realizedPnl >= 0 ? "+" : ""}$${realizedPnl.toFixed(4)} realized`}
+            color={realizedPnl >= 0 ? "text-green-400" : "text-red-400"}
+          />
+          <Stat
+            label="Win Rate"
+            value={`${winRate}%`}
+            sub={`${closedTrades.length} trades (${wins}W/${closedTrades.length - wins}L)`}
+            color="text-blue-400"
+          />
+          <Stat
+            label="Position"
+            value={side ? side.toUpperCase() : "FLAT"}
+            sub={side && baseAmount ? `${baseAmount} BTC @ $${entryPrice?.toFixed(1)}` : "no open position"}
+            color={side === "long" ? "text-green-400" : side === "short" ? "text-red-400" : "text-gray-400"}
+          />
+          <Stat
+            label="Unrealized"
+            value={unrealizedUsd != null ? `${unrealizedUsd >= 0 ? "+" : ""}$${unrealizedUsd.toFixed(4)}` : "—"}
+            sub={currentPrice ? `mark $${currentPrice.toFixed(1)}` : "—"}
+            color={unrealizedUsd != null ? (unrealizedUsd >= 0 ? "text-green-400" : "text-red-400") : "text-gray-400"}
+          />
+        </div>
+      )}
+
+      <div className="space-y-1.5">
+        <p className="text-gray-400 text-xs font-semibold">Recent trades</p>
+        <div className="max-h-48 overflow-y-auto space-y-1">
+          {closedTrades.slice(0, 20).map((t) => (
+            <div key={t.id} className="flex items-center justify-between text-xs bg-gray-800/50 rounded px-2 py-1">
+              <span className={t.side === "long" ? "text-green-400" : "text-red-400"}>{t.side} · {t.reason}</span>
+              <span className="text-gray-400">${t.entry_price?.toFixed(1)} → ${t.exit_price?.toFixed(1)}</span>
+              <span className={t.pnl_usd >= 0 ? "text-green-400" : "text-red-400"}>{t.pnl_usd >= 0 ? "+" : ""}${t.pnl_usd?.toFixed(4)}</span>
+            </div>
+          ))}
+          {closedTrades.length === 0 && <p className="text-gray-600 text-xs">No closed trades yet.</p>}
+        </div>
+      </div>
+    </div>
+  );
+}
+
 // ── Dashboard ───────────────────────────────────────────────────────────────
 
 export default function Dashboard() {
@@ -1470,6 +1561,10 @@ export default function Dashboard() {
   const [szRuns,    setSzRuns]    = useState<any[]>([]);
   const [szToggling, setSzToggling] = useState(false);
   const [szClearing, setSzClearing] = useState(false);
+  const [ocoBtcState,  setOcoBtcState]  = useState<any>(null);
+  const [ocoBtcTrades, setOcoBtcTrades] = useState<any[]>([]);
+  const [ocoBtcRuns,   setOcoBtcRuns]   = useState<any[]>([]);
+  const [ocoBtcPrice,  setOcoBtcPrice]  = useState<number | null>(null);
 
   async function load() {
     const [
@@ -1485,6 +1580,9 @@ export default function Dashboard() {
       { data: szSt },
       { data: szTr },
       { data: szRs },
+      { data: ocoBtcSt },
+      { data: ocoBtcTr },
+      { data: ocoBtcRs },
     ] = await Promise.all([
       getSupabase().from("surfer_state").select("*").eq("id", 1).single(),
       getSupabase().from("surfer_trades").select("*").order("exit_time", { ascending: false }).limit(5000),
@@ -1498,6 +1596,9 @@ export default function Dashboard() {
       getSupabase().from("solbtc_sizeconf_state").select("*").eq("id", 1).single(),
       getSupabase().from("solbtc_sizeconf_trades").select("*").order("fill_time", { ascending: false }).limit(5000),
       getSupabase().from("solbtc_sizeconf_runs").select("id,run_at,data").order("run_at", { ascending: false }).limit(120),
+      getSupabase().from("lighter_oco_btc_state").select("*").eq("id", 1).single(),
+      getSupabase().from("lighter_oco_btc_trades").select("*").order("closed_at", { ascending: false }).limit(200),
+      getSupabase().from("lighter_oco_btc_runs").select("*").order("ran_at", { ascending: false }).limit(50),
     ]);
     setSurferState(surferSt ?? null);
     setSurferTrades(surferTr ?? []);
@@ -1511,6 +1612,17 @@ export default function Dashboard() {
     setSzState(szSt ?? null);
     setSzTrades(szTr ?? []);
     setSzRuns(szRs ?? []);
+    setOcoBtcState(ocoBtcSt ?? null);
+    setOcoBtcTrades(ocoBtcTr ?? []);
+    setOcoBtcRuns(ocoBtcRs ?? []);
+    fetch("https://mainnet.zklighter.elliot.ai/api/v1/orderBookOrders?market_id=1&limit=1")
+      .then((r) => r.json())
+      .then((ob) => {
+        const bid = parseFloat(ob?.bids?.[0]?.price);
+        const ask = parseFloat(ob?.asks?.[0]?.price);
+        if (bid && ask) setOcoBtcPrice((bid + ask) / 2);
+      })
+      .catch(() => {});
     setLoading(false);
   }
 
@@ -1801,6 +1913,17 @@ export default function Dashboard() {
             toggling={szToggling}
             onClearHistory={handleSzClearHistory}
             clearingHistory={szClearing}
+          />
+        </div>
+
+        {/* ── Lighter BTC OCO: Worker 3, real money */}
+        <div className="grid grid-cols-1 gap-6 items-start">
+          <LighterOcoBtcPanel
+            state={ocoBtcState}
+            trades={ocoBtcTrades}
+            runs={ocoBtcRuns}
+            currentPrice={ocoBtcPrice}
+            loading={loading}
           />
         </div>
 
