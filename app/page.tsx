@@ -1474,11 +1474,8 @@ function LighterOcoBtcPanel({
     <div className="bg-gray-900 rounded-xl p-5 space-y-5 flex flex-col">
       <div className="space-y-1.5">
         <div className="flex items-center gap-2">
-          <h2 className="text-white font-bold text-lg">Lighter BTC OCO (Worker 3)</h2>
-          <span className="text-xs font-bold px-2 py-0.5 rounded-full bg-red-500/20 text-red-400">REAL MONEY</span>
-          <span className={`text-xs font-bold px-2 py-0.5 rounded-full ${workerAlive ? "bg-green-500/20 text-green-400" : "bg-gray-700/40 text-gray-500"}`}>
-            {workerAlive ? "worker alive" : "worker offline"}
-          </span>
+          <h2 className="text-white font-bold text-lg">Lighter BTC OCO (archived)</h2>
+          <span className="text-xs font-bold px-2 py-0.5 rounded-full bg-gray-700/40 text-gray-400">STOPPED — replaced by DCA bot on Worker 3</span>
         </div>
         <p className="text-gray-500 text-xs">VWAP 15m mean-reversion, band 0% · TP 1.5% / SL 0.03% · real OCO bracket on Lighter · $20 seed, compounding · moved from SOL after real slippage on tight stops</p>
       </div>
@@ -1533,6 +1530,125 @@ function LighterOcoBtcPanel({
   );
 }
 
+function LighterStochDcaBtcPanel({
+  state, trades, runs, currentPrice, loading,
+}: {
+  state: any; trades: any[]; runs: any[]; currentPrice: number | null; loading: boolean;
+}) {
+  const side = state?.side ?? null;
+  const legs: any[] = state?.legs ?? [];
+  const dcaLevel = state?.dca_level ?? 0;
+  const firstEntryPrice = state?.first_entry_price ?? null;
+  const firstEntryTime = state?.first_entry_time ?? null;
+  const seedUsd = state?.seed_usd ?? 20;
+  const realizedPnl = state?.realized_pnl_usd ?? 0;
+  const equity = seedUsd + realizedPnl;
+
+  const totalNotional = legs.reduce((s, l) => s + l.usd_size, 0);
+  const totalQty = legs.reduce((s, l) => s + l.usd_size / l.price, 0);
+  const avgEntry = totalQty > 0 ? totalNotional / totalQty : null;
+
+  const unrealizedUsd = side && avgEntry && totalQty && currentPrice
+    ? (side === "long" ? (currentPrice - avgEntry) : (avgEntry - currentPrice)) * totalQty
+    : null;
+
+  const tpPrice = avgEntry != null ? (side === "long" ? avgEntry * 1.001 : avgEntry * 0.999) : null;
+  const slPrice = firstEntryPrice != null ? (side === "long" ? firstEntryPrice * 0.995 : firstEntryPrice * 1.005) : null;
+  const deadline = firstEntryTime != null ? firstEntryTime + 30 * 60_000 : null;
+
+  const closedTrades = trades.filter((t) => t.pnl_usd != null);
+  const wins = closedTrades.filter((t) => t.pnl_usd > 0).length;
+  const winRate = closedTrades.length > 0 ? (wins / closedTrades.length * 100).toFixed(1) : "—";
+
+  const [nowTick, setNowTick] = useState(Date.now());
+  useEffect(() => {
+    const id = setInterval(() => setNowTick(Date.now()), 5_000);
+    return () => clearInterval(id);
+  }, []);
+  const lastRunAge = runs?.[0]?.ran_at ? nowTick - new Date(runs[0].ran_at).getTime() : null;
+  const workerAlive = lastRunAge != null && lastRunAge < 90_000;
+  const minutesLeft = deadline != null ? Math.max(0, Math.round((deadline - nowTick) / 60_000)) : null;
+
+  return (
+    <div className="bg-gray-900 rounded-xl p-5 space-y-5 flex flex-col">
+      <div className="space-y-1.5">
+        <div className="flex items-center gap-2">
+          <h2 className="text-white font-bold text-lg">Lighter BTC Stochastic5 + DCA (Worker 3)</h2>
+          <span className="text-xs font-bold px-2 py-0.5 rounded-full bg-red-500/20 text-red-400">REAL MONEY</span>
+          <span className={`text-xs font-bold px-2 py-0.5 rounded-full ${workerAlive ? "bg-green-500/20 text-green-400" : "bg-gray-700/40 text-gray-500"}`}>
+            {workerAlive ? "worker alive" : "worker offline"}
+          </span>
+        </div>
+        <p className="text-gray-500 text-xs">%K(5) raw stochastic, no smoothing · fresh signal only (no memory in neutral zone) · 1:2:4 DCA legs at 0.06%/0.12% adverse · TP 0.10% off avg entry · SL 0.50% off first entry (fixed) · 30-min deadline · $20 seed · from the hypertrading DCA sweep, doc's own stress test showed it fails under +0.002% extra slippage — this is the live check</p>
+      </div>
+
+      {loading ? (
+        <div className="grid grid-cols-2 gap-2 animate-pulse">
+          {[...Array(4)].map((_, i) => <div key={i} className="h-16 bg-gray-800 rounded-lg" />)}
+        </div>
+      ) : (
+        <div className="grid grid-cols-2 gap-2">
+          <Stat
+            label="Equity"
+            value={`$${equity.toFixed(4)}`}
+            sub={`${realizedPnl >= 0 ? "+" : ""}$${realizedPnl.toFixed(4)} realized`}
+            color={realizedPnl >= 0 ? "text-green-400" : "text-red-400"}
+          />
+          <Stat
+            label="Win Rate"
+            value={`${winRate}%`}
+            sub={`${closedTrades.length} trades (${wins}W/${closedTrades.length - wins}L)`}
+            color="text-blue-400"
+          />
+          <Stat
+            label="Position"
+            value={side ? `${side.toUpperCase()} · leg ${legs.length}/3` : "FLAT"}
+            sub={avgEntry ? `avg $${avgEntry.toFixed(1)} · $${totalNotional.toFixed(2)} notional` : "no open position"}
+            color={side === "long" ? "text-green-400" : side === "short" ? "text-red-400" : "text-gray-400"}
+          />
+          <Stat
+            label="Unrealized"
+            value={unrealizedUsd != null ? `${unrealizedUsd >= 0 ? "+" : ""}$${unrealizedUsd.toFixed(4)}` : "—"}
+            sub={currentPrice ? `mark $${currentPrice.toFixed(1)}` : "—"}
+            color={unrealizedUsd != null ? (unrealizedUsd >= 0 ? "text-green-400" : "text-red-400") : "text-gray-400"}
+          />
+        </div>
+      )}
+
+      {side && (
+        <div className="grid grid-cols-3 gap-2 text-xs">
+          <div className="bg-gray-800/50 rounded px-2 py-1.5">
+            <div className="text-gray-500">TP</div>
+            <div className="text-green-400 font-semibold">${tpPrice?.toFixed(1)}</div>
+          </div>
+          <div className="bg-gray-800/50 rounded px-2 py-1.5">
+            <div className="text-gray-500">SL (fixed)</div>
+            <div className="text-red-400 font-semibold">${slPrice?.toFixed(1)}</div>
+          </div>
+          <div className="bg-gray-800/50 rounded px-2 py-1.5">
+            <div className="text-gray-500">Deadline</div>
+            <div className="text-yellow-400 font-semibold">{minutesLeft}m left</div>
+          </div>
+        </div>
+      )}
+
+      <div className="space-y-1.5">
+        <p className="text-gray-400 text-xs font-semibold">Recent trades</p>
+        <div className="max-h-48 overflow-y-auto space-y-1">
+          {closedTrades.slice(0, 20).map((t) => (
+            <div key={t.id} className="flex items-center justify-between text-xs bg-gray-800/50 rounded px-2 py-1">
+              <span className={t.side === "long" ? "text-green-400" : "text-red-400"}>{t.side} · {t.reason} · {t.legs_used}leg</span>
+              <span className="text-gray-400">${t.avg_entry_price?.toFixed(1)} → ${t.exit_price?.toFixed(1)}</span>
+              <span className={t.pnl_usd >= 0 ? "text-green-400" : "text-red-400"}>{t.pnl_usd >= 0 ? "+" : ""}${t.pnl_usd?.toFixed(4)}</span>
+            </div>
+          ))}
+          {closedTrades.length === 0 && <p className="text-gray-600 text-xs">No closed trades yet.</p>}
+        </div>
+      </div>
+    </div>
+  );
+}
+
 // ── Dashboard ───────────────────────────────────────────────────────────────
 
 export default function Dashboard() {
@@ -1565,6 +1681,9 @@ export default function Dashboard() {
   const [ocoBtcTrades, setOcoBtcTrades] = useState<any[]>([]);
   const [ocoBtcRuns,   setOcoBtcRuns]   = useState<any[]>([]);
   const [ocoBtcPrice,  setOcoBtcPrice]  = useState<number | null>(null);
+  const [dcaBtcState,  setDcaBtcState]  = useState<any>(null);
+  const [dcaBtcTrades, setDcaBtcTrades] = useState<any[]>([]);
+  const [dcaBtcRuns,   setDcaBtcRuns]   = useState<any[]>([]);
 
   async function load() {
     const [
@@ -1583,6 +1702,9 @@ export default function Dashboard() {
       { data: ocoBtcSt },
       { data: ocoBtcTr },
       { data: ocoBtcRs },
+      { data: dcaBtcSt },
+      { data: dcaBtcTr },
+      { data: dcaBtcRs },
     ] = await Promise.all([
       getSupabase().from("surfer_state").select("*").eq("id", 1).single(),
       getSupabase().from("surfer_trades").select("*").order("exit_time", { ascending: false }).limit(5000),
@@ -1599,6 +1721,9 @@ export default function Dashboard() {
       getSupabase().from("lighter_oco_btc_state").select("*").eq("id", 1).single(),
       getSupabase().from("lighter_oco_btc_trades").select("*").order("closed_at", { ascending: false }).limit(200),
       getSupabase().from("lighter_oco_btc_runs").select("*").order("ran_at", { ascending: false }).limit(50),
+      getSupabase().from("lighter_stoch_dca_btc_state").select("*").eq("id", 1).single(),
+      getSupabase().from("lighter_stoch_dca_btc_trades").select("*").order("closed_at", { ascending: false }).limit(200),
+      getSupabase().from("lighter_stoch_dca_btc_runs").select("*").order("ran_at", { ascending: false }).limit(50),
     ]);
     setSurferState(surferSt ?? null);
     setSurferTrades(surferTr ?? []);
@@ -1615,6 +1740,9 @@ export default function Dashboard() {
     setOcoBtcState(ocoBtcSt ?? null);
     setOcoBtcTrades(ocoBtcTr ?? []);
     setOcoBtcRuns(ocoBtcRs ?? []);
+    setDcaBtcState(dcaBtcSt ?? null);
+    setDcaBtcTrades(dcaBtcTr ?? []);
+    setDcaBtcRuns(dcaBtcRs ?? []);
     fetch("https://mainnet.zklighter.elliot.ai/api/v1/orderBookOrders?market_id=1&limit=1")
       .then((r) => r.json())
       .then((ob) => {
@@ -1916,7 +2044,18 @@ export default function Dashboard() {
           />
         </div>
 
-        {/* ── Lighter BTC OCO: Worker 3, real money */}
+        {/* ── Lighter BTC Stochastic5 + DCA: Worker 3, real money (active) */}
+        <div className="grid grid-cols-1 gap-6 items-start">
+          <LighterStochDcaBtcPanel
+            state={dcaBtcState}
+            trades={dcaBtcTrades}
+            runs={dcaBtcRuns}
+            currentPrice={ocoBtcPrice}
+            loading={loading}
+          />
+        </div>
+
+        {/* ── Lighter BTC OCO: archived, replaced by the DCA bot above */}
         <div className="grid grid-cols-1 gap-6 items-start">
           <LighterOcoBtcPanel
             state={ocoBtcState}
