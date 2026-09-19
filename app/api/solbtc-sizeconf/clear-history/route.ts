@@ -19,6 +19,7 @@ export async function POST() {
     active: false, minute_buf: [], window_mv: 0, window_sg: 0, window_ct: 0, prev_minute_close: null,
     er30: 1.0, log_equity: 0, peak_log_equity: 0, tightened: false,
     peak_since_entry: null, entry_price: null, entry_fill_ts: null, entry_reached_10bps: false,
+    entry_request_q: null,
     last_closed_minute: null, current_minute_count: 0, current_minute_last_price: null,
     entry_btc: null, realized_pnl_btc: 0, total_trades: 0, total_wins: 0, last_tick_at: null,
   }).eq("id", 1);

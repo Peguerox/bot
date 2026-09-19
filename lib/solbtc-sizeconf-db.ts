@@ -23,6 +23,7 @@ export type SolbtcSizeconfState = {
   peak_since_entry: number | null; entry_price: number | null;
   entry_fill_ts: number | null; entry_reached_10bps: boolean;
   pending_request_q: number | null;
+  entry_request_q: number | null;
   last_closed_minute: number | null;
   current_minute_count: number;
   current_minute_last_price: number | null;

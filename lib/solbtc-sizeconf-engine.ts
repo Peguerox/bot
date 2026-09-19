@@ -30,6 +30,19 @@
 //      (q <= 0.30, and below whatever q triggered the original entry request), force an exit even
 //      without a pressure-reversal signal. Protects against holding a "failed" entry indefinitely.
 //
+// 2026-09-18 upgrade to the "early response" challenger (SOLBTC_Early_Response_Challenger.md).
+// Independently reproduced on our own corrected 5yr CSV (not the 3yr window the challenger doc's
+// own search used) -- confirmed the improvement holds on the genuinely out-of-sample 2021-2023
+// years (+369.24%/28.37%DD vs the frozen protection benchmark's +238.85%/32.49%DD over that same
+// untouched window), so this isn't just an overfit artifact of the visible window. One honest
+// caveat found during verification: it's not uniformly better every single year (the year ending
+// 2024-09-16 was worse for this rule, 60.76% vs 75.37%) -- consistent with the doc's own "thin
+// margin, not a reliable guarantee" framing.
+//   5. Early response -- while holding SOL, if ALL of: holding age is between 180-900s, current
+//      price has dropped >=0.5% from entry, current pressure q<=0.40, AND q is below whatever q
+//      was observed at the ORIGINAL SOL-entry request (not the fill) -- exit early. This is lowest
+//      priority: only fires if pressure/trail/failed-entry didn't already trigger first.
+//
 // Architectural note: the backtest replays a fixed CSV array and groups trades into batches by
 // exact matching millisecond timestamp. This live engine is event-driven off a real-time trade
 // WebSocket instead -- batches are formed by buffering trades that share a timestamp until a
@@ -84,6 +97,7 @@ export type EngineState = {
   entryPrice: number | null;
   entryFillTs: number | null; // seconds
   entryReached10bps: boolean;
+  entryRequestQ: number | null; // q at the ORIGINAL SOL-entry request (not the fill), used by early response
 };
 
 export const TINY_SOL = 0.1;
@@ -109,6 +123,10 @@ export const TRAIL_PULLBACK = 0.0075;
 export const FAILED_ENTRY_ELAPSED_S = 3600;
 export const FAILED_ENTRY_DRAWDOWN = 0.005;
 export const FAILED_ENTRY_MAX_Q = 0.30;
+export const EARLY_RESPONSE_MIN_AGE_S = 180;
+export const EARLY_RESPONSE_MAX_AGE_S = 900;
+export const EARLY_RESPONSE_DRAWDOWN = 0.005;
+export const EARLY_RESPONSE_MAX_Q = 0.40;
 
 export function initialState(): EngineState {
   return {
@@ -123,6 +141,7 @@ export function initialState(): EngineState {
     er30: 1.0,
     logEquity: 0, peakLogEquity: 0, tightened: false,
     peakSinceEntry: null, entryPrice: null, entryFillTs: null, entryReached10bps: false,
+    entryRequestQ: null,
   };
 }
 
@@ -152,6 +171,7 @@ export function processBatch(s: EngineState, b: Batch, costPct: number = COST): 
   let entryPrice = s.entryPrice;
   let entryFillTs = s.entryFillTs;
   let entryReached10bps = s.entryReached10bps;
+  let entryRequestQ = s.entryRequestQ;
   let logEquity = s.logEquity;
   let peakLogEquity = s.peakLogEquity;
   let tightened = s.tightened;
@@ -175,6 +195,7 @@ export function processBatch(s: EngineState, b: Batch, costPct: number = COST): 
     logEquity += (side === "SOL" ? 1 : 0) * (x - fillLogPrice);
     if (side === "SOL") {
       peakSinceEntry = fp; entryPrice = fp; entryFillTs = tsS; entryReached10bps = false;
+      entryRequestQ = pendingRequestQ; // q at the request that led to THIS fill, persists through the hold
       pendingRequestQ = null;
     }
   } else {
@@ -233,7 +254,18 @@ export function processBatch(s: EngineState, b: Batch, costPct: number = COST): 
       entryReached10bps === false &&
       q <= FAILED_ENTRY_MAX_Q &&
       (pendingRequestQ === null || q < pendingRequestQ);
-    if (q < -sellThreshold || trailHit || failedEntryHit) {
+    // Lowest priority -- only checked if none of the above already triggered, matching the
+    // challenger doc's reason-attribution order (pressure, trail, failed-entry, early response).
+    let earlyResponseHit = false;
+    if (!(q < -sellThreshold) && !trailHit && !failedEntryHit &&
+        entryFillTs !== null && entryPrice !== null && entryRequestQ !== null) {
+      const age = tsS - entryFillTs;
+      earlyResponseHit = age >= EARLY_RESPONSE_MIN_AGE_S && age <= EARLY_RESPONSE_MAX_AGE_S &&
+        b.lastPrice <= entryPrice * (1 - EARLY_RESPONSE_DRAWDOWN) &&
+        q <= EARLY_RESPONSE_MAX_Q &&
+        q < entryRequestQ;
+    }
+    if (q < -sellThreshold || trailHit || failedEntryHit || earlyResponseHit) {
       pending = "BTC"; queuedTs = tsS;
     }
   }
@@ -242,7 +274,7 @@ export function processBatch(s: EngineState, b: Batch, costPct: number = COST): 
     state: {
       ...s, side, pending, queuedTs, lastFillTs, pendingRequestQ, U, W, Ut, Wt, lastTinyTs,
       lastLogPrice: x, qLagPrev: q, respNum, respDen, respBuf,
-      peakSinceEntry, entryPrice, entryFillTs, entryReached10bps,
+      peakSinceEntry, entryPrice, entryFillTs, entryReached10bps, entryRequestQ,
       logEquity, peakLogEquity, tightened,
     },
     fill, q, tinyQ, response,

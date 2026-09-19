@@ -83,6 +83,7 @@ function engineFromRow(row: SolbtcSizeconfState): EngineState {
     tightened: row.tightened ?? false,
     peakSinceEntry: row.peak_since_entry, entryPrice: row.entry_price,
     entryFillTs: row.entry_fill_ts, entryReached10bps: row.entry_reached_10bps ?? false,
+    entryRequestQ: row.entry_request_q ?? null,
   };
 }
 
@@ -99,6 +100,7 @@ function rowFromEngine(s: EngineState): Record<string, unknown> {
     log_equity: s.logEquity, peak_log_equity: s.peakLogEquity, tightened: s.tightened,
     peak_since_entry: s.peakSinceEntry, entry_price: s.entryPrice,
     entry_fill_ts: s.entryFillTs, entry_reached_10bps: s.entryReached10bps,
+    entry_request_q: s.entryRequestQ,
   };
 }
 
