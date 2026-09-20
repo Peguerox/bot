@@ -22,7 +22,7 @@ function formatDurationShort(ms: number): string {
   return `${remMins}m`;
 }
 
-function Stat({ label, value, sub, color }: { label: string; value: string; sub: string; color: string }) {
+function Stat({ label, value, sub, color }: { label: string; value: string; sub: React.ReactNode; color: string }) {
   return (
     <div className="bg-gray-800/60 rounded-lg p-3">
       <p className="text-gray-500 text-xs uppercase tracking-wide">{label}</p>
@@ -1501,7 +1501,15 @@ function LighterStochDcaBtcPanel({
           <Stat
             label="Equity"
             value={`$${equity.toFixed(4)}`}
-            sub={`${realizedPnl >= 0 ? "+" : ""}$${realizedPnl.toFixed(4)} (${realizedPnl >= 0 ? "+" : ""}${(realizedPnl / seedUsd * 100).toFixed(2)}%) realized`}
+            sub={
+              <>
+                {realizedPnl >= 0 ? "+" : ""}${realizedPnl.toFixed(4)}{" "}
+                <span className={`text-base font-bold ${realizedPnl >= 0 ? "text-green-400" : "text-red-400"}`}>
+                  ({realizedPnl >= 0 ? "+" : ""}{(realizedPnl / seedUsd * 100).toFixed(2)}%)
+                </span>{" "}
+                realized
+              </>
+            }
             color={realizedPnl >= 0 ? "text-green-400" : "text-red-400"}
           />
           <Stat
@@ -1526,14 +1534,14 @@ function LighterStochDcaBtcPanel({
       )}
 
       {side && (
-        <div className="grid grid-cols-2 gap-2 text-xs">
-          <div className="bg-gray-800/50 rounded px-2 py-1.5">
-            <div className="text-gray-500">TP</div>
-            <div className="text-green-400 font-semibold">${tpPrice?.toFixed(1)}</div>
+        <div className="grid grid-cols-2 gap-2">
+          <div className="bg-gray-800/50 rounded-lg px-3 py-2">
+            <div className="text-gray-500 text-xs uppercase tracking-wide">TP</div>
+            <div className="text-green-400 text-xl font-bold">${tpPrice?.toFixed(1)}</div>
           </div>
-          <div className="bg-gray-800/50 rounded px-2 py-1.5">
-            <div className="text-gray-500">SL (fixed)</div>
-            <div className="text-red-400 font-semibold">${slPrice?.toFixed(1)}</div>
+          <div className="bg-gray-800/50 rounded-lg px-3 py-2">
+            <div className="text-gray-500 text-xs uppercase tracking-wide">SL (fixed)</div>
+            <div className="text-red-400 text-xl font-bold">${slPrice?.toFixed(1)}</div>
           </div>
         </div>
       )}
