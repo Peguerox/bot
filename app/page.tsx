@@ -1521,8 +1521,8 @@ function CompactStochBtcPanel({
       )}
       <div className="space-y-1">
         <p className="text-gray-500 text-[10px] uppercase">Recent trades</p>
-        <div className="max-h-32 overflow-y-auto space-y-1 pr-0.5">
-          {closedTrades.slice(0, 10).map((t) => (
+        <div className="max-h-72 overflow-y-auto space-y-1 pr-0.5">
+          {closedTrades.slice(0, 20).map((t) => (
             <div key={t.id} className="flex items-center justify-between text-[11px] bg-gray-800/50 rounded px-1.5 py-1">
               <span className={t.side === "long" ? "text-green-400" : "text-red-400"}>{t.side}·{t.reason}</span>
               <span className="text-gray-500">${t.avg_entry_price?.toFixed(0)}→${t.exit_price?.toFixed(0)}</span>
@@ -2001,36 +2001,6 @@ export default function Dashboard() {
 
         {summaryData && <SummaryCards rows={summaryData} />}
 
-        {/* ── Live bots ── */}
-        <div className="grid grid-cols-1 md:grid-cols-2 gap-6 items-start">
-          <SurferUsdtPanel
-            trades={surferUsdtTrades}
-            surferState={surferUsdtState}
-            runs={surferUsdtRuns}
-            loading={loading}
-            enabled={surferUsdtState?.enabled ?? false}
-            onToggle={handleSurferUsdtToggle}
-            toggling={surferUsdtToggling}
-            onSellAll={handleSurferUsdtSellAll}
-            sellingAll={surferUsdtSellingAll}
-            onClearHistory={handleSurferUsdtClearHistory}
-            clearingHistory={surferUsdtClearing}
-          />
-          <SurferPanel
-            trades={surferTrades}
-            surferState={surferState}
-            runs={surferRuns}
-            loading={loading}
-            enabled={surferState?.enabled ?? false}
-            onToggle={handleSurferToggle}
-            toggling={surferToggling}
-            onSellAll={handleSurferSellAll}
-            sellingAll={surferSellingAll}
-            onClearHistory={handleSurferClearHistory}
-            clearingHistory={surferClearing}
-          />
-        </div>
-
         {/* ── Lighter BTC Stochastic5: 3-worker comparison, real money, $100 each */}
         <div className="grid grid-cols-1 sm:grid-cols-3 gap-3">
           <CompactStochBtcPanel
@@ -2062,6 +2032,36 @@ export default function Dashboard() {
             currentPrice={ocoBtcPrice}
             loading={loading}
             onToggled={load}
+          />
+        </div>
+
+        {/* ── Live bots ── */}
+        <div className="grid grid-cols-1 md:grid-cols-2 gap-6 items-start">
+          <SurferUsdtPanel
+            trades={surferUsdtTrades}
+            surferState={surferUsdtState}
+            runs={surferUsdtRuns}
+            loading={loading}
+            enabled={surferUsdtState?.enabled ?? false}
+            onToggle={handleSurferUsdtToggle}
+            toggling={surferUsdtToggling}
+            onSellAll={handleSurferUsdtSellAll}
+            sellingAll={surferUsdtSellingAll}
+            onClearHistory={handleSurferUsdtClearHistory}
+            clearingHistory={surferUsdtClearing}
+          />
+          <SurferPanel
+            trades={surferTrades}
+            surferState={surferState}
+            runs={surferRuns}
+            loading={loading}
+            enabled={surferState?.enabled ?? false}
+            onToggle={handleSurferToggle}
+            toggling={surferToggling}
+            onSellAll={handleSurferSellAll}
+            sellingAll={surferSellingAll}
+            onClearHistory={handleSurferClearHistory}
+            clearingHistory={surferClearing}
           />
         </div>
 
