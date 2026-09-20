@@ -39,8 +39,8 @@ STOCH_WINDOW = 5
 DCA_TRIGGER_1_PCT = 0.06
 DCA_TRIGGER_2_PCT = 0.12
 LEG_FRACTIONS = [1.0]  # no DCA: full equity on the single entry, no legs 2/3
-TP_PCT = 0.10
-SL_PCT = 0.15
+TP_PCT = 0.15
+SL_PCT = 0.11
 TIME_LIMIT_MIN = 30
 DCA_ENABLED = False
 
