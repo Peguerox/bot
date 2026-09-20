@@ -22,7 +22,7 @@ function formatDurationShort(ms: number): string {
   return `${remMins}m`;
 }
 
-function Stat({ label, value, sub, color }: { label: string; value: string; sub: React.ReactNode; color: string }) {
+function Stat({ label, value, sub, color }: { label: string; value: React.ReactNode; sub: React.ReactNode; color: string }) {
   return (
     <div className="bg-gray-800/60 rounded-lg p-3">
       <p className="text-gray-500 text-xs uppercase tracking-wide">{label}</p>
@@ -1500,16 +1500,15 @@ function LighterStochDcaBtcPanel({
         <div className="grid grid-cols-2 gap-2">
           <Stat
             label="Equity"
-            value={`$${equity.toFixed(4)}`}
-            sub={
+            value={
               <>
-                {realizedPnl >= 0 ? "+" : ""}${realizedPnl.toFixed(4)}{" "}
-                <span className={`text-base font-bold ${realizedPnl >= 0 ? "text-green-400" : "text-red-400"}`}>
+                ${equity.toFixed(4)}{" "}
+                <span className="text-base font-bold">
                   ({realizedPnl >= 0 ? "+" : ""}{(realizedPnl / seedUsd * 100).toFixed(2)}%)
-                </span>{" "}
-                realized
+                </span>
               </>
             }
+            sub={`${realizedPnl >= 0 ? "+" : ""}$${realizedPnl.toFixed(4)} realized`}
             color={realizedPnl >= 0 ? "text-green-400" : "text-red-400"}
           />
           <Stat
