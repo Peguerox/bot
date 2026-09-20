@@ -313,7 +313,17 @@ async def tick():
                 else:
                     update_state({"last_processed_candle_ts": candle_ts})
         else:
-            if entry_signal is not None and state.get("enabled"):
+            if abs(real_pos) > 0.000001:
+                # A previous attempt's order reported an error (e.g. a nonce race) but actually
+                # filled on-chain anyway -- adopt the real position instead of firing another
+                # entry order on top of it, which is what tripled position sizes on 2026-09-20.
+                adopted_side = "long" if real_pos > 0 else "short"
+                price = best_ask if adopted_side == "long" else best_bid
+                update_state({"side": adopted_side, "legs": [{"price": price, "usd_size": price * abs(real_pos)}],
+                              "first_entry_price": price, "first_entry_time": now_ms, "dca_level": 0,
+                              "collateral_before_entry": collateral, "last_processed_candle_ts": candle_ts})
+                log_run("adopted_orphan_position", {"side": adopted_side, "qty": abs(real_pos)})
+            elif entry_signal is not None and state.get("enabled"):
                 eq = equity_now(state)
                 leg_usd = eq * LEG_FRACTIONS[0]
                 price = best_ask if entry_signal == "long" else best_bid
