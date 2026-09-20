@@ -31,7 +31,7 @@ import lighter
 
 MARKET_INDEX = 1  # BTC
 BASE_URL = "https://mainnet.zklighter.elliot.ai"
-POLL_SECONDS = 15
+POLL_SECONDS = 1
 PRICE_DECIMALS = 1
 SIZE_DECIMALS = 5
 
@@ -267,16 +267,20 @@ async def tick():
             sl = round_trigger(state["first_entry_price"] * (1 - SL_PCT / 100 if side == "long" else 1 + SL_PCT / 100), up=(side != "long"))
             deadline = (state.get("first_entry_time") or now_ms) + TIME_LIMIT_MIN * 60_000
 
-            # opening-gap OCO first
+            # live-price OCO check -- uses the real best bid/ask fetched this tick (the actual
+            # achievable exit price), not the current candle's open, which can be up to a minute
+            # stale. A long exits by selling (check vs best_bid); a short exits by buying (check
+            # vs best_ask).
+            check_price = best_bid if side == "long" else best_ask
             gap_hit = None
             if side == "long":
-                if now_open <= sl: gap_hit = "SL"
-                elif now_open >= tp: gap_hit = "TP"
+                if check_price <= sl: gap_hit = "SL"
+                elif check_price >= tp: gap_hit = "TP"
             else:
-                if now_open >= sl: gap_hit = "SL"
-                elif now_open <= tp: gap_hit = "TP"
+                if check_price >= sl: gap_hit = "SL"
+                elif check_price <= tp: gap_hit = "TP"
             if gap_hit:
-                await close_all(gap_hit, now_open)
+                await close_all(gap_hit, check_price)
             elif now_ms >= deadline:
                 await close_all("TIME", now_open)
             elif signal is not None and signal != side:

@@ -1514,7 +1514,7 @@ function LighterStochDcaBtcPanel({
           />
           <Stat
             label="Position"
-            value={side ? `${side.toUpperCase()} · leg ${legs.length}/1` : "FLAT"}
+            value={side ? side.toUpperCase() : "FLAT"}
             sub={avgEntry ? `avg $${avgEntry.toFixed(1)} · $${totalNotional.toFixed(2)} notional` : "no open position"}
             color={side === "long" ? "text-green-400" : side === "short" ? "text-red-400" : "text-gray-400"}
           />
