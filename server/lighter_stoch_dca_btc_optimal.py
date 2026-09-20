@@ -20,7 +20,7 @@ import lighter
 
 MARKET_INDEX = 1  # BTC
 BASE_URL = "https://mainnet.zklighter.elliot.ai"
-POLL_SECONDS = 1
+POLL_SECONDS = 0.5
 PRICE_DECIMALS = 1
 SIZE_DECIMALS = 5
 
@@ -150,7 +150,7 @@ async def get_position(client, account_index):
 
 
 async def market_order(client, is_ask, base_amount, reduce_only, ref_price):
-    band = ref_price * (0.99 if is_ask else 1.01)
+    band = ref_price * (0.9995 if is_ask else 1.0005)  # tight band -- prefer no fill over a bad fill
     exec_price = price_to_int(band)
     base_amount_int = int(round(base_amount * (10 ** SIZE_DECIMALS)))
     co_idx = int(time.time() * 1000) % 500_000_000
