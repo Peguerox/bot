@@ -269,17 +269,18 @@ async def tick():
                 await close_all(gap_hit, check_price)
             elif reversal_signal is not None and reversal_signal != side:
                 await close_all("REVERSAL", now_open)
-                eq = equity_now(state)
-                leg_usd = eq * LEG_FRACTIONS[0]
-                price = best_ask if reversal_signal == "long" else best_bid
-                err = await market_order(client, is_ask=(reversal_signal == "short"), base_amount=leg_usd / price, reduce_only=False, ref_price=price)
-                if not err:
-                    await asyncio.sleep(1.5)
-                    _, collateral_after = await get_position(client, account_index)
-                    update_state({"side": reversal_signal, "legs": [{"price": price, "usd_size": leg_usd}],
-                                  "first_entry_price": price, "first_entry_time": now_ms, "dca_level": 0,
-                                  "collateral_before_entry": collateral_after, "last_processed_candle_ts": candle_ts})
-                    log_run("entered", {"signal": reversal_signal, "price": price, "via": "reversal"})
+                if state.get("enabled"):
+                    eq = equity_now(state)
+                    leg_usd = eq * LEG_FRACTIONS[0]
+                    price = best_ask if reversal_signal == "long" else best_bid
+                    err = await market_order(client, is_ask=(reversal_signal == "short"), base_amount=leg_usd / price, reduce_only=False, ref_price=price)
+                    if not err:
+                        await asyncio.sleep(1.5)
+                        _, collateral_after = await get_position(client, account_index)
+                        update_state({"side": reversal_signal, "legs": [{"price": price, "usd_size": leg_usd}],
+                                      "first_entry_price": price, "first_entry_time": now_ms, "dca_level": 0,
+                                      "collateral_before_entry": collateral_after, "last_processed_candle_ts": candle_ts})
+                        log_run("entered", {"signal": reversal_signal, "price": price, "via": "reversal"})
             else:
                 next_level = state.get("dca_level", 0) + 1
                 if DCA_ENABLED and next_level <= 2 and latest_closed is not None:
@@ -310,7 +311,7 @@ async def tick():
                 else:
                     update_state({"last_processed_candle_ts": candle_ts})
         else:
-            if entry_signal is not None:
+            if entry_signal is not None and state.get("enabled"):
                 eq = equity_now(state)
                 leg_usd = eq * LEG_FRACTIONS[0]
                 price = best_ask if entry_signal == "long" else best_bid
