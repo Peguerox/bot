@@ -215,6 +215,22 @@ async def tick():
             side = None
             legs = []
 
+        # Resync: real position is open but doesn't match tracked size (e.g. a double-entry from
+        # two processes briefly overlapping across a deploy). Reuses the same get_position() call
+        # above -- no extra request. Keeps the tracked avg price, corrects the tracked qty to match
+        # the real exchange position so the next close sells the actual full size instead of
+        # leaving a residual behind.
+        tracked_qty = total_qty(legs) if legs else 0.0
+        if side is not None and abs(real_pos) > 0.000001 and tracked_qty > 0:
+            same_direction = (real_pos > 0) == (side == "long")
+            mismatch_pct = abs(abs(real_pos) - tracked_qty) / tracked_qty
+            if same_direction and mismatch_pct > 0.02:
+                ae = avg_entry(legs)
+                legs = [{"price": ae, "usd_size": ae * abs(real_pos)}]
+                update_state({"legs": legs})
+                log_run("qty_resynced", {"side": side, "tracked_qty_before": tracked_qty,
+                                          "real_qty": abs(real_pos), "mismatch_pct": mismatch_pct})
+
         ob_url = f"{BASE_URL}/api/v1/orderBookOrders?market_id={MARKET_INDEX}&limit=1"
         with urllib.request.urlopen(ob_url, timeout=15) as resp:
             ob = jsonlib.loads(resp.read())
