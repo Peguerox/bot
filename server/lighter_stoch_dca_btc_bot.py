@@ -110,23 +110,36 @@ def fetch_candles(count=30):
     return sorted(data.get("c", []), key=lambda c: c["t"])
 
 
+ENTRY_LO, ENTRY_HI = 25, 75  # looser than reversal -- enters sooner, real data showed a small edge
+REVERSAL_LO, REVERSAL_HI = 20, 80  # proven setting, left unchanged
+
+
+def _sig(k, lo, hi):
+    if k is None:
+        return None
+    if k < lo:
+        return "long"
+    if k > hi:
+        return "short"
+    return None
+
+
 def compute_stoch_signal(candles):
-    # signal from the last FULLY completed candle (closed[:-1] excludes the in-progress one)
+    # entry/reversal signal from the last FULLY completed candle (closed[:-1] excludes the
+    # in-progress one). Returns (entry_signal, reversal_signal, timestamp) -- entry uses a looser
+    # threshold than reversal, so re-entries can fire earlier without changing how eagerly an open
+    # position flips.
     if len(candles) < STOCH_WINDOW + 2:
-        return None, None
+        return None, None, None
     closed = candles[:-1]
     window = closed[-STOCH_WINDOW:]
     hh = max(c["h"] for c in window)
     ll = min(c["l"] for c in window)
     ts = closed[-1]["t"]
     if hh == ll:
-        return None, ts
+        return None, None, ts
     k = 100 * (closed[-1]["c"] - ll) / (hh - ll)
-    if k < 20:
-        return "long", ts
-    if k > 80:
-        return "short", ts
-    return None, ts
+    return _sig(k, ENTRY_LO, ENTRY_HI), _sig(k, REVERSAL_LO, REVERSAL_HI), ts
 
 
 async def get_client():
@@ -189,7 +202,7 @@ async def tick():
     try:
         state = get_state()
         candles = fetch_candles()
-        signal, candle_ts = compute_stoch_signal(candles)
+        entry_signal, reversal_signal, candle_ts = compute_stoch_signal(candles)
         latest_closed = candles[-2] if len(candles) >= 2 else None
         now_open = candles[-1]["o"] if candles else None
         now_ms = candles[-1]["t"] if candles else int(time.time() * 1000)
@@ -280,20 +293,20 @@ async def tick():
                 elif check_price <= tp: gap_hit = "TP"
             if gap_hit:
                 await close_all(gap_hit, check_price)
-            elif signal is not None and signal != side:
+            elif reversal_signal is not None and reversal_signal != side:
                 await close_all("REVERSAL", now_open)
                 # open the other side fresh, same open
                 eq = equity_now(state)
                 leg_usd = eq * LEG_FRACTIONS[0]
-                price = best_ask if signal == "long" else best_bid
-                err = await market_order(client, is_ask=(signal == "short"), base_amount=leg_usd / price, reduce_only=False, ref_price=price)
+                price = best_ask if reversal_signal == "long" else best_bid
+                err = await market_order(client, is_ask=(reversal_signal == "short"), base_amount=leg_usd / price, reduce_only=False, ref_price=price)
                 if not err:
                     await asyncio.sleep(1.5)
                     _, collateral_after = await get_position(client, account_index)
-                    update_state({"side": signal, "legs": [{"price": price, "usd_size": leg_usd}],
+                    update_state({"side": reversal_signal, "legs": [{"price": price, "usd_size": leg_usd}],
                                   "first_entry_price": price, "first_entry_time": now_ms, "dca_level": 0,
                                   "collateral_before_entry": collateral_after, "last_processed_candle_ts": candle_ts})
-                    log_run("entered", {"signal": signal, "price": price, "via": "reversal"})
+                    log_run("entered", {"signal": reversal_signal, "price": price, "via": "reversal"})
             else:
                 # check DCA add eligibility
                 next_level = state.get("dca_level", 0) + 1
@@ -303,7 +316,7 @@ async def tick():
                     level_price = fe * (1 - trigger_pct / 100) if side == "long" else fe * (1 + trigger_pct / 100)
                     prev_close_passes = (latest_closed["c"] <= level_price) if side == "long" else (latest_closed["c"] >= level_price)
                     open_passes = (now_open <= level_price) if side == "long" else (now_open >= level_price)
-                    signal_favors = (signal != ("short" if side == "long" else "long"))
+                    signal_favors = (reversal_signal != ("short" if side == "long" else "long"))
                     last_dca_min = state.get("last_dca_minute")
                     this_min = now_ms // 60000
                     not_same_minute = last_dca_min is None or last_dca_min != this_min
@@ -325,21 +338,21 @@ async def tick():
                 else:
                     update_state({"last_processed_candle_ts": candle_ts})
         else:
-            if signal is not None:
+            if entry_signal is not None:
                 eq = equity_now(state)
                 leg_usd = eq * LEG_FRACTIONS[0]
-                price = best_ask if signal == "long" else best_bid
-                err = await market_order(client, is_ask=(signal == "short"), base_amount=leg_usd / price, reduce_only=False, ref_price=price)
+                price = best_ask if entry_signal == "long" else best_bid
+                err = await market_order(client, is_ask=(entry_signal == "short"), base_amount=leg_usd / price, reduce_only=False, ref_price=price)
                 if err:
-                    log_run("enter_failed", {"signal": signal, "error": str(err)})
+                    log_run("enter_failed", {"signal": entry_signal, "error": str(err)})
                     update_state({"last_processed_candle_ts": candle_ts})
                 else:
                     await asyncio.sleep(1.5)
                     _, collateral_after = await get_position(client, account_index)
-                    update_state({"side": signal, "legs": [{"price": price, "usd_size": leg_usd}],
+                    update_state({"side": entry_signal, "legs": [{"price": price, "usd_size": leg_usd}],
                                   "first_entry_price": price, "first_entry_time": now_ms, "dca_level": 0,
                                   "collateral_before_entry": collateral_after, "last_processed_candle_ts": candle_ts})
-                    log_run("entered", {"signal": signal, "price": price})
+                    log_run("entered", {"signal": entry_signal, "price": price})
             else:
                 update_state({"last_processed_candle_ts": candle_ts})
     finally:
