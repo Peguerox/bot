@@ -1552,7 +1552,7 @@ function LighterStochDcaBtcPanel({
             const pnlPct = notional > 0 ? (t.pnl_usd / notional * 100) : null;
             return (
               <div key={t.id} className="flex items-center justify-between text-xs bg-gray-800/50 rounded px-2 py-1">
-                <span className={t.side === "long" ? "text-green-400" : "text-red-400"}>{t.side} · {t.reason} · {t.legs_used}leg</span>
+                <span className={t.side === "long" ? "text-green-400" : "text-red-400"}>{t.side} · {t.reason}</span>
                 <span className="text-gray-400">${t.avg_entry_price?.toFixed(1)} → ${t.exit_price?.toFixed(1)}</span>
                 <span className={t.pnl_usd >= 0 ? "text-green-400" : "text-red-400"}>
                   {t.pnl_usd >= 0 ? "+" : ""}${t.pnl_usd?.toFixed(4)}{pnlPct != null ? ` (${pnlPct >= 0 ? "+" : ""}${pnlPct.toFixed(2)}%)` : ""}
