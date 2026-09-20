@@ -1465,7 +1465,7 @@ function LighterStochDcaBtcPanel({
     : null;
 
   const tpPrice = avgEntry != null ? (side === "long" ? avgEntry * 1.001 : avgEntry * 0.999) : null;
-  const slPrice = firstEntryPrice != null ? (side === "long" ? firstEntryPrice * 0.995 : firstEntryPrice * 1.005) : null;
+  const slPrice = firstEntryPrice != null ? (side === "long" ? firstEntryPrice * 0.9995 : firstEntryPrice * 1.0005) : null;
   const deadline = firstEntryTime != null ? firstEntryTime + 30 * 60_000 : null;
 
   const closedTrades = trades.filter((t) => t.pnl_usd != null);
@@ -1491,7 +1491,7 @@ function LighterStochDcaBtcPanel({
             {workerAlive ? "worker alive" : "worker offline"}
           </span>
         </div>
-        <p className="text-gray-500 text-xs">%K(5) raw stochastic, no smoothing · fresh signal only (no memory in neutral zone) · 1:2:4 DCA legs at 0.06%/0.12% adverse · TP 0.10% off avg entry · SL 0.50% off first entry (fixed) · 30-min deadline · $20 seed · from the hypertrading DCA sweep, doc's own stress test showed it fails under +0.002% extra slippage — this is the live check</p>
+        <p className="text-gray-500 text-xs">%K(5) raw stochastic, no smoothing · fresh signal only (no memory in neutral zone) · no DCA, full equity on entry · TP 0.10% off entry · SL 0.05% off entry (fixed) · 30-min deadline · $20 seed</p>
       </div>
 
       {loading ? (
@@ -1514,7 +1514,7 @@ function LighterStochDcaBtcPanel({
           />
           <Stat
             label="Position"
-            value={side ? `${side.toUpperCase()} · leg ${legs.length}/3` : "FLAT"}
+            value={side ? `${side.toUpperCase()} · leg ${legs.length}/1` : "FLAT"}
             sub={avgEntry ? `avg $${avgEntry.toFixed(1)} · $${totalNotional.toFixed(2)} notional` : "no open position"}
             color={side === "long" ? "text-green-400" : side === "short" ? "text-red-400" : "text-gray-400"}
           />
