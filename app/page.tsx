@@ -1465,7 +1465,7 @@ function LighterStochDcaBtcPanel({
     : null;
 
   const tpPrice = avgEntry != null ? (side === "long" ? avgEntry * 1.001 : avgEntry * 0.999) : null;
-  const slPrice = firstEntryPrice != null ? (side === "long" ? firstEntryPrice * 0.9995 : firstEntryPrice * 1.0005) : null;
+  const slPrice = firstEntryPrice != null ? (side === "long" ? firstEntryPrice * 0.995 : firstEntryPrice * 1.005) : null;
   const deadline = firstEntryTime != null ? firstEntryTime + 30 * 60_000 : null;
 
   const closedTrades = trades.filter((t) => t.pnl_usd != null);
@@ -1491,7 +1491,7 @@ function LighterStochDcaBtcPanel({
             {workerAlive ? "worker alive" : "worker offline"}
           </span>
         </div>
-        <p className="text-gray-500 text-xs">%K(5) raw stochastic, no smoothing · fresh signal only (no memory in neutral zone) · no DCA, full equity on entry · TP 0.10% off entry · SL 0.05% off entry (fixed) · 30-min deadline · $20 seed</p>
+        <p className="text-gray-500 text-xs">%K(5) raw stochastic, no smoothing · fresh signal only (no memory in neutral zone) · no DCA, full equity on entry · TP 0.10% off entry · SL 0.50% off entry (fixed) · checks live bid/ask every 1s · 30-min deadline · $20 seed</p>
       </div>
 
       {loading ? (
