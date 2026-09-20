@@ -265,7 +265,6 @@ async def tick():
             ae = avg_entry(legs)
             tp = round_trigger(ae * (1 + TP_PCT / 100 if side == "long" else 1 - TP_PCT / 100), up=(side == "long"))
             sl = round_trigger(state["first_entry_price"] * (1 - SL_PCT / 100 if side == "long" else 1 + SL_PCT / 100), up=(side != "long"))
-            deadline = (state.get("first_entry_time") or now_ms) + TIME_LIMIT_MIN * 60_000
 
             # live-price OCO check -- uses the real best bid/ask fetched this tick (the actual
             # achievable exit price), not the current candle's open, which can be up to a minute
@@ -281,8 +280,6 @@ async def tick():
                 elif check_price <= tp: gap_hit = "TP"
             if gap_hit:
                 await close_all(gap_hit, check_price)
-            elif now_ms >= deadline:
-                await close_all("TIME", now_open)
             elif signal is not None and signal != side:
                 await close_all("REVERSAL", now_open)
                 # open the other side fresh, same open

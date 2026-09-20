@@ -1466,7 +1466,6 @@ function LighterStochDcaBtcPanel({
 
   const tpPrice = avgEntry != null ? (side === "long" ? avgEntry * 1.001 : avgEntry * 0.999) : null;
   const slPrice = firstEntryPrice != null ? (side === "long" ? firstEntryPrice * 0.995 : firstEntryPrice * 1.005) : null;
-  const deadline = firstEntryTime != null ? firstEntryTime + 30 * 60_000 : null;
 
   const closedTrades = trades.filter((t) => t.pnl_usd != null);
   const wins = closedTrades.filter((t) => t.pnl_usd > 0).length;
@@ -1479,7 +1478,6 @@ function LighterStochDcaBtcPanel({
   }, []);
   const lastRunAge = runs?.[0]?.ran_at ? nowTick - new Date(runs[0].ran_at).getTime() : null;
   const workerAlive = lastRunAge != null && lastRunAge < 90_000;
-  const minutesLeft = deadline != null ? Math.max(0, Math.round((deadline - nowTick) / 60_000)) : null;
 
   return (
     <div className="bg-gray-900 rounded-xl p-5 space-y-5 flex flex-col">
@@ -1491,7 +1489,7 @@ function LighterStochDcaBtcPanel({
             {workerAlive ? "worker alive" : "worker offline"}
           </span>
         </div>
-        <p className="text-gray-500 text-xs">%K(5) raw stochastic, no smoothing · fresh signal only (no memory in neutral zone) · no DCA, full equity on entry · TP 0.10% off entry · SL 0.50% off entry (fixed) · checks live bid/ask every 1s · 30-min deadline · $20 seed</p>
+        <p className="text-gray-500 text-xs">%K(5) raw stochastic, no smoothing · fresh signal only (no memory in neutral zone) · no DCA, full equity on entry · TP 0.10% off entry · SL 0.50% off entry (fixed) · checks live bid/ask every 1s · no time limit · $20 seed</p>
       </div>
 
       {loading ? (
@@ -1528,7 +1526,7 @@ function LighterStochDcaBtcPanel({
       )}
 
       {side && (
-        <div className="grid grid-cols-3 gap-2 text-xs">
+        <div className="grid grid-cols-2 gap-2 text-xs">
           <div className="bg-gray-800/50 rounded px-2 py-1.5">
             <div className="text-gray-500">TP</div>
             <div className="text-green-400 font-semibold">${tpPrice?.toFixed(1)}</div>
@@ -1536,10 +1534,6 @@ function LighterStochDcaBtcPanel({
           <div className="bg-gray-800/50 rounded px-2 py-1.5">
             <div className="text-gray-500">SL (fixed)</div>
             <div className="text-red-400 font-semibold">${slPrice?.toFixed(1)}</div>
-          </div>
-          <div className="bg-gray-800/50 rounded px-2 py-1.5">
-            <div className="text-gray-500">Deadline</div>
-            <div className="text-yellow-400 font-semibold">{minutesLeft}m left</div>
           </div>
         </div>
       )}
