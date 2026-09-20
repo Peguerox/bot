@@ -1442,6 +1442,87 @@ function SolbtcSizeconfPanel({
   );
 }
 
+function CompactStochBtcPanel({
+  title, subtitle, table, state, trades, currentPrice, loading, onToggled,
+}: {
+  title: string; subtitle: string; table: string; state: any; trades: any[];
+  currentPrice: number | null; loading: boolean; onToggled: () => void;
+}) {
+  const [toggling, setToggling] = useState(false);
+  const side = state?.side ?? null;
+  const legs: any[] = state?.legs ?? [];
+  const seedUsd = state?.seed_usd ?? 100;
+  const realizedPnl = state?.realized_pnl_usd ?? 0;
+  const equity = seedUsd + realizedPnl;
+  const enabled = state?.enabled ?? false;
+
+  const totalNotional = legs.reduce((s, l) => s + l.usd_size, 0);
+  const totalQty = legs.reduce((s, l) => s + l.usd_size / l.price, 0);
+  const avgEntry = totalQty > 0 ? totalNotional / totalQty : null;
+  const unrealizedUsd = side && avgEntry && totalQty && currentPrice
+    ? (side === "long" ? (currentPrice - avgEntry) : (avgEntry - currentPrice)) * totalQty
+    : null;
+
+  const closedTrades = trades.filter((t) => t.pnl_usd != null);
+  const wins = closedTrades.filter((t) => t.pnl_usd > 0).length;
+  const winRate = closedTrades.length > 0 ? (wins / closedTrades.length * 100).toFixed(1) : "—";
+
+  async function handleToggle() {
+    setToggling(true);
+    await fetch("/api/lighter-btc-toggle", {
+      method: "POST", headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ table }),
+    });
+    await onToggled();
+    setToggling(false);
+  }
+
+  return (
+    <div className="bg-gray-900 rounded-xl p-4 space-y-3">
+      <div className="flex items-center justify-between">
+        <div>
+          <h3 className="text-white font-bold text-sm">{title}</h3>
+          <p className="text-gray-500 text-[11px]">{subtitle}</p>
+        </div>
+        <button
+          onClick={handleToggle}
+          disabled={toggling || loading}
+          className={`text-xs font-bold px-2.5 py-1 rounded-full ${enabled ? "bg-green-500/20 text-green-400" : "bg-gray-700/40 text-gray-500"}`}
+        >
+          {toggling ? "…" : enabled ? "ON" : "OFF"}
+        </button>
+      </div>
+      {loading ? (
+        <div className="h-16 bg-gray-800 rounded-lg animate-pulse" />
+      ) : (
+        <div className="grid grid-cols-2 gap-2 text-xs">
+          <div className="bg-gray-800/60 rounded-lg p-2">
+            <p className="text-gray-500 text-[10px] uppercase">Equity</p>
+            <p className={`font-bold ${realizedPnl >= 0 ? "text-green-400" : "text-red-400"}`}>
+              ${equity.toFixed(2)} <span className="text-[10px] font-normal">({realizedPnl >= 0 ? "+" : ""}{(realizedPnl / seedUsd * 100).toFixed(2)}%)</span>
+            </p>
+          </div>
+          <div className="bg-gray-800/60 rounded-lg p-2">
+            <p className="text-gray-500 text-[10px] uppercase">Win Rate</p>
+            <p className="font-bold text-blue-400">{winRate}% <span className="text-[10px] font-normal text-gray-500">({closedTrades.length})</span></p>
+          </div>
+          <div className="bg-gray-800/60 rounded-lg p-2 col-span-2">
+            <p className="text-gray-500 text-[10px] uppercase">Position</p>
+            <p className={`font-bold ${side === "long" ? "text-green-400" : side === "short" ? "text-red-400" : "text-gray-400"}`}>
+              {side ? side.toUpperCase() : "FLAT"}
+              {unrealizedUsd != null && (
+                <span className={`text-[10px] font-normal ml-1 ${unrealizedUsd >= 0 ? "text-green-400" : "text-red-400"}`}>
+                  ({unrealizedUsd >= 0 ? "+" : ""}${unrealizedUsd.toFixed(2)})
+                </span>
+              )}
+            </p>
+          </div>
+        </div>
+      )}
+    </div>
+  );
+}
+
 function LighterStochDcaBtcPanel({
   state, trades, runs, currentPrice, loading,
 }: {
@@ -1600,6 +1681,10 @@ export default function Dashboard() {
   const [dcaBtcState,  setDcaBtcState]  = useState<any>(null);
   const [dcaBtcTrades, setDcaBtcTrades] = useState<any[]>([]);
   const [dcaBtcRuns,   setDcaBtcRuns]   = useState<any[]>([]);
+  const [initialBtcState,  setInitialBtcState]  = useState<any>(null);
+  const [initialBtcTrades, setInitialBtcTrades] = useState<any[]>([]);
+  const [optimalBtcState,  setOptimalBtcState]  = useState<any>(null);
+  const [optimalBtcTrades, setOptimalBtcTrades] = useState<any[]>([]);
 
   async function load() {
     const [
@@ -1618,6 +1703,10 @@ export default function Dashboard() {
       { data: dcaBtcSt },
       { data: dcaBtcTr },
       { data: dcaBtcRs },
+      { data: initialBtcSt },
+      { data: initialBtcTr },
+      { data: optimalBtcSt },
+      { data: optimalBtcTr },
     ] = await Promise.all([
       getSupabase().from("surfer_state").select("*").eq("id", 1).single(),
       getSupabase().from("surfer_trades").select("*").order("exit_time", { ascending: false }).limit(5000),
@@ -1634,6 +1723,10 @@ export default function Dashboard() {
       getSupabase().from("lighter_stoch_dca_btc_state").select("*").eq("id", 1).single(),
       getSupabase().from("lighter_stoch_dca_btc_trades").select("*").order("closed_at", { ascending: false }).limit(200),
       getSupabase().from("lighter_stoch_dca_btc_runs").select("*").order("ran_at", { ascending: false }).limit(50),
+      getSupabase().from("lighter_btc_initial_state").select("*").eq("id", 1).single(),
+      getSupabase().from("lighter_btc_initial_trades").select("*").order("closed_at", { ascending: false }).limit(200),
+      getSupabase().from("lighter_btc_optimal_state").select("*").eq("id", 1).single(),
+      getSupabase().from("lighter_btc_optimal_trades").select("*").order("closed_at", { ascending: false }).limit(200),
     ]);
     setSurferState(surferSt ?? null);
     setSurferTrades(surferTr ?? []);
@@ -1650,6 +1743,10 @@ export default function Dashboard() {
     setDcaBtcState(dcaBtcSt ?? null);
     setDcaBtcTrades(dcaBtcTr ?? []);
     setDcaBtcRuns(dcaBtcRs ?? []);
+    setInitialBtcState(initialBtcSt ?? null);
+    setInitialBtcTrades(initialBtcTr ?? []);
+    setOptimalBtcState(optimalBtcSt ?? null);
+    setOptimalBtcTrades(optimalBtcTr ?? []);
     fetch("https://mainnet.zklighter.elliot.ai/api/v1/orderBookOrders?market_id=1&limit=1")
       .then((r) => r.json())
       .then((ob) => {
@@ -1919,14 +2016,37 @@ export default function Dashboard() {
           />
         </div>
 
-        {/* ── Lighter BTC Stochastic5 + DCA: Worker 3, real money (active) */}
-        <div className="grid grid-cols-1 gap-6 items-start">
-          <LighterStochDcaBtcPanel
-            state={dcaBtcState}
-            trades={dcaBtcTrades}
-            runs={dcaBtcRuns}
+        {/* ── Lighter BTC Stochastic5: 3-worker comparison, real money, $100 each */}
+        <div className="grid grid-cols-1 sm:grid-cols-3 gap-3">
+          <CompactStochBtcPanel
+            title="Worker 1 · Initial"
+            subtitle="TP 0.10% / SL 0.10% / 20-80"
+            table="lighter_btc_initial_state"
+            state={initialBtcState}
+            trades={initialBtcTrades}
             currentPrice={ocoBtcPrice}
             loading={loading}
+            onToggled={load}
+          />
+          <CompactStochBtcPanel
+            title="Worker 2 · Optimal"
+            subtitle="TP 0.10% / SL 0.11% / 25-75"
+            table="lighter_btc_optimal_state"
+            state={optimalBtcState}
+            trades={optimalBtcTrades}
+            currentPrice={ocoBtcPrice}
+            loading={loading}
+            onToggled={load}
+          />
+          <CompactStochBtcPanel
+            title="Worker 3 · Current"
+            subtitle="TP 0.15% / SL 0.11% / 25-75"
+            table="lighter_stoch_dca_btc_state"
+            state={dcaBtcState}
+            trades={dcaBtcTrades}
+            currentPrice={ocoBtcPrice}
+            loading={loading}
+            onToggled={load}
           />
         </div>
 
