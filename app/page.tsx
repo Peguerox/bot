@@ -1519,6 +1519,21 @@ function CompactStochBtcPanel({
           </div>
         </div>
       )}
+      <div className="space-y-1">
+        <p className="text-gray-500 text-[10px] uppercase">Recent trades</p>
+        <div className="max-h-32 overflow-y-auto space-y-1 pr-0.5">
+          {closedTrades.slice(0, 10).map((t) => (
+            <div key={t.id} className="flex items-center justify-between text-[11px] bg-gray-800/50 rounded px-1.5 py-1">
+              <span className={t.side === "long" ? "text-green-400" : "text-red-400"}>{t.side}·{t.reason}</span>
+              <span className="text-gray-500">${t.avg_entry_price?.toFixed(0)}→${t.exit_price?.toFixed(0)}</span>
+              <span className={t.pnl_usd >= 0 ? "text-green-400" : "text-red-400"}>
+                {t.pnl_usd >= 0 ? "+" : ""}${t.pnl_usd?.toFixed(3)}
+              </span>
+            </div>
+          ))}
+          {closedTrades.length === 0 && <p className="text-gray-600 text-[11px]">No closed trades yet.</p>}
+        </div>
+      </div>
     </div>
   );
 }
