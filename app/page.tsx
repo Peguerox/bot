@@ -1770,8 +1770,6 @@ export default function Dashboard() {
     const bots = [
       { name: "Surfer SOLUSDT", badge: "LIVE",  state: surferUsdtState, runsTable: "surfer_usdt_runs",          pnlField: "realized_pnl_usdt", initial: 50, unit: "$", venue: "us" as const,       symbol: "SOLUSDT", backtestBotKey: "surfer-solusdt" },
       { name: "Surfer SOLBTC",  badge: "LIVE",  state: surferState,     runsTable: "surfer_runs",               pnlField: "realized_pnl_btc",  initial: SURFER_BTC_INITIAL, unit: "₿", venue: "us" as const,       symbol: "SOLBTC", backtestBotKey: "surfer-solbtc" },
-      { name: "Hypertrade DCA", badge: "LIVE",  state: htState,         runsTable: "sol_hypertrade_paper_runs", pnlField: "realized_pnl_usd",  initial: HT_SEED_USD, unit: "$", venue: "bitfinex" as const, symbol: "tSOLUSD", tradesField: "total_cycles", backtestBotKey: "hypertrade" },
-      { name: "SOL/BTC SizeConf", badge: "PAPER", state: szState,       runsTable: "solbtc_sizeconf_runs",      pnlField: "realized_pnl_btc",  initial: 1,  unit: "₿", venue: "bitfinex" as const, symbol: "tSOLBTC", backtestBotKey: "solbtc-sizeconf" },
     ];
 
     const rows: SummaryRow[] = [];
@@ -1918,36 +1916,6 @@ export default function Dashboard() {
             sellingAll={surferSellingAll}
             onClearHistory={handleSurferClearHistory}
             clearingHistory={surferClearing}
-          />
-        </div>
-
-        {/* ── SOL Hypertrade: Worker 2 (replaced Jump Trail), LIVE real-money continuous-grid DCA since 2026-09-12 */}
-        <div className="grid grid-cols-1 gap-6 items-start">
-          <SolHypertradePaperPanel
-            trades={htTrades}
-            state={htState}
-            runs={htRuns}
-            loading={loading}
-            enabled={htState?.enabled ?? false}
-            onToggle={handleHtToggle}
-            toggling={htToggling}
-            onClearHistory={handleHtClearHistory}
-            clearingHistory={htClearing}
-          />
-        </div>
-
-        {/* ── SOL/BTC Size Confirmation: Worker 1 (replaced the archived Participation bot), PAPER since 2026-09-17 */}
-        <div className="grid grid-cols-1 gap-6 items-start">
-          <SolbtcSizeconfPanel
-            trades={szTrades}
-            state={szState}
-            runs={szRuns}
-            loading={loading}
-            enabled={szState?.enabled ?? false}
-            onToggle={handleSzToggle}
-            toggling={szToggling}
-            onClearHistory={handleSzClearHistory}
-            clearingHistory={szClearing}
           />
         </div>
 
