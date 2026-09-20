@@ -38,10 +38,11 @@ SIZE_DECIMALS = 5
 STOCH_WINDOW = 5
 DCA_TRIGGER_1_PCT = 0.06
 DCA_TRIGGER_2_PCT = 0.12
-LEG_FRACTIONS = [1 / 7, 2 / 7, 4 / 7]
+LEG_FRACTIONS = [1.0]  # no DCA: full equity on the single entry, no legs 2/3
 TP_PCT = 0.10
-SL_PCT = 0.50
+SL_PCT = 0.05
 TIME_LIMIT_MIN = 30
+DCA_ENABLED = False
 
 SUPABASE_URL = os.environ["NEXT_PUBLIC_SUPABASE_URL"]
 SUPABASE_KEY = os.environ["SUPABASE_SERVICE_ROLE_KEY"]
@@ -295,7 +296,7 @@ async def tick():
             else:
                 # check DCA add eligibility
                 next_level = state.get("dca_level", 0) + 1
-                if next_level <= 2 and latest_closed is not None:
+                if DCA_ENABLED and next_level <= 2 and latest_closed is not None:
                     trigger_pct = DCA_TRIGGER_1_PCT if next_level == 1 else DCA_TRIGGER_2_PCT
                     fe = state["first_entry_price"]
                     level_price = fe * (1 - trigger_pct / 100) if side == "long" else fe * (1 + trigger_pct / 100)
