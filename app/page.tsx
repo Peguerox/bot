@@ -1503,7 +1503,7 @@ function LighterStochDcaBtcPanel({
           <Stat
             label="Equity"
             value={`$${equity.toFixed(4)}`}
-            sub={`${realizedPnl >= 0 ? "+" : ""}$${realizedPnl.toFixed(4)} realized`}
+            sub={`${realizedPnl >= 0 ? "+" : ""}$${realizedPnl.toFixed(4)} (${realizedPnl >= 0 ? "+" : ""}${(realizedPnl / seedUsd * 100).toFixed(2)}%) realized`}
             color={realizedPnl >= 0 ? "text-green-400" : "text-red-400"}
           />
           <Stat
@@ -1520,7 +1520,7 @@ function LighterStochDcaBtcPanel({
           />
           <Stat
             label="Unrealized"
-            value={unrealizedUsd != null ? `${unrealizedUsd >= 0 ? "+" : ""}$${unrealizedUsd.toFixed(4)}` : "—"}
+            value={unrealizedUsd != null ? `${unrealizedUsd >= 0 ? "+" : ""}$${unrealizedUsd.toFixed(4)} (${unrealizedUsd >= 0 ? "+" : ""}${(unrealizedUsd / totalNotional * 100).toFixed(2)}%)` : "—"}
             sub={currentPrice ? `mark $${currentPrice.toFixed(1)}` : "—"}
             color={unrealizedUsd != null ? (unrealizedUsd >= 0 ? "text-green-400" : "text-red-400") : "text-gray-400"}
           />
@@ -1547,13 +1547,19 @@ function LighterStochDcaBtcPanel({
       <div className="space-y-1.5">
         <p className="text-gray-400 text-xs font-semibold">Recent trades</p>
         <div className="max-h-48 overflow-y-auto space-y-1">
-          {closedTrades.slice(0, 20).map((t) => (
-            <div key={t.id} className="flex items-center justify-between text-xs bg-gray-800/50 rounded px-2 py-1">
-              <span className={t.side === "long" ? "text-green-400" : "text-red-400"}>{t.side} · {t.reason} · {t.legs_used}leg</span>
-              <span className="text-gray-400">${t.avg_entry_price?.toFixed(1)} → ${t.exit_price?.toFixed(1)}</span>
-              <span className={t.pnl_usd >= 0 ? "text-green-400" : "text-red-400"}>{t.pnl_usd >= 0 ? "+" : ""}${t.pnl_usd?.toFixed(4)}</span>
-            </div>
-          ))}
+          {closedTrades.slice(0, 20).map((t) => {
+            const notional = (t.avg_entry_price ?? 0) * (t.base_amount_btc ?? 0);
+            const pnlPct = notional > 0 ? (t.pnl_usd / notional * 100) : null;
+            return (
+              <div key={t.id} className="flex items-center justify-between text-xs bg-gray-800/50 rounded px-2 py-1">
+                <span className={t.side === "long" ? "text-green-400" : "text-red-400"}>{t.side} · {t.reason} · {t.legs_used}leg</span>
+                <span className="text-gray-400">${t.avg_entry_price?.toFixed(1)} → ${t.exit_price?.toFixed(1)}</span>
+                <span className={t.pnl_usd >= 0 ? "text-green-400" : "text-red-400"}>
+                  {t.pnl_usd >= 0 ? "+" : ""}${t.pnl_usd?.toFixed(4)}{pnlPct != null ? ` (${pnlPct >= 0 ? "+" : ""}${pnlPct.toFixed(2)}%)` : ""}
+                </span>
+              </div>
+            );
+          })}
           {closedTrades.length === 0 && <p className="text-gray-600 text-xs">No closed trades yet.</p>}
         </div>
       </div>
