@@ -110,7 +110,9 @@ def fetch_candles(count=30):
     return sorted(data.get("c", []), key=lambda c: c["t"])
 
 
-ENTRY_LO, ENTRY_HI = 25, 75  # looser than reversal -- enters sooner, real data showed a small edge
+ENTRY_LO, ENTRY_HI = 25, 85  # asymmetric: %K "extremity past threshold" only showed real predictive
+                              # edge on the short side in backtest (2026-09-21) -- longs unchanged at 25,
+                              # shorts tightened to 85 to require a deeper overbought reading before fading
 REVERSAL_LO, REVERSAL_HI = 20, 80  # proven setting, left unchanged
 
 
