@@ -27,12 +27,19 @@ STOCH_WINDOW = 5
 DCA_TRIGGER_1_PCT = 0.06
 DCA_TRIGGER_2_PCT = 0.12
 LEG_FRACTIONS = [1.0]
-TP_PCT = 0.15
+TP_PCT = 0.10
 SL_PCT = 0.11
 DCA_ENABLED = False
 
 ENTRY_LO, ENTRY_HI = 25, 75
-REVERSAL_LO, REVERSAL_HI = 20, 80
+REVERSAL_LO, REVERSAL_HI = 25, 75
+
+# Efficiency Ratio trend filter: |net move| / |total path length| over ER_PERIOD closed
+# candles. Near 1 = strong directional trend, near 0 = chop. Entries are skipped (reversals
+# are not) when ER is above ER_MAX -- backtested 2026-09-21 on real BTC candles, ER(20)<=0.6
+# was the best total-pnl point (only filters out the most extreme trend moments).
+ER_PERIOD = 20
+ER_MAX = 0.6
 
 TABLE_STATE = "lighter_stoch_dca_btc_state"
 TABLE_TRADES = "lighter_stoch_dca_btc_trades"
@@ -132,6 +139,17 @@ def compute_stoch_signal(candles):
         return None, None, ts
     k = 100 * (closed[-1]["c"] - ll) / (hh - ll)
     return _sig(k, ENTRY_LO, ENTRY_HI), _sig(k, REVERSAL_LO, REVERSAL_HI), ts
+
+
+def compute_er(candles, period):
+    closed = candles[:-1]
+    if len(closed) < period + 1:
+        return None
+    window = closed[-(period + 1):]
+    closes = [c["c"] for c in window]
+    net = abs(closes[-1] - closes[0])
+    path = sum(abs(closes[i] - closes[i - 1]) for i in range(1, len(closes)))
+    return net / path if path > 0 else 0.0
 
 
 # ── Live state cache, fed by the WebSocket ──────────────────────────────────────────────────
@@ -311,6 +329,9 @@ async def tick(client, live, account_index):
     state = get_state()
     candles = candles_cache["data"]
     entry_signal, reversal_signal, candle_ts = compute_stoch_signal(candles)
+    er = compute_er(candles, ER_PERIOD)
+    if entry_signal is not None and er is not None and er > ER_MAX:
+        entry_signal = None
     latest_closed = candles[-2] if len(candles) >= 2 else None
     now_open = candles[-1]["o"] if candles else None
     now_ms = candles[-1]["t"] if candles else int(time.time() * 1000)

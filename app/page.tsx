@@ -2028,8 +2028,8 @@ export default function Dashboard() {
             onToggled={load}
           />
           <CompactStochBtcPanel
-            title="Worker 3 · Latest Tweak"
-            subtitle="TP 0.10% / SL 0.11% / long<25, short>85 asymmetric"
+            title="Worker 3 · ER Filter"
+            subtitle="TP 0.10% / SL 0.11% / 25-75 / window 5 / ER(20)≤0.6"
             table="lighter_stoch_dca_btc_state"
             state={dcaBtcState}
             trades={dcaBtcTrades}
