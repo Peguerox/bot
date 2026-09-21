@@ -532,13 +532,14 @@ async def main():
         while True:
             try:
                 await tick(client, live, account_index)
+                await asyncio.sleep(TICK_SECONDS)
             except Exception as e:
                 print(f"tick error: {e}")
                 try:
                     log_run("error", {"error": str(e)})
                 except Exception:
                     pass
-            await asyncio.sleep(TICK_SECONDS)
+                await asyncio.sleep(1.0)
     finally:
         ws_task.cancel()
         candle_task.cancel()
