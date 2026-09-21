@@ -155,9 +155,16 @@ class LiveState:
             self.ob_updated_at = time.time()
 
     def on_account(self, account_id, state):
-        if str(account_id) == self.account_key:
-            self.account = state
-            self.acct_updated_at = time.time()
+        if str(account_id) != self.account_key:
+            return
+        # Merge, don't replace: a message that carries a field as an explicit null must not
+        # wipe out previously-known-good data for that field (this produced a corrupted
+        # collateral reading -> a fake ~$100 "loss" logged, fixed 2026-09-21). Only overwrite
+        # keys the message actually provides a non-null value for.
+        for k, v in state.items():
+            if v is not None:
+                self.account[k] = v
+        self.acct_updated_at = time.time()
 
     def best_bid_ask(self):
         bids = self.order_book.get("bids") or []
@@ -177,7 +184,9 @@ class LiveState:
         pos_raw = positions.get(self.market_key) or {}
         sign = 1 if str(pos_raw.get("sign", 1)) in ("1", "True", "true") else -1
         pos = sign * float(pos_raw.get("position", 0) or 0)
-        collateral = 0.0
+        collateral = None  # None (not 0.0) if we never actually found a USDC entry -- a
+        # fabricated 0.0 here previously got treated as "account emptied", wiping out the
+        # tracked realized PnL on the next close (fixed 2026-09-21).
         assets = self.account.get("assets") or {}
         for asset in assets.values():
             if asset.get("symbol") == "USDC":
@@ -247,7 +256,9 @@ async def get_position_rest(client, account_index):
 
 async def read_position(client, live, account_index):
     if live.is_fresh():
-        return live.position_collateral()
+        pos, collateral = live.position_collateral()
+        if pos is not None and collateral is not None:
+            return pos, collateral
     return await get_position_rest(client, account_index)
 
 
