@@ -1,0 +1,723 @@
+"""
+Shared core for the three real-money Lighter BTC stochastic bots.
+
+The three workers used to be three near-identical ~560-line copies, which is how a fix
+landed on Worker 2 and silently missed Workers 1 and 3 more than once. Everything that is
+not a setting now lives here exactly once; the per-worker files are config + entrypoint.
+
+Hardening pass 2026-09-21 (after a 32-minute silent freeze on Workers 1 and 2):
+
+* **Every network call has a timeout.** The Lighter SDK defaults to `_request_timeout or
+  5 * 60` (lighter/rest.py) -- 300 seconds per REST call, which the bots never overrode.
+  A single `confirm_fill()` (4 tries) could therefore block for 20 minutes with no log
+  output at all, which is exactly what the observed freeze looked like: process alive,
+  Render reporting "live", zero activity, SL never firing.
+* **Order responses are never trusted.** A request that times out client-side can still
+  succeed on the exchange, and the SDK's nonce manager then hard-refreshes and reports
+  `invalid nonce` on the *next* call -- so an order that really filled gets recorded as a
+  failure and re-sent. That is the mechanism behind the phantom 2x positions. Every order
+  is now followed by an authoritative REST read of the real position, whatever the
+  response said.
+* **Fill confirmation is size-aware**, and an oversized position triggers an immediate
+  flatten + disable rather than being quietly adopted.
+* **Closes close what is really open**, read fresh from REST, not the tracked legs.
+* **No blocking I/O on the event loop.** Supabase and candle fetches use urllib, which
+  blocked the WS task while they ran, starving the order book and forcing the REST
+  fallback that caused the rate-limit storm. They run in a thread now.
+* **Watchdogs**: a stale order book forces a WS reconnect, and any tick exceeding
+  TICK_WATCHDOG is cancelled and logged instead of hanging forever.
+"""
+import asyncio
+import contextlib
+import os
+import time
+import urllib.request
+import json as jsonlib
+from dataclasses import dataclass
+from datetime import datetime, timezone
+from typing import Optional
+
+import lighter
+
+# ── Network safety budget ───────────────────────────────────────────────────────────────────
+# Worst-case pathological tick is bounded by these: reconcile confirm (~17s) + close (~59s)
+# + re-entry (~47s) ~= 125s, comfortably under TICK_WATCHDOG. A normal tick is ~0.5s.
+REST_TIMEOUT = 8.0        # per Lighter REST read (SDK default would be 300s)
+ORDER_TIMEOUT = 12.0      # per order placement / cancel-all
+SB_TIMEOUT = 10.0         # per Supabase call
+TICK_WATCHDOG = 180.0     # hard ceiling on one tick before it is cancelled
+WS_RECONNECT_AFTER = 45.0 # order book silence that forces a WS reconnect
+HEARTBEAT_EVERY = 300.0   # liveness row, so "is it stuck?" is a single query
+POST_ORDER_REST_WINDOW = 20.0  # after an order, prefer REST until the account push lands
+
+QTY_EPS = 1e-6
+OVERSIZE_FACTOR = 1.5     # real position this much bigger than intended => emergency flatten
+
+SUPABASE_URL = os.environ["NEXT_PUBLIC_SUPABASE_URL"]
+SUPABASE_KEY = os.environ["SUPABASE_SERVICE_ROLE_KEY"]
+
+
+@dataclass
+class BotConfig:
+    name: str
+    table_state: str
+    table_trades: str
+    table_runs: str
+    stoch_window: int
+    tp_pct: float
+    sl_pct: float
+    entry_lo: float
+    entry_hi: float
+    reversal_lo: float
+    reversal_hi: float
+    er_period: Optional[int] = None   # Efficiency Ratio trend filter; None = disabled
+    er_max: Optional[float] = None
+    market_index: int = 1
+    price_decimals: int = 1
+    size_decimals: int = 5
+    tick_seconds: float = 0.5
+
+
+# ── Pure helpers ────────────────────────────────────────────────────────────────────────────
+def ms_to_iso(ms):
+    if ms is None:
+        return "1970-01-01T00:00:00+00:00"
+    return datetime.fromtimestamp(ms / 1000, tz=timezone.utc).isoformat()
+
+
+def round_trigger(p, up):
+    step = 0.1
+    return (int(p / step) + (1 if up else 0)) * step if up else (int(p / step)) * step
+
+
+def _sig(k, lo, hi):
+    if k is None:
+        return None
+    if k < lo:
+        return "long"
+    if k > hi:
+        return "short"
+    return None
+
+
+def avg_entry(legs):
+    total_notional = sum(l["usd_size"] for l in legs)
+    total_qty_ = sum(l["usd_size"] / l["price"] for l in legs)
+    return total_notional / total_qty_ if total_qty_ else None
+
+
+def total_qty(legs):
+    return sum(l["usd_size"] / l["price"] for l in legs)
+
+
+def compute_er(candles, period):
+    """Kaufman Efficiency Ratio: |net move| / total path length over `period` closed candles.
+    Near 1 = clean directional trend, near 0 = chop."""
+    closed = candles[:-1]
+    if len(closed) < period + 1:
+        return None
+    window = closed[-(period + 1):]
+    closes = [c["c"] for c in window]
+    net = abs(closes[-1] - closes[0])
+    path = sum(abs(closes[i] - closes[i - 1]) for i in range(1, len(closes)))
+    return net / path if path > 0 else 0.0
+
+
+# ── Live state cache, fed by the WebSocket ──────────────────────────────────────────────────
+class LiveState:
+    def __init__(self, account_index, market_index):
+        self.account_key = str(account_index)
+        self.market_key = str(market_index)
+        self.order_book = {}
+        self.account = {}
+        self.ob_updated_at = 0.0
+        self.acct_updated_at = 0.0
+
+    def on_order_book(self, market_id, state):
+        if str(market_id) == self.market_key:
+            self.order_book = state
+            self.ob_updated_at = time.time()
+
+    def on_account(self, account_id, state):
+        if str(account_id) != self.account_key:
+            return
+        # Merge, don't replace: a message carrying a field as an explicit null must not wipe
+        # out previously-known-good data (this produced a corrupted collateral read and a
+        # fake ~$100 "loss" on 2026-09-21).
+        for k, v in state.items():
+            if v is not None:
+                self.account[k] = v
+        self.acct_updated_at = time.time()
+
+    def best_bid_ask(self):
+        bids = self.order_book.get("bids") or []
+        asks = self.order_book.get("asks") or []
+        if not bids or not asks:
+            return None, None
+        return max(float(b["price"]) for b in bids), min(float(a["price"]) for a in asks)
+
+    def position_collateral(self):
+        if not self.account:
+            return None, None
+        # `or {}` rather than .get(key, {}): these keys arrive as explicit nulls, and a dict
+        # default only applies when the key is absent.
+        positions = self.account.get("positions") or {}
+        pos_raw = positions.get(self.market_key) or {}
+        sign = 1 if str(pos_raw.get("sign", 1)) in ("1", "True", "true") else -1
+        pos = sign * float(pos_raw.get("position", 0) or 0)
+        collateral = None  # None, never a fabricated 0.0 -- a fake zero here previously got
+        # read as "account emptied" and wiped the tracked realized PnL on the next close.
+        assets = self.account.get("assets") or {}
+        for asset in assets.values():
+            if asset.get("symbol") == "USDC":
+                collateral = float(asset.get("margin_balance", 0) or 0)
+                break
+        return pos, collateral
+
+    def book_fresh(self, max_age=10.0):
+        """Only the order book. Account freshness is handled separately in read_position():
+        the account channel pushes on fills only, with no idle heartbeat, so demanding a
+        recent account push kept every idle bot permanently on the REST fallback."""
+        return time.time() - self.ob_updated_at < max_age
+
+
+class StochBot:
+    def __init__(self, cfg: BotConfig):
+        self.cfg = cfg
+        self.client = None
+        self.live = None
+        self.account_index = None
+        self.candles = []
+        self.last_order_ts = 0.0
+        self.ws_connected_at = 0.0
+        self.last_heartbeat = 0.0
+        self.last_stale_log = 0.0
+
+    # ── Supabase (off the event loop) ───────────────────────────────────────────────────────
+    def _sb_sync(self, method, path, body=None):
+        url = f"{SUPABASE_URL}/rest/v1/{path}"
+        data = jsonlib.dumps(body).encode() if body is not None else None
+        req = urllib.request.Request(url, data=data, method=method)
+        req.add_header("apikey", SUPABASE_KEY)
+        req.add_header("Authorization", f"Bearer {SUPABASE_KEY}")
+        req.add_header("Content-Type", "application/json")
+        if method in ("POST", "PATCH"):
+            req.add_header("Prefer", "return=representation")
+        with urllib.request.urlopen(req, timeout=SB_TIMEOUT) as resp:
+            raw = resp.read()
+            return jsonlib.loads(raw) if raw else None
+
+    async def sb(self, method, path, body=None):
+        # urllib is blocking; running it inline froze the WS task for the duration of every
+        # Supabase call, starving the order book and forcing the REST fallback.
+        return await asyncio.to_thread(self._sb_sync, method, path, body)
+
+    async def get_state(self):
+        rows = await self.sb("GET", f"{self.cfg.table_state}?id=eq.1")
+        return rows[0]
+
+    async def update_state(self, patch):
+        await self.sb("PATCH", f"{self.cfg.table_state}?id=eq.1", patch)
+
+    async def log_run(self, action, detail):
+        try:
+            await self.sb("POST", self.cfg.table_runs, {"action": action, "detail": detail})
+        except Exception as e:
+            print(f"  (log_run failed: {e})")
+
+    async def log_trade(self, side, ae, exit_price, base_amount, pnl_usd, reason, legs_used, opened_at):
+        await self.sb("POST", self.cfg.table_trades, {
+            "side": side, "avg_entry_price": ae, "exit_price": exit_price,
+            "base_amount_btc": base_amount, "pnl_usd": pnl_usd, "reason": reason,
+            "legs_used": legs_used, "opened_at": opened_at,
+        })
+
+    # ── Candles ─────────────────────────────────────────────────────────────────────────────
+    def _fetch_candles_sync(self, count=40):
+        end_ms = int(time.time() * 1000)
+        url = (f"https://mainnet.zklighter.elliot.ai/api/v1/candles?market_id={self.cfg.market_index}"
+               f"&resolution=1m&start_timestamp=0&end_timestamp={end_ms}&count_back={count}")
+        with urllib.request.urlopen(url, timeout=SB_TIMEOUT) as resp:
+            data = jsonlib.loads(resp.read())
+        return sorted(data.get("c", []), key=lambda c: c["t"])
+
+    async def run_candle_refresh_forever(self):
+        while True:
+            try:
+                self.candles = await asyncio.to_thread(self._fetch_candles_sync)
+            except Exception as e:
+                await self.log_run("candle_fetch_failed", {"error": str(e)[:300]})
+            now = time.time()
+            next_boundary = (int(now // 60) + 1) * 60 + 1.5  # just after the minute rolls over
+            await asyncio.sleep(max(1.0, next_boundary - now))
+
+    def compute_stoch_signal(self):
+        c = self.candles
+        w = self.cfg.stoch_window
+        if len(c) < w + 2:
+            return None, None, None
+        closed = c[:-1]
+        window = closed[-w:]
+        hh = max(x["h"] for x in window)
+        ll = min(x["l"] for x in window)
+        ts = closed[-1]["t"]
+        if hh == ll:
+            return None, None, ts
+        k = 100 * (closed[-1]["c"] - ll) / (hh - ll)
+        return (_sig(k, self.cfg.entry_lo, self.cfg.entry_hi),
+                _sig(k, self.cfg.reversal_lo, self.cfg.reversal_hi), ts)
+
+    # ── WebSocket with a staleness watchdog ─────────────────────────────────────────────────
+    async def _ws_session(self):
+        ws = lighter.WsClient(
+            order_book_ids=[self.cfg.market_index], account_ids=[self.account_index],
+            on_order_book_update=self.live.on_order_book, on_account_update=self.live.on_account,
+        )
+        self.ws_connected_at = time.time()
+        await ws.run_async()
+
+    async def run_ws_forever(self):
+        # `async for message in ws` never raises if the socket half-dies, so exception-only
+        # reconnect is not enough: watch the data itself and force a reconnect on silence.
+        while True:
+            task = asyncio.create_task(self._ws_session())
+            try:
+                while not task.done():
+                    await asyncio.sleep(2.0)
+                    quiet_since = max(self.live.ob_updated_at, self.ws_connected_at)
+                    age = time.time() - quiet_since
+                    if age > WS_RECONNECT_AFTER:
+                        await self.log_run("ws_watchdog_reconnect", {"ob_age": round(age, 1)})
+                        break
+                if task.done() and not task.cancelled():
+                    exc = task.exception()
+                    if exc is not None:
+                        await self.log_run("ws_disconnected", {"error": str(exc)[:300]})
+            except Exception as e:
+                await self.log_run("ws_supervisor_error", {"error": str(e)[:300]})
+            finally:
+                task.cancel()
+                with contextlib.suppress(BaseException):
+                    await task
+            await asyncio.sleep(1.0)
+
+    # ── Exchange reads/writes, all timeout-bounded ──────────────────────────────────────────
+    async def get_position_rest(self):
+        account_api = lighter.AccountApi(self.client.api_client)
+        acct = await asyncio.wait_for(
+            account_api.account(by="index", value=str(self.account_index),
+                                _request_timeout=REST_TIMEOUT),
+            timeout=REST_TIMEOUT + 2.0,
+        )
+        a = acct.accounts[0]
+        pos = 0.0
+        for p in a.positions:
+            if p.market_id == self.cfg.market_index:
+                sign = 1 if str(getattr(p, "sign", 1)) in ("1", "True", "true") else -1
+                pos = sign * float(p.position)
+        return pos, float(a.collateral)
+
+    async def read_position(self):
+        """WS when it is trustworthy, REST when it is not.
+
+        The account channel pushes only on fills, so between trades the cached account data
+        is old but still correct. The one window where "old" also means "wrong" is right
+        after we send an order: the book stays fresh while the account push is still in
+        flight, and reading a pre-fill position there is exactly how a duplicate entry gets
+        placed. So prefer REST for a short window after any order we sent.
+        """
+        stale_after_order = (
+            time.time() - self.last_order_ts < POST_ORDER_REST_WINDOW
+            and self.live.acct_updated_at < self.last_order_ts
+        )
+        if self.live.book_fresh() and not stale_after_order:
+            pos, coll = self.live.position_collateral()
+            if pos is not None and coll is not None:
+                return pos, coll
+        now = time.time()
+        if now - self.last_stale_log > 60.0:
+            self.last_stale_log = now
+            if not self.live.book_fresh():
+                await self.log_run("ws_stale", {"ob_age": round(now - self.live.ob_updated_at, 1)})
+        return await self.get_position_rest()
+
+    async def confirm_fill(self, want_nonzero, expect_qty=None, tries=4, delay=1.0):
+        """Authoritative REST answer to 'what is the real position right now'.
+
+        Never reads the WS cache: account broadcasts lagging a real fill by more than one
+        check is what stacked 19 real orders into a ~$1900 position on 2026-09-21. When
+        `expect_qty` is given, a position far smaller than requested counts as not-yet-
+        settled rather than done, so a partial fill is not mistaken for the finished size.
+        """
+        pos, coll = 0.0, None
+        for attempt in range(tries):
+            try:
+                pos, coll = await self.get_position_rest()
+            except Exception as e:
+                if attempt == tries - 1:
+                    await self.log_run("confirm_fill_read_failed", {"error": str(e)[:200]})
+                    return pos, coll, False
+                await asyncio.sleep(delay)
+                continue
+            settled = (abs(pos) > QTY_EPS) == want_nonzero
+            if settled and want_nonzero and expect_qty:
+                if abs(pos) < expect_qty * 0.5:
+                    settled = False
+            if settled:
+                return pos, coll, True
+            if attempt < tries - 1:
+                await asyncio.sleep(delay)
+        return pos, coll, False
+
+    async def place_order(self, is_ask, base_amount, reduce_only, ref_price):
+        """Returns an error string, or None. A returned error means *unknown*, not 'no fill'
+        -- callers must verify against the real position either way."""
+        band = ref_price * (0.9995 if is_ask else 1.0005)  # tight: prefer no fill over a bad fill
+        exec_price = int(round(band * (10 ** self.cfg.price_decimals)))
+        base_amount_int = int(round(base_amount * (10 ** self.cfg.size_decimals)))
+        co_idx = int(time.time() * 1000) % 500_000_000
+        self.last_order_ts = time.time()
+        try:
+            order, resp, err = await asyncio.wait_for(
+                self.client.create_market_order(
+                    market_index=self.cfg.market_index, client_order_index=co_idx,
+                    base_amount=base_amount_int, avg_execution_price=exec_price,
+                    is_ask=is_ask, reduce_only=reduce_only,
+                ),
+                timeout=ORDER_TIMEOUT,
+            )
+            return err
+        except asyncio.TimeoutError:
+            return "TIMEOUT: order request exceeded ORDER_TIMEOUT (may still have filled)"
+        except Exception as e:
+            return f"EXCEPTION: {str(e)[:200]}"
+
+    async def cancel_all(self):
+        try:
+            await asyncio.wait_for(
+                self.client.cancel_all_orders(
+                    time_in_force=self.client.CANCEL_ALL_TIF_IMMEDIATE, timestamp_ms=0,
+                    cancel_all_market_index=self.cfg.market_index,
+                ),
+                timeout=ORDER_TIMEOUT,
+            )
+        except Exception as e:
+            await self.log_run("cancel_all_failed", {"error": str(e)[:200]})
+
+    async def emergency_flatten(self, reason, detail):
+        """Real position is larger than anything we asked for. Get flat and stop trading --
+        this is the guard against repeating the ~20x-leverage incident."""
+        await self.log_run("oversize_detected", detail)
+        await self.cancel_all()
+        for _ in range(3):
+            pos, _coll = await self.get_position_rest()
+            if abs(pos) <= QTY_EPS:
+                break
+            bid, ask = self.live.best_bid_ask()
+            ref = bid if pos > 0 else ask
+            if ref is None:
+                await self.log_run("emergency_flatten_no_book", {"residual": pos})
+                break
+            await self.place_order(is_ask=(pos > 0), base_amount=abs(pos),
+                                   reduce_only=True, ref_price=ref)
+            await asyncio.sleep(1.0)
+        pos_after, _c, flat = await self.confirm_fill(want_nonzero=False, tries=3, delay=1.0)
+        await self.update_state({
+            "enabled": False, "side": None, "legs": [], "first_entry_price": None,
+            "first_entry_time": None, "dca_level": 0,
+        })
+        await self.log_run("emergency_flatten", {"reason": reason, "flat": flat,
+                                                 "residual": pos_after})
+
+    # ── Entry / exit ────────────────────────────────────────────────────────────────────────
+    async def try_enter(self, signal, price, leg_usd, via, candle_ts, state, collateral_hint):
+        fail_count = state.get("consecutive_entry_failures", 0) or 0
+        intended_qty = leg_usd / price
+        err = await self.place_order(is_ask=(signal == "short"), base_amount=intended_qty,
+                                     reduce_only=False, ref_price=price)
+        # `err` is deliberately not treated as failure. A timed-out or nonce-rejected request
+        # can still have filled; only the exchange knows.
+        pos, coll, confirmed = await self.confirm_fill(want_nonzero=True, expect_qty=intended_qty)
+        if not confirmed:
+            await self.log_run("enter_no_fill", {"signal": signal, "via": via,
+                                                 "error": str(err)[:200] if err else None,
+                                                 "fail_count": fail_count + 1})
+            await self.update_state({"last_processed_candle_ts": candle_ts,
+                                     "consecutive_entry_failures": fail_count + 1})
+            return False
+        if abs(pos) > intended_qty * OVERSIZE_FACTOR:
+            await self.emergency_flatten("entry_oversize", {
+                "signal": signal, "via": via, "intended_qty": intended_qty,
+                "real_qty": abs(pos), "error": str(err)[:200] if err else None,
+            })
+            return False
+        # Record the REAL filled size, not the size we asked for, so TP/SL and the eventual
+        # close all operate on the position that actually exists.
+        real_usd = price * abs(pos)
+        await self.update_state({
+            "side": signal, "legs": [{"price": price, "usd_size": real_usd}],
+            "consecutive_entry_failures": 0, "first_entry_price": price,
+            "first_entry_time": self.now_ms(), "dca_level": 0,
+            "collateral_before_entry": coll if coll is not None else collateral_hint,
+            "last_processed_candle_ts": candle_ts,
+        })
+        await self.log_run("entered", {"signal": signal, "price": price, "via": via,
+                                       "qty": abs(pos)})
+        return True
+
+    async def close_all(self, reason, state, side, legs, best_bid, best_ask, candle_ts):
+        prior_collateral = state.get("collateral_before_entry")
+        # Close what is really open. Closing only the tracked legs would leave a residual
+        # position running whenever a phantom fill made the real size larger.
+        try:
+            real_pos, _coll = await self.get_position_rest()
+        except Exception as e:
+            await self.log_run("close_read_failed", {"reason": reason, "error": str(e)[:200]})
+            return False
+        qty = abs(real_pos)
+        if qty <= QTY_EPS:
+            return True  # already flat; the reconcile branch books it next tick
+        is_ask = real_pos > 0
+        await self.cancel_all()
+        err = await self.place_order(is_ask=is_ask, base_amount=qty, reduce_only=True,
+                                     ref_price=(best_bid if is_ask else best_ask))
+        pos_after, coll_after, confirmed = await self.confirm_fill(want_nonzero=False)
+        if not confirmed and abs(pos_after) > QTY_EPS:
+            # One retry for whatever is left rather than leaving a residual open.
+            await self.log_run("close_residual_retry", {"reason": reason, "residual": pos_after,
+                                                        "error": str(err)[:200] if err else None})
+            await self.place_order(is_ask=(pos_after > 0), base_amount=abs(pos_after),
+                                   reduce_only=True,
+                                   ref_price=(best_bid if pos_after > 0 else best_ask))
+            pos_after, coll_after, confirmed = await self.confirm_fill(want_nonzero=False)
+        if not confirmed:
+            await self.log_run("close_incomplete", {"reason": reason, "remaining_qty": pos_after})
+            return False
+        pnl = (coll_after - prior_collateral) if (prior_collateral is not None and coll_after is not None) else 0.0
+        ae = avg_entry(legs) or state.get("first_entry_price")
+        if ae and qty > 0:
+            exit_price = ae + pnl / qty if side == "long" else ae - pnl / qty
+        else:
+            exit_price = ae
+        new_pnl = state["realized_pnl_usd"] + pnl
+        await self.update_state({"side": None, "legs": [], "first_entry_price": None,
+                                 "first_entry_time": None, "dca_level": 0,
+                                 "realized_pnl_usd": new_pnl,
+                                 "last_processed_candle_ts": candle_ts})
+        await self.log_trade(side, ae, exit_price, qty, pnl, reason, len(legs),
+                             ms_to_iso(state.get("first_entry_time")))
+        await self.log_run("closed", {"reason": reason, "pnl": pnl, "side": side})
+        state["realized_pnl_usd"] = new_pnl
+        return True
+
+    def now_ms(self):
+        return self.candles[-1]["t"] if self.candles else int(time.time() * 1000)
+
+    # ── One decision cycle ──────────────────────────────────────────────────────────────────
+    async def tick(self):
+        cfg = self.cfg
+        state = await self.get_state()
+        entry_signal, reversal_signal, candle_ts = self.compute_stoch_signal()
+        now_open = self.candles[-1]["o"] if self.candles else None
+        if candle_ts is None or now_open is None:
+            return
+
+        if entry_signal is not None and cfg.er_period and cfg.er_max is not None:
+            er = compute_er(self.candles, cfg.er_period)
+            if er is not None and er > cfg.er_max:
+                entry_signal = None  # too trend-driven to fade
+
+        real_pos, collateral = await self.read_position()
+        if real_pos is None:
+            return
+
+        side = state.get("side")
+        legs = state.get("legs") or []
+
+        # Reconcile: something external closed us (OCO, liquidation, manual). Re-verify
+        # before trusting it -- acting on a single stale read is what corrupted PnL before.
+        if side is not None and abs(real_pos) < QTY_EPS:
+            real_pos, collateral, confirmed_flat = await self.confirm_fill(
+                want_nonzero=False, tries=2, delay=0.8)
+            if not confirmed_flat:
+                return
+            prior = state.get("collateral_before_entry")
+            pnl = (collateral - prior) if (prior is not None and collateral is not None) else 0.0
+            ae = avg_entry(legs) or state.get("first_entry_price")
+            qty = total_qty(legs) or 0.0001
+            implied_exit = (ae + pnl / qty) if side == "long" else (ae - pnl / qty)
+            await self.update_state({"side": None, "legs": [], "first_entry_price": None,
+                                     "first_entry_time": None, "dca_level": 0,
+                                     "realized_pnl_usd": state["realized_pnl_usd"] + pnl})
+            await self.log_trade(side, ae, implied_exit, qty, pnl, "EXTERNAL", len(legs),
+                                 ms_to_iso(state.get("first_entry_time")))
+            await self.log_run("resolved_externally", {"side": side, "pnl": pnl})
+            state["realized_pnl_usd"] += pnl
+            side, legs = None, []
+
+        # Resync: real position open but a different size than tracked.
+        tracked = total_qty(legs) if legs else 0.0
+        if side is not None and abs(real_pos) > QTY_EPS and tracked > 0:
+            same_direction = (real_pos > 0) == (side == "long")
+            mismatch = abs(abs(real_pos) - tracked) / tracked
+            if same_direction and mismatch > OVERSIZE_FACTOR - 1.0:
+                await self.emergency_flatten("tracked_size_mismatch", {
+                    "side": side, "tracked_qty": tracked, "real_qty": abs(real_pos),
+                    "mismatch_pct": mismatch,
+                })
+                return
+            if same_direction and mismatch > 0.02:
+                ae = avg_entry(legs)
+                legs = [{"price": ae, "usd_size": ae * abs(real_pos)}]
+                await self.update_state({"legs": legs})
+                await self.log_run("qty_resynced", {"side": side, "tracked_qty_before": tracked,
+                                                    "real_qty": abs(real_pos),
+                                                    "mismatch_pct": mismatch})
+
+        best_bid, best_ask = self.live.best_bid_ask()
+        if best_bid is None or best_ask is None:
+            return
+
+        if side is not None:
+            ae = avg_entry(legs)
+            tp = round_trigger(ae * (1 + cfg.tp_pct / 100 if side == "long" else 1 - cfg.tp_pct / 100),
+                               up=(side == "long"))
+            sl = round_trigger(state["first_entry_price"] * (1 - cfg.sl_pct / 100 if side == "long"
+                                                             else 1 + cfg.sl_pct / 100),
+                               up=(side != "long"))
+            check_price = best_bid if side == "long" else best_ask
+            gap_hit = None
+            if side == "long":
+                if check_price <= sl:
+                    gap_hit = "SL"
+                elif check_price >= tp:
+                    gap_hit = "TP"
+            else:
+                if check_price >= sl:
+                    gap_hit = "SL"
+                elif check_price <= tp:
+                    gap_hit = "TP"
+
+            if gap_hit:
+                await self.close_all(gap_hit, state, side, legs, best_bid, best_ask, candle_ts)
+            elif reversal_signal is not None and reversal_signal != side:
+                closed_ok = await self.close_all("REVERSAL", state, side, legs,
+                                                 best_bid, best_ask, candle_ts)
+                if not closed_ok:
+                    return
+                fresh = await self.get_state()
+                fail_count = fresh.get("consecutive_entry_failures", 0) or 0
+                eq = fresh["seed_usd"] + fresh["realized_pnl_usd"]
+                if not fresh.get("enabled"):
+                    return
+                if fail_count >= 3:
+                    await self.log_run("entry_circuit_breaker",
+                                       {"signal": reversal_signal, "fail_count": fail_count,
+                                        "via": "reversal"})
+                    await self.update_state({"enabled": False})
+                    return
+                if eq <= 0:
+                    await self.log_run("equity_non_positive", {"eq": eq, "via": "reversal"})
+                    await self.update_state({"enabled": False})
+                    return
+                price = best_ask if reversal_signal == "long" else best_bid
+                await self.try_enter(reversal_signal, price, eq, "reversal", candle_ts,
+                                     fresh, collateral)
+            else:
+                await self.update_state({"last_processed_candle_ts": candle_ts})
+        else:
+            if abs(real_pos) > QTY_EPS:
+                adopted = "long" if real_pos > 0 else "short"
+                price = best_ask if adopted == "long" else best_bid
+                await self.update_state({
+                    "side": adopted, "legs": [{"price": price, "usd_size": price * abs(real_pos)}],
+                    "first_entry_price": price, "first_entry_time": self.now_ms(),
+                    "dca_level": 0, "collateral_before_entry": collateral,
+                    "last_processed_candle_ts": candle_ts})
+                await self.log_run("adopted_orphan_position", {"side": adopted, "qty": abs(real_pos)})
+            elif entry_signal is not None and state.get("enabled"):
+                fail_count = state.get("consecutive_entry_failures", 0) or 0
+                if fail_count >= 3:
+                    # Hard stop rather than another retry -- unbounded retries are what
+                    # stacked 19 real orders into one position on 2026-09-21.
+                    await self.log_run("entry_circuit_breaker",
+                                       {"signal": entry_signal, "fail_count": fail_count})
+                    await self.update_state({"enabled": False,
+                                             "last_processed_candle_ts": candle_ts})
+                    return
+                eq = state["seed_usd"] + state["realized_pnl_usd"]
+                if eq <= 0:
+                    await self.log_run("equity_non_positive", {"eq": eq})
+                    await self.update_state({"enabled": False,
+                                             "last_processed_candle_ts": candle_ts})
+                    return
+                price = best_ask if entry_signal == "long" else best_bid
+                await self.try_enter(entry_signal, price, eq, "entry", candle_ts,
+                                     state, collateral)
+            else:
+                await self.update_state({"last_processed_candle_ts": candle_ts})
+
+    async def heartbeat(self):
+        now = time.time()
+        if now - self.last_heartbeat < HEARTBEAT_EVERY:
+            return
+        self.last_heartbeat = now
+        await self.log_run("heartbeat", {
+            "ob_age": round(now - self.live.ob_updated_at, 1),
+            "acct_age": round(now - self.live.acct_updated_at, 1),
+            "candles": len(self.candles),
+        })
+
+    async def run(self):
+        cfg = self.cfg
+        print(f"Stochastic bot [{cfg.name}] starting (BTC, real money) [WebSocket-based]")
+        self.account_index = int(os.environ["LIGHTER_ACCOUNT_INDEX"])
+        self.client = lighter.SignerClient(
+            url="https://mainnet.zklighter.elliot.ai", account_index=self.account_index,
+            api_private_keys={int(os.environ["LIGHTER_API_KEY_INDEX"]):
+                              os.environ["LIGHTER_API_PRIVATE_KEY"]},
+        )
+        self.live = LiveState(self.account_index, cfg.market_index)
+
+        ws_task = asyncio.create_task(self.run_ws_forever())
+        candle_task = asyncio.create_task(self.run_candle_refresh_forever())
+
+        print("Waiting for initial WebSocket data...")
+        for _ in range(40):
+            if self.live.book_fresh() and self.candles:
+                break
+            await asyncio.sleep(0.5)
+        ready = self.live.book_fresh()
+        print(f"WS ready: {ready}")
+        await self.log_run("started", {"ws_ready": ready, "mode": "websocket",
+                                       "window": cfg.stoch_window, "tp": cfg.tp_pct,
+                                       "sl": cfg.sl_pct, "er": cfg.er_period})
+        self.last_heartbeat = time.time()
+
+        try:
+            while True:
+                try:
+                    # Hard ceiling. Without this a single hung REST call could freeze the
+                    # whole bot for 20+ minutes with an open position and no SL running.
+                    await asyncio.wait_for(self.tick(), timeout=TICK_WATCHDOG)
+                    await self.heartbeat()
+                    await asyncio.sleep(cfg.tick_seconds)
+                except asyncio.TimeoutError:
+                    await self.log_run("tick_watchdog_timeout", {"limit_s": TICK_WATCHDOG})
+                    await asyncio.sleep(1.0)
+                except Exception as e:
+                    print(f"tick error: {e}")
+                    try:
+                        await self.log_run("error", {"error": str(e)[:400]})
+                    except Exception:
+                        pass
+                    await asyncio.sleep(1.0)
+        finally:
+            ws_task.cancel()
+            candle_task.cancel()
+            with contextlib.suppress(BaseException):
+                await self.client.api_client.close()
+
+
+def run_bot(cfg: BotConfig):
+    asyncio.run(StochBot(cfg).run())
