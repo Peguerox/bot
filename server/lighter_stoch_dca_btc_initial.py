@@ -190,8 +190,11 @@ class LiveState:
         return pos, collateral
 
     def is_fresh(self, max_age=10.0):
-        now = time.time()
-        return (now - self.ob_updated_at < max_age) and (now - self.acct_updated_at < max_age)
+        # Account data only changes on a fill, and every fill pushes a fresh update -- so
+        # it can never be both wrong and silently stale at once. Requiring a recent push
+        # regardless (there's no account-side heartbeat) forced a REST fallback on every
+        # tick between fills, which is what triggered the 429 storm on 2026-09-21.
+        return time.time() - self.ob_updated_at < max_age
 
 
 async def run_ws_forever(live, account_index):
