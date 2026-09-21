@@ -249,11 +249,22 @@ async def get_position_rest(client, account_index):
     return pos, float(a.collateral)
 
 
+_last_staleness_log = {"t": 0.0}
+
+
 async def read_position(client, live, account_index):
     if live.is_fresh():
         pos, collateral = live.position_collateral()
         if pos is not None and collateral is not None:
             return pos, collateral
+    else:
+        now = time.time()
+        if now - _last_staleness_log["t"] > 5.0:
+            _last_staleness_log["t"] = now
+            log_run("ws_stale", {
+                "ob_age": round(now - live.ob_updated_at, 2),
+                "acct_age": round(now - live.acct_updated_at, 2),
+            })
     return await get_position_rest(client, account_index)
 
 
