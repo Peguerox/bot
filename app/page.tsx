@@ -2009,7 +2009,7 @@ export default function Dashboard() {
         <div className="grid grid-cols-1 sm:grid-cols-3 gap-3">
           <CompactStochBtcPanel
             title="Worker 1 · Initial"
-            subtitle="TP 0.10% / SL 0.10% / 20-80"
+            subtitle="TP 0.10% / SL 0.11% / 25-75 / window 9"
             table="lighter_btc_initial_state"
             state={initialBtcState}
             trades={initialBtcTrades}
@@ -2019,7 +2019,7 @@ export default function Dashboard() {
           />
           <CompactStochBtcPanel
             title="Worker 2 · Optimal"
-            subtitle="TP 0.10% / SL 0.11% / 25-75"
+            subtitle="TP 0.10% / SL 0.11% / 25-75 / window 5"
             table="lighter_btc_optimal_state"
             state={optimalBtcState}
             trades={optimalBtcTrades}
