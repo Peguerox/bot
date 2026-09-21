@@ -32,7 +32,7 @@ SL_PCT = 0.11
 DCA_ENABLED = False
 
 ENTRY_LO, ENTRY_HI = 25, 75
-REVERSAL_LO, REVERSAL_HI = 20, 80
+REVERSAL_LO, REVERSAL_HI = 25, 75
 
 TABLE_STATE = "lighter_btc_initial_state"
 TABLE_TRADES = "lighter_btc_initial_trades"
