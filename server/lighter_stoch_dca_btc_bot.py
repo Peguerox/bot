@@ -138,20 +138,27 @@ def _sig(k, lo, hi):
 
 def compute_stoch_signal(candles):
     # entry/reversal signal from the last FULLY completed candle (closed[:-1] excludes the
-    # in-progress one). Returns (entry_signal, reversal_signal, timestamp) -- entry uses a looser
-    # threshold than reversal, so re-entries can fire earlier without changing how eagerly an open
-    # position flips.
+    # in-progress one). Returns (entry_signal, reversal_signal, timestamp, short_confirmed) --
+    # entry uses a looser threshold than reversal, so re-entries can fire earlier without changing
+    # how eagerly an open position flips. short_confirmed = K fell vs the previous completed
+    # candle -- external review (2026-09-21) found shorts entered while K was still rising/flat
+    # lost money in this session; longs showed no such pattern, so only shorts require it.
     if len(candles) < STOCH_WINDOW + 2:
-        return None, None, None
+        return None, None, None, None
     closed = candles[:-1]
     window = closed[-STOCH_WINDOW:]
     hh = max(c["h"] for c in window)
     ll = min(c["l"] for c in window)
     ts = closed[-1]["t"]
-    if hh == ll:
-        return None, None, ts
+    prev_window = closed[-STOCH_WINDOW - 1:-1]
+    phh = max(c["h"] for c in prev_window)
+    pll = min(c["l"] for c in prev_window)
+    if hh == ll or phh == pll:
+        return None, None, ts, None
     k = 100 * (closed[-1]["c"] - ll) / (hh - ll)
-    return _sig(k, ENTRY_LO, ENTRY_HI), _sig(k, REVERSAL_LO, REVERSAL_HI), ts
+    prev_k = 100 * (prev_window[-1]["c"] - pll) / (phh - pll)
+    short_confirmed = k < prev_k
+    return _sig(k, ENTRY_LO, ENTRY_HI), _sig(k, REVERSAL_LO, REVERSAL_HI), ts, short_confirmed
 
 
 async def get_client():
@@ -214,7 +221,11 @@ async def tick():
     try:
         state = get_state()
         candles = fetch_candles()
-        entry_signal, reversal_signal, candle_ts = compute_stoch_signal(candles)
+        entry_signal, reversal_signal, candle_ts, short_confirmed = compute_stoch_signal(candles)
+        # gate short signals on K having turned down vs the prior candle -- longs are ungated
+        if entry_signal == "short" and not short_confirmed:
+            entry_signal = None
+        reversal_short_ok = short_confirmed  # only relevant when reversal_signal == "short"
         latest_closed = candles[-2] if len(candles) >= 2 else None
         now_open = candles[-1]["o"] if candles else None
         now_ms = candles[-1]["t"] if candles else int(time.time() * 1000)
@@ -265,15 +276,27 @@ async def tick():
         mid = (best_bid + best_ask) / 2
 
         async def close_all(reason, real_exit_ref):
+            # returns True if the position was actually confirmed flat and logged, False if the
+            # close order failed or didn't actually flatten the real position -- caller must not
+            # proceed to reopen/reverse on a False return, since the position may still be open.
             nonlocal side, legs, state
             prior_collateral = state.get("collateral_before_entry")
             qty = total_qty(legs)
             is_ask = (side == "long")
             await cancel_all(client)
-            await market_order(client, is_ask=is_ask, base_amount=qty, reduce_only=True,
-                                ref_price=(best_bid if is_ask else best_ask))
+            err = await market_order(client, is_ask=is_ask, base_amount=qty, reduce_only=True,
+                                      ref_price=(best_bid if is_ask else best_ask))
+            if err:
+                log_run("close_failed", {"reason": reason, "error": str(err)})
+                return False
             await asyncio.sleep(1.5)
-            _, collateral_after = await get_position(client, account_index)
+            real_pos_after, collateral_after = await get_position(client, account_index)
+            if abs(real_pos_after) > 0.000001:
+                # order accepted but didn't actually flatten us (rejected/partial despite no
+                # client-side error) -- don't log a false close; let the next tick re-evaluate
+                # against the real remaining position instead of fabricating an exit
+                log_run("close_incomplete", {"reason": reason, "remaining_qty": real_pos_after})
+                return False
             pnl = (collateral_after - prior_collateral) if prior_collateral is not None else 0.0
             ae = avg_entry(legs)
             exit_price = ae + pnl / qty if side == "long" else ae - pnl / qty
@@ -289,6 +312,7 @@ async def tick():
             state["realized_pnl_usd"] = new_pnl
             side = None
             legs = []
+            return True
 
         if side is not None:
             ae = avg_entry(legs)
@@ -310,21 +334,29 @@ async def tick():
             if gap_hit:
                 await close_all(gap_hit, check_price)
             elif reversal_signal is not None and reversal_signal != side:
-                await close_all("REVERSAL", now_open)
-                # open the other side fresh, same open -- only if still enabled; a toggle-off
-                # always still closes the current position, it just skips reopening
-                if state.get("enabled"):
+                closed_ok = await close_all("REVERSAL", now_open)
+                # open the other side fresh, same open -- only if still enabled and the close
+                # actually confirmed flat; a toggle-off always still closes the current position,
+                # it just skips reopening. Shorts additionally require K to have turned down --
+                # gates reversal reopens the same as flat entries, not just the entry-signal path.
+                reopen_ok = (reversal_signal == "long") or reversal_short_ok
+                if closed_ok and state.get("enabled") and reopen_ok:
                     eq = equity_now(state)
                     leg_usd = eq * LEG_FRACTIONS[0]
                     price = best_ask if reversal_signal == "long" else best_bid
                     err = await market_order(client, is_ask=(reversal_signal == "short"), base_amount=leg_usd / price, reduce_only=False, ref_price=price)
-                    if not err:
+                    if err:
+                        log_run("reversal_enter_failed", {"signal": reversal_signal, "error": str(err)})
+                    else:
                         await asyncio.sleep(1.5)
-                        _, collateral_after = await get_position(client, account_index)
-                        update_state({"side": reversal_signal, "legs": [{"price": price, "usd_size": leg_usd}],
-                                      "first_entry_price": price, "first_entry_time": now_ms, "dca_level": 0,
-                                      "collateral_before_entry": collateral_after, "last_processed_candle_ts": candle_ts})
-                        log_run("entered", {"signal": reversal_signal, "price": price, "via": "reversal"})
+                        real_pos_after, collateral_after = await get_position(client, account_index)
+                        if abs(real_pos_after) < 0.000001:
+                            log_run("reversal_enter_no_fill", {"signal": reversal_signal})
+                        else:
+                            update_state({"side": reversal_signal, "legs": [{"price": price, "usd_size": leg_usd}],
+                                          "first_entry_price": price, "first_entry_time": now_ms, "dca_level": 0,
+                                          "collateral_before_entry": collateral_after, "last_processed_candle_ts": candle_ts})
+                            log_run("entered", {"signal": reversal_signal, "price": price, "via": "reversal"})
             else:
                 # check DCA add eligibility
                 next_level = state.get("dca_level", 0) + 1
@@ -376,11 +408,16 @@ async def tick():
                     update_state({"last_processed_candle_ts": candle_ts})
                 else:
                     await asyncio.sleep(1.5)
-                    _, collateral_after = await get_position(client, account_index)
-                    update_state({"side": entry_signal, "legs": [{"price": price, "usd_size": leg_usd}],
-                                  "first_entry_price": price, "first_entry_time": now_ms, "dca_level": 0,
-                                  "collateral_before_entry": collateral_after, "last_processed_candle_ts": candle_ts})
-                    log_run("entered", {"signal": entry_signal, "price": price})
+                    real_pos_after, collateral_after = await get_position(client, account_index)
+                    if abs(real_pos_after) < 0.000001:
+                        # order accepted but didn't actually fill -- stay flat, retry next tick
+                        log_run("enter_no_fill", {"signal": entry_signal})
+                        update_state({"last_processed_candle_ts": candle_ts})
+                    else:
+                        update_state({"side": entry_signal, "legs": [{"price": price, "usd_size": leg_usd}],
+                                      "first_entry_price": price, "first_entry_time": now_ms, "dca_level": 0,
+                                      "collateral_before_entry": collateral_after, "last_processed_candle_ts": candle_ts})
+                        log_run("entered", {"signal": entry_signal, "price": price})
             else:
                 update_state({"last_processed_candle_ts": candle_ts})
     finally:
