@@ -330,8 +330,14 @@ async def tick(client, live, account_index):
     side = state.get("side")
     legs = state.get("legs") or []
 
-    # Reconcile: OCO or something external already flattened us
+    # Reconcile: OCO or something external already flattened us. Re-verify with a real REST
+    # read before trusting this -- the top-of-tick read above can be WS-stale, and this exact
+    # single-read pattern is what corrupted state before (2026-09-21). This fires on every tick,
+    # not just after our own orders, so it needs the same authoritative check.
     if side is not None and abs(real_pos) < 0.000001:
+        real_pos, collateral, confirmed_flat = await confirm_fill(client, account_index, want_nonzero=False, tries=2, delay=1.0)
+        if not confirmed_flat:
+            return  # actually still open (was a stale read) -- try again next tick
         prior_collateral = state.get("collateral_before_entry")
         pnl = (collateral - prior_collateral) if prior_collateral is not None else 0.0
         ae = avg_entry(legs) or state.get("first_entry_price")
@@ -407,8 +413,8 @@ async def tick(client, live, account_index):
         elif reversal_signal is not None and reversal_signal != side:
             closed_ok = await close_all("REVERSAL", now_open)
             fail_count = state.get("consecutive_entry_failures", 0) or 0
-            if closed_ok and state.get("enabled") and fail_count < 3:
-                eq = equity_now(state)
+            eq = equity_now(state)
+            if closed_ok and state.get("enabled") and fail_count < 3 and eq > 0:
                 leg_usd = eq * LEG_FRACTIONS[0]
                 price = best_ask if reversal_signal == "long" else best_bid
                 err = await market_order(client, is_ask=(reversal_signal == "short"), base_amount=leg_usd / price, reduce_only=False, ref_price=price)
@@ -428,6 +434,9 @@ async def tick(client, live, account_index):
                         log_run("entered", {"signal": reversal_signal, "price": price, "via": "reversal"})
             elif closed_ok and fail_count >= 3:
                 log_run("entry_circuit_breaker", {"signal": reversal_signal, "fail_count": fail_count, "via": "reversal"})
+                update_state({"enabled": False})
+            elif closed_ok and eq <= 0:
+                log_run("equity_non_positive", {"eq": eq, "via": "reversal"})
                 update_state({"enabled": False})
         else:
             next_level = state.get("dca_level", 0) + 1
@@ -476,6 +485,10 @@ async def tick(client, live, account_index):
                 update_state({"enabled": False, "last_processed_candle_ts": candle_ts})
                 return
             eq = equity_now(state)
+            if eq <= 0:
+                log_run("equity_non_positive", {"eq": eq})
+                update_state({"enabled": False, "last_processed_candle_ts": candle_ts})
+                return
             leg_usd = eq * LEG_FRACTIONS[0]
             price = best_ask if entry_signal == "long" else best_bid
             err = await market_order(client, is_ask=(entry_signal == "short"), base_amount=leg_usd / price, reduce_only=False, ref_price=price)
