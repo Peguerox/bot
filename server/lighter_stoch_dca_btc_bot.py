@@ -119,7 +119,10 @@ def fetch_candles(count=30):
 
 ENTRY_LO, ENTRY_HI = 25, 85  # asymmetric: %K "extremity past threshold" only showed real predictive
                               # edge on the short side in backtest (2026-09-21) -- longs unchanged at 25,
-                              # shorts tightened to 85 to require a deeper overbought reading before fading
+                              # shorts tightened to 85 to require a deeper overbought reading before fading.
+                              # NOTE 2026-09-21: a longer backtest + live A/B both came out negative for
+                              # this vs baseline -- holding as-is pending a better-validated replacement,
+                              # not reverting yet per explicit instruction.
 REVERSAL_LO, REVERSAL_HI = 20, 80  # proven setting, left unchanged
 
 
@@ -230,10 +233,10 @@ async def tick():
             ae = avg_entry(legs) or state.get("first_entry_price")
             qty = total_qty(legs) or 0.0001
             implied_exit = ae + pnl / qty if side == "long" else ae - pnl / qty
-            log_trade(side, ae, implied_exit, qty, pnl, "EXTERNAL", len(legs), ms_to_iso(state.get("first_entry_time")))
-            log_run("resolved_externally", {"side": side, "pnl": pnl})
             update_state({"side": None, "legs": [], "first_entry_price": None, "first_entry_time": None,
                           "dca_level": 0, "realized_pnl_usd": state["realized_pnl_usd"] + pnl})
+            log_trade(side, ae, implied_exit, qty, pnl, "EXTERNAL", len(legs), ms_to_iso(state.get("first_entry_time")))
+            log_run("resolved_externally", {"side": side, "pnl": pnl})
             state["realized_pnl_usd"] += pnl
             side = None
             legs = []
@@ -274,10 +277,14 @@ async def tick():
             pnl = (collateral_after - prior_collateral) if prior_collateral is not None else 0.0
             ae = avg_entry(legs)
             exit_price = ae + pnl / qty if side == "long" else ae - pnl / qty
-            log_trade(side, ae, exit_price, qty, pnl, reason, len(legs), ms_to_iso(state.get("first_entry_time")))
             new_pnl = state["realized_pnl_usd"] + pnl
+            # clear state BEFORE logging: if the state write fails here, the position would
+            # still look open next tick and could get closed+logged a second time for the same
+            # real event (this produced the duplicate trade rows found 2026-09-21). Logging
+            # after means a failure here only loses one log row, never duplicates one.
             update_state({"side": None, "legs": [], "first_entry_price": None, "first_entry_time": None,
                           "dca_level": 0, "realized_pnl_usd": new_pnl, "last_processed_candle_ts": candle_ts})
+            log_trade(side, ae, exit_price, qty, pnl, reason, len(legs), ms_to_iso(state.get("first_entry_time")))
             log_run("closed", {"reason": reason, "pnl": pnl, "side": side})
             state["realized_pnl_usd"] = new_pnl
             side = None
