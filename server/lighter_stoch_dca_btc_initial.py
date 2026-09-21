@@ -23,15 +23,15 @@ TICK_SECONDS = 0.5   # decision loop cadence -- cheap now, reads cache only, no 
 PRICE_DECIMALS = 1
 SIZE_DECIMALS = 5
 
-STOCH_WINDOW = 5
+STOCH_WINDOW = 9
 DCA_TRIGGER_1_PCT = 0.06
 DCA_TRIGGER_2_PCT = 0.12
 LEG_FRACTIONS = [1.0]
 TP_PCT = 0.10
-SL_PCT = 0.10
+SL_PCT = 0.11
 DCA_ENABLED = False
 
-ENTRY_LO, ENTRY_HI = 20, 80
+ENTRY_LO, ENTRY_HI = 25, 75
 REVERSAL_LO, REVERSAL_HI = 20, 80
 
 TABLE_STATE = "lighter_btc_initial_state"
