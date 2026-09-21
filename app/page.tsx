@@ -2029,7 +2029,7 @@ export default function Dashboard() {
           />
           <CompactStochBtcPanel
             title="Worker 3 · ER Filter"
-            subtitle="TP 0.10% / SL 0.11% / 25-75 / window 5 / ER(20)≤0.6"
+            subtitle="TP 0.10% / SL 0.11% / 25-75 / window 5 / ER(18)≤0.3"
             table="lighter_stoch_dca_btc_state"
             state={dcaBtcState}
             trades={dcaBtcTrades}

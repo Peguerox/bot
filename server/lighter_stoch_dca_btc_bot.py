@@ -36,10 +36,11 @@ REVERSAL_LO, REVERSAL_HI = 25, 75
 
 # Efficiency Ratio trend filter: |net move| / |total path length| over ER_PERIOD closed
 # candles. Near 1 = strong directional trend, near 0 = chop. Entries are skipped (reversals
-# are not) when ER is above ER_MAX -- backtested 2026-09-21 on real BTC candles, ER(20)<=0.6
-# was the best total-pnl point (only filters out the most extreme trend moments).
-ER_PERIOD = 20
-ER_MAX = 0.6
+# are not) when ER is above ER_MAX -- full grid sweep (period 3-30, threshold 0.20-0.90) on
+# real BTC candles at window=5 found ER(18)<=0.3 as the best total-pnl point, ~3x the
+# no-filter baseline.
+ER_PERIOD = 18
+ER_MAX = 0.3
 
 TABLE_STATE = "lighter_stoch_dca_btc_state"
 TABLE_TRADES = "lighter_stoch_dca_btc_trades"
