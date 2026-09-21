@@ -13,6 +13,7 @@ import os
 import time
 import urllib.request
 import json as jsonlib
+from datetime import datetime, timezone
 
 import lighter
 
@@ -61,6 +62,12 @@ def get_state():
 
 def update_state(patch):
     sb_request("PATCH", f"{TABLE_STATE}?id=eq.1", patch)
+
+
+def ms_to_iso(ms):
+    if ms is None:
+        return "1970-01-01T00:00:00+00:00"
+    return datetime.fromtimestamp(ms / 1000, tz=timezone.utc).isoformat()
 
 
 def log_trade(side, avg_entry, exit_price, base_amount, pnl_usd, reason, legs_used, opened_at):
@@ -205,7 +212,7 @@ async def tick():
             ae = avg_entry(legs) or state.get("first_entry_price")
             qty = total_qty(legs) or 0.0001
             implied_exit = ae + pnl / qty if side == "long" else ae - pnl / qty
-            log_trade(side, ae, implied_exit, qty, pnl, "EXTERNAL", len(legs), state.get("updated_at") or "1970-01-01")
+            log_trade(side, ae, implied_exit, qty, pnl, "EXTERNAL", len(legs), ms_to_iso(state.get("first_entry_time")))
             log_run("resolved_externally", {"side": side, "pnl": pnl})
             update_state({"side": None, "legs": [], "first_entry_price": None, "first_entry_time": None,
                           "dca_level": 0, "realized_pnl_usd": state["realized_pnl_usd"] + pnl})
@@ -243,7 +250,7 @@ async def tick():
             pnl = (collateral_after - prior_collateral) if prior_collateral is not None else 0.0
             ae = avg_entry(legs)
             exit_price = ae + pnl / qty if side == "long" else ae - pnl / qty
-            log_trade(side, ae, exit_price, qty, pnl, reason, len(legs), state.get("updated_at") or "1970-01-01")
+            log_trade(side, ae, exit_price, qty, pnl, reason, len(legs), ms_to_iso(state.get("first_entry_time")))
             new_pnl = state["realized_pnl_usd"] + pnl
             update_state({"side": None, "legs": [], "first_entry_price": None, "first_entry_time": None,
                           "dca_level": 0, "realized_pnl_usd": new_pnl, "last_processed_candle_ts": candle_ts})
