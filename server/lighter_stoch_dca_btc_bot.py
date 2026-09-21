@@ -1,29 +1,33 @@
 """
-Real-money Lighter BTC bot -- "Stochastic5 + 1:2:4 DCA", from Lighter_BTC_Hypertrading_DCA_Sweep.xlsx
-(the best baseline-cost candidate found in a 40,080-configuration sweep). $20 real test to measure
-whether it survives real execution -- the doc's own stress test shows it flips negative under just
-0.002% extra slippage on regular fills, so this is exactly the kind of thing worth verifying live
-rather than trusting the backtest either way.
+Lighter BTC Worker 3 -- stochastic + actual-price confirmation.
 
-Exact rules (from "Main rules" sheet):
-  - Raw %K over last 5 completed 1-min candles, no smoothing. <20 => long signal, >80 => short
-    signal, 20-80 (inclusive) => neutral. NO memory -- neutral means no signal, period.
-  - Flat: enter only on a fresh non-neutral signal, at the next minute's open.
-  - Budget fixed at basket start, split 1:2:4 across up to 3 legs (1/7, 2/7, 4/7 of equity).
-  - Leg 1 (1/7) fires on the entry signal. Legs 2/3 are DCA adds at 0.06% / 0.12% adverse move
-    from the FIRST fill (not the last leg), gated: prior close AND current open must both pass
-    the level, current signal must not oppose the held side, max 1 addition per minute.
-  - TP = avg-entry x (1 +/- 0.001), recalculated after every addition.
-  - SL = FIRST entry x (1 -/+ 0.005), fixed forever (never moves as legs are added).
-  - Reversal: an opposite non-neutral signal closes everything and reopens at that same open.
-  - Time limit: close 30 minutes after the FIRST entry if still open (additions don't reset it).
-  - After TP/SL/time exit: wait for next minute before reentry. Reversal can close+reopen same minute.
-  - Tie-break priority: opening-gap OCO first, then deadline, then reversal, then additions;
-    if TP and SL both touch in one minute, the stop wins.
+SETTINGS
+  Completed 1-minute candles, raw stochastic K(5).
+  Long: K < 25, K rising, close >= previous close * 1.00006.
+  Short: K > 75, K falling, close <= previous close * 0.99994.
+  TP 0.10%, SL 0.11%, no DCA. Reversal exits remain 20/80.
+  Both flat entries and entries after reversals must pass confirmation.
+
+USAGE
+  Uses this worker's Lighter/Supabase environment variables and tables.
+  Run: python lighter_stoch_dca_btc_bot.py
+
+EXECUTION CHANGES (2026-09-21, from external source-code review)
+  Confirm the exchange position is flat before logging a close or reversing.
+  Keep a close request in legs JSON so partial/rejected closes are retried.
+  Check observed position after entry; disable new entries if unconfirmed.
+  Refresh quotes and signals before reversal entries; record wall-clock times.
+  Re-entry on a still-valid completed-bar signal remains allowed.
+
+RECORDING LIMIT
+  PnL uses collateral changes and exit price is inferred, not matched to exchange
+  fills. Order/position confirmation does not independently reconcile fill-level PnL.
 """
 import asyncio
 import os
 import time
+import math
+import urllib.parse
 import urllib.request
 import json as jsonlib
 from datetime import datetime, timezone
@@ -37,13 +41,21 @@ PRICE_DECIMALS = 1
 SIZE_DECIMALS = 5
 
 STOCH_WINDOW = 5
+PRICE_CONFIRM_PCT = 0.006
+POSITION_EPSILON = 0.000001
 DCA_TRIGGER_1_PCT = 0.06
 DCA_TRIGGER_2_PCT = 0.12
-LEG_FRACTIONS = [1.0]  # no DCA: full equity on the single entry, no legs 2/3
-TP_PCT = 0.10  # matches the exact config backtested 2026-09-21 alongside the asymmetric entry threshold
+LEG_FRACTIONS = [1.0]
+TP_PCT = 0.10
 SL_PCT = 0.11
-TIME_LIMIT_MIN = 30
 DCA_ENABLED = False
+
+ENTRY_LO, ENTRY_HI = 25, 75
+REVERSAL_LO, REVERSAL_HI = 20, 80
+
+TABLE_STATE = "lighter_stoch_dca_btc_state"
+TABLE_TRADES = "lighter_stoch_dca_btc_trades"
+TABLE_RUNS = "lighter_stoch_dca_btc_runs"
 
 SUPABASE_URL = os.environ["NEXT_PUBLIC_SUPABASE_URL"]
 SUPABASE_KEY = os.environ["SUPABASE_SERVICE_ROLE_KEY"]
@@ -64,11 +76,11 @@ def sb_request(method, path, body=None):
 
 
 def get_state():
-    return sb_request("GET", "lighter_stoch_dca_btc_state?id=eq.1")[0]
+    return sb_request("GET", f"{TABLE_STATE}?id=eq.1")[0]
 
 
 def update_state(patch):
-    sb_request("PATCH", "lighter_stoch_dca_btc_state?id=eq.1", patch)
+    sb_request("PATCH", f"{TABLE_STATE}?id=eq.1", patch)
 
 
 def ms_to_iso(ms):
@@ -78,7 +90,7 @@ def ms_to_iso(ms):
 
 
 def log_trade(side, avg_entry, exit_price, base_amount, pnl_usd, reason, legs_used, opened_at):
-    sb_request("POST", "lighter_stoch_dca_btc_trades", {
+    sb_request("POST", TABLE_TRADES, {
         "side": side, "avg_entry_price": avg_entry, "exit_price": exit_price,
         "base_amount_btc": base_amount, "pnl_usd": pnl_usd, "reason": reason,
         "legs_used": legs_used, "opened_at": opened_at,
@@ -87,7 +99,7 @@ def log_trade(side, avg_entry, exit_price, base_amount, pnl_usd, reason, legs_us
 
 def log_run(action, detail):
     try:
-        sb_request("POST", "lighter_stoch_dca_btc_runs", {"action": action, "detail": detail})
+        sb_request("POST", TABLE_RUNS, {"action": action, "detail": detail})
     except Exception as e:
         print(f"  (log_run failed: {e})")
 
@@ -117,15 +129,6 @@ def fetch_candles(count=30):
     return sorted(data.get("c", []), key=lambda c: c["t"])
 
 
-ENTRY_LO, ENTRY_HI = 25, 85  # asymmetric: %K "extremity past threshold" only showed real predictive
-                              # edge on the short side in backtest (2026-09-21) -- longs unchanged at 25,
-                              # shorts tightened to 85 to require a deeper overbought reading before fading.
-                              # NOTE 2026-09-21: a longer backtest + live A/B both came out negative for
-                              # this vs baseline -- holding as-is pending a better-validated replacement,
-                              # not reverting yet per explicit instruction.
-REVERSAL_LO, REVERSAL_HI = 20, 80  # proven setting, left unchanged
-
-
 def _sig(k, lo, hi):
     if k is None:
         return None
@@ -136,29 +139,76 @@ def _sig(k, lo, hi):
     return None
 
 
+def compute_signal_details(candles, as_of_ms=None):
+    if as_of_ms is None:
+        as_of_ms = int(time.time() * 1000)
+    # Never use a forming candle, including when an API response omits that candle.
+    closed = sorted((c for c in candles if int(c["t"]) + 60000 <= as_of_ms),
+                    key=lambda c: int(c["t"]))
+    result = {"entry": None, "reversal": None, "candle_ts": None,
+              "k": None, "previous_k": None, "price_change_pct": None}
+    if len(closed) < STOCH_WINDOW + 1:
+        return result
+    recent = closed[-STOCH_WINDOW-1:]
+    if any(int(b["t"]) - int(a["t"]) != 60000 for a, b in zip(recent, recent[1:])):
+        return result
+    def raw_k(window):
+        hh = max(float(c["h"]) for c in window)
+        ll = min(float(c["l"]) for c in window)
+        return None if hh <= ll else 100 * (float(window[-1]["c"]) - ll) / (hh - ll)
+    k = raw_k(closed[-STOCH_WINDOW:])
+    previous_k = raw_k(closed[-STOCH_WINDOW-1:-1])
+    previous_close = float(closed[-2]["c"])
+    change = 100 * (float(closed[-1]["c"]) / previous_close - 1) if previous_close > 0 else None
+    entry = _sig(k, ENTRY_LO, ENTRY_HI)
+    if previous_k is None or change is None:
+        entry = None
+    elif entry == "long" and not (k > previous_k and change >= PRICE_CONFIRM_PCT - 1e-10):
+        entry = None
+    elif entry == "short" and not (k < previous_k and change <= -PRICE_CONFIRM_PCT + 1e-10):
+        entry = None
+    result.update(entry=entry, reversal=_sig(k, REVERSAL_LO, REVERSAL_HI),
+                  candle_ts=int(closed[-1]["t"]), k=k, previous_k=previous_k,
+                  price_change_pct=change)
+    return result
+
+
 def compute_stoch_signal(candles):
-    # entry/reversal signal from the last FULLY completed candle (closed[:-1] excludes the
-    # in-progress one). Returns (entry_signal, reversal_signal, timestamp, short_confirmed) --
-    # entry uses a looser threshold than reversal, so re-entries can fire earlier without changing
-    # how eagerly an open position flips. short_confirmed = K fell vs the previous completed
-    # candle -- external review (2026-09-21) found shorts entered while K was still rising/flat
-    # lost money in this session; longs showed no such pattern, so only shorts require it.
-    if len(candles) < STOCH_WINDOW + 2:
-        return None, None, None, None
-    closed = candles[:-1]
-    window = closed[-STOCH_WINDOW:]
-    hh = max(c["h"] for c in window)
-    ll = min(c["l"] for c in window)
-    ts = closed[-1]["t"]
-    prev_window = closed[-STOCH_WINDOW - 1:-1]
-    phh = max(c["h"] for c in prev_window)
-    pll = min(c["l"] for c in prev_window)
-    if hh == ll or phh == pll:
-        return None, None, ts, None
-    k = 100 * (closed[-1]["c"] - ll) / (hh - ll)
-    prev_k = 100 * (prev_window[-1]["c"] - pll) / (phh - pll)
-    short_confirmed = k < prev_k
-    return _sig(k, ENTRY_LO, ENTRY_HI), _sig(k, REVERSAL_LO, REVERSAL_HI), ts, short_confirmed
+    signal = compute_signal_details(candles)
+    return signal["entry"], signal["reversal"], signal["candle_ts"]
+
+
+def fetch_bid_ask():
+    url = f"{BASE_URL}/api/v1/orderBookOrders?market_id={MARKET_INDEX}&limit=1"
+    with urllib.request.urlopen(url, timeout=15) as resp:
+        ob = jsonlib.loads(resp.read())
+    bid, ask = float(ob["bids"][0]["price"]), float(ob["asks"][0]["price"])
+    if not (0 < bid <= ask and math.isfinite(bid) and math.isfinite(ask)):
+        raise ValueError("Invalid executable bid/ask")
+    return bid, ask
+
+
+async def confirmed_flat(client, account_index):
+    # Require two successive flat observations; a submitted order alone is insufficient.
+    flat_reads = 0
+    last = None
+    for attempt in range(5):
+        last = await get_position(client, account_index)
+        flat_reads = flat_reads + 1 if abs(last[0]) < POSITION_EPSILON else 0
+        if flat_reads >= 2:
+            return True, last
+        if attempt < 4:
+            await asyncio.sleep(0.5)
+    return False, last
+
+
+def existing_closed_trade(side, opened_at):
+    # Retry protection for a trade POST that succeeded before a state PATCH failed.
+    # One writer is required; full multi-writer atomicity needs a database constraint.
+    query = urllib.parse.urlencode({"select": "pnl_usd", "side": "eq." + side,
+                                   "opened_at": "eq." + opened_at, "limit": "1"})
+    rows = sb_request("GET", f"{TABLE_TRADES}?{query}")
+    return rows[0] if rows else None
 
 
 async def get_client():
@@ -190,6 +240,10 @@ async def market_order(client, is_ask, base_amount, reduce_only, ref_price):
         market_index=MARKET_INDEX, client_order_index=co_idx, base_amount=base_amount_int,
         avg_execution_price=exec_price, is_ask=is_ask, reduce_only=reduce_only,
     )
+    log_run("order_submitted", {"client_order_index": co_idx, "is_ask": is_ask,
+                                "reduce_only": reduce_only, "base_amount_int": base_amount_int,
+                                "reference_price": ref_price, "error": str(err) if err else None,
+                                "tx_hash": getattr(resp, "tx_hash", None)})
     return err
 
 
@@ -221,14 +275,10 @@ async def tick():
     try:
         state = get_state()
         candles = fetch_candles()
-        entry_signal, reversal_signal, candle_ts, short_confirmed = compute_stoch_signal(candles)
-        # gate short signals on K having turned down vs the prior candle -- longs are ungated
-        if entry_signal == "short" and not short_confirmed:
-            entry_signal = None
-        reversal_short_ok = short_confirmed  # only relevant when reversal_signal == "short"
+        entry_signal, reversal_signal, candle_ts = compute_stoch_signal(candles)
         latest_closed = candles[-2] if len(candles) >= 2 else None
         now_open = candles[-1]["o"] if candles else None
-        now_ms = candles[-1]["t"] if candles else int(time.time() * 1000)
+        now_ms = int(time.time() * 1000)
 
         if candle_ts is None or now_open is None:
             return
@@ -237,92 +287,159 @@ async def tick():
         side = state.get("side")
         legs = state.get("legs") or []
 
-        # Reconcile: OCO or something external already flattened us
-        if side is not None and abs(real_pos) < 0.000001:
+        if side is not None and abs(real_pos) >= POSITION_EPSILON and ((real_pos > 0) != (side == "long")):
+            update_state({"enabled": False})
+            log_run("position_direction_mismatch", {"tracked_side": side, "real_position": real_pos})
+            return
+
+        if side is not None and abs(real_pos) < POSITION_EPSILON:
+            flat, observed = await confirmed_flat(client, account_index)
+            if not flat:
+                return
+            real_pos, collateral = observed
             prior_collateral = state.get("collateral_before_entry")
             pnl = (collateral - prior_collateral) if prior_collateral is not None else 0.0
             ae = avg_entry(legs) or state.get("first_entry_price")
             qty = total_qty(legs) or 0.0001
             implied_exit = ae + pnl / qty if side == "long" else ae - pnl / qty
+            opened_at = ms_to_iso(state.get("first_entry_time"))
+            existing = existing_closed_trade(side, opened_at)
+            if existing is not None:
+                pnl = float(existing["pnl_usd"])
+            else:
+                reason = legs[0].get("close_requested_reason", "EXTERNAL") if legs else "EXTERNAL"
+                log_trade(side, ae, implied_exit, qty, pnl, reason, len(legs), opened_at)
+            log_run("resolved_externally", {"side": side, "pnl": pnl})
             update_state({"side": None, "legs": [], "first_entry_price": None, "first_entry_time": None,
                           "dca_level": 0, "realized_pnl_usd": state["realized_pnl_usd"] + pnl})
-            log_trade(side, ae, implied_exit, qty, pnl, "EXTERNAL", len(legs), ms_to_iso(state.get("first_entry_time")))
-            log_run("resolved_externally", {"side": side, "pnl": pnl})
             state["realized_pnl_usd"] += pnl
             side = None
             legs = []
 
-        # Resync: real position is open but doesn't match tracked size (e.g. a double-entry from
-        # two processes briefly overlapping across a deploy). Reuses the same get_position() call
-        # above -- no extra request. Keeps the tracked avg price, corrects the tracked qty to match
-        # the real exchange position so the next close sells the actual full size instead of
-        # leaving a residual behind.
         tracked_qty = total_qty(legs) if legs else 0.0
         if side is not None and abs(real_pos) > 0.000001 and tracked_qty > 0:
             same_direction = (real_pos > 0) == (side == "long")
             mismatch_pct = abs(abs(real_pos) - tracked_qty) / tracked_qty
-            if same_direction and mismatch_pct > 0.02:
+            if same_direction and mismatch_pct > 0.02 and not legs[0].get("close_requested_reason"):
                 ae = avg_entry(legs)
                 legs = [{"price": ae, "usd_size": ae * abs(real_pos)}]
                 update_state({"legs": legs})
                 log_run("qty_resynced", {"side": side, "tracked_qty_before": tracked_qty,
                                           "real_qty": abs(real_pos), "mismatch_pct": mismatch_pct})
 
-        ob_url = f"{BASE_URL}/api/v1/orderBookOrders?market_id={MARKET_INDEX}&limit=1"
-        with urllib.request.urlopen(ob_url, timeout=15) as resp:
-            ob = jsonlib.loads(resp.read())
-        best_bid = float(ob["bids"][0]["price"])
-        best_ask = float(ob["asks"][0]["price"])
-        mid = (best_bid + best_ask) / 2
+        best_bid, best_ask = fetch_bid_ask()
 
         async def close_all(reason, real_exit_ref):
-            # returns True if the position was actually confirmed flat and logged, False if the
-            # close order failed or didn't actually flatten the real position -- caller must not
-            # proceed to reopen/reverse on a False return, since the position may still be open.
             nonlocal side, legs, state
+            closing_side = side
+            if not legs or avg_entry(legs) is None:
+                update_state({"enabled": False})
+                log_run("close_missing_entry_state", {"side": side})
+                return False
+            # Persist an exit request inside the existing legs JSON. Do not cancel it
+            # merely because price bounces while an exit order is rejected/partial.
+            if not legs[0].get("close_requested_reason"):
+                legs = [dict(leg) for leg in legs]
+                legs[0]["close_requested_reason"] = reason
+                update_state({"legs": legs})
+            reason = legs[0]["close_requested_reason"]
             prior_collateral = state.get("collateral_before_entry")
             qty = total_qty(legs)
-            is_ask = (side == "long")
-            await cancel_all(client)
-            err = await market_order(client, is_ask=is_ask, base_amount=qty, reduce_only=True,
-                                      ref_price=(best_bid if is_ask else best_ask))
-            if err:
-                log_run("close_failed", {"reason": reason, "error": str(err)})
+            real_remaining, _ = await get_position(client, account_index)
+            if abs(real_remaining) >= POSITION_EPSILON:
+                if (real_remaining > 0) != (side == "long"):
+                    update_state({"enabled": False})
+                    log_run("close_direction_mismatch", {"side": side, "real_position": real_remaining})
+                    return False
+                cancel_error = await cancel_all(client)
+                if cancel_error:
+                    log_run("close_cancel_failed", {"error": str(cancel_error)})
+                    return False
+                bid, ask = fetch_bid_ask()
+                err = await market_order(client, is_ask=(side == "long"),
+                                         base_amount=abs(real_remaining), reduce_only=True,
+                                         ref_price=bid if side == "long" else ask)
+                if err:
+                    log_run("close_order_error", {"error": str(err), "reason": reason})
+                await asyncio.sleep(1.5)
+            flat, observed = await confirmed_flat(client, account_index)
+            if not flat:
+                log_run("close_pending", {"reason": reason, "remaining_position": observed[0]})
                 return False
-            await asyncio.sleep(1.5)
-            real_pos_after, collateral_after = await get_position(client, account_index)
-            if abs(real_pos_after) > 0.000001:
-                # order accepted but didn't actually flatten us (rejected/partial despite no
-                # client-side error) -- don't log a false close; let the next tick re-evaluate
-                # against the real remaining position instead of fabricating an exit
-                log_run("close_incomplete", {"reason": reason, "remaining_qty": real_pos_after})
-                return False
-            pnl = (collateral_after - prior_collateral) if prior_collateral is not None else 0.0
+            collateral_after = observed[1]
+            pnl = collateral_after - prior_collateral if prior_collateral is not None else 0.0
             ae = avg_entry(legs)
             exit_price = ae + pnl / qty if side == "long" else ae - pnl / qty
+            opened_at = ms_to_iso(state.get("first_entry_time"))
+            existing = existing_closed_trade(side, opened_at)
+            if existing is not None:
+                pnl = float(existing["pnl_usd"])
+            else:
+                log_trade(side, ae, exit_price, qty, pnl, reason, len(legs), opened_at)
             new_pnl = state["realized_pnl_usd"] + pnl
-            # clear state BEFORE logging: if the state write fails here, the position would
-            # still look open next tick and could get closed+logged a second time for the same
-            # real event (this produced the duplicate trade rows found 2026-09-21). Logging
-            # after means a failure here only loses one log row, never duplicates one.
             update_state({"side": None, "legs": [], "first_entry_price": None, "first_entry_time": None,
                           "dca_level": 0, "realized_pnl_usd": new_pnl, "last_processed_candle_ts": candle_ts})
-            log_trade(side, ae, exit_price, qty, pnl, reason, len(legs), ms_to_iso(state.get("first_entry_time")))
-            log_run("closed", {"reason": reason, "pnl": pnl, "side": side})
+            log_run("closed", {"reason": reason, "pnl": pnl, "side": closing_side,
+                               "position_confirmed_flat": True, "pnl_basis": "collateral_delta",
+                               "exit_price_basis": "collateral_delta_estimate"})
             state["realized_pnl_usd"] = new_pnl
             side = None
             legs = []
             return True
+
+        async def enter_confirmed(desired, via):
+            # Shared gate: a reversal can close a trade without authorizing a new one.
+            latest_state = get_state()
+            if not latest_state.get("enabled"):
+                return False
+            latest_signal = compute_signal_details(fetch_candles())
+            if desired is None or latest_signal["entry"] != desired:
+                log_run("entry_not_confirmed", {"via": via, "desired": desired, **latest_signal})
+                return False
+            real_before, collateral_before = await get_position(client, account_index)
+            if abs(real_before) >= POSITION_EPSILON:
+                log_run("entry_blocked_position_not_flat", {"position": real_before, "via": via})
+                return False
+            eq = equity_now(latest_state)
+            if not math.isfinite(eq) or eq <= 0:
+                return False
+            bid, ask = fetch_bid_ask()
+            price = ask if desired == "long" else bid
+            leg_usd = eq * LEG_FRACTIONS[0]
+            submitted_ms = int(time.time() * 1000)
+            # Disable new entries BEFORE submission. A crash or uncertain response must
+            # not lead to a second order. Confirmed entries restore the previous flag.
+            update_state({"enabled": False})
+            err = await market_order(client, is_ask=(desired == "short"),
+                                     base_amount=leg_usd / price, reduce_only=False, ref_price=price)
+            await asyncio.sleep(1.5)
+            actual_pos, collateral_after = await get_position(client, account_index)
+            matches = abs(actual_pos) >= POSITION_EPSILON and ((actual_pos > 0) == (desired == "long"))
+            if not matches:
+                log_run("entry_unconfirmed", {"signal": desired, "error": str(err) if err else None,
+                                               "observed_position": actual_pos, "via": via,
+                                               "new_entries_disabled": True, **latest_signal})
+                return False
+            actual_usd_at_quote = price * abs(actual_pos)
+            update_state({"side": desired, "legs": [{"price": price, "usd_size": actual_usd_at_quote}],
+                          "first_entry_price": price, "first_entry_time": submitted_ms, "dca_level": 0,
+                          "collateral_before_entry": collateral_before,
+                          "last_processed_candle_ts": latest_signal["candle_ts"], "enabled": True})
+            log_run("entered", {"signal": desired, "price": price, "via": via,
+                                "position_observed": actual_pos, "submitted_at": ms_to_iso(submitted_ms),
+                                "price_basis": "quote_reference", "error": str(err) if err else None,
+                                **latest_signal})
+            return True
+
+        if side is not None and legs and legs[0].get("close_requested_reason"):
+            await close_all(legs[0]["close_requested_reason"], best_bid if side == "long" else best_ask)
+            return
 
         if side is not None:
             ae = avg_entry(legs)
             tp = round_trigger(ae * (1 + TP_PCT / 100 if side == "long" else 1 - TP_PCT / 100), up=(side == "long"))
             sl = round_trigger(state["first_entry_price"] * (1 - SL_PCT / 100 if side == "long" else 1 + SL_PCT / 100), up=(side != "long"))
 
-            # live-price OCO check -- uses the real best bid/ask fetched this tick (the actual
-            # achievable exit price), not the current candle's open, which can be up to a minute
-            # stale. A long exits by selling (check vs best_bid); a short exits by buying (check
-            # vs best_ask).
             check_price = best_bid if side == "long" else best_ask
             gap_hit = None
             if side == "long":
@@ -335,58 +452,10 @@ async def tick():
                 await close_all(gap_hit, check_price)
             elif reversal_signal is not None and reversal_signal != side:
                 closed_ok = await close_all("REVERSAL", now_open)
-                # open the other side fresh, same open -- only if still enabled and the close
-                # actually confirmed flat; a toggle-off always still closes the current position,
-                # it just skips reopening. Shorts additionally require K to have turned down --
-                # gates reversal reopens the same as flat entries, not just the entry-signal path.
-                reopen_ok = (reversal_signal == "long") or reversal_short_ok
-                if closed_ok and state.get("enabled") and reopen_ok:
-                    eq = equity_now(state)
-                    leg_usd = eq * LEG_FRACTIONS[0]
-                    price = best_ask if reversal_signal == "long" else best_bid
-                    err = await market_order(client, is_ask=(reversal_signal == "short"), base_amount=leg_usd / price, reduce_only=False, ref_price=price)
-                    if err:
-                        log_run("reversal_enter_failed", {"signal": reversal_signal, "error": str(err)})
-                    else:
-                        await asyncio.sleep(1.5)
-                        real_pos_after, collateral_after = await get_position(client, account_index)
-                        if abs(real_pos_after) < 0.000001:
-                            log_run("reversal_enter_no_fill", {"signal": reversal_signal})
-                        else:
-                            update_state({"side": reversal_signal, "legs": [{"price": price, "usd_size": leg_usd}],
-                                          "first_entry_price": price, "first_entry_time": now_ms, "dca_level": 0,
-                                          "collateral_before_entry": collateral_after, "last_processed_candle_ts": candle_ts})
-                            log_run("entered", {"signal": reversal_signal, "price": price, "via": "reversal"})
+                if closed_ok:
+                    await enter_confirmed(reversal_signal, "reversal")
             else:
-                # check DCA add eligibility
-                next_level = state.get("dca_level", 0) + 1
-                if DCA_ENABLED and next_level <= 2 and latest_closed is not None:
-                    trigger_pct = DCA_TRIGGER_1_PCT if next_level == 1 else DCA_TRIGGER_2_PCT
-                    fe = state["first_entry_price"]
-                    level_price = fe * (1 - trigger_pct / 100) if side == "long" else fe * (1 + trigger_pct / 100)
-                    prev_close_passes = (latest_closed["c"] <= level_price) if side == "long" else (latest_closed["c"] >= level_price)
-                    open_passes = (now_open <= level_price) if side == "long" else (now_open >= level_price)
-                    signal_favors = (reversal_signal != ("short" if side == "long" else "long"))
-                    last_dca_min = state.get("last_dca_minute")
-                    this_min = now_ms // 60000
-                    not_same_minute = last_dca_min is None or last_dca_min != this_min
-                    if prev_close_passes and open_passes and signal_favors and not_same_minute:
-                        eq = equity_now(state)
-                        leg_usd = eq * LEG_FRACTIONS[next_level]
-                        price = now_open
-                        is_ask = (side == "short")
-                        err = await market_order(client, is_ask=is_ask, base_amount=leg_usd / price, reduce_only=False, ref_price=price)
-                        if not err:
-                            new_legs = legs + [{"price": price, "usd_size": leg_usd}]
-                            update_state({"legs": new_legs, "dca_level": next_level, "last_dca_minute": this_min,
-                                          "last_processed_candle_ts": candle_ts})
-                            log_run("dca_add", {"level": next_level, "price": price})
-                        else:
-                            update_state({"last_processed_candle_ts": candle_ts})
-                    else:
-                        update_state({"last_processed_candle_ts": candle_ts})
-                else:
-                    update_state({"last_processed_candle_ts": candle_ts})
+                update_state({"last_processed_candle_ts": candle_ts})
         else:
             if abs(real_pos) > 0.000001:
                 # A previous attempt's order reported an error (e.g. a nonce race) but actually
@@ -399,25 +468,7 @@ async def tick():
                               "collateral_before_entry": collateral, "last_processed_candle_ts": candle_ts})
                 log_run("adopted_orphan_position", {"side": adopted_side, "qty": abs(real_pos)})
             elif entry_signal is not None and state.get("enabled"):
-                eq = equity_now(state)
-                leg_usd = eq * LEG_FRACTIONS[0]
-                price = best_ask if entry_signal == "long" else best_bid
-                err = await market_order(client, is_ask=(entry_signal == "short"), base_amount=leg_usd / price, reduce_only=False, ref_price=price)
-                if err:
-                    log_run("enter_failed", {"signal": entry_signal, "error": str(err)})
-                    update_state({"last_processed_candle_ts": candle_ts})
-                else:
-                    await asyncio.sleep(1.5)
-                    real_pos_after, collateral_after = await get_position(client, account_index)
-                    if abs(real_pos_after) < 0.000001:
-                        # order accepted but didn't actually fill -- stay flat, retry next tick
-                        log_run("enter_no_fill", {"signal": entry_signal})
-                        update_state({"last_processed_candle_ts": candle_ts})
-                    else:
-                        update_state({"side": entry_signal, "legs": [{"price": price, "usd_size": leg_usd}],
-                                      "first_entry_price": price, "first_entry_time": now_ms, "dca_level": 0,
-                                      "collateral_before_entry": collateral_after, "last_processed_candle_ts": candle_ts})
-                        log_run("entered", {"signal": entry_signal, "price": price})
+                await enter_confirmed(entry_signal, "flat")
             else:
                 update_state({"last_processed_candle_ts": candle_ts})
     finally:
@@ -425,7 +476,7 @@ async def tick():
 
 
 async def main():
-    print("Stochastic5 + 1:2:4 DCA bot starting (BTC, real money, $20 seed)")
+    print("Worker 3: BTC K5 + 0.006% price confirmation; TP 0.10%, SL 0.11%, DCA off")
     while True:
         try:
             await tick()
