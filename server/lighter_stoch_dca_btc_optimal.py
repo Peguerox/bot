@@ -160,8 +160,8 @@ class LiveState:
             self.acct_updated_at = time.time()
 
     def best_bid_ask(self):
-        bids = self.order_book.get("bids", [])
-        asks = self.order_book.get("asks", [])
+        bids = self.order_book.get("bids") or []
+        asks = self.order_book.get("asks") or []
         if not bids or not asks:
             return None, None
         return max(float(b["price"]) for b in bids), min(float(a["price"]) for a in asks)
@@ -169,11 +169,17 @@ class LiveState:
     def position_collateral(self):
         if not self.account:
             return None, None
-        pos_raw = self.account.get("positions", {}).get(self.market_key, {})
+        # NOTE: use `or {}`, not `.get(key, {})` -- some WS messages carry these keys as an
+        # explicit null rather than omitting them, and dict.get()'s default only applies when
+        # the key is *absent*, not when its value is None. This caused a crash mid-tick that
+        # left state in limbo, later misread as an "EXTERNAL" close (fixed 2026-09-21).
+        positions = self.account.get("positions") or {}
+        pos_raw = positions.get(self.market_key) or {}
         sign = 1 if str(pos_raw.get("sign", 1)) in ("1", "True", "true") else -1
         pos = sign * float(pos_raw.get("position", 0) or 0)
         collateral = 0.0
-        for asset in self.account.get("assets", {}).values():
+        assets = self.account.get("assets") or {}
+        for asset in assets.values():
             if asset.get("symbol") == "USDC":
                 collateral = float(asset.get("margin_balance", 0) or 0)
                 break
