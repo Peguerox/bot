@@ -262,6 +262,23 @@ async def read_position(client, live, account_index):
     return await get_position_rest(client, account_index)
 
 
+async def confirm_fill(client, account_index, want_nonzero, tries=4, delay=1.5):
+    # Safety-critical check: did an order we just placed actually change the real position?
+    # Always uses a direct REST read (authoritative, synchronous) rather than the WS cache --
+    # the WS account broadcast lagging behind a real fill by more than one check window is
+    # exactly what caused 19 real entries to stack into one ~$1900 position on 2026-09-21,
+    # because each attempt wrongly concluded "didn't fill" and retried. Polls a few times
+    # before giving up, instead of trusting a single read.
+    for attempt in range(tries):
+        pos, collateral = await get_position_rest(client, account_index)
+        is_nonzero = abs(pos) > 0.000001
+        if is_nonzero == want_nonzero:
+            return pos, collateral, True
+        if attempt < tries - 1:
+            await asyncio.sleep(delay)
+    return pos, collateral, False
+
+
 async def market_order(client, is_ask, base_amount, reduce_only, ref_price):
     band = ref_price * (0.9995 if is_ask else 1.0005)  # tight band -- prefer no fill over a bad fill
     exec_price = price_to_int(band)
@@ -355,9 +372,8 @@ async def tick(client, live, account_index):
         if err:
             log_run("close_failed", {"reason": reason, "error": str(err)})
             return False
-        await asyncio.sleep(1.5)
-        real_pos_after, collateral_after = await read_position(client, live, account_index)
-        if real_pos_after is None or abs(real_pos_after) > 0.000001:
+        real_pos_after, collateral_after, confirmed = await confirm_fill(client, account_index, want_nonzero=False)
+        if not confirmed:
             log_run("close_incomplete", {"reason": reason, "remaining_qty": real_pos_after})
             return False
         pnl = (collateral_after - prior_collateral) if prior_collateral is not None else 0.0
@@ -390,23 +406,29 @@ async def tick(client, live, account_index):
             await close_all(gap_hit, check_price)
         elif reversal_signal is not None and reversal_signal != side:
             closed_ok = await close_all("REVERSAL", now_open)
-            if closed_ok and state.get("enabled"):
+            fail_count = state.get("consecutive_entry_failures", 0) or 0
+            if closed_ok and state.get("enabled") and fail_count < 3:
                 eq = equity_now(state)
                 leg_usd = eq * LEG_FRACTIONS[0]
                 price = best_ask if reversal_signal == "long" else best_bid
                 err = await market_order(client, is_ask=(reversal_signal == "short"), base_amount=leg_usd / price, reduce_only=False, ref_price=price)
                 if err:
                     log_run("reversal_enter_failed", {"signal": reversal_signal, "error": str(err)})
+                    update_state({"consecutive_entry_failures": fail_count + 1})
                 else:
-                    await asyncio.sleep(1.5)
-                    real_pos_after, collateral_after = await read_position(client, live, account_index)
-                    if real_pos_after is None or abs(real_pos_after) < 0.000001:
-                        log_run("reversal_enter_no_fill", {"signal": reversal_signal})
+                    real_pos_after, collateral_after, confirmed = await confirm_fill(client, account_index, want_nonzero=True)
+                    if not confirmed:
+                        log_run("reversal_enter_no_fill", {"signal": reversal_signal, "fail_count": fail_count + 1})
+                        update_state({"consecutive_entry_failures": fail_count + 1})
                     else:
                         update_state({"side": reversal_signal, "legs": [{"price": price, "usd_size": leg_usd}],
+                                      "consecutive_entry_failures": 0,
                                       "first_entry_price": price, "first_entry_time": now_ms, "dca_level": 0,
                                       "collateral_before_entry": collateral_after, "last_processed_candle_ts": candle_ts})
                         log_run("entered", {"signal": reversal_signal, "price": price, "via": "reversal"})
+            elif closed_ok and fail_count >= 3:
+                log_run("entry_circuit_breaker", {"signal": reversal_signal, "fail_count": fail_count, "via": "reversal"})
+                update_state({"enabled": False})
         else:
             next_level = state.get("dca_level", 0) + 1
             if DCA_ENABLED and next_level <= 2 and latest_closed is not None:
@@ -445,21 +467,29 @@ async def tick(client, live, account_index):
                           "collateral_before_entry": collateral, "last_processed_candle_ts": candle_ts})
             log_run("adopted_orphan_position", {"side": adopted_side, "qty": abs(real_pos)})
         elif entry_signal is not None and state.get("enabled"):
+            fail_count = state.get("consecutive_entry_failures", 0) or 0
+            if fail_count >= 3:
+                # Hard stop: something is wrong (this is exactly the pattern that stacked 19
+                # real entries into one ~$1900 position on 2026-09-21) -- disable rather than
+                # keep retrying, and require a human to look before it trades again.
+                log_run("entry_circuit_breaker", {"signal": entry_signal, "fail_count": fail_count})
+                update_state({"enabled": False, "last_processed_candle_ts": candle_ts})
+                return
             eq = equity_now(state)
             leg_usd = eq * LEG_FRACTIONS[0]
             price = best_ask if entry_signal == "long" else best_bid
             err = await market_order(client, is_ask=(entry_signal == "short"), base_amount=leg_usd / price, reduce_only=False, ref_price=price)
             if err:
                 log_run("enter_failed", {"signal": entry_signal, "error": str(err)})
-                update_state({"last_processed_candle_ts": candle_ts})
+                update_state({"last_processed_candle_ts": candle_ts, "consecutive_entry_failures": fail_count + 1})
             else:
-                await asyncio.sleep(1.5)
-                real_pos_after, collateral_after = await read_position(client, live, account_index)
-                if real_pos_after is None or abs(real_pos_after) < 0.000001:
-                    log_run("enter_no_fill", {"signal": entry_signal})
-                    update_state({"last_processed_candle_ts": candle_ts})
+                real_pos_after, collateral_after, confirmed = await confirm_fill(client, account_index, want_nonzero=True)
+                if not confirmed:
+                    log_run("enter_no_fill", {"signal": entry_signal, "fail_count": fail_count + 1})
+                    update_state({"last_processed_candle_ts": candle_ts, "consecutive_entry_failures": fail_count + 1})
                 else:
                     update_state({"side": entry_signal, "legs": [{"price": price, "usd_size": leg_usd}],
+                                  "consecutive_entry_failures": 0,
                                   "first_entry_price": price, "first_entry_time": now_ms, "dca_level": 0,
                                   "collateral_before_entry": collateral_after, "last_processed_candle_ts": candle_ts})
                     log_run("entered", {"signal": entry_signal, "price": price})
