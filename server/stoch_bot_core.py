@@ -94,6 +94,13 @@ class BotConfig:
     # block-only behavior (skip the entry instead of flipping to trend-follow).
     trend_tp_pct: Optional[float] = None
     trend_sl_pct: Optional[float] = None
+    # A/B test (2026-09-22): trend-regime trades on Worker 1/3 have been net losers (41-42%
+    # win rate) while fade-regime trades stay near breakeven -- consistent with a lagging
+    # trend confirmation catching the move right as it exhausts. True flips the direction
+    # computed by compute_er_and_direction() (long<->short) so this bot fades the "confirmed
+    # trend" instead of following it, using the same trend-leg TP/SL. Live comparison against
+    # the un-inverted version, not backtested first.
+    trend_invert_direction: bool = False
     market_index: int = 1
     price_decimals: int = 1
     size_decimals: int = 5
@@ -657,6 +664,8 @@ class StochBot:
         if cfg.er_period and cfg.er_max is not None:
             er, trend_dir = compute_er_and_direction(self.candles, cfg.er_period)
             is_trending = er is not None and er > cfg.er_max
+            if trend_dir is not None and cfg.trend_invert_direction:
+                trend_dir = "short" if trend_dir == "long" else "long"
             if is_trending and cfg.trend_tp_pct is not None:
                 # Regime switch: don't fade a real trend, ride it instead -- with the
                 # trend leg's own (usually wider) TP/SL, applied below at entry time.
