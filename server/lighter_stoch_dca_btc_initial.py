@@ -17,6 +17,7 @@ from stoch_bot_core import BotConfig, run_bot
 
 CONFIG = BotConfig(
     name="REGIME SWITCH (worker 1, window 9)",
+    worker_id="worker1",
     table_state="lighter_btc_initial_state",
     table_trades="lighter_btc_initial_trades",
     table_runs="lighter_btc_initial_runs",
@@ -29,6 +30,8 @@ CONFIG = BotConfig(
     er_max=0.75,
     trend_tp_pct=0.30,
     trend_sl_pct=0.30,
+    # Price-tick logging: last resort. Only writes if both Worker 2 and Worker 3 are quiet.
+    tick_log_defers_to=["worker2", "worker3"],
 )
 
 if __name__ == "__main__":

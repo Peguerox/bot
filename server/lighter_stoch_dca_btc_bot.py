@@ -33,6 +33,7 @@ from stoch_bot_core import BotConfig, run_bot
 
 CONFIG = BotConfig(
     name="REGIME SWITCH (worker 3, window 5)",
+    worker_id="worker3",
     table_state="lighter_stoch_dca_btc_state",
     table_trades="lighter_stoch_dca_btc_trades",
     table_runs="lighter_stoch_dca_btc_runs",
@@ -45,6 +46,8 @@ CONFIG = BotConfig(
     er_max=0.75,
     trend_tp_pct=0.30,
     trend_sl_pct=0.30,
+    # Price-tick logging: backup writer. Takes over the moment Worker 2 goes quiet.
+    tick_log_defers_to=["worker2"],
 )
 
 if __name__ == "__main__":

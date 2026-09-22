@@ -42,7 +42,7 @@ import sys
 import time
 import json as jsonlib
 from dataclasses import dataclass
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from typing import Optional
 
 import aiohttp
@@ -59,6 +59,10 @@ WS_RECONNECT_AFTER = 45.0 # order book silence that forces a WS reconnect
 HEARTBEAT_EVERY = 300.0   # liveness row, so "is it stuck?" is a single query
 POSITION_TTL = 3.0        # cache the REST position read this long (~0.33 req/s, vs the
                           # 6 req/s polling that caused the original rate-limit storm)
+TICK_LOG_EVERY = 2.5      # seconds between price-tick log rows (candle-vs-real-trade check
+                          # on 2026-09-22 showed 1-min candles are too coarse to backtest
+                          # against; this records the real book for a proper replay later)
+TICK_LOG_RETENTION_DAYS = 14
 
 QTY_EPS = 1e-6
 OVERSIZE_FACTOR = 1.5     # real position this much bigger than intended => emergency flatten
@@ -70,6 +74,7 @@ SUPABASE_KEY = os.environ["SUPABASE_SERVICE_ROLE_KEY"]
 @dataclass
 class BotConfig:
     name: str
+    worker_id: str  # short tag for shared-table rows, e.g. "worker1" -- must be unique per bot
     table_state: str
     table_trades: str
     table_runs: str
@@ -91,6 +96,12 @@ class BotConfig:
     price_decimals: int = 1
     size_decimals: int = 5
     tick_seconds: float = 0.5
+    # Price-tick logging failover chain: this bot writes only if every worker_id listed here
+    # has gone quiet (no fresh row from them). Primary writer = empty list (always writes).
+    # None = this bot does not participate in tick logging at all.
+    tick_log_defers_to: Optional[list] = None
+    tick_log_prune: bool = False  # only one bot should run the retention prune; keep it True
+                                  # on exactly one worker (the primary) to avoid redundant deletes
 
 
 # ── Pure helpers ────────────────────────────────────────────────────────────────────────────
@@ -286,6 +297,51 @@ class StochBot:
             now = time.time()
             next_boundary = (int(now // 60) + 1) * 60 + 1.5  # just after the minute rolls over
             await asyncio.sleep(max(1.0, next_boundary - now))
+
+    # ── Price-tick logging (failover chain, not all-3-write) ───────────────────────────────
+    async def run_tick_logger_forever(self):
+        """Records real bid/ask so a future backtest can replay against actual tick-by-tick
+        price instead of 1-min candle high/low -- a same-window check against real trades on
+        2026-09-22 showed candles are too coarse to reproduce what really happens live.
+
+        Only one worker writes at a time. This bot only writes once every worker_id in
+        `tick_log_defers_to` has gone quiet (no fresh row from them within STALE_AFTER) --
+        so Worker 2 (empty list) always writes, Worker 3 takes over the moment Worker 2 goes
+        silent, Worker 1 only kicks in if both are down. Whichever bot is running always
+        keeps the recording continuous; this task can never affect trading either way.
+        """
+        cfg = self.cfg
+        if cfg.tick_log_defers_to is None:
+            return
+        STALE_AFTER = TICK_LOG_EVERY * 3
+        last_prune = 0.0
+        while True:
+            try:
+                should_write = len(cfg.tick_log_defers_to) == 0
+                if not should_write:
+                    last = await self.sb(
+                        "GET", "lighter_btc_price_ticks?select=ts,source&order=ts.desc&limit=1")
+                    if not last:
+                        should_write = True
+                    else:
+                        last_ts = datetime.fromisoformat(last[0]["ts"].replace("Z", "+00:00"))
+                        age = time.time() - last_ts.timestamp()
+                        active_higher_priority = (
+                            last[0]["source"] in cfg.tick_log_defers_to and age < STALE_AFTER)
+                        should_write = not active_higher_priority
+                if should_write and self.live.book_fresh():
+                    bid, ask = self.live.best_bid_ask()
+                    if bid and ask:
+                        await self.sb("POST", "lighter_btc_price_ticks",
+                                      {"best_bid": bid, "best_ask": ask, "source": cfg.worker_id})
+                if cfg.tick_log_prune and time.time() - last_prune > 3600:
+                    last_prune = time.time()
+                    cutoff = (datetime.now(timezone.utc)
+                             - timedelta(days=TICK_LOG_RETENTION_DAYS)).isoformat()
+                    await self.sb("DELETE", f"lighter_btc_price_ticks?ts=lt.{cutoff}")
+            except Exception:
+                pass  # never let tick logging affect trading
+            await asyncio.sleep(TICK_LOG_EVERY)
 
     def compute_stoch_signal(self):
         c = self.candles
@@ -756,6 +812,7 @@ class StochBot:
 
         ws_task = asyncio.create_task(self.run_ws_forever())
         candle_task = asyncio.create_task(self.run_candle_refresh_forever())
+        tick_log_task = asyncio.create_task(self.run_tick_logger_forever())
 
         print("Waiting for initial WebSocket data...", flush=True)
         for _ in range(40):
@@ -791,6 +848,7 @@ class StochBot:
         finally:
             ws_task.cancel()
             candle_task.cancel()
+            tick_log_task.cancel()
             with contextlib.suppress(BaseException):
                 await self.client.api_client.close()
             with contextlib.suppress(BaseException):
