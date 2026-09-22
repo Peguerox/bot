@@ -731,6 +731,20 @@ class StochBot:
             return
 
         if side is not None:
+            if cfg.trend_tp_pct is not None and reversal_signal == side:
+                # Already positioned the way the current regime wants (no reversal trade
+                # needed this tick) -- but the regime may have changed SINCE entry (e.g. a
+                # position opened during chop is now sitting in a real trend, or vice
+                # versa). Keep its TP/SL synced to the regime that's true right now rather
+                # than frozen at whatever was true at entry -- otherwise a trend-aligned
+                # position keeps running on the tight fade SL instead of the wider band
+                # built to tolerate normal trend volatility.
+                target_tp = cfg.trend_tp_pct if is_trending else cfg.tp_pct
+                target_sl = cfg.trend_sl_pct if is_trending else cfg.sl_pct
+                if state.get("position_tp_pct") != target_tp or state.get("position_sl_pct") != target_sl:
+                    await self.update_state({"position_tp_pct": target_tp, "position_sl_pct": target_sl})
+                    state["position_tp_pct"] = target_tp
+                    state["position_sl_pct"] = target_sl
             ae = avg_entry(legs)
             # Each position keeps the TP/SL it was actually entered with (fade vs trend
             # can differ) -- falls back to the bot's default when nothing was recorded
