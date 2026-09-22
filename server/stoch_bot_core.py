@@ -49,8 +49,10 @@ import aiohttp
 import lighter
 
 # ── Network safety budget ───────────────────────────────────────────────────────────────────
-# Worst-case pathological tick is bounded by these: reconcile confirm (~17s) + close (~59s)
-# + re-entry (~47s) ~= 125s, comfortably under TICK_WATCHDOG. A normal tick is ~0.5s.
+# Worst-case pathological tick is bounded by these: reconcile confirm (~17s) + close (~61s)
+# + re-entry (~61s) ~= 139s, comfortably under TICK_WATCHDOG (see confirm_fill()'s docstring
+# for how tries/delay were chosen -- there's a real tradeoff here between speed and this
+# margin, not just a free win). A normal tick is ~0.5s.
 REST_TIMEOUT = 8.0        # per Lighter REST read (SDK default would be 300s)
 ORDER_TIMEOUT = 12.0      # per order placement / cancel-all
 SB_TIMEOUT = 10.0         # per Supabase call
@@ -434,13 +436,25 @@ class StochBot:
             return self._pos_cache
         return await self.get_position_rest()
 
-    async def confirm_fill(self, want_nonzero, expect_qty=None, tries=4, delay=1.0):
+    async def confirm_fill(self, want_nonzero, expect_qty=None, tries=6, delay=0.25):
         """Authoritative REST answer to 'what is the real position right now'.
 
         Never reads the WS cache: account broadcasts lagging a real fill by more than one
         check is what stacked 19 real orders into a ~$1900 position on 2026-09-21. When
         `expect_qty` is given, a position far smaller than requested counts as not-yet-
         settled rather than done, so a partial fill is not mistaken for the finished size.
+
+        tries/delay tuned from a live measurement (2026-09-22): polling the real exchange
+        every 0.1s found the true fill-to-queryable delay sits at ~0.7-1.1s, tight and
+        consistent. The old defaults (tries=4, delay=1.0) checked too early, then
+        overshot that window by waiting a full second past it, landing real closes at
+        ~1.8s instead of ~0.7-1.1s. A faster poll fixes that -- confirmed live at
+        tries=8/delay=0.25 (10/10 trials, mean 1.375s -> 0.778s, max 1.86s -> 1.07s) --
+        but 8 tries doubles the worst-case wait if the exchange were ever genuinely
+        unresponsive (each try can cost up to REST_TIMEOUT), which left only ~8s of
+        margin under TICK_WATCHDOG instead of the ~70s the design assumed. tries=6 keeps
+        essentially all the measured speedup (nothing here ever needed more than 2
+        tries) while keeping a real safety margin (~40s) under the watchdog.
         """
         pos, coll = 0.0, None
         for attempt in range(tries):
@@ -514,7 +528,7 @@ class StochBot:
             await self.place_order(is_ask=(pos > 0), base_amount=abs(pos),
                                    reduce_only=True, ref_price=ref)
             await asyncio.sleep(1.0)
-        pos_after, _c, flat = await self.confirm_fill(want_nonzero=False, tries=3, delay=1.0)
+        pos_after, _c, flat = await self.confirm_fill(want_nonzero=False)
         await self.update_state({
             "enabled": False, "side": None, "legs": [], "first_entry_price": None,
             "first_entry_time": None, "dca_level": 0,
