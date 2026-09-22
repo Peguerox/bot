@@ -2008,8 +2008,8 @@ export default function Dashboard() {
         {/* ── Lighter BTC Stochastic5: 3-worker comparison, real money, $100 each */}
         <div className="grid grid-cols-1 sm:grid-cols-3 gap-3">
           <CompactStochBtcPanel
-            title="Worker 1 · Initial"
-            subtitle="TP 0.10% / SL 0.11% / 25-75 / window 9"
+            title="Worker 1 · Regime Switch"
+            subtitle="fade TP0.10/SL0.11, trend TP0.30/SL0.30 / ER(6)>0.75 / window 9"
             table="lighter_btc_initial_state"
             state={initialBtcState}
             trades={initialBtcTrades}
@@ -2028,8 +2028,8 @@ export default function Dashboard() {
             onToggled={load}
           />
           <CompactStochBtcPanel
-            title="Worker 3 · ER Filter"
-            subtitle="TP 0.10% / SL 0.11% / 25-75 / window 5 / ER(34)≤0.2"
+            title="Worker 3 · Regime Switch"
+            subtitle="fade TP0.10/SL0.11, trend TP0.30/SL0.30 / ER(6)>0.75 / window 5"
             table="lighter_stoch_dca_btc_state"
             state={dcaBtcState}
             trades={dcaBtcTrades}

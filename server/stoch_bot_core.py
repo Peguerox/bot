@@ -80,8 +80,13 @@ class BotConfig:
     entry_hi: float
     reversal_lo: float
     reversal_hi: float
-    er_period: Optional[int] = None   # Efficiency Ratio trend filter; None = disabled
-    er_max: Optional[float] = None
+    er_period: Optional[int] = None   # Efficiency Ratio regime detector; None = disabled
+    er_max: Optional[float] = None    # ER above this = "trending", not chop
+    # Regime-switch: while trending, trade WITH the direction instead of fading the
+    # stochastic extreme, using this leg's own (usually wider) TP/SL. None = the old
+    # block-only behavior (skip the entry instead of flipping to trend-follow).
+    trend_tp_pct: Optional[float] = None
+    trend_sl_pct: Optional[float] = None
     market_index: int = 1
     price_decimals: int = 1
     size_decimals: int = 5
@@ -120,17 +125,22 @@ def total_qty(legs):
     return sum(l["usd_size"] / l["price"] for l in legs)
 
 
-def compute_er(candles, period):
-    """Kaufman Efficiency Ratio: |net move| / total path length over `period` closed candles.
-    Near 1 = clean directional trend, near 0 = chop."""
+def compute_er_and_direction(candles, period):
+    """Kaufman Efficiency Ratio + the net direction of the move over the same window.
+    ER = |net move| / total path length over `period` closed candles: near 1 = clean
+    directional trend, near 0 = chop. Direction is "long" if price net-moved up over the
+    window, "short" if down, None if perfectly flat or there isn't enough data yet."""
     closed = candles[:-1]
     if len(closed) < period + 1:
-        return None
+        return None, None
     window = closed[-(period + 1):]
     closes = [c["c"] for c in window]
-    net = abs(closes[-1] - closes[0])
+    diff = closes[-1] - closes[0]
+    net = abs(diff)
     path = sum(abs(closes[i] - closes[i - 1]) for i in range(1, len(closes)))
-    return net / path if path > 0 else 0.0
+    er = net / path if path > 0 else 0.0
+    direction = "long" if diff > 0 else ("short" if diff < 0 else None)
+    return er, direction
 
 
 # ── Live state cache, fed by the WebSocket ──────────────────────────────────────────────────
@@ -457,7 +467,9 @@ class StochBot:
                                                  "residual": pos_after})
 
     # ── Entry / exit ────────────────────────────────────────────────────────────────────────
-    async def try_enter(self, signal, price, leg_usd, via, candle_ts, state, collateral_hint):
+    async def try_enter(self, signal, price, leg_usd, via, candle_ts, state, collateral_hint,
+                        is_trending=False):
+        cfg = self.cfg
         fail_count = state.get("consecutive_entry_failures", 0) or 0
         intended_qty = leg_usd / price
         err = await self.place_order(is_ask=(signal == "short"), base_amount=intended_qty,
@@ -481,15 +493,24 @@ class StochBot:
         # Record the REAL filled size, not the size we asked for, so TP/SL and the eventual
         # close all operate on the position that actually exists.
         real_usd = price * abs(pos)
-        await self.update_state({
+        patch = {
             "side": signal, "legs": [{"price": price, "usd_size": real_usd}],
             "consecutive_entry_failures": 0, "first_entry_price": price,
             "first_entry_time": self.now_ms(), "dca_level": 0,
             "collateral_before_entry": coll if coll is not None else collateral_hint,
             "last_processed_candle_ts": candle_ts,
-        })
+        }
+        regime = None
+        if cfg.trend_tp_pct is not None:
+            # Only bots with regime-switch configured write these columns -- plain
+            # fade-only bots (Worker 1/2) never touch this field, no schema needed there.
+            trending_leg = is_trending
+            patch["position_tp_pct"] = cfg.trend_tp_pct if trending_leg else cfg.tp_pct
+            patch["position_sl_pct"] = cfg.trend_sl_pct if trending_leg else cfg.sl_pct
+            regime = "trend" if trending_leg else "fade"
+        await self.update_state(patch)
         await self.log_run("entered", {"signal": signal, "price": price, "via": via,
-                                       "qty": abs(pos)})
+                                       "qty": abs(pos), "regime": regime})
         return True
 
     async def close_all(self, reason, state, side, legs, best_bid, best_ask, candle_ts):
@@ -549,10 +570,17 @@ class StochBot:
         if candle_ts is None or now_open is None:
             return
 
-        if entry_signal is not None and cfg.er_period and cfg.er_max is not None:
-            er = compute_er(self.candles, cfg.er_period)
-            if er is not None and er > cfg.er_max:
-                entry_signal = None  # too trend-driven to fade
+        is_trending = False
+        if cfg.er_period and cfg.er_max is not None:
+            er, trend_dir = compute_er_and_direction(self.candles, cfg.er_period)
+            is_trending = er is not None and er > cfg.er_max
+            if is_trending and cfg.trend_tp_pct is not None:
+                # Regime switch: don't fade a real trend, ride it instead -- with the
+                # trend leg's own (usually wider) TP/SL, applied below at entry time.
+                entry_signal = trend_dir
+                reversal_signal = trend_dir
+            elif is_trending:
+                entry_signal = None  # no trend-follow config -- old block-only behavior
 
         real_pos, collateral = await self.read_position()
         if real_pos is None:
@@ -612,10 +640,17 @@ class StochBot:
 
         if side is not None:
             ae = avg_entry(legs)
-            tp = round_trigger(ae * (1 + cfg.tp_pct / 100 if side == "long" else 1 - cfg.tp_pct / 100),
+            # Each position keeps the TP/SL it was actually entered with (fade vs trend
+            # can differ) -- falls back to the bot's default when nothing was recorded
+            # (plain fade-only bots, or a position adopted from an unknown origin).
+            pos_tp = state.get("position_tp_pct")
+            pos_sl = state.get("position_sl_pct")
+            pos_tp = pos_tp if pos_tp is not None else cfg.tp_pct
+            pos_sl = pos_sl if pos_sl is not None else cfg.sl_pct
+            tp = round_trigger(ae * (1 + pos_tp / 100 if side == "long" else 1 - pos_tp / 100),
                                up=(side == "long"))
-            sl = round_trigger(state["first_entry_price"] * (1 - cfg.sl_pct / 100 if side == "long"
-                                                             else 1 + cfg.sl_pct / 100),
+            sl = round_trigger(state["first_entry_price"] * (1 - pos_sl / 100 if side == "long"
+                                                             else 1 + pos_sl / 100),
                                up=(side != "long"))
             check_price = best_bid if side == "long" else best_ask
             gap_hit = None
@@ -654,7 +689,7 @@ class StochBot:
                     return
                 price = best_ask if reversal_signal == "long" else best_bid
                 await self.try_enter(reversal_signal, price, eq, "reversal", candle_ts,
-                                     fresh, collateral)
+                                     fresh, collateral, is_trending=is_trending)
             else:
                 await self.update_state({"last_processed_candle_ts": candle_ts})
         else:
@@ -685,7 +720,7 @@ class StochBot:
                     return
                 price = best_ask if entry_signal == "long" else best_bid
                 await self.try_enter(entry_signal, price, eq, "entry", candle_ts,
-                                     state, collateral)
+                                     state, collateral, is_trending=is_trending)
             else:
                 await self.update_state({"last_processed_candle_ts": candle_ts})
 

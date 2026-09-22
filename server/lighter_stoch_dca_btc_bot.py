@@ -1,26 +1,38 @@
 """
-Worker 3 -- "ER FILTER" settings. Real-money Lighter BTC stochastic bot.
+Worker 3 -- "REGIME SWITCH" settings. Real-money Lighter BTC stochastic bot.
 
-All logic lives in stoch_bot_core; this file is settings only. Identical to Worker 2 except
-for the Efficiency Ratio trend filter -- it is the live A/B test of that one variable.
+All logic lives in stoch_bot_core; this file is settings only.
 
-ER = |net move| / total path length over ER_PERIOD closed candles: near 1 means a clean
-directional trend, near 0 means chop. Entries are skipped when ER exceeds er_max, on the
-theory that a mean-reversion signal should not fade a real breakout. Reversal re-entries
-deliberately bypass the filter, matching how the backtest was run.
+History: started as a pure ER *filter* (skip entries when ER is too trend-like). Two
+versions of that were tried and abandoned after larger backtests -- ER(18)<=0.3 ranked
+772nd of 1368 combos on a 3.5-day sample and was net negative in half of it; ER(34)<=0.2
+fixed that (positive in both halves) but only reached +1.15% on the same sample, barely
+better than doing nothing during the trend.
 
-ER(18)<=0.3 was picked from a one-day backtest and later proved not robust: on a 3.5-day,
-5000-candle sample it ranked 772nd of 1368 combos tested and was net negative in the first
-half of that sample. ER(34)<=0.2 -- longer lookback, tighter threshold -- was the only
-top-ranked config that stayed net positive in BOTH halves of a split-sample check, so it
-replaced ER(18)<=0.3 on 2026-09-22. Fewer entries than the old setting (773 vs 802 trades
-in the search sample), but the ones it skips are disproportionately the bad ones. Still a
-single-symbol backtest on one exchange's candles -- keep validating against the live A/B.
+2026-09-22: replaced with a regime SWITCH instead of a filter. Blocking a real trend just
+means missing the whole move. Trading it in the trend's own direction, with its own wider
+TP/SL, captures it instead:
+
+  - ER(6) <= 0.75  -> chop. Fade the stochastic extreme as normal, TP 0.10% / SL 0.11%.
+  - ER(6) >  0.75  -> trending. Trade WITH the direction of the last 6 candles' net move
+    instead of fading the stochastic, TP 0.30% / SL 0.30% (needs room to actually ride a
+    real move instead of getting stopped out by the same tight band built for chop).
+
+Kept at window 5 here specifically to A/B against Worker 1, which runs this exact same
+regime-switch strategy at window 9 -- window 9 backtested stronger (+6.85% vs this
+config's +3.11% on the same 3.5-day sample) but the live comparison is the real test.
+Grid search + split-sample check on 5000 real BTC candles: /tmp/er_regime_switch.py
+(2026-09-22).
+
+Still a single-symbol backtest on one exchange's candles, and this is a structurally
+different strategy from Worker 2's (which stays on plain fade-only as the baseline), not
+a parameter tweak -- keep validating against the live A/B, especially through a real
+NYSE-open trend event.
 """
 from stoch_bot_core import BotConfig, run_bot
 
 CONFIG = BotConfig(
-    name="ER FILTER (worker 3)",
+    name="REGIME SWITCH (worker 3, window 5)",
     table_state="lighter_stoch_dca_btc_state",
     table_trades="lighter_stoch_dca_btc_trades",
     table_runs="lighter_stoch_dca_btc_runs",
@@ -29,8 +41,10 @@ CONFIG = BotConfig(
     sl_pct=0.11,
     entry_lo=25, entry_hi=75,
     reversal_lo=25, reversal_hi=75,
-    er_period=34,
-    er_max=0.2,
+    er_period=6,
+    er_max=0.75,
+    trend_tp_pct=0.30,
+    trend_sl_pct=0.30,
 )
 
 if __name__ == "__main__":
