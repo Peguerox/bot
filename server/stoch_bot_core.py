@@ -569,20 +569,33 @@ class StochBot:
                                        "qty": abs(pos), "regime": regime})
         return True
 
-    async def close_all(self, reason, state, side, legs, best_bid, best_ask, candle_ts):
+    async def close_all(self, reason, state, side, legs, best_bid, best_ask, candle_ts,
+                        known_pos=None):
         prior_collateral = state.get("collateral_before_entry")
         # Close what is really open. Closing only the tracked legs would leave a residual
         # position running whenever a phantom fill made the real size larger.
-        try:
-            real_pos, _coll = await self.get_position_rest()
-        except Exception as e:
-            await self.log_run("close_read_failed", {"reason": reason, "error": str(e)[:200]})
-            return False
+        #
+        # `known_pos` lets the caller pass the position it already read this same tick
+        # (read_position()/the reconcile block), instead of paying for another REST round
+        # trip here -- measured ~0.35s on a live test (2026-09-22). Only trusted if it's
+        # non-null and points the same direction as the side we're closing; anything else
+        # falls back to a fresh authoritative read, same as before.
+        if known_pos is not None and (known_pos > 0) == (side == "long") and abs(known_pos) > QTY_EPS:
+            real_pos = known_pos
+        else:
+            try:
+                real_pos, _coll = await self.get_position_rest()
+            except Exception as e:
+                await self.log_run("close_read_failed", {"reason": reason, "error": str(e)[:200]})
+                return False
         qty = abs(real_pos)
         if qty <= QTY_EPS:
             return True  # already flat; the reconcile branch books it next tick
         is_ask = real_pos > 0
-        await self.cancel_all()
+        # No cancel_all() here: these bots only ever place reduce_only market orders, never
+        # a resting/limit order, so there is structurally nothing to cancel. Confirmed live
+        # (zero active orders on all 3 real accounts) and measured -- it cost ~0.37s of pure
+        # overhead on every close for no benefit (2026-09-22).
         err = await self.place_order(is_ask=is_ask, base_amount=qty, reduce_only=True,
                                      ref_price=(best_bid if is_ask else best_ask))
         pos_after, coll_after, confirmed = await self.confirm_fill(want_nonzero=False)
@@ -722,10 +735,12 @@ class StochBot:
                     gap_hit = "TP"
 
             if gap_hit:
-                await self.close_all(gap_hit, state, side, legs, best_bid, best_ask, candle_ts)
+                await self.close_all(gap_hit, state, side, legs, best_bid, best_ask, candle_ts,
+                                     known_pos=real_pos)
             elif reversal_signal is not None and reversal_signal != side:
                 closed_ok = await self.close_all("REVERSAL", state, side, legs,
-                                                 best_bid, best_ask, candle_ts)
+                                                 best_bid, best_ask, candle_ts,
+                                                 known_pos=real_pos)
                 if not closed_ok:
                     return
                 fresh = await self.get_state()
