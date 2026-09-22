@@ -21,22 +21,31 @@ Hardening pass 2026-09-21 (after a 32-minute silent freeze on Workers 1 and 2):
 * **Fill confirmation is size-aware**, and an oversized position triggers an immediate
   flatten + disable rather than being quietly adopted.
 * **Closes close what is really open**, read fresh from REST, not the tracked legs.
-* **No blocking I/O on the event loop.** Supabase and candle fetches use urllib, which
-  blocked the WS task while they ran, starving the order book and forcing the REST
-  fallback that caused the rate-limit storm. They run in a thread now.
+* **No blocking I/O on the event loop, and no thread pool either.** Supabase and candle
+  fetches used urllib, which froze the WS task for the duration of every DB call. Moving
+  them to `asyncio.to_thread` made it worse: urllib's `timeout=` does not cover DNS, so a
+  wedged lookup pins a worker thread forever, and once the small default pool is exhausted
+  every later call -- including the watchdog's own error log -- queues behind it and the
+  process goes completely silent. Both now use aiohttp, whose ClientTimeout is enforced by
+  the event loop and covers the whole request including name resolution.
 * **Watchdogs**: a stale order book forces a WS reconnect, and any tick exceeding
   TICK_WATCHDOG is cancelled and logged instead of hanging forever.
+* **stdout is line-buffered and every log is mirrored to it.** Python block-buffers stdout
+  when it is not a TTY, so on Render every print() sat in a buffer that never flushed --
+  which is why the service appeared to emit no runtime logs at all and every hang had to be
+  diagnosed blind.
 """
 import asyncio
 import contextlib
 import os
+import sys
 import time
-import urllib.request
 import json as jsonlib
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from typing import Optional
 
+import aiohttp
 import lighter
 
 # ── Network safety budget ───────────────────────────────────────────────────────────────────
@@ -185,32 +194,42 @@ class StochBot:
     def __init__(self, cfg: BotConfig):
         self.cfg = cfg
         self.client = None
+        self.http = None
         self.live = None
         self.account_index = None
         self.candles = []
+        self.candles_updated_at = 0.0
         self.last_order_ts = 0.0
         self.ws_connected_at = 0.0
         self.last_heartbeat = 0.0
         self.last_stale_log = 0.0
+        self.ticks = 0
 
-    # ── Supabase (off the event loop) ───────────────────────────────────────────────────────
-    def _sb_sync(self, method, path, body=None):
-        url = f"{SUPABASE_URL}/rest/v1/{path}"
-        data = jsonlib.dumps(body).encode() if body is not None else None
-        req = urllib.request.Request(url, data=data, method=method)
-        req.add_header("apikey", SUPABASE_KEY)
-        req.add_header("Authorization", f"Bearer {SUPABASE_KEY}")
-        req.add_header("Content-Type", "application/json")
-        if method in ("POST", "PATCH"):
-            req.add_header("Prefer", "return=representation")
-        with urllib.request.urlopen(req, timeout=SB_TIMEOUT) as resp:
-            raw = resp.read()
-            return jsonlib.loads(raw) if raw else None
-
+    # ── Supabase (aiohttp: async, and actually cancellable) ─────────────────────────────────
     async def sb(self, method, path, body=None):
-        # urllib is blocking; running it inline froze the WS task for the duration of every
-        # Supabase call, starving the order book and forcing the REST fallback.
-        return await asyncio.to_thread(self._sb_sync, method, path, body)
+        """All Supabase I/O. Deliberately NOT urllib.
+
+        urllib blocks, so calling it inline froze the WS task for the duration of every DB
+        call. Moving it to `asyncio.to_thread` was worse: urllib's `timeout=` does not cover
+        DNS resolution, so a wedged lookup pins a worker thread forever, and once the small
+        default thread pool is exhausted every later call -- including the watchdog's own
+        error log -- queues behind it and the whole bot goes silent with nothing written
+        anywhere. aiohttp's ClientTimeout is enforced by the event loop itself and covers the
+        entire request including name resolution, so a hung network never costs us the loop.
+        """
+        url = f"{SUPABASE_URL}/rest/v1/{path}"
+        headers = {
+            "apikey": SUPABASE_KEY,
+            "Authorization": f"Bearer {SUPABASE_KEY}",
+            "Content-Type": "application/json",
+        }
+        if method in ("POST", "PATCH"):
+            headers["Prefer"] = "return=representation"
+        async with self.http.request(method, url, json=body, headers=headers) as resp:
+            text = await resp.text()
+            if resp.status >= 400:
+                raise RuntimeError(f"supabase {resp.status} on {method} {path}: {text[:200]}")
+            return jsonlib.loads(text) if text else None
 
     async def get_state(self):
         rows = await self.sb("GET", f"{self.cfg.table_state}?id=eq.1")
@@ -220,10 +239,13 @@ class StochBot:
         await self.sb("PATCH", f"{self.cfg.table_state}?id=eq.1", patch)
 
     async def log_run(self, action, detail):
+        # Always mirror to stdout: if Supabase is the thing that is broken, the DB log is
+        # exactly the one place the evidence will not appear.
+        print(f"[{action}] {detail}", flush=True)
         try:
             await self.sb("POST", self.cfg.table_runs, {"action": action, "detail": detail})
         except Exception as e:
-            print(f"  (log_run failed: {e})")
+            print(f"  (log_run failed: {e})", flush=True)
 
     async def log_trade(self, side, ae, exit_price, base_amount, pnl_usd, reason, legs_used, opened_at):
         await self.sb("POST", self.cfg.table_trades, {
@@ -233,18 +255,19 @@ class StochBot:
         })
 
     # ── Candles ─────────────────────────────────────────────────────────────────────────────
-    def _fetch_candles_sync(self, count=40):
+    async def fetch_candles(self, count=60):
         end_ms = int(time.time() * 1000)
         url = (f"https://mainnet.zklighter.elliot.ai/api/v1/candles?market_id={self.cfg.market_index}"
                f"&resolution=1m&start_timestamp=0&end_timestamp={end_ms}&count_back={count}")
-        with urllib.request.urlopen(url, timeout=SB_TIMEOUT) as resp:
-            data = jsonlib.loads(resp.read())
+        async with self.http.get(url) as resp:
+            data = jsonlib.loads(await resp.text())
         return sorted(data.get("c", []), key=lambda c: c["t"])
 
     async def run_candle_refresh_forever(self):
         while True:
             try:
-                self.candles = await asyncio.to_thread(self._fetch_candles_sync)
+                self.candles = await self.fetch_candles()
+                self.candles_updated_at = time.time()
             except Exception as e:
                 await self.log_run("candle_fetch_failed", {"error": str(e)[:300]})
             now = time.time()
@@ -665,13 +688,21 @@ class StochBot:
         await self.log_run("heartbeat", {
             "ob_age": round(now - self.live.ob_updated_at, 1),
             "acct_age": round(now - self.live.acct_updated_at, 1),
-            "candles": len(self.candles),
+            "candle_age": round(now - self.candles_updated_at, 1),
+            "ticks": self.ticks,
         })
 
     async def run(self):
         cfg = self.cfg
-        print(f"Stochastic bot [{cfg.name}] starting (BTC, real money) [WebSocket-based]")
+        # Python block-buffers stdout when it is not a TTY, so on Render every print() was
+        # sitting in a buffer that never flushed -- which is why the service looked like it
+        # emitted no runtime logs at all and every hang had to be diagnosed blind.
+        sys.stdout.reconfigure(line_buffering=True)
+        sys.stderr.reconfigure(line_buffering=True)
+        print(f"Stochastic bot [{cfg.name}] starting (BTC, real money) [WebSocket-based]",
+              flush=True)
         self.account_index = int(os.environ["LIGHTER_ACCOUNT_INDEX"])
+        self.http = aiohttp.ClientSession(timeout=aiohttp.ClientTimeout(total=SB_TIMEOUT))
         self.client = lighter.SignerClient(
             url="https://mainnet.zklighter.elliot.ai", account_index=self.account_index,
             api_private_keys={int(os.environ["LIGHTER_API_KEY_INDEX"]):
@@ -682,13 +713,13 @@ class StochBot:
         ws_task = asyncio.create_task(self.run_ws_forever())
         candle_task = asyncio.create_task(self.run_candle_refresh_forever())
 
-        print("Waiting for initial WebSocket data...")
+        print("Waiting for initial WebSocket data...", flush=True)
         for _ in range(40):
             if self.live.book_fresh() and self.candles:
                 break
             await asyncio.sleep(0.5)
         ready = self.live.book_fresh()
-        print(f"WS ready: {ready}")
+        print(f"WS ready: {ready}", flush=True)
         await self.log_run("started", {"ws_ready": ready, "mode": "websocket",
                                        "window": cfg.stoch_window, "tp": cfg.tp_pct,
                                        "sl": cfg.sl_pct, "er": cfg.er_period})
@@ -700,13 +731,14 @@ class StochBot:
                     # Hard ceiling. Without this a single hung REST call could freeze the
                     # whole bot for 20+ minutes with an open position and no SL running.
                     await asyncio.wait_for(self.tick(), timeout=TICK_WATCHDOG)
+                    self.ticks += 1
                     await self.heartbeat()
                     await asyncio.sleep(cfg.tick_seconds)
                 except asyncio.TimeoutError:
                     await self.log_run("tick_watchdog_timeout", {"limit_s": TICK_WATCHDOG})
                     await asyncio.sleep(1.0)
                 except Exception as e:
-                    print(f"tick error: {e}")
+                    print(f"tick error: {e}", flush=True)
                     try:
                         await self.log_run("error", {"error": str(e)[:400]})
                     except Exception:
@@ -717,6 +749,8 @@ class StochBot:
             candle_task.cancel()
             with contextlib.suppress(BaseException):
                 await self.client.api_client.close()
+            with contextlib.suppress(BaseException):
+                await self.http.close()
 
 
 def run_bot(cfg: BotConfig):
