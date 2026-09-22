@@ -57,7 +57,8 @@ SB_TIMEOUT = 10.0         # per Supabase call
 TICK_WATCHDOG = 180.0     # hard ceiling on one tick before it is cancelled
 WS_RECONNECT_AFTER = 45.0 # order book silence that forces a WS reconnect
 HEARTBEAT_EVERY = 300.0   # liveness row, so "is it stuck?" is a single query
-POST_ORDER_REST_WINDOW = 20.0  # after an order, prefer REST until the account push lands
+POSITION_TTL = 3.0        # cache the REST position read this long (~0.33 req/s, vs the
+                          # 6 req/s polling that caused the original rate-limit storm)
 
 QTY_EPS = 1e-6
 OVERSIZE_FACTOR = 1.5     # real position this much bigger than intended => emergency flatten
@@ -204,6 +205,8 @@ class StochBot:
         self.last_heartbeat = 0.0
         self.last_stale_log = 0.0
         self.ticks = 0
+        self._pos_cache = None      # (pos, collateral) from the last authoritative REST read
+        self._pos_cache_at = 0.0
 
     # ── Supabase (aiohttp: async, and actually cancellable) ─────────────────────────────────
     async def sb(self, method, path, body=None):
@@ -338,30 +341,31 @@ class StochBot:
             if p.market_id == self.cfg.market_index:
                 sign = 1 if str(getattr(p, "sign", 1)) in ("1", "True", "true") else -1
                 pos = sign * float(p.position)
-        return pos, float(a.collateral)
+        # Every authoritative read refreshes the cache, so a confirm_fill right after an
+        # order also leaves read_position() returning the post-fill truth immediately.
+        self._pos_cache = (pos, float(a.collateral))
+        self._pos_cache_at = time.time()
+        return self._pos_cache
 
     async def read_position(self):
-        """WS when it is trustworthy, REST when it is not.
+        """Position/collateral from REST, cached for POSITION_TTL seconds.
 
-        The account channel pushes only on fills, so between trades the cached account data
-        is old but still correct. The one window where "old" also means "wrong" is right
-        after we send an order: the book stays fresh while the account push is still in
-        flight, and reading a pre-fill position there is exactly how a duplicate entry gets
-        placed. So prefer REST for a short window after any order we sent.
+        The WS account cache is deliberately NOT consulted here. `account_all` pushes only
+        on a fill, so when the push that should follow our own entry never arrives -- or
+        arrives still showing the pre-fill state -- the cache reports "flat" indefinitely
+        while we are really holding a position. Every tick then concludes it was closed
+        externally, re-verifies against REST, is told it is still open, and skips the rest
+        of the tick, so TP and SL are never evaluated while a real position sits unmanaged.
+        That is exactly what happened on 2026-09-22 at 00:24 to all three workers.
+
+        REST is always right, and one call per POSITION_TTL is ~18x below the polling rate
+        that caused the original rate-limit storm (3 calls every 0.5s). Price still comes
+        from the WS order book, so TP/SL triggers stay real-time -- position size is the
+        only thing moved here, and it does not change second to second.
         """
-        stale_after_order = (
-            time.time() - self.last_order_ts < POST_ORDER_REST_WINDOW
-            and self.live.acct_updated_at < self.last_order_ts
-        )
-        if self.live.book_fresh() and not stale_after_order:
-            pos, coll = self.live.position_collateral()
-            if pos is not None and coll is not None:
-                return pos, coll
         now = time.time()
-        if now - self.last_stale_log > 60.0:
-            self.last_stale_log = now
-            if not self.live.book_fresh():
-                await self.log_run("ws_stale", {"ob_age": round(now - self.live.ob_updated_at, 1)})
+        if self._pos_cache is not None and now - self._pos_cache_at < POSITION_TTL:
+            return self._pos_cache
         return await self.get_position_rest()
 
     async def confirm_fill(self, want_nonzero, expect_qty=None, tries=4, delay=1.0):
@@ -562,8 +566,13 @@ class StochBot:
         if side is not None and abs(real_pos) < QTY_EPS:
             real_pos, collateral, confirmed_flat = await self.confirm_fill(
                 want_nonzero=False, tries=2, delay=0.8)
-            if not confirmed_flat:
-                return
+        else:
+            confirmed_flat = False
+        # Only book an external close when REST agrees we are actually flat. If it disagrees,
+        # real_pos/collateral now hold the authoritative reading, so fall through and manage
+        # the position normally -- returning here instead is what left three live positions
+        # with no TP or SL running on 2026-09-22.
+        if side is not None and confirmed_flat:
             prior = state.get("collateral_before_entry")
             pnl = (collateral - prior) if (prior is not None and collateral is not None) else 0.0
             ae = avg_entry(legs) or state.get("first_entry_price")
