@@ -1443,10 +1443,11 @@ function SolbtcSizeconfPanel({
 }
 
 function CompactStochBtcPanel({
-  title, subtitle, table, state, trades, currentPrice, loading, onToggled,
+  title, subtitle, table, state, trades, currentPrice, loading, onToggled, erValue,
 }: {
   title: string; subtitle: string; table: string; state: any; trades: any[];
   currentPrice: number | null; loading: boolean; onToggled: () => void;
+  erValue?: number | null;
 }) {
   const [toggling, setToggling] = useState(false);
   const side = state?.side ?? null;
@@ -1455,6 +1456,11 @@ function CompactStochBtcPanel({
   const realizedPnl = state?.realized_pnl_usd ?? 0;
   const equity = seedUsd + realizedPnl;
   const enabled = state?.enabled ?? false;
+  // A trend-regime leg is entered with a wider TP than the fade default (0.10%) -- that's
+  // the only signal we have client-side for which regime this open position belongs to.
+  const posTpPct = state?.position_tp_pct ?? null;
+  const positionRegime = side == null ? null : (posTpPct != null && posTpPct > 0.15 ? "trend" : "fade");
+  const marketRegime = erValue == null ? null : (erValue > 0.75 ? "trend" : "chop");
 
   const totalNotional = legs.reduce((s, l) => s + l.usd_size, 0);
   const totalQty = legs.reduce((s, l) => s + l.usd_size / l.price, 0);
@@ -1506,17 +1512,35 @@ function CompactStochBtcPanel({
             <p className="text-gray-500 text-[10px] uppercase">Win Rate</p>
             <p className="font-bold text-blue-400">{winRate}% <span className="text-[10px] font-normal text-gray-500">({closedTrades.length})</span></p>
           </div>
-          <div className="bg-gray-800/60 rounded-lg p-2 col-span-2">
+          <div className={`bg-gray-800/60 rounded-lg p-2 ${erValue == null ? "col-span-2" : ""}`}>
             <p className="text-gray-500 text-[10px] uppercase">Position</p>
-            <p className={`font-bold ${side === "long" ? "text-green-400" : side === "short" ? "text-red-400" : "text-gray-400"}`}>
-              {side ? side.toUpperCase() : "FLAT"}
+            <div className="flex items-center gap-1.5 flex-wrap">
+              <span className={`font-bold ${side === "long" ? "text-green-400" : side === "short" ? "text-red-400" : "text-gray-400"}`}>
+                {side ? side.toUpperCase() : "FLAT"}
+              </span>
+              {positionRegime && (
+                <span className={`text-[9px] font-bold px-1.5 py-0.5 rounded uppercase ${positionRegime === "trend" ? "bg-purple-500/20 text-purple-300" : "bg-blue-500/20 text-blue-300"}`}>
+                  {positionRegime}
+                </span>
+              )}
               {unrealizedUsd != null && (
-                <span className={`text-[10px] font-normal ml-1 ${unrealizedUsd >= 0 ? "text-green-400" : "text-red-400"}`}>
+                <span className={`text-[10px] font-normal ${unrealizedUsd >= 0 ? "text-green-400" : "text-red-400"}`}>
                   ({unrealizedUsd >= 0 ? "+" : ""}${unrealizedUsd.toFixed(2)})
                 </span>
               )}
-            </p>
+            </div>
           </div>
+          {erValue != null && (
+            <div className="bg-gray-800/60 rounded-lg p-2">
+              <p className="text-gray-500 text-[10px] uppercase">Market ER(6)</p>
+              <div className="flex items-center gap-1.5">
+                <span className="font-bold text-white">{erValue.toFixed(2)}</span>
+                <span className={`text-[9px] font-bold px-1.5 py-0.5 rounded uppercase ${marketRegime === "trend" ? "bg-purple-500/20 text-purple-300" : "bg-blue-500/20 text-blue-300"}`}>
+                  {marketRegime}
+                </span>
+              </div>
+            </div>
+          )}
         </div>
       )}
       <div className="space-y-1">
@@ -1697,6 +1721,7 @@ export default function Dashboard() {
   const [szToggling, setSzToggling] = useState(false);
   const [szClearing, setSzClearing] = useState(false);
   const [ocoBtcPrice,  setOcoBtcPrice]  = useState<number | null>(null);
+  const [btcEr6, setBtcEr6] = useState<number | null>(null);
   const [dcaBtcState,  setDcaBtcState]  = useState<any>(null);
   const [dcaBtcTrades, setDcaBtcTrades] = useState<any[]>([]);
   const [dcaBtcRuns,   setDcaBtcRuns]   = useState<any[]>([]);
@@ -1772,6 +1797,21 @@ export default function Dashboard() {
         const bid = parseFloat(ob?.bids?.[0]?.price);
         const ask = parseFloat(ob?.asks?.[0]?.price);
         if (bid && ask) setOcoBtcPrice((bid + ask) / 2);
+      })
+      .catch(() => {});
+    // Live Efficiency Ratio(6) -- same formula Worker 1/3's regime switch uses -- computed
+    // client-side from public candles so the panel shows the actual market condition, not
+    // just the bot's last trade.
+    fetch(`https://mainnet.zklighter.elliot.ai/api/v1/candles?market_id=1&resolution=1m&start_timestamp=0&end_timestamp=${Date.now()}&count_back=10`)
+      .then((r) => r.json())
+      .then((d) => {
+        const c = (d?.c ?? []).slice().sort((a: any, b: any) => a.t - b.t);
+        if (c.length < 7) return;
+        const closes = c.slice(-7).map((x: any) => x.c);
+        const net = Math.abs(closes[closes.length - 1] - closes[0]);
+        let path = 0;
+        for (let i = 1; i < closes.length; i++) path += Math.abs(closes[i] - closes[i - 1]);
+        setBtcEr6(path > 0 ? net / path : 0);
       })
       .catch(() => {});
     setLoading(false);
@@ -2016,6 +2056,7 @@ export default function Dashboard() {
             currentPrice={ocoBtcPrice}
             loading={loading}
             onToggled={load}
+            erValue={btcEr6}
           />
           <CompactStochBtcPanel
             title="Worker 2 · Optimal"
@@ -2036,6 +2077,7 @@ export default function Dashboard() {
             currentPrice={ocoBtcPrice}
             loading={loading}
             onToggled={load}
+            erValue={btcEr6}
           />
         </div>
 
