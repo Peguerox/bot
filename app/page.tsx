@@ -1442,12 +1442,23 @@ function SolbtcSizeconfPanel({
   );
 }
 
+function currentSessionStart(nowUtc: Date): Date {
+  // Mirrors stoch_bot_core.py's _current_session_start: 3 fixed 8h sessions,
+  // 15:00-23:00 / 23:00-07:00 / 07:00-15:00 UTC (11am-7pm / 7pm-3am / 3am-11am ET).
+  const hour = nowUtc.getUTCHours();
+  const y = nowUtc.getUTCFullYear(), m = nowUtc.getUTCMonth(), d = nowUtc.getUTCDate();
+  if (hour >= 15 && hour < 23) return new Date(Date.UTC(y, m, d, 15));
+  if (hour < 7) return new Date(Date.UTC(y, m, d - 1, 23));
+  if (hour < 15) return new Date(Date.UTC(y, m, d, 7));
+  return new Date(Date.UTC(y, m, d, 23));
+}
+
 function CompactStochBtcPanel({
-  title, subtitle, table, state, trades, currentPrice, loading, onToggled, erValue,
+  title, subtitle, table, state, trades, currentPrice, loading, onToggled, erValue, runs, cooldownMin,
 }: {
   title: string; subtitle: string; table: string; state: any; trades: any[];
   currentPrice: number | null; loading: boolean; onToggled: () => void;
-  erValue?: number | null;
+  erValue?: number | null; runs?: any[]; cooldownMin?: number;
 }) {
   const [toggling, setToggling] = useState(false);
   const side = state?.side ?? null;
@@ -1472,6 +1483,24 @@ function CompactStochBtcPanel({
   const closedTrades = trades.filter((t) => t.pnl_usd != null);
   const wins = closedTrades.filter((t) => t.pnl_usd > 0).length;
   const winRate = closedTrades.length > 0 ? (wins / closedTrades.length * 100).toFixed(1) : "—";
+
+  // Session drawdown breaker status: paused if the last trip is within cooldownMin AND we
+  // haven't crossed into a new session boundary since (which re-arms it early regardless).
+  let breakerPaused = false;
+  let breakerResumeInMin: number | null = null;
+  if (cooldownMin) {
+    const lastStop = runs?.find((r) => r.action === "session_drawdown_stop") ?? null;
+    if (lastStop) {
+      const tripTime = new Date(lastStop.ran_at);
+      const now = new Date();
+      const elapsedMin = (now.getTime() - tripTime.getTime()) / 60000;
+      const sameSession = currentSessionStart(tripTime).getTime() === currentSessionStart(now).getTime();
+      if (sameSession && elapsedMin < cooldownMin) {
+        breakerPaused = true;
+        breakerResumeInMin = cooldownMin - elapsedMin;
+      }
+    }
+  }
 
   async function handleToggle() {
     setToggling(true);
@@ -1538,6 +1567,21 @@ function CompactStochBtcPanel({
                 <span className={`text-[9px] font-bold px-1.5 py-0.5 rounded uppercase ${marketRegime === "trend" ? "bg-purple-500/20 text-purple-300" : "bg-blue-500/20 text-blue-300"}`}>
                   {marketRegime}
                 </span>
+              </div>
+            </div>
+          )}
+          {cooldownMin != null && (
+            <div className="bg-gray-800/60 rounded-lg p-2 col-span-2">
+              <p className="text-gray-500 text-[10px] uppercase">Session Breaker</p>
+              <div className="flex items-center gap-1.5">
+                <span className={`text-[10px] font-bold px-1.5 py-0.5 rounded uppercase ${breakerPaused ? "bg-red-500/20 text-red-400" : "bg-green-500/20 text-green-400"}`}>
+                  {breakerPaused ? "cooldown" : "active"}
+                </span>
+                {breakerPaused && breakerResumeInMin != null && (
+                  <span className="text-[10px] text-gray-400">
+                    resumes in {Math.ceil(breakerResumeInMin)}m
+                  </span>
+                )}
               </div>
             </div>
           )}
@@ -2068,15 +2112,16 @@ export default function Dashboard() {
             onToggled={load}
           />
           <CompactStochBtcPanel
-            title="Worker 3 · Pure ER Fade"
-            subtitle="no stochastic, ER(6)>0.75 fades the trend / TP 0.10% / SL 0.10%"
+            title="Worker 3 · Reversal Guard + Session Breaker"
+            subtitle="TP 0.10% / SL 0.11% / 25-75 / window 5 / 120s reversal guard / 0.25% session stop, 45min cooldown"
             table="lighter_stoch_dca_btc_state"
             state={dcaBtcState}
             trades={dcaBtcTrades}
             currentPrice={ocoBtcPrice}
             loading={loading}
             onToggled={load}
-            erValue={btcEr6}
+            runs={dcaBtcRuns}
+            cooldownMin={45}
           />
         </div>
 
