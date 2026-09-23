@@ -1,22 +1,32 @@
 """
-Worker 1 -- "REGIME SWITCH, INVERTED TREND". Real-money Lighter BTC stochastic bot.
+Worker 1 -- "REVERSAL GUARD". Real-money Lighter BTC stochastic bot.
 
-All logic lives in stoch_bot_core; this file is settings only. Same settings as Worker 3
-(window 5, ER(6)>0.75, trend TP/SL 0.30%/0.30%) -- the ONLY difference is
-trend_invert_direction=True, isolating that one variable as a live A/B against Worker 3.
+All logic lives in stoch_bot_core; this file is settings only. Same as Worker 2's plain
+fade-only strategy (window 5, 25/75, TP 0.10%/SL 0.11%, no regime switch) -- the ONLY
+difference is reversal_guard_seconds=120, isolating that one variable as a live A/B against
+Worker 2.
 
-2026-09-22: this bot previously ran the regime-switch strategy at window 9 as an A/B against
-Worker 3's window 5. Reconfigured after live data showed trend-regime entries losing on both
-workers (W1: 34 trades, 41.2% win rate, -0.28 total; W3: 38 trades, 42.1% win rate, -0.28
-total) while fade-regime entries stayed near breakeven (52-55% win rate) -- consistent with
-the lagging ER(6) trend confirmation catching moves right as they exhaust and reverse
-(observed directly in two live examples around 23:00-23:13 UTC). Testing whether fading the
-"confirmed trend" instead of following it does better. Not backtested first -- live A/B only.
+2026-09-23: dropped the regime-switch/trend-follow experiment. Neither Worker 1 (inverted
+trend) nor Worker 3 (normal trend) was outperforming plain fade-only in the live A/B or in a
+1,092-combo tick-validated parameter sweep over the same data -- plain fade-only (matching
+Worker 2) was the best performer found. Replaced with a different, independently validated
+idea instead: a 120-second minimum position age before an opposite-side signal can close/
+reverse it (TP/SL still fire immediately, unaffected). Tested against 14,842 real recorded
+ticks + the 1.4s execution-latency model (calibrated earlier against real Worker 2 trades to
+within ~0.17 percentage points): 162->157 trades, 62.96%->64.97% win rate, +1.698%->+2.304%
+total (a ~36% relative improvement), driven by fewer premature reversals (62->56) converting
+into more real TPs (51->54). Single 11.3-hour bull-market session -- a live A/B is the next
+real test, not proof across regimes.
+
+schema_has_position_bands stays True (not because this bot uses regime-switch anymore, but
+because its table already has the position_tp_pct/position_sl_pct columns from when it did --
+this makes sure the leftover trend-band value on the currently-open position gets cleared
+properly on its next close instead of silently lingering forever).
 """
 from stoch_bot_core import BotConfig, run_bot
 
 CONFIG = BotConfig(
-    name="REGIME SWITCH, INVERTED TREND (worker 1)",
+    name="REVERSAL GUARD (worker 1)",
     worker_id="worker1",
     table_state="lighter_btc_initial_state",
     table_trades="lighter_btc_initial_trades",
@@ -26,11 +36,8 @@ CONFIG = BotConfig(
     sl_pct=0.11,
     entry_lo=25, entry_hi=75,
     reversal_lo=25, reversal_hi=75,
-    er_period=6,
-    er_max=0.75,
-    trend_tp_pct=0.30,
-    trend_sl_pct=0.30,
-    trend_invert_direction=True,
+    reversal_guard_seconds=120,
+    schema_has_position_bands=True,
     # Price-tick logging: last resort. Only writes if both Worker 2 and Worker 3 are quiet.
     tick_log_defers_to=["worker2", "worker3"],
 )

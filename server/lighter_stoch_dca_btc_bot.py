@@ -46,6 +46,7 @@ CONFIG = BotConfig(
     er_max=0.75,
     trend_tp_pct=0.30,
     trend_sl_pct=0.30,
+    schema_has_position_bands=True,
     # Price-tick logging: backup writer. Takes over the moment Worker 2 goes quiet.
     tick_log_defers_to=["worker2"],
 )
