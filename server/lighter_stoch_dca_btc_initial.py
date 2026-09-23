@@ -13,12 +13,10 @@ style "is this a clean trend" check stayed under 0.75 at every window from 6-45 
 a real grinding decline that kept stopping out fade entries. Net DIRECTION was the reliable
 signal there, not ER's trend-cleanliness measure.
 
-Worker 1 gets the "smart resume" version instead: after the base cooldown, resuming also
-requires net price direction (over session_breaker_direction_window candles) to have stopped
-matching the direction the market was moving in at trip time, AND recent realized volatility
-(5-min range %) to be back under session_breaker_calm_range_pct -- not just "stopped moving the
-same way," since crypto rarely reverts to a pre-crash level, it just consolidates wherever it
-landed. If either check still fails, resume is deferred and re-checked every
+Worker 1 gets a "smart resume" instead: after the base cooldown, resuming also requires recent
+realized volatility (5-min range %) to be back under session_breaker_calm_range_pct -- not just
+"stopped moving the same way," since crypto rarely reverts to a pre-crash level, it just
+consolidates wherever it landed. If it still fails, resume is deferred and re-checked every
 session_breaker_recheck_min instead of resuming blind.
 
 Threshold/cooldown/recheck swept together (4 thresholds x 5 cooldowns x 2 recheck intervals)
@@ -28,6 +26,11 @@ trades, 59.4% win, +$0.148. Tighter than Worker 3's blind-cooldown calibration (
 purpose: a false trip costs little when resume is smart (clears almost immediately once real
 conditions are checked), while missing a real crash costs a lot -- that asymmetry pushes the
 optimal threshold tighter than the fixed-cooldown version's calibration.
+
+2026-09-23, later same day: originally shipped with an AND-gate (direction AND volatility both
+required). Live data showed that was too strict -- only 7 trades and -0.05% equity in a stretch
+where Worker 2 and Worker 3 each ran 50 trades at +0.87%/+0.78% with no breaker slowing them
+down. Dropped the direction leg entirely; volatility alone is the gate now.
 
 schema_has_position_bands stays True from the earlier regime-switch era (clears a leftover
 trend-band value on close instead of leaving it stuck). schema_has_session_breaker=True is new
@@ -53,7 +56,10 @@ CONFIG = BotConfig(
     session_drawdown_stop_pct=0.15,
     session_breaker_cooldown_min=15.0,
     session_breaker_recheck_min=10.0,
-    session_breaker_direction_window=30,
+    session_breaker_direction_window=None,  # dropped 2026-09-23: real data (7 trades, -0.05%
+    # equity vs W2/W3's 50 trades at +0.87%/+0.78% over the same stretch) showed the AND-gate
+    # (direction + volatility both required) kept it paused far longer than the market actually
+    # warranted. Volatility alone is the gate now.
     session_breaker_calm_range_pct=0.20,
     schema_has_session_breaker=True,
     schema_has_position_bands=True,
