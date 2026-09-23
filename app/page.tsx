@@ -2048,15 +2048,14 @@ export default function Dashboard() {
         {/* ── Lighter BTC Stochastic5: 3-worker comparison, real money, $100 each */}
         <div className="grid grid-cols-1 sm:grid-cols-3 gap-3">
           <CompactStochBtcPanel
-            title="Worker 1 · Regime Switch"
-            subtitle="fade TP0.10/SL0.11, trend TP0.30/SL0.30 / ER(6)>0.75 / window 9"
+            title="Worker 1 · Reversal Guard"
+            subtitle="TP 0.10% / SL 0.11% / 25-75 / window 5 / 120s reversal guard"
             table="lighter_btc_initial_state"
             state={initialBtcState}
             trades={initialBtcTrades}
             currentPrice={ocoBtcPrice}
             loading={loading}
             onToggled={load}
-            erValue={btcEr6}
           />
           <CompactStochBtcPanel
             title="Worker 2 · Optimal"
