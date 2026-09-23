@@ -26,6 +26,12 @@ initial 0.4% to 0.25% (still calibrated to clear normal chop noise -- see stoch_
 Cooldown set from 4 real crash-recovery times measured on our OWN recorded tick data (not
 Binance): 18-50 minutes to stabilize, median ~40 min -- 45 min chosen as a round number inside
 that range. Live test, not a settled parameter.
+
+schema_has_session_breaker=True (migrated 2026-09-23) after an unrelated frontend-only deploy
+restarted this backend (Render redeploys every service on any push to the watched branch) and
+silently wiped an active cooldown mid-pause -- twice, in production, on the very first day this
+existed. The breaker's state now survives a restart by reading/writing DB columns instead of
+living only in process memory.
 """
 from stoch_bot_core import BotConfig, run_bot
 
@@ -43,6 +49,7 @@ CONFIG = BotConfig(
     reversal_guard_seconds=120,
     session_drawdown_stop_pct=0.25,
     session_breaker_cooldown_min=45.0,
+    schema_has_session_breaker=True,
     schema_has_position_bands=True,
     # Price-tick logging: backup writer. Takes over the moment Worker 2 goes quiet.
     tick_log_defers_to=["worker2"],

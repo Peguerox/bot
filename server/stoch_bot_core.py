@@ -136,6 +136,13 @@ class BotConfig:
     # None = disabled.
     session_drawdown_stop_pct: Optional[float] = None
     session_breaker_cooldown_min: float = 45.0
+    # True only for bots whose table has the session_breaker_* columns (migrated 2026-09-23
+    # after a restart -- caused by an unrelated frontend-only deploy -- wiped an active
+    # cooldown twice in production). When True, the breaker's state survives a restart by
+    # reading/writing these columns instead of living in memory only. False = old in-memory-
+    # only behavior (safe default for any bot that sets session_drawdown_stop_pct without the
+    # migration having been run on its table).
+    schema_has_session_breaker: bool = False
     market_index: int = 1
     price_decimals: int = 1
     size_decimals: int = 5
@@ -153,6 +160,10 @@ def ms_to_iso(ms):
     if ms is None:
         return "1970-01-01T00:00:00+00:00"
     return datetime.fromtimestamp(ms / 1000, tz=timezone.utc).isoformat()
+
+
+def parse_iso(s):
+    return datetime.fromisoformat(s.replace("Z", "+00:00"))
 
 
 def round_trigger(p, up):
@@ -724,21 +735,55 @@ class StochBot:
         return datetime(start_date.year, start_date.month, start_date.day, start_hour,
                         tzinfo=timezone.utc)
 
+    def _persist_session_breaker_patch(self):
+        return {
+            "session_breaker_session_start": self.session_index.isoformat() if self.session_index else None,
+            "session_breaker_baseline_pnl": self.session_baseline_pnl,
+            "session_breaker_peak_pnl": self.session_peak_pnl,
+            "session_breaker_paused": self.session_paused,
+            "session_breaker_paused_at": self.session_paused_at.isoformat() if self.session_paused_at else None,
+        }
+
     async def _apply_session_breaker(self, state, entry_signal, now_utc=None):
         """Two trip conditions: drawdown from an established session peak, OR a raw loss from
         session start if the session was never yet profitable (closes the gap where an
         immediate bad start went unprotected). Either blocks new entries until the cooldown
         elapses, then re-arms with a fresh peak/baseline *within the same session* (does not
-        wait for the next 8h boundary). In-memory only -- a restart re-arms it (see __init__)."""
+        wait for the next 8h boundary).
+
+        With schema_has_session_breaker=True, state survives a restart by reading/writing the
+        session_breaker_* columns -- proven necessary in production: an unrelated frontend-only
+        deploy still restarts this backend (Render redeploys every service on any push to the
+        watched branch), and that silently wiped an active cooldown twice before this existed.
+        Without the flag, falls back to in-memory-only (resets on every restart)."""
         now_utc = now_utc or datetime.now(timezone.utc)
         session_start = self._current_session_start(now_utc)
+        persist = self.cfg.schema_has_session_breaker
+
         if self.session_index != session_start:
-            self.session_index = session_start
-            self.session_baseline_pnl = state["realized_pnl_usd"]
-            self.session_peak_pnl = 0.0
-            self.session_start_equity = state["seed_usd"] + state["realized_pnl_usd"]
-            self.session_paused = False
-            self.session_paused_at = None
+            # First, try to rehydrate from a persisted row matching THIS session (recovers
+            # from a restart mid-session instead of wiping an active pause/peak).
+            rehydrated = False
+            if persist and self.session_index is None:
+                saved_start = state.get("session_breaker_session_start")
+                if saved_start and parse_iso(saved_start) == session_start:
+                    self.session_index = session_start
+                    self.session_baseline_pnl = state.get("session_breaker_baseline_pnl")
+                    self.session_peak_pnl = state.get("session_breaker_peak_pnl") or 0.0
+                    self.session_paused = bool(state.get("session_breaker_paused"))
+                    paused_at = state.get("session_breaker_paused_at")
+                    self.session_paused_at = parse_iso(paused_at) if paused_at else None
+                    self.session_start_equity = state["seed_usd"] + self.session_baseline_pnl
+                    rehydrated = True
+            if not rehydrated:
+                self.session_index = session_start
+                self.session_baseline_pnl = state["realized_pnl_usd"]
+                self.session_peak_pnl = 0.0
+                self.session_paused = False
+                self.session_paused_at = None
+                if persist:
+                    await self.update_state(self._persist_session_breaker_patch())
+            self.session_start_equity = state["seed_usd"] + self.session_baseline_pnl
 
         if self.session_paused and self.session_paused_at is not None:
             elapsed_min = (now_utc - self.session_paused_at).total_seconds() / 60
@@ -749,10 +794,15 @@ class StochBot:
                 self.session_paused_at = None
                 self.session_baseline_pnl = state["realized_pnl_usd"]
                 self.session_peak_pnl = 0.0
+                self.session_start_equity = state["seed_usd"] + self.session_baseline_pnl
+                if persist:
+                    await self.update_state(self._persist_session_breaker_patch())
 
         session_pnl = state["realized_pnl_usd"] - self.session_baseline_pnl
         if session_pnl > self.session_peak_pnl:
             self.session_peak_pnl = session_pnl
+            if persist:
+                await self.update_state({"session_breaker_peak_pnl": self.session_peak_pnl})
 
         threshold = self.cfg.session_drawdown_stop_pct
         if not self.session_paused and self.session_start_equity:
@@ -768,6 +818,8 @@ class StochBot:
             if tripped:
                 self.session_paused = True
                 self.session_paused_at = now_utc
+                if persist:
+                    await self.update_state(self._persist_session_breaker_patch())
                 await self.log_run("session_drawdown_stop", {
                     "session_start": self.session_index.isoformat(), "basis": basis,
                     "session_peak_pnl": self.session_peak_pnl, "session_pnl": session_pnl,
