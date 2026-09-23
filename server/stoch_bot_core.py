@@ -122,15 +122,20 @@ class BotConfig:
     # windows 2-9 were consistently profitable, window 6 best (56 trades, 62.5% win,
     # +1.524% over a 14.3h window) -- much cleaner than the stochastic-blended regime switch.
     pure_trend_fade: bool = False
-    # Session drawdown breaker (2026-09-23): the day splits into 3 fixed 8h sessions (11am-7pm,
-    # 7pm-3am, 3am-11am ET). Once a session has been realized-profitable at least once, if it
-    # gives back this many percentage points of total account equity from that session's own
-    # peak, new entries stop for the rest of THAT session (existing positions still manage
-    # normally to TP/SL/reversal-guard) -- re-arms fresh at the next session boundary.
-    # Calibrated against one real crashed session vs one real good session on 2026-09-23: 0.4%
-    # never triggered on the good session (its worst post-profit drawdown was 0.2491%) and
-    # caught the bad one early, avoiding roughly half of its eventual loss. None = disabled.
+    # Session drawdown breaker (2026-09-23, tightened after a real -1.86% BTC crash in 18 min):
+    # the day splits into 3 fixed 8h sessions (11am-7pm, 7pm-3am, 3am-11am ET). Two trip
+    # conditions, checked every tick: (1) once the session has been realized-profitable at
+    # least once, giving back this many percentage points of total account equity from that
+    # peak; (2) if the session has NEVER been profitable yet, losing this many points from the
+    # session's own start (closes the gap where an immediate bad start went unprotected).
+    # Either one blocks new entries (existing positions still manage normally to TP/SL/
+    # reversal-guard) until session_breaker_cooldown_min elapses, then re-arms with a fresh
+    # peak/baseline *within the same session* -- does not wait for the next 8h boundary.
+    # 0.25% chosen after tightening from an initial 0.4%; cooldown chosen from 4 real crash
+    # events measured on our own recorded tick data (18-50 min to stabilize, median ~40 min).
+    # None = disabled.
     session_drawdown_stop_pct: Optional[float] = None
+    session_breaker_cooldown_min: float = 45.0
     market_index: int = 1
     price_decimals: int = 1
     size_decimals: int = 5
@@ -275,6 +280,7 @@ class StochBot:
         self.session_peak_pnl = 0.0
         self.session_start_equity = None
         self.session_paused = False
+        self.session_paused_at = None
 
     # ── Supabase (aiohttp: async, and actually cancellable) ─────────────────────────────────
     async def sb(self, method, path, body=None):
@@ -719,31 +725,54 @@ class StochBot:
                         tzinfo=timezone.utc)
 
     async def _apply_session_breaker(self, state, entry_signal, now_utc=None):
-        """If the current session has given back cfg.session_drawdown_stop_pct of total
-        account equity from its own peak (after being profitable at least once this session),
-        block new entries for the rest of THIS session. Re-arms fresh at the next boundary.
-        In-memory only -- a restart re-arms it, an accepted tradeoff (see __init__)."""
-        session_start = self._current_session_start(now_utc or datetime.now(timezone.utc))
+        """Two trip conditions: drawdown from an established session peak, OR a raw loss from
+        session start if the session was never yet profitable (closes the gap where an
+        immediate bad start went unprotected). Either blocks new entries until the cooldown
+        elapses, then re-arms with a fresh peak/baseline *within the same session* (does not
+        wait for the next 8h boundary). In-memory only -- a restart re-arms it (see __init__)."""
+        now_utc = now_utc or datetime.now(timezone.utc)
+        session_start = self._current_session_start(now_utc)
         if self.session_index != session_start:
             self.session_index = session_start
             self.session_baseline_pnl = state["realized_pnl_usd"]
             self.session_peak_pnl = 0.0
             self.session_start_equity = state["seed_usd"] + state["realized_pnl_usd"]
             self.session_paused = False
+            self.session_paused_at = None
+
+        if self.session_paused and self.session_paused_at is not None:
+            elapsed_min = (now_utc - self.session_paused_at).total_seconds() / 60
+            if elapsed_min >= self.cfg.session_breaker_cooldown_min:
+                # Cooldown elapsed -- re-arm within the same session, fresh peak/baseline so
+                # we don't immediately re-trip on stale pre-cooldown drawdown.
+                self.session_paused = False
+                self.session_paused_at = None
+                self.session_baseline_pnl = state["realized_pnl_usd"]
+                self.session_peak_pnl = 0.0
 
         session_pnl = state["realized_pnl_usd"] - self.session_baseline_pnl
         if session_pnl > self.session_peak_pnl:
             self.session_peak_pnl = session_pnl
 
-        if (not self.session_paused and self.session_peak_pnl > 0
-                and self.session_start_equity):
-            dd_pct = (self.session_peak_pnl - session_pnl) / self.session_start_equity * 100
-            if dd_pct >= self.cfg.session_drawdown_stop_pct:
+        threshold = self.cfg.session_drawdown_stop_pct
+        if not self.session_paused and self.session_start_equity:
+            tripped, dd_pct, basis = False, None, None
+            if self.session_peak_pnl > 0:
+                dd_pct = (self.session_peak_pnl - session_pnl) / self.session_start_equity * 100
+                basis = "drawdown_from_peak"
+            else:
+                dd_pct = -session_pnl / self.session_start_equity * 100
+                basis = "raw_loss_from_start"
+            if dd_pct >= threshold:
+                tripped = True
+            if tripped:
                 self.session_paused = True
+                self.session_paused_at = now_utc
                 await self.log_run("session_drawdown_stop", {
-                    "session_start": self.session_index.isoformat(),
+                    "session_start": self.session_index.isoformat(), "basis": basis,
                     "session_peak_pnl": self.session_peak_pnl, "session_pnl": session_pnl,
-                    "dd_pct": dd_pct, "threshold_pct": self.cfg.session_drawdown_stop_pct,
+                    "dd_pct": dd_pct, "threshold_pct": threshold,
+                    "cooldown_min": self.cfg.session_breaker_cooldown_min,
                 })
 
         return None if self.session_paused else entry_signal
