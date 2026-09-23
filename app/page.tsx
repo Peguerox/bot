@@ -1497,13 +1497,17 @@ function CompactStochBtcPanel({
   // cooldown re-armed early at a new session boundary.
   let breakerPaused = false;
   let breakerResumeSec: number | null = null;
+  let breakerTripDirection: string | null = null;
   if (cooldownMin) {
     breakerPaused = Boolean(state?.session_breaker_paused);
-    if (breakerPaused && state?.session_breaker_paused_at) {
-      const tripTime = new Date(state.session_breaker_paused_at);
+    breakerTripDirection = state?.session_breaker_trip_direction ?? null;
+    // Read the server's own next-check time directly -- accurate for both a fixed cooldown
+    // (Worker 3) and a dynamic recheck-until-calm resume (Worker 1), since the server (not
+    // this client) is the one deciding when that next check actually happens.
+    if (breakerPaused && state?.session_breaker_next_check_at) {
+      const nextCheck = new Date(state.session_breaker_next_check_at);
       const now = new Date(nowTick);
-      const elapsedMin = (now.getTime() - tripTime.getTime()) / 60000;
-      breakerResumeSec = Math.max(0, Math.round((cooldownMin - elapsedMin) * 60));
+      breakerResumeSec = Math.max(0, Math.round((nextCheck.getTime() - now.getTime()) / 1000));
     }
   }
 
@@ -1578,13 +1582,18 @@ function CompactStochBtcPanel({
           {cooldownMin != null && (
             <div className="bg-gray-800/60 rounded-lg p-2">
               <p className="text-gray-500 text-[10px] uppercase">Breaker</p>
-              <div className="flex items-center gap-1.5">
+              <div className="flex items-center gap-1.5 flex-wrap">
                 <span className={`text-[9px] font-bold px-1.5 py-0.5 rounded uppercase ${breakerPaused ? "bg-red-500/20 text-red-400" : "bg-green-500/20 text-green-400"}`}>
-                  {breakerPaused ? "cooldown" : "active"}
+                  {breakerPaused ? "paused" : "active"}
                 </span>
+                {breakerPaused && breakerTripDirection && (
+                  <span className="text-[9px] font-bold px-1.5 py-0.5 rounded uppercase bg-gray-700/50 text-gray-400">
+                    vs {breakerTripDirection}
+                  </span>
+                )}
                 {breakerPaused && breakerResumeSec != null && (
                   <span className="text-[10px] font-bold text-gray-300 tabular-nums">
-                    {String(Math.floor(breakerResumeSec / 60)).padStart(2, "0")}:{String(breakerResumeSec % 60).padStart(2, "0")}
+                    next check {String(Math.floor(breakerResumeSec / 60)).padStart(2, "0")}:{String(breakerResumeSec % 60).padStart(2, "0")}
                   </span>
                 )}
               </div>
@@ -2097,14 +2106,15 @@ export default function Dashboard() {
         {/* ── Lighter BTC Stochastic5: 3-worker comparison, real money, $100 each */}
         <div className="grid grid-cols-1 sm:grid-cols-3 gap-3">
           <CompactStochBtcPanel
-            title="Worker 1 · Reversal Guard"
-            subtitle="TP 0.10% / SL 0.11% / 25-75 / window 5 / 120s reversal guard"
+            title="Worker 1 · Reversal Guard + Smart Breaker"
+            subtitle="TP 0.10% / SL 0.11% / 25-75 / window 5 / 120s reversal guard / 0.15% session stop, direction+volatility resume"
             table="lighter_btc_initial_state"
             state={initialBtcState}
             trades={initialBtcTrades}
             currentPrice={ocoBtcPrice}
             loading={loading}
             onToggled={load}
+            cooldownMin={15}
           />
           <CompactStochBtcPanel
             title="Worker 2 · Optimal"
