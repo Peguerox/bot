@@ -943,6 +943,107 @@ async def t_tick_error_backoff_formula():
     check("large error count caps at 60s", backoff(50) == 60.0, backoff(50))
 
 
+class FakeSigner:
+    """Stands in for lighter.SignerClient's create_auth_token_with_expiry -- a purely local
+    signing call, so no network mock is needed, just a call counter."""
+    def __init__(self, token="tok-1", fail=False):
+        self.token = token
+        self.fail = fail
+        self.calls = 0
+        self.api_client = object()
+
+    def create_auth_token_with_expiry(self):
+        self.calls += 1
+        if self.fail:
+            return None, "signing error"
+        return self.token, None
+
+
+async def t_auth_token_cached_across_calls():
+    print("\n[_get_auth_token: reuses the cached token instead of re-signing on every call]")
+    ex = FakeExchange()
+    bot = make_bot(ex, candles_kind="mid")
+    bot.client = FakeSigner()
+    t1 = bot._get_auth_token()
+    t2 = bot._get_auth_token()
+    check("same token returned both times", t1 == t2 == "tok-1", (t1, t2))
+    check("only signed once", bot.client.calls == 1, bot.client.calls)
+
+
+async def t_auth_token_refreshes_within_margin_of_expiry():
+    print("\n[_get_auth_token: regenerates once the cached token is within the refresh margin of expiry]")
+    ex = FakeExchange()
+    bot = make_bot(ex, candles_kind="mid")
+    bot.client = FakeSigner(token="tok-1")
+    bot._get_auth_token()
+    check("signed once so far", bot.client.calls == 1, bot.client.calls)
+    bot.client.token = "tok-2"
+    bot._auth_token_expiry_at = time.time() + core.AUTH_TOKEN_REFRESH_MARGIN_S - 1
+    t = bot._get_auth_token()
+    check("regenerated a fresh token", t == "tok-2", t)
+    check("signed a second time", bot.client.calls == 2, bot.client.calls)
+
+
+async def t_auth_token_signing_error_returns_none_without_poisoning_cache():
+    print("\n[_get_auth_token: a signing error returns None and is retried next call, not cached]")
+    ex = FakeExchange()
+    bot = make_bot(ex, candles_kind="mid")
+    bot.client = FakeSigner(fail=True)
+    t = bot._get_auth_token()
+    check("returns None on signing error", t is None, t)
+    bot.client.fail = False
+    bot.client.token = "tok-recovered"
+    t2 = bot._get_auth_token()
+    check("recovers on the next call", t2 == "tok-recovered", t2)
+    check("attempted signing both times (failure wasn't cached)", bot.client.calls == 2, bot.client.calls)
+
+
+async def t_get_position_rest_attaches_auth_header():
+    print("\n[get_position_rest: the real method attaches the signed token as an authorization header]")
+
+    class FakePosition:
+        def __init__(self, market_id, position, sign):
+            self.market_id = market_id
+            self.position = position
+            self.sign = sign
+
+    class FakeAccountRow:
+        def __init__(self, position, collateral, market_index):
+            sign = "1" if position >= 0 else "-1"
+            self.positions = [FakePosition(market_index, str(abs(position)), sign)]
+            self.collateral = collateral
+
+    class FakeAcctResp:
+        def __init__(self, position, collateral, market_index):
+            self.accounts = [FakeAccountRow(position, collateral, market_index)]
+
+    captured = {}
+
+    class FakeAccountApi:
+        def __init__(self, api_client):
+            pass
+
+        async def account(self, by, value, _headers=None, _request_timeout=None):
+            captured["headers"] = _headers
+            return FakeAcctResp(0.001, 25.0, 1)
+
+    ex = FakeExchange()
+    bot = make_bot(ex, candles_kind="mid")
+    bot.client = FakeSigner(token="tok-xyz")
+
+    orig_account_api = core.lighter.AccountApi
+    core.lighter.AccountApi = FakeAccountApi
+    try:
+        pos, coll = await core.StochBot.get_position_rest(bot)
+    finally:
+        core.lighter.AccountApi = orig_account_api
+
+    check("position read correctly through the fake", abs(pos - 0.001) < 1e-9, pos)
+    check("collateral read correctly", coll == 25.0, coll)
+    check("authorization header carries the signed token",
+          captured.get("headers", {}).get("authorization") == "tok-xyz", captured.get("headers"))
+
+
 async def t_close_clears_position_bands_when_schema_has_them():
     print("\n[closing a position clears position_tp_pct/sl_pct when schema_has_position_bands=True]")
     entry = 86000.0
@@ -1211,6 +1312,10 @@ async def main():
               t_read_position_falls_back_to_cache_on_error,
               t_read_position_raises_without_any_cache,
               t_tick_error_backoff_formula,
+              t_auth_token_cached_across_calls,
+              t_auth_token_refreshes_within_margin_of_expiry,
+              t_auth_token_signing_error_returns_none_without_poisoning_cache,
+              t_get_position_rest_attaches_auth_header,
               t_close_clears_position_bands_when_schema_has_them,
               t_close_does_not_touch_bands_without_schema_flag,
               t_trend_leg_sl_is_wider_than_fade_sl,

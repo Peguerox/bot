@@ -61,6 +61,8 @@ WS_RECONNECT_AFTER = 45.0 # order book silence that forces a WS reconnect
 HEARTBEAT_EVERY = 300.0   # liveness row, so "is it stuck?" is a single query
 POSITION_TTL = 3.0        # cache the REST position read this long (~0.33 req/s, vs the
                           # 6 req/s polling that caused the original rate-limit storm)
+AUTH_TOKEN_LIFETIME_S = 10 * 60  # SDK's create_auth_token_with_expiry default validity
+AUTH_TOKEN_REFRESH_MARGIN_S = 60.0  # regenerate this long before actual expiry
 TICK_LOG_EVERY = 2.5      # seconds between price-tick log rows (candle-vs-real-trade check
                           # on 2026-09-22 showed 1-min candles are too coarse to backtest
                           # against; this records the real book for a proper replay later)
@@ -323,6 +325,8 @@ class StochBot:
         self.ticks = 0
         self._pos_cache = None      # (pos, collateral) from the last authoritative REST read
         self._pos_cache_at = 0.0
+        self._auth_token = None     # cached signed auth token for get_position_rest()
+        self._auth_token_expiry_at = 0.0
         # Session drawdown breaker state -- in-memory only (not DB-persisted), so a restart
         # re-arms it. That's an accepted tradeoff: restarts already happen every few hours in
         # this project, and re-arming on restart is a safe default direction to err in.
@@ -500,10 +504,37 @@ class StochBot:
             await asyncio.sleep(1.0)
 
     # ── Exchange reads/writes, all timeout-bounded ──────────────────────────────────────────
+    def _get_auth_token(self):
+        """Signed auth token for get_position_rest(), cached for ~AUTH_TOKEN_LIFETIME_S.
+
+        account() is otherwise sent fully unauthenticated (confirmed in the SDK source --
+        AccountApi._account_serialize sets auth_settings=[]), which puts every read on
+        Lighter's shared per-IP anonymous quota instead of our own per-account quota. That
+        anonymous quota is what three workers polling ~1/s from the same Render IP blew
+        through on 2026-09-23, triggering CloudFront's WAF CAPTCHA on every read for
+        minutes straight. create_auth_token_with_expiry() only signs locally with the key
+        we already hold -- no network call -- so caching it costs nothing and there is no
+        reason not to attach it to every read.
+        """
+        now = time.time()
+        if self._auth_token is not None and now < self._auth_token_expiry_at - AUTH_TOKEN_REFRESH_MARGIN_S:
+            return self._auth_token
+        token, err = self.client.create_auth_token_with_expiry()
+        if err:
+            return None
+        self._auth_token = token
+        self._auth_token_expiry_at = now + AUTH_TOKEN_LIFETIME_S
+        return self._auth_token
+
     async def get_position_rest(self):
         account_api = lighter.AccountApi(self.client.api_client)
+        headers = {}
+        token = self._get_auth_token()
+        if token:
+            headers["authorization"] = token
         acct = await asyncio.wait_for(
             account_api.account(by="index", value=str(self.account_index),
+                                _headers=headers or None,
                                 _request_timeout=REST_TIMEOUT),
             timeout=REST_TIMEOUT + 2.0,
         )
