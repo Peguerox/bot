@@ -2068,8 +2068,8 @@ export default function Dashboard() {
             onToggled={load}
           />
           <CompactStochBtcPanel
-            title="Worker 3 · Regime Switch"
-            subtitle="fade TP0.10/SL0.11, trend TP0.30/SL0.30 / ER(6)>0.75 / window 5"
+            title="Worker 3 · Pure ER Fade"
+            subtitle="no stochastic, ER(6)>0.75 fades the trend / TP 0.10% / SL 0.10%"
             table="lighter_stoch_dca_btc_state"
             state={dcaBtcState}
             trades={dcaBtcTrades}

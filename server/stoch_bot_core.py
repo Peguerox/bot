@@ -603,7 +603,11 @@ class StochBot:
             "last_processed_candle_ts": candle_ts,
         }
         regime = None
-        if cfg.schema_has_position_bands:
+        if cfg.pure_trend_fade:
+            # Every entry here only fires when is_trending was true (see tick()), so it's
+            # always a faded-trend entry -- never a plain chop fade, never a trend-follow.
+            regime = "trend_fade"
+        elif cfg.schema_has_position_bands:
             # Only bots whose table actually has these columns write them -- plain
             # fade-only bots without the migration (Worker 2) never touch this field.
             trending_leg = is_trending and cfg.trend_tp_pct is not None
