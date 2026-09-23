@@ -1461,6 +1461,11 @@ function CompactStochBtcPanel({
   erValue?: number | null; runs?: any[]; cooldownMin?: number;
 }) {
   const [toggling, setToggling] = useState(false);
+  const [nowTick, setNowTick] = useState(() => Date.now());
+  useEffect(() => {
+    const id = setInterval(() => setNowTick(Date.now()), 1000);
+    return () => clearInterval(id);
+  }, []);
   const side = state?.side ?? null;
   const legs: any[] = state?.legs ?? [];
   const seedUsd = state?.seed_usd ?? 100;
@@ -1486,18 +1491,20 @@ function CompactStochBtcPanel({
 
   // Session drawdown breaker status: paused if the last trip is within cooldownMin AND we
   // haven't crossed into a new session boundary since (which re-arms it early regardless).
+  // Driven by nowTick (ticks every second) so the countdown below is live, not just refreshed
+  // on the next data poll.
   let breakerPaused = false;
-  let breakerResumeInMin: number | null = null;
+  let breakerResumeSec: number | null = null;
   if (cooldownMin) {
     const lastStop = runs?.find((r) => r.action === "session_drawdown_stop") ?? null;
     if (lastStop) {
       const tripTime = new Date(lastStop.ran_at);
-      const now = new Date();
+      const now = new Date(nowTick);
       const elapsedMin = (now.getTime() - tripTime.getTime()) / 60000;
       const sameSession = currentSessionStart(tripTime).getTime() === currentSessionStart(now).getTime();
       if (sameSession && elapsedMin < cooldownMin) {
         breakerPaused = true;
-        breakerResumeInMin = cooldownMin - elapsedMin;
+        breakerResumeSec = Math.round((cooldownMin - elapsedMin) * 60);
       }
     }
   }
@@ -1541,7 +1548,7 @@ function CompactStochBtcPanel({
             <p className="text-gray-500 text-[10px] uppercase">Win Rate</p>
             <p className="font-bold text-blue-400">{winRate}% <span className="text-[10px] font-normal text-gray-500">({closedTrades.length})</span></p>
           </div>
-          <div className={`bg-gray-800/60 rounded-lg p-2 ${erValue == null ? "col-span-2" : ""}`}>
+          <div className={`bg-gray-800/60 rounded-lg p-2 ${erValue == null && cooldownMin == null ? "col-span-2" : ""}`}>
             <p className="text-gray-500 text-[10px] uppercase">Position</p>
             <div className="flex items-center gap-1.5 flex-wrap">
               <span className={`font-bold ${side === "long" ? "text-green-400" : side === "short" ? "text-red-400" : "text-gray-400"}`}>
@@ -1571,15 +1578,15 @@ function CompactStochBtcPanel({
             </div>
           )}
           {cooldownMin != null && (
-            <div className="bg-gray-800/60 rounded-lg p-2 col-span-2">
-              <p className="text-gray-500 text-[10px] uppercase">Session Breaker</p>
+            <div className="bg-gray-800/60 rounded-lg p-2">
+              <p className="text-gray-500 text-[10px] uppercase">Breaker</p>
               <div className="flex items-center gap-1.5">
-                <span className={`text-[10px] font-bold px-1.5 py-0.5 rounded uppercase ${breakerPaused ? "bg-red-500/20 text-red-400" : "bg-green-500/20 text-green-400"}`}>
+                <span className={`text-[9px] font-bold px-1.5 py-0.5 rounded uppercase ${breakerPaused ? "bg-red-500/20 text-red-400" : "bg-green-500/20 text-green-400"}`}>
                   {breakerPaused ? "cooldown" : "active"}
                 </span>
-                {breakerPaused && breakerResumeInMin != null && (
-                  <span className="text-[10px] text-gray-400">
-                    resumes in {Math.ceil(breakerResumeInMin)}m
+                {breakerPaused && breakerResumeSec != null && (
+                  <span className="text-[10px] font-bold text-gray-300 tabular-nums">
+                    {String(Math.floor(breakerResumeSec / 60)).padStart(2, "0")}:{String(breakerResumeSec % 60).padStart(2, "0")}
                   </span>
                 )}
               </div>
