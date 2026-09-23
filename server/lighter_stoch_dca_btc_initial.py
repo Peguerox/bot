@@ -1,32 +1,45 @@
 """
-Worker 1 -- "REVERSAL GUARD". Real-money Lighter BTC stochastic bot.
+Worker 1 -- "REVERSAL GUARD + SMART SESSION BREAKER". Real-money Lighter BTC stochastic bot.
 
-All logic lives in stoch_bot_core; this file is settings only. Same as Worker 2's plain
-fade-only strategy (window 5, 25/75, TP 0.10%/SL 0.11%, no regime switch) -- the ONLY
-difference is reversal_guard_seconds=120, isolating that one variable as a live A/B against
-Worker 2.
+All logic lives in stoch_bot_core; this file is settings only. Same base strategy as Worker 2's
+plain fade-only (window 5, 25/75, TP 0.10%/SL 0.11%) plus reversal_guard_seconds=120 -- the
+same live A/B against Worker 2 as before, now with a session drawdown breaker added on top.
 
-2026-09-23: dropped the regime-switch/trend-follow experiment. Neither Worker 1 (inverted
-trend) nor Worker 3 (normal trend) was outperforming plain fade-only in the live A/B or in a
-1,092-combo tick-validated parameter sweep over the same data -- plain fade-only (matching
-Worker 2) was the best performer found. Replaced with a different, independently validated
-idea instead: a 120-second minimum position age before an opposite-side signal can close/
-reverse it (TP/SL still fire immediately, unaffected). Tested against 14,842 real recorded
-ticks + the 1.4s execution-latency model (calibrated earlier against real Worker 2 trades to
-within ~0.17 percentage points): 162->157 trades, 62.96%->64.97% win rate, +1.698%->+2.304%
-total (a ~36% relative improvement), driven by fewer premature reversals (62->56) converting
-into more real TPs (51->54). Single 11.3-hour bull-market session -- a live A/B is the next
-real test, not proof across regimes.
+History: regime-switch/trend-follow (both directions) underperformed plain fade-only in the
+live A/B and a 1,092-combo tick-validated sweep -- replaced 2026-09-23 with the 120s reversal
+guard (36% relative improvement, tick+latency validated). Worker 3 then got a session drawdown
+breaker with a blind fixed cooldown; real data the same day showed a genuine gap -- an ER(6)-
+style "is this a clean trend" check stayed under 0.75 at every window from 6-45 candles during
+a real grinding decline that kept stopping out fade entries. Net DIRECTION was the reliable
+signal there, not ER's trend-cleanliness measure.
 
-schema_has_position_bands stays True (not because this bot uses regime-switch anymore, but
-because its table already has the position_tp_pct/position_sl_pct columns from when it did --
-this makes sure the leftover trend-band value on the currently-open position gets cleared
-properly on its next close instead of silently lingering forever).
+Worker 1 gets the "smart resume" version instead: after the base cooldown, resuming also
+requires net price direction (over session_breaker_direction_window candles) to have stopped
+matching the direction the market was moving in at trip time, AND recent realized volatility
+(5-min range %) to be back under session_breaker_calm_range_pct -- not just "stopped moving the
+same way," since crypto rarely reverts to a pre-crash level, it just consolidates wherever it
+landed. If either check still fails, resume is deferred and re-checked every
+session_breaker_recheck_min instead of resuming blind.
+
+Threshold/cooldown/recheck swept together (4 thresholds x 5 cooldowns x 2 recheck intervals)
+against 28 hours of our own real recorded ticks (including the -1.86% crash on 2026-09-23):
+0.15%/15min/10min recheck won clearly -- 179 trades, 65.9% win, +$0.321 vs baseline's 409
+trades, 59.4% win, +$0.148. Tighter than Worker 3's blind-cooldown calibration (0.25%/45min) on
+purpose: a false trip costs little when resume is smart (clears almost immediately once real
+conditions are checked), while missing a real crash costs a lot -- that asymmetry pushes the
+optimal threshold tighter than the fixed-cooldown version's calibration.
+
+schema_has_position_bands stays True from the earlier regime-switch era (clears a leftover
+trend-band value on close instead of leaving it stuck). schema_has_session_breaker=True is new
+(migrated 2026-09-23) -- without it the breaker still works but resets on every restart,
+proven costly on Worker 3 (an unrelated frontend-only deploy restarts every backend service,
+since Render redeploys everything on any push, and that wiped an active cooldown twice before
+persistence existed).
 """
 from stoch_bot_core import BotConfig, run_bot
 
 CONFIG = BotConfig(
-    name="REVERSAL GUARD (worker 1)",
+    name="REVERSAL GUARD + SMART SESSION BREAKER (worker 1)",
     worker_id="worker1",
     table_state="lighter_btc_initial_state",
     table_trades="lighter_btc_initial_trades",
@@ -37,6 +50,12 @@ CONFIG = BotConfig(
     entry_lo=25, entry_hi=75,
     reversal_lo=25, reversal_hi=75,
     reversal_guard_seconds=120,
+    session_drawdown_stop_pct=0.15,
+    session_breaker_cooldown_min=15.0,
+    session_breaker_recheck_min=10.0,
+    session_breaker_direction_window=30,
+    session_breaker_calm_range_pct=0.20,
+    schema_has_session_breaker=True,
     schema_has_position_bands=True,
     # Price-tick logging: last resort. Only writes if both Worker 2 and Worker 3 are quiet.
     tick_log_defers_to=["worker2", "worker3"],

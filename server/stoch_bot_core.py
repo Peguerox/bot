@@ -136,6 +136,24 @@ class BotConfig:
     # None = disabled.
     session_drawdown_stop_pct: Optional[float] = None
     session_breaker_cooldown_min: float = 45.0
+    # Smart resume (2026-09-23, built for Worker 1 after real data showed a plain ER(6)-style
+    # "is this a clean trend" check stays under 0.75 at EVERY window 6-45 candles during a real
+    # grinding decline -- net DIRECTION was the reliable signal there, not ER's cleanliness
+    # measure). After session_breaker_cooldown_min, resuming ALSO requires: (1) net price
+    # direction over this many candles no longer matches the direction the market was moving in
+    # at trip time (whichever way that was -- not a downtrend-only check), and (2) recent
+    # realized volatility (5-min high/low range as % of price) is back under
+    # session_breaker_calm_range_pct. If either still fails, resume is deferred and re-checked
+    # every session_breaker_recheck_min instead of resuming blind. None (either field) disables
+    # that specific gate -- with both None, behaves exactly like Worker 3's plain fixed-cooldown
+    # version. Swept threshold x cooldown x recheck against 28h of our own real tick data
+    # (409 baseline trades, +$0.148): 0.15%/15min/10min recheck won clearly (179 trades, 65.9%
+    # win, +$0.321) -- tighter than the fixed-cooldown-only calibration, because a false trip
+    # costs little when resume is smart (it clears almost immediately) while missing a real
+    # crash costs a lot, which pushes the optimal threshold tighter than before.
+    session_breaker_direction_window: Optional[int] = None
+    session_breaker_calm_range_pct: Optional[float] = None
+    session_breaker_recheck_min: float = 10.0
     # True only for bots whose table has the session_breaker_* columns (migrated 2026-09-23
     # after a restart -- caused by an unrelated frontend-only deploy -- wiped an active
     # cooldown twice in production). When True, the breaker's state survives a restart by
@@ -207,6 +225,21 @@ def compute_er_and_direction(candles, period):
     er = net / path if path > 0 else 0.0
     direction = "long" if diff > 0 else ("short" if diff < 0 else None)
     return er, direction
+
+
+def compute_range_pct(candles, window=5):
+    """Realized volatility proxy: high/low range over the last `window` closed candles, as a
+    % of the latest close. Used by the session breaker's smart resume to check the market has
+    actually calmed down, not just that price stopped moving the same direction -- crypto
+    rarely reverts to a pre-crash level, it just stops and consolidates at wherever it landed,
+    so this is measured relative to the CURRENT price, not the pre-crash one."""
+    closed = candles[:-1]
+    if len(closed) < window:
+        return None
+    w = closed[-window:]
+    hh = max(c["h"] for c in w)
+    ll = min(c["l"] for c in w)
+    return (hh - ll) / w[-1]["c"] * 100
 
 
 # ── Live state cache, fed by the WebSocket ──────────────────────────────────────────────────
@@ -292,6 +325,8 @@ class StochBot:
         self.session_start_equity = None
         self.session_paused = False
         self.session_paused_at = None
+        self.session_trip_direction = None   # direction the market was moving in at trip time
+        self.session_next_check_at = None    # when to next evaluate whether resume is safe
 
     # ── Supabase (aiohttp: async, and actually cancellable) ─────────────────────────────────
     async def sb(self, method, path, body=None):
@@ -742,14 +777,25 @@ class StochBot:
             "session_breaker_peak_pnl": self.session_peak_pnl,
             "session_breaker_paused": self.session_paused,
             "session_breaker_paused_at": self.session_paused_at.isoformat() if self.session_paused_at else None,
+            "session_breaker_trip_direction": self.session_trip_direction,
+            "session_breaker_next_check_at": self.session_next_check_at.isoformat() if self.session_next_check_at else None,
         }
 
     async def _apply_session_breaker(self, state, entry_signal, now_utc=None):
         """Two trip conditions: drawdown from an established session peak, OR a raw loss from
         session start if the session was never yet profitable (closes the gap where an
-        immediate bad start went unprotected). Either blocks new entries until the cooldown
-        elapses, then re-arms with a fresh peak/baseline *within the same session* (does not
-        wait for the next 8h boundary).
+        immediate bad start went unprotected). Either blocks new entries for
+        session_breaker_cooldown_min, then re-arms with a fresh peak/baseline *within the same
+        session* (does not wait for the next 8h boundary) -- UNLESS
+        session_breaker_direction_window is set, in which case resuming also requires net price
+        direction over that window to have stopped matching the direction the market was moving
+        in at trip time (whichever way that was -- this isn't a "downtrend only" check, a trip
+        during a rally waits for the rally to calm/reverse the same way). If it's still moving
+        the same way, resume is deferred and re-checked every session_breaker_recheck_min
+        instead of resuming blind. Real data (2026-09-23): a plain ER(6)-style "is this a clean
+        trend" check stayed under 0.75 at EVERY window from 6-45 candles during a real grinding
+        decline that kept stopping out fade entries -- net DIRECTION was the reliable signal
+        there, not ER's trend-cleanliness measure, which is why this checks direction only.
 
         With schema_has_session_breaker=True, state survives a restart by reading/writing the
         session_breaker_* columns -- proven necessary in production: an unrelated frontend-only
@@ -773,6 +819,17 @@ class StochBot:
                     self.session_paused = bool(state.get("session_breaker_paused"))
                     paused_at = state.get("session_breaker_paused_at")
                     self.session_paused_at = parse_iso(paused_at) if paused_at else None
+                    self.session_trip_direction = state.get("session_breaker_trip_direction")
+                    next_check = state.get("session_breaker_next_check_at")
+                    if next_check:
+                        self.session_next_check_at = parse_iso(next_check)
+                    elif self.session_paused_at is not None:
+                        # Backward-compat: a row persisted before this field existed --
+                        # reconstruct it from paused_at + the (possibly since-changed) cooldown.
+                        self.session_next_check_at = self.session_paused_at + timedelta(
+                            minutes=self.cfg.session_breaker_cooldown_min)
+                    else:
+                        self.session_next_check_at = None
                     self.session_start_equity = state["seed_usd"] + self.session_baseline_pnl
                     rehydrated = True
             if not rehydrated:
@@ -781,22 +838,45 @@ class StochBot:
                 self.session_peak_pnl = 0.0
                 self.session_paused = False
                 self.session_paused_at = None
+                self.session_trip_direction = None
+                self.session_next_check_at = None
                 if persist:
                     await self.update_state(self._persist_session_breaker_patch())
             self.session_start_equity = state["seed_usd"] + self.session_baseline_pnl
 
-        if self.session_paused and self.session_paused_at is not None:
-            elapsed_min = (now_utc - self.session_paused_at).total_seconds() / 60
-            if elapsed_min >= self.cfg.session_breaker_cooldown_min:
-                # Cooldown elapsed -- re-arm within the same session, fresh peak/baseline so
-                # we don't immediately re-trip on stale pre-cooldown drawdown.
+        if self.session_paused and self.session_next_check_at is not None and now_utc >= self.session_next_check_at:
+            direction_window = self.cfg.session_breaker_direction_window
+            can_rearm = True
+            if direction_window:
+                _, current_dir = compute_er_and_direction(self.candles, direction_window)
+                if current_dir is not None and current_dir == self.session_trip_direction:
+                    can_rearm = False
+            if can_rearm and self.cfg.session_breaker_calm_range_pct:
+                range_pct = compute_range_pct(self.candles)
+                if range_pct is not None and range_pct > self.cfg.session_breaker_calm_range_pct:
+                    can_rearm = False
+            if can_rearm:
+                # Cleared (cooldown elapsed, and market has calmed/reversed if direction-gated)
+                # -- re-arm within the same session, fresh peak/baseline so we don't instantly
+                # re-trip on stale pre-cooldown drawdown.
                 self.session_paused = False
                 self.session_paused_at = None
+                self.session_trip_direction = None
+                self.session_next_check_at = None
                 self.session_baseline_pnl = state["realized_pnl_usd"]
                 self.session_peak_pnl = 0.0
                 self.session_start_equity = state["seed_usd"] + self.session_baseline_pnl
                 if persist:
                     await self.update_state(self._persist_session_breaker_patch())
+            else:
+                # Still moving the same way it was at trip time -- defer to a shorter recheck
+                # instead of resuming blind or waiting the full cooldown again.
+                self.session_next_check_at = now_utc + timedelta(
+                    minutes=self.cfg.session_breaker_recheck_min)
+                if persist:
+                    await self.update_state({
+                        "session_breaker_next_check_at": self.session_next_check_at.isoformat(),
+                    })
 
         session_pnl = state["realized_pnl_usd"] - self.session_baseline_pnl
         if session_pnl > self.session_peak_pnl:
@@ -818,6 +898,13 @@ class StochBot:
             if tripped:
                 self.session_paused = True
                 self.session_paused_at = now_utc
+                self.session_next_check_at = now_utc + timedelta(
+                    minutes=self.cfg.session_breaker_cooldown_min)
+                if self.cfg.session_breaker_direction_window:
+                    _, self.session_trip_direction = compute_er_and_direction(
+                        self.candles, self.cfg.session_breaker_direction_window)
+                else:
+                    self.session_trip_direction = None
                 if persist:
                     await self.update_state(self._persist_session_breaker_patch())
                 await self.log_run("session_drawdown_stop", {
@@ -825,6 +912,7 @@ class StochBot:
                     "session_peak_pnl": self.session_peak_pnl, "session_pnl": session_pnl,
                     "dd_pct": dd_pct, "threshold_pct": threshold,
                     "cooldown_min": self.cfg.session_breaker_cooldown_min,
+                    "trip_direction": self.session_trip_direction,
                 })
 
         return None if self.session_paused else entry_signal
