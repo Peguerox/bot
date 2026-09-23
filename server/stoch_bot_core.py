@@ -122,6 +122,15 @@ class BotConfig:
     # windows 2-9 were consistently profitable, window 6 best (56 trades, 62.5% win,
     # +1.524% over a 14.3h window) -- much cleaner than the stochastic-blended regime switch.
     pure_trend_fade: bool = False
+    # Session drawdown breaker (2026-09-23): the day splits into 3 fixed 8h sessions (11am-7pm,
+    # 7pm-3am, 3am-11am ET). Once a session has been realized-profitable at least once, if it
+    # gives back this many percentage points of total account equity from that session's own
+    # peak, new entries stop for the rest of THAT session (existing positions still manage
+    # normally to TP/SL/reversal-guard) -- re-arms fresh at the next session boundary.
+    # Calibrated against one real crashed session vs one real good session on 2026-09-23: 0.4%
+    # never triggered on the good session (its worst post-profit drawdown was 0.2491%) and
+    # caught the bad one early, avoiding roughly half of its eventual loss. None = disabled.
+    session_drawdown_stop_pct: Optional[float] = None
     market_index: int = 1
     price_decimals: int = 1
     size_decimals: int = 5
@@ -258,6 +267,14 @@ class StochBot:
         self.ticks = 0
         self._pos_cache = None      # (pos, collateral) from the last authoritative REST read
         self._pos_cache_at = 0.0
+        # Session drawdown breaker state -- in-memory only (not DB-persisted), so a restart
+        # re-arms it. That's an accepted tradeoff: restarts already happen every few hours in
+        # this project, and re-arming on restart is a safe default direction to err in.
+        self.session_index = None      # which of the 3 daily sessions we're currently in
+        self.session_baseline_pnl = None
+        self.session_peak_pnl = 0.0
+        self.session_start_equity = None
+        self.session_paused = False
 
     # ── Supabase (aiohttp: async, and actually cancellable) ─────────────────────────────────
     async def sb(self, method, path, body=None):
@@ -684,6 +701,53 @@ class StochBot:
     def now_ms(self):
         return self.candles[-1]["t"] if self.candles else int(time.time() * 1000)
 
+    def _current_session_start(self, now_utc):
+        """3 fixed 8h sessions: 11am-7pm ET, 7pm-3am ET, 3am-11am ET -- 15:00-23:00 UTC,
+        23:00-07:00 UTC, 07:00-15:00 UTC during EDT. Returns this moment's session start."""
+        day = now_utc.date()
+        hour = now_utc.hour
+        if 15 <= hour < 23:
+            start_date, start_hour = day, 15
+        elif hour < 7:
+            prev = day - timedelta(days=1)
+            start_date, start_hour = prev, 23
+        elif hour < 15:
+            start_date, start_hour = day, 7
+        else:  # hour >= 23
+            start_date, start_hour = day, 23
+        return datetime(start_date.year, start_date.month, start_date.day, start_hour,
+                        tzinfo=timezone.utc)
+
+    async def _apply_session_breaker(self, state, entry_signal, now_utc=None):
+        """If the current session has given back cfg.session_drawdown_stop_pct of total
+        account equity from its own peak (after being profitable at least once this session),
+        block new entries for the rest of THIS session. Re-arms fresh at the next boundary.
+        In-memory only -- a restart re-arms it, an accepted tradeoff (see __init__)."""
+        session_start = self._current_session_start(now_utc or datetime.now(timezone.utc))
+        if self.session_index != session_start:
+            self.session_index = session_start
+            self.session_baseline_pnl = state["realized_pnl_usd"]
+            self.session_peak_pnl = 0.0
+            self.session_start_equity = state["seed_usd"] + state["realized_pnl_usd"]
+            self.session_paused = False
+
+        session_pnl = state["realized_pnl_usd"] - self.session_baseline_pnl
+        if session_pnl > self.session_peak_pnl:
+            self.session_peak_pnl = session_pnl
+
+        if (not self.session_paused and self.session_peak_pnl > 0
+                and self.session_start_equity):
+            dd_pct = (self.session_peak_pnl - session_pnl) / self.session_start_equity * 100
+            if dd_pct >= self.cfg.session_drawdown_stop_pct:
+                self.session_paused = True
+                await self.log_run("session_drawdown_stop", {
+                    "session_start": self.session_index.isoformat(),
+                    "session_peak_pnl": self.session_peak_pnl, "session_pnl": session_pnl,
+                    "dd_pct": dd_pct, "threshold_pct": self.cfg.session_drawdown_stop_pct,
+                })
+
+        return None if self.session_paused else entry_signal
+
     # ── One decision cycle ──────────────────────────────────────────────────────────────────
     async def tick(self):
         cfg = self.cfg
@@ -715,6 +779,9 @@ class StochBot:
                 reversal_signal = trend_dir
             elif is_trending:
                 entry_signal = None  # no trend-follow config -- old block-only behavior
+
+        if cfg.session_drawdown_stop_pct is not None:
+            entry_signal = await self._apply_session_breaker(state, entry_signal)
 
         real_pos, collateral = await self.read_position()
         if real_pos is None:
