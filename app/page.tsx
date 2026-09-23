@@ -1489,23 +1489,21 @@ function CompactStochBtcPanel({
   const wins = closedTrades.filter((t) => t.pnl_usd > 0).length;
   const winRate = closedTrades.length > 0 ? (wins / closedTrades.length * 100).toFixed(1) : "—";
 
-  // Session drawdown breaker status: paused if the last trip is within cooldownMin AND we
-  // haven't crossed into a new session boundary since (which re-arms it early regardless).
-  // Driven by nowTick (ticks every second) so the countdown below is live, not just refreshed
-  // on the next data poll.
+  // Session drawdown breaker status: read directly from the persisted state row (the
+  // backend's own authoritative source of truth) rather than re-deriving it from the runs
+  // log -- a heuristic based on the last "session_drawdown_stop" run doesn't know when a
+  // restart has already cleared the pause (which happens on every deploy, since Render
+  // redeploys every service on any push, not just the one whose files changed) or when the
+  // cooldown re-armed early at a new session boundary.
   let breakerPaused = false;
   let breakerResumeSec: number | null = null;
   if (cooldownMin) {
-    const lastStop = runs?.find((r) => r.action === "session_drawdown_stop") ?? null;
-    if (lastStop) {
-      const tripTime = new Date(lastStop.ran_at);
+    breakerPaused = Boolean(state?.session_breaker_paused);
+    if (breakerPaused && state?.session_breaker_paused_at) {
+      const tripTime = new Date(state.session_breaker_paused_at);
       const now = new Date(nowTick);
       const elapsedMin = (now.getTime() - tripTime.getTime()) / 60000;
-      const sameSession = currentSessionStart(tripTime).getTime() === currentSessionStart(now).getTime();
-      if (sameSession && elapsedMin < cooldownMin) {
-        breakerPaused = true;
-        breakerResumeSec = Math.round((cooldownMin - elapsedMin) * 60);
-      }
+      breakerResumeSec = Math.max(0, Math.round((cooldownMin - elapsedMin) * 60));
     }
   }
 
