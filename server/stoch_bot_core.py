@@ -184,6 +184,13 @@ def parse_iso(s):
     return datetime.fromisoformat(s.replace("Z", "+00:00"))
 
 
+def tick_error_backoff_seconds(consecutive_errors):
+    """1s, 2s, 4s, 8s, ... capped at 60s. Replaces a flat 1s retry (2026-09-23): hammering a
+    WAF-blocked endpoint once a second for minutes both burns the retry budget for nothing and
+    likely makes an IP-level block look more abusive, not less."""
+    return min(1.0 * (2 ** min(consecutive_errors - 1, 6)), 60.0)
+
+
 def round_trigger(p, up):
     step = 0.1
     return (int(p / step) + (1 if up else 0)) * step if up else (int(p / step)) * step
@@ -531,7 +538,23 @@ class StochBot:
         now = time.time()
         if self._pos_cache is not None and now - self._pos_cache_at < POSITION_TTL:
             return self._pos_cache
-        return await self.get_position_rest()
+        try:
+            return await self.get_position_rest()
+        except Exception as e:
+            # Proven necessary in production (2026-09-23): Lighter's CloudFront WAF started
+            # returning a CAPTCHA challenge (HTTP 405) to Render's IP specifically -- every
+            # tick failed right here, before ever reaching the TP/SL check below, leaving two
+            # real open positions (already past their TP) completely unmanaged for minutes.
+            # Falling back to the last known position lets the tick continue far enough to
+            # still evaluate and act on TP/SL using slightly stale size data, instead of
+            # giving up entirely. If we've never successfully read a position at all, there
+            # is nothing safe to fall back to, so this still raises in that case.
+            if self._pos_cache is not None:
+                await self.log_run("position_read_failed_using_cache", {
+                    "error": str(e)[:300], "cache_age_s": round(now - self._pos_cache_at, 1),
+                })
+                return self._pos_cache
+            raise
 
     async def confirm_fill(self, want_nonzero, expect_qty=None, tries=6, delay=0.25):
         """Authoritative REST answer to 'what is the real position right now'.
@@ -921,6 +944,14 @@ class StochBot:
     async def tick(self):
         cfg = self.cfg
         state = await self.get_state()
+
+        if not state.get("enabled", True) and state.get("side") is None:
+            # Disabled AND flat -- nothing to protect, so don't hit the REST position endpoint
+            # at all. Proven necessary 2026-09-23: two disabled, already-flat workers kept
+            # hammering a WAF-blocked endpoint once per tick for no reason, which both wastes
+            # the retry budget and likely makes an IP-level block look more abusive, not less.
+            return
+
         entry_signal, reversal_signal, candle_ts = self.compute_stoch_signal()
         now_open = self.candles[-1]["o"] if self.candles else None
         if candle_ts is None or now_open is None:
@@ -1166,6 +1197,7 @@ class StochBot:
                                        "sl": cfg.sl_pct, "er": cfg.er_period})
         self.last_heartbeat = time.time()
 
+        consecutive_errors = 0
         try:
             while True:
                 try:
@@ -1173,6 +1205,7 @@ class StochBot:
                     # whole bot for 20+ minutes with an open position and no SL running.
                     await asyncio.wait_for(self.tick(), timeout=TICK_WATCHDOG)
                     self.ticks += 1
+                    consecutive_errors = 0
                     await self.heartbeat()
                     await asyncio.sleep(cfg.tick_seconds)
                 except asyncio.TimeoutError:
@@ -1180,11 +1213,19 @@ class StochBot:
                     await asyncio.sleep(1.0)
                 except Exception as e:
                     print(f"tick error: {e}", flush=True)
+                    consecutive_errors += 1
                     try:
-                        await self.log_run("error", {"error": str(e)[:400]})
+                        await self.log_run("error", {"error": str(e)[:400],
+                                                      "consecutive": consecutive_errors})
                     except Exception:
                         pass
-                    await asyncio.sleep(1.0)
+                    # Exponential backoff instead of a flat 1s retry -- proven necessary
+                    # 2026-09-23: two workers hammered a WAF-blocked endpoint once a second
+                    # for minutes straight, which both burns the retry budget for nothing and
+                    # looks more like abusive traffic to whatever is doing the blocking, not
+                    # less. Caps at 60s so a real transient blip still recovers reasonably fast.
+                    backoff = tick_error_backoff_seconds(consecutive_errors)
+                    await asyncio.sleep(backoff)
         finally:
             ws_task.cancel()
             candle_task.cancel()
