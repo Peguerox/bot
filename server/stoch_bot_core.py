@@ -114,6 +114,14 @@ class BotConfig:
     # same window's baseline. TP/SL still fire immediately regardless of this guard. None =
     # no guard (any opposite signal reverses immediately, the original behavior).
     reversal_guard_seconds: Optional[float] = None
+    # Pure ER-fade (2026-09-23): no stochastic entries at all -- ER(er_period) is the ONLY
+    # signal. When ER > er_max, enter fading the detected direction (trend_invert_direction
+    # should be True to actually fade rather than follow), at the bot's plain tp_pct/sl_pct
+    # (no separate trend band). Exit is TP/SL exclusively -- there is no reversal exit in
+    # this mode. Tick-validated on real ticks + the 1.4s latency model, window swept 2-20:
+    # windows 2-9 were consistently profitable, window 6 best (56 trades, 62.5% win,
+    # +1.524% over a 14.3h window) -- much cleaner than the stochastic-blended regime switch.
+    pure_trend_fade: bool = False
     market_index: int = 1
     price_decimals: int = 1
     size_decimals: int = 5
@@ -681,13 +689,22 @@ class StochBot:
         if candle_ts is None or now_open is None:
             return
 
+        if cfg.pure_trend_fade:
+            # No stochastic entries at all -- ER is the only signal, and it drives entry
+            # only. Exit is TP/SL exclusively (reversal_signal stays None permanently).
+            entry_signal, reversal_signal = None, None
+
         is_trending = False
         if cfg.er_period and cfg.er_max is not None:
             er, trend_dir = compute_er_and_direction(self.candles, cfg.er_period)
             is_trending = er is not None and er > cfg.er_max
             if trend_dir is not None and cfg.trend_invert_direction:
                 trend_dir = "short" if trend_dir == "long" else "long"
-            if is_trending and cfg.trend_tp_pct is not None:
+            if cfg.pure_trend_fade:
+                if is_trending:
+                    entry_signal = trend_dir
+                # reversal_signal is never set here -- pure_trend_fade only exits via TP/SL.
+            elif is_trending and cfg.trend_tp_pct is not None:
                 # Regime switch: don't fade a real trend, ride it instead -- with the
                 # trend leg's own (usually wider) TP/SL, applied below at entry time.
                 entry_signal = trend_dir
