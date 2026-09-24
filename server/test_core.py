@@ -1039,6 +1039,35 @@ async def t_tick_close_requested_keeps_retrying_if_close_fails():
     check("side still tracked (nothing was falsely cleared)", bot.state_row["side"] == "long")
 
 
+async def t_tick_close_requested_backs_off_between_retries():
+    print("\n[tick: a failed close retry backs off instead of hammering the very next tick]")
+    entry = 86000.0
+    ex = FakeExchange(position=round(20.0 / entry, 5), collateral=20.0)
+    ex.order_error = "boom"
+    ex.fills_when_erroring = False
+    state = {
+        "id": 1, "side": "long", "legs": [{"price": entry, "usd_size": 20.0}],
+        "first_entry_price": entry, "first_entry_time": 1700000000000, "dca_level": 0,
+        "seed_usd": 20.0, "realized_pnl_usd": 0.0, "collateral_before_entry": 20.0,
+        "enabled": True, "consecutive_entry_failures": 0, "last_processed_candle_ts": 0,
+        "close_requested": True,
+    }
+    bot = make_bot(ex, state=state, candles_kind="mid")
+    await bot.tick()
+    orders_after_first_attempt = len(ex.orders)
+    check("first attempt actually tried to place an order", orders_after_first_attempt >= 1,
+          orders_after_first_attempt)
+    check("backoff counter incremented", bot._close_retry_failures >= 1, bot._close_retry_failures)
+    check("next retry time pushed into the future",
+          bot._close_retry_next_at > time.time(), bot._close_retry_next_at - time.time())
+
+    # An immediate next tick, before the backoff window elapses, must NOT place another order --
+    # this is exactly the gap that hammered a WAF-blocked endpoint on 2026-09-24.
+    await bot.tick()
+    check("no new order placed on the immediate next tick (backoff held)",
+          len(ex.orders) == orders_after_first_attempt, len(ex.orders))
+
+
 async def t_read_position_falls_back_to_cache_on_error():
     print("\n[read_position: REST call fails, but we have a prior cached read -> use it, don't crash]")
     ex = FakeExchange(position=0.0005, collateral=20.0)
@@ -1458,6 +1487,7 @@ async def main():
               t_tick_close_requested_works_even_when_disabled,
               t_tick_close_requested_with_no_position_just_clears_flag,
               t_tick_close_requested_keeps_retrying_if_close_fails,
+              t_tick_close_requested_backs_off_between_retries,
               t_read_position_falls_back_to_cache_on_error,
               t_read_position_raises_without_any_cache,
               t_tick_error_backoff_formula,

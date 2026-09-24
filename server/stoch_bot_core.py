@@ -337,6 +337,8 @@ class StochBot:
         self._pos_cache_at = 0.0
         self._auth_token = None     # cached signed auth token for get_position_rest()
         self._auth_token_expiry_at = 0.0
+        self._close_retry_failures = 0    # backoff counter for the close_requested retry loop
+        self._close_retry_next_at = 0.0
         # Session drawdown breaker state -- in-memory only (not DB-persisted), so a restart
         # re-arms it. That's an accepted tradeoff: restarts already happen every few hours in
         # this project, and re-arming on restart is a safe default direction to err in.
@@ -1004,18 +1006,39 @@ class StochBot:
             # in. Keeps retrying next tick (does not clear the flag) until either nothing is
             # left to close or close_all actually confirms flat -- a fire-once attempt would
             # silently give up on exactly the kind of transient failure this button exists for.
+            #
+            # Backs off between retries (proven necessary 2026-09-24): the first version of
+            # this retried every tick with no delay, which hammered a WAF-blocked read hard
+            # enough to trigger the exact CAPTCHA block it was trying to work around -- the
+            # same failure mode the general tick-error backoff already exists to prevent,
+            # just missing here because this path returns before reaching that code.
             if state.get("side") is None:
                 await self.update_state({"close_requested": False, "enabled": False})
+                self._close_retry_failures = 0
+                self._close_retry_next_at = 0.0
+                return
+            now = time.time()
+            if now < self._close_retry_next_at:
                 return
             best_bid, best_ask = self.live.best_bid_ask()
             if best_bid is None or best_ask is None:
                 await self.log_run("close_requested_no_book", {})
+                self._close_retry_failures += 1
+                self._close_retry_next_at = now + tick_error_backoff_seconds(self._close_retry_failures)
                 return
             closed_ok = await self.close_all("MANUAL_BUTTON", state, state["side"],
                                              state.get("legs") or [], best_bid, best_ask,
                                              self.now_ms(), known_pos=None)
             if closed_ok:
                 await self.update_state({"close_requested": False, "enabled": False})
+                self._close_retry_failures = 0
+                self._close_retry_next_at = 0.0
+            else:
+                # Measured from AFTER the attempt, not before -- close_all can itself take up
+                # to ~1.5s (confirm_fill's own retries), so backing off from the start time
+                # would let a slow failure get LESS real delay than a fast one.
+                self._close_retry_failures += 1
+                self._close_retry_next_at = time.time() + tick_error_backoff_seconds(self._close_retry_failures)
             return
 
         if not state.get("enabled", True) and state.get("side") is None:
