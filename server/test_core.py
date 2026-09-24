@@ -724,6 +724,204 @@ async def t_entry_vol_gate_blocks_reversal_reopen_but_not_the_close():
     check("only one order placed (the close, no reopen)", len(ex.orders) == 1, ex.orders)
 
 
+async def t_self_lock_paper_shadow_opens_when_flat():
+    print("\n[self-lock: paper shadow opens a position the moment a signal appears while flat]")
+    ex = FakeExchange()
+    bot = make_bot(ex, candles_kind="mid", self_lock_enabled=True)
+    state = dict(bot.state_row)
+    await bot._update_paper_shadow(state, "long", None, 86000.0, 86001.0, 1700000000000)
+    check("paper side opened", bot.paper_side == "long", bot.paper_side)
+    check("paper entry recorded at the ask (buying long)", bot.paper_entry == 86001.0, bot.paper_entry)
+
+
+async def t_self_lock_single_paper_tp_does_not_unlock():
+    print("\n[self-lock: one paper TP alone doesn't unlock -- needs two IN A ROW]")
+    ex = FakeExchange()
+    bot = make_bot(ex, candles_kind="mid", self_lock_enabled=True)
+    bot.real_trading_locked = True
+    bot._self_lock_loaded = True
+    bot.paper_side = "long"
+    bot.paper_entry = 86000.0
+    bot.paper_entry_ms = 1700000000000
+    state = dict(bot.state_row)
+    tp_price = 86000.0 * 1.0011  # past the 0.10% TP
+    await bot._update_paper_shadow(state, None, None, tp_price, tp_price + 1, 1700000060000)
+    check("counter at 1", bot.paper_consecutive_tps == 1, bot.paper_consecutive_tps)
+    check("still locked", bot.real_trading_locked is True)
+
+
+async def t_self_lock_two_consecutive_paper_tps_unlocks():
+    print("\n[self-lock: two consecutive paper TPs unlock real trading]")
+    ex = FakeExchange()
+    bot = make_bot(ex, candles_kind="mid", self_lock_enabled=True, schema_has_self_lock=True)
+    bot.real_trading_locked = True
+    bot._self_lock_loaded = True
+    bot.paper_side = "long"
+    bot.paper_entry = 86000.0
+    bot.paper_entry_ms = 1700000000000
+    state = dict(bot.state_row)
+    tp_price = 86000.0 * 1.0011
+    await bot._update_paper_shadow(state, None, None, tp_price, tp_price + 1, 1700000060000)
+    check("still locked after 1 TP", bot.real_trading_locked is True)
+    check("counter=1", bot.paper_consecutive_tps == 1)
+    # Simulate the shadow's next cycle: reopened, then hits TP again.
+    bot.paper_side = "long"
+    bot.paper_entry = 86000.0
+    bot.paper_entry_ms = 1700000120000
+    await bot._update_paper_shadow(state, None, None, tp_price, tp_price + 1, 1700000180000)
+    check("unlocked after 2nd consecutive TP", bot.real_trading_locked is False, bot.real_trading_locked)
+    check("counter reset to 0", bot.paper_consecutive_tps == 0, bot.paper_consecutive_tps)
+
+
+async def t_self_lock_paper_sl_resets_counter():
+    print("\n[self-lock: a paper SL resets the consecutive-TP counter back to zero]")
+    ex = FakeExchange()
+    bot = make_bot(ex, candles_kind="mid", self_lock_enabled=True)
+    bot.real_trading_locked = True
+    bot._self_lock_loaded = True
+    bot.paper_side = "long"
+    bot.paper_entry = 86000.0
+    bot.paper_entry_ms = 1700000000000
+    bot.paper_consecutive_tps = 1  # already has one TP toward the goal
+    state = dict(bot.state_row)
+    sl_price = 86000.0 * 0.9988  # past the 0.11% SL
+    await bot._update_paper_shadow(state, None, None, sl_price, sl_price + 1, 1700000060000)
+    check("counter reset to 0", bot.paper_consecutive_tps == 0, bot.paper_consecutive_tps)
+    check("still locked (a paper SL doesn't unlock)", bot.real_trading_locked is True)
+
+
+async def t_self_lock_real_sl_locks_and_resets_paper_counter():
+    print("\n[self-lock: a REAL SL close locks real trading and resets the paper counter]")
+    entry = 86000.0
+    ex = FakeExchange(position=round(20.0 / entry, 5), collateral=20.0 - 0.02)  # long position
+    candles = make_candles("mid")
+    state = {
+        "id": 1, "side": "long", "legs": [{"price": entry, "usd_size": 20.0}],
+        "first_entry_price": entry, "first_entry_time": candles[-1]["t"], "dca_level": 0,
+        "seed_usd": 20.0, "realized_pnl_usd": 0.0, "collateral_before_entry": 20.0,
+        "enabled": True, "consecutive_entry_failures": 0, "last_processed_candle_ts": 0,
+    }
+    bot = make_bot(ex, state=state, candles=candles, self_lock_enabled=True)
+    bot.paper_consecutive_tps = 1  # pretend the shadow already had progress
+    sl_trigger = entry * (1 - 0.11 / 100) - 1
+    bot.live.order_book = {"bids": [{"price": str(sl_trigger)}], "asks": [{"price": str(sl_trigger + 1)}]}
+    await bot.tick()
+    check("real position closed on SL", bot.state_row["side"] is None, bot.state_row["side"])
+    check("real trading locked", bot.real_trading_locked is True, bot.real_trading_locked)
+    check("paper counter reset on lock", bot.paper_consecutive_tps == 0, bot.paper_consecutive_tps)
+
+
+async def t_self_lock_blocks_real_entry_while_locked():
+    print("\n[self-lock: while locked, a real entry signal never places a real order]")
+    ex = FakeExchange()
+    bot = make_bot(ex, candles_kind="long", self_lock_enabled=True)  # K near 0 -> entry signal "long"
+    bot.real_trading_locked = True
+    bot._self_lock_loaded = True
+    await bot.tick()
+    check("no real order placed", ex.orders == [], ex.orders)
+    check("still flat", bot.state_row["side"] is None, bot.state_row["side"])
+
+
+async def t_self_lock_blocks_real_reversal_reopen_but_not_the_close():
+    print("\n[self-lock: while locked, a reversal CLOSES the real position but does not reopen it]")
+    entry = 86000.0
+    ex = FakeExchange(position=-round(20.0 / entry, 5), collateral=20.0)  # short position
+    candles = make_candles("long")  # K near 0 -> reversal signal "long", opposite of held short
+    entry_time = candles[-1]["t"] - 200_000
+    state = {
+        "id": 1, "side": "short", "legs": [{"price": entry, "usd_size": 20.0}],
+        "first_entry_price": entry, "first_entry_time": entry_time, "dca_level": 0,
+        "seed_usd": 20.0, "realized_pnl_usd": 0.0, "collateral_before_entry": 20.0,
+        "enabled": True, "consecutive_entry_failures": 0, "last_processed_candle_ts": 0,
+    }
+    bot = make_bot(ex, state=state, candles=candles, self_lock_enabled=True)
+    bot.real_trading_locked = True
+    bot._self_lock_loaded = True
+    await bot.tick()
+    check("real position closed (reversal close leg is never gated)", bot.state_row["side"] is None,
+          bot.state_row["side"])
+    check("logged as a REVERSAL close", any(d.get("reason") == "REVERSAL" for a, d in bot.runs if a == "closed"),
+          bot.runs)
+    check("only one order placed (the close, no real reopen)", len(ex.orders) == 1, ex.orders)
+
+
+async def t_self_lock_persists_when_schema_enabled():
+    print("\n[self-lock: paper state is written to the DB when schema_has_self_lock=True]")
+    ex = FakeExchange()
+    bot = make_bot(ex, candles_kind="mid", self_lock_enabled=True, schema_has_self_lock=True)
+    bot.real_trading_locked = True
+    bot._self_lock_loaded = True
+    state = dict(bot.state_row)
+    await bot._update_paper_shadow(state, "long", None, 86000.0, 86001.0, 1700000000000)
+    check("paper_side persisted", bot.state_row.get("paper_side") == "long", bot.state_row.get("paper_side"))
+    check("paper_entry_price persisted", bot.state_row.get("paper_entry_price") == 86001.0,
+          bot.state_row.get("paper_entry_price"))
+
+
+async def t_self_lock_rehydrates_after_restart():
+    print("\n[self-lock: a fresh bot instance rehydrates locked=True + paper position from a persisted row]")
+    ex = FakeExchange()
+    bot = make_bot(ex, candles_kind="mid", self_lock_enabled=True, schema_has_self_lock=True)
+    persisted_state = dict(bot.state_row)
+    persisted_state.update({
+        "real_trading_locked": True, "paper_side": "short", "paper_entry_price": 86000.0,
+        "paper_entry_time": 1700000000000, "paper_consecutive_tps": 1,
+    })
+    await bot._update_paper_shadow(persisted_state, None, None, 86000.0, 86001.0, 1700000000000)
+    check("rehydrated locked=True", bot.real_trading_locked is True)
+    check("rehydrated paper side", bot.paper_side == "short", bot.paper_side)
+    check("rehydrated paper entry", bot.paper_entry == 86000.0, bot.paper_entry)
+    check("rehydrated consecutive tps", bot.paper_consecutive_tps == 1, bot.paper_consecutive_tps)
+
+
+async def t_self_lock_unlocks_and_enters_real_same_tick():
+    print("\n[self-lock: the moment the 2nd paper TP closes, real trading enters immediately, same tick]")
+    ex = FakeExchange()
+    candles = make_candles("long")  # K near 0 -> real entry_signal "long" right now
+    state = {
+        "id": 1, "side": None, "legs": [], "first_entry_price": None, "first_entry_time": None,
+        "dca_level": 0, "seed_usd": 20.0, "realized_pnl_usd": 0.0, "collateral_before_entry": None,
+        "enabled": True, "consecutive_entry_failures": 0, "last_processed_candle_ts": 0,
+    }
+    bot = make_bot(ex, state=state, candles=candles, self_lock_enabled=True)
+    bot.real_trading_locked = True
+    bot._self_lock_loaded = True
+    bot.paper_side = "long"
+    bot.paper_entry = 86000.0
+    bot.paper_entry_ms = candles[-1]["t"] - 60000
+    bot.paper_consecutive_tps = 1  # one TP away from unlocking
+
+    tp_price = 86000.0 * 1.0011  # past the paper position's own 0.10% TP
+    bot.live.order_book = {"bids": [{"price": str(tp_price)}], "asks": [{"price": str(tp_price + 1)}]}
+
+    await bot.tick()
+
+    check("unlocked this same tick", bot.real_trading_locked is False, bot.real_trading_locked)
+    check("real order placed THIS tick, no extra delay", len(ex.orders) == 1, ex.orders)
+    check("real side opened long", bot.state_row["side"] == "long", bot.state_row["side"])
+
+
+async def t_self_lock_paper_shadow_respects_reversal_guard():
+    print("\n[self-lock: the paper shadow's reversal also respects reversal_guard_seconds, same as real]")
+    ex = FakeExchange()
+    bot = make_bot(ex, candles_kind="mid", self_lock_enabled=True, reversal_guard_seconds=120)
+    bot.real_trading_locked = True
+    bot._self_lock_loaded = True
+    bot.paper_side = "short"
+    bot.paper_entry = 86000.0
+    bot.paper_entry_ms = 1700000000000  # will be "now" below, so age=0 -- under the 120s guard
+
+    state = dict(bot.state_row)
+    # K near 0 -> reversal signal "long", opposite of the held paper short; no TP/SL trigger.
+    await bot._update_paper_shadow(state, None, "long", 86000.0, 86001.0, 1700000000000)
+    check("still holding the paper short (guard blocks the reversal)", bot.paper_side == "short",
+          bot.paper_side)
+
+    # 130s later -- past the guard -- the same reversal signal should now fire.
+    await bot._update_paper_shadow(state, None, "long", 86000.0, 86001.0, 1700000130000)
+    check("reversed to paper long once the guard has elapsed", bot.paper_side == "long", bot.paper_side)
+
+
 def _mk_session_state(seed_usd, realized_pnl_usd):
     return {"id": 1, "seed_usd": seed_usd, "realized_pnl_usd": realized_pnl_usd}
 
@@ -1717,6 +1915,17 @@ async def main():
               t_entry_vol_gate_persists_when_schema_enabled,
               t_entry_vol_gate_rehydrates_paused_state_after_restart,
               t_entry_vol_gate_blocks_reversal_reopen_but_not_the_close,
+              t_self_lock_paper_shadow_opens_when_flat,
+              t_self_lock_single_paper_tp_does_not_unlock,
+              t_self_lock_two_consecutive_paper_tps_unlocks,
+              t_self_lock_paper_sl_resets_counter,
+              t_self_lock_real_sl_locks_and_resets_paper_counter,
+              t_self_lock_blocks_real_entry_while_locked,
+              t_self_lock_blocks_real_reversal_reopen_but_not_the_close,
+              t_self_lock_persists_when_schema_enabled,
+              t_self_lock_rehydrates_after_restart,
+              t_self_lock_unlocks_and_enters_real_same_tick,
+              t_self_lock_paper_shadow_respects_reversal_guard,
               t_session_breaker_stays_off_below_threshold,
               t_session_breaker_trips_and_blocks_new_entries,
               t_session_breaker_rearms_at_next_session,

@@ -185,6 +185,15 @@ class BotConfig:
     # Same persistence rationale as schema_has_session_breaker -- without this, a restart
     # (which happens on every push, to every service) forgets an active pause.
     schema_has_entry_vol_gate: bool = False
+    # Self-lock (2026-09-24, Worker 3's second replacement -- the TR% gate above is dropped
+    # for this one, too many silent no-ops). Same base strategy as Worker 2 (no reversal
+    # guard, no session breaker, no volatility gate) plus one mechanism: the instant a REAL
+    # position closes via SL, real order placement locks -- the bot keeps trading the exact
+    # same signal on paper (no money, no real orders) until it posts two CONSECUTIVE paper
+    # TPs (a paper SL resets that count to zero), then unlocks immediately -- same tick, no
+    # extra delay, if a signal is live right when the 2nd paper TP closes.
+    self_lock_enabled: bool = False
+    schema_has_self_lock: bool = False
     market_index: int = 1
     price_decimals: int = 1
     size_decimals: int = 5
@@ -386,6 +395,13 @@ class StochBot:
         self.entry_vol_paused = False
         self.entry_vol_last_bar_ts = None
         self._entry_vol_loaded = False
+        # Self-lock (independent of the entry volatility gate above)
+        self.real_trading_locked = False
+        self.paper_side = None
+        self.paper_entry = None
+        self.paper_entry_ms = None
+        self.paper_consecutive_tps = 0
+        self._self_lock_loaded = False
 
     # ── Supabase (aiohttp: async, and actually cancellable) ─────────────────────────────────
     async def sb(self, method, path, body=None, extra_headers=None):
@@ -1108,6 +1124,103 @@ class StochBot:
                                    {"paused": self.entry_vol_paused, "tr_pct": tr_pct})
         return None if self.entry_vol_paused else entry_signal
 
+    async def _load_self_lock_state(self, state):
+        if self._self_lock_loaded:
+            return
+        self._self_lock_loaded = True
+        if self.cfg.schema_has_self_lock:
+            self.real_trading_locked = bool(state.get("real_trading_locked"))
+            self.paper_side = state.get("paper_side")
+            self.paper_entry = state.get("paper_entry_price")
+            self.paper_entry_ms = state.get("paper_entry_time")
+            self.paper_consecutive_tps = state.get("paper_consecutive_tps") or 0
+
+    async def _lock_real_trading(self):
+        """A real SL just closed -- lock real order placement immediately. Resets the paper
+        TP counter too: the 2-in-a-row count is always measured fresh from this moment
+        forward, not carried over from whatever the shadow happened to be doing before."""
+        self.real_trading_locked = True
+        self.paper_consecutive_tps = 0
+        if self.cfg.schema_has_self_lock:
+            await self.update_state({"real_trading_locked": True, "paper_consecutive_tps": 0})
+        await self.log_run("real_trading_locked", {"via": "real_sl"})
+
+    async def _update_paper_shadow(self, state, entry_signal, reversal_signal, best_bid, best_ask, now_ms):
+        """Always-on simulated shadow of the plain (no-guard) strategy -- never places a real
+        order or touches realized_pnl_usd. The only thing it drives is when real_trading_locked
+        clears: two CONSECUTIVE paper TPs (a paper SL resets the count to zero) unlock real
+        trading again, proving the market is tradeable again by actually trading through it on
+        paper, instead of guessing from a timer or a volatility reading -- which is exactly
+        what the entry volatility gate this replaces kept getting wrong (detected a spike,
+        then didn't actually act on it most of the time)."""
+        cfg = self.cfg
+        await self._load_self_lock_state(state)
+
+        if self.paper_side is None:
+            if entry_signal is not None:
+                self.paper_side = entry_signal
+                self.paper_entry = best_ask if entry_signal == "long" else best_bid
+                self.paper_entry_ms = now_ms
+                if cfg.schema_has_self_lock:
+                    await self.update_state({
+                        "paper_side": self.paper_side, "paper_entry_price": self.paper_entry,
+                        "paper_entry_time": self.paper_entry_ms,
+                    })
+            return
+
+        side = self.paper_side
+        entry = self.paper_entry
+        check_price = best_bid if side == "long" else best_ask
+        if side == "long":
+            tp = entry * (1 + cfg.tp_pct / 100); sl = entry * (1 - cfg.sl_pct / 100)
+            hit_sl = check_price <= sl; hit_tp = check_price >= tp
+        else:
+            tp = entry * (1 - cfg.tp_pct / 100); sl = entry * (1 + cfg.sl_pct / 100)
+            hit_sl = check_price >= sl; hit_tp = check_price <= tp
+        reason = "SL" if hit_sl else ("TP" if hit_tp else None)
+        reversal_ready = reversal_signal is not None and reversal_signal != side
+        if reversal_ready and cfg.reversal_guard_seconds:
+            age_s = (now_ms - self.paper_entry_ms) / 1000 if self.paper_entry_ms is not None else None
+            reversal_ready = age_s is not None and age_s >= cfg.reversal_guard_seconds
+
+        if reason is None and not reversal_ready:
+            return
+
+        unlocked_now = False
+        closed_side = side
+        self.paper_side = None
+        self.paper_entry = None
+        self.paper_entry_ms = None
+
+        if reason == "TP":
+            self.paper_consecutive_tps += 1
+            if self.paper_consecutive_tps >= 2:
+                self.paper_consecutive_tps = 0
+                if self.real_trading_locked:
+                    self.real_trading_locked = False
+                    unlocked_now = True
+        elif reason == "SL":
+            self.paper_consecutive_tps = 0
+
+        # Same close+reopen shape as the real position: an opposite signal reopens
+        # immediately, regardless of whether this close was TP/SL or a pure reversal.
+        if reversal_signal is not None and reversal_signal != closed_side:
+            self.paper_side = reversal_signal
+            self.paper_entry = best_ask if reversal_signal == "long" else best_bid
+            self.paper_entry_ms = now_ms
+
+        if cfg.schema_has_self_lock:
+            patch = {
+                "paper_side": self.paper_side, "paper_entry_price": self.paper_entry,
+                "paper_entry_time": self.paper_entry_ms,
+                "paper_consecutive_tps": self.paper_consecutive_tps,
+            }
+            if unlocked_now:
+                patch["real_trading_locked"] = False
+            await self.update_state(patch)
+        if unlocked_now:
+            await self.log_run("real_trading_unlocked", {"via": "two_consecutive_paper_tps"})
+
     # ── One decision cycle ──────────────────────────────────────────────────────────────────
     async def tick(self):
         cfg = self.cfg
@@ -1167,6 +1280,9 @@ class StochBot:
         now_open = self.candles[-1]["o"] if self.candles else None
         if candle_ts is None or now_open is None:
             return
+        # Captured before any gate below touches entry_signal/reversal_signal -- the paper
+        # shadow always sees the plain, ungated signal, regardless of what else is layered on.
+        paper_entry_signal, paper_reversal_signal = entry_signal, reversal_signal
 
         if cfg.pure_trend_fade:
             # No stochastic entries at all -- ER is the only signal, and it drives entry
@@ -1257,6 +1373,14 @@ class StochBot:
         if best_bid is None or best_ask is None:
             return
 
+        if cfg.self_lock_enabled:
+            await self._update_paper_shadow(state, paper_entry_signal, paper_reversal_signal,
+                                            best_bid, best_ask, self.now_ms())
+            # Same tick the unlock happens: if a signal is already live, real trading fires on
+            # it immediately, not on a delay -- only gates when still locked right now.
+            if self.real_trading_locked:
+                entry_signal = None
+
         if side is not None:
             if cfg.trend_tp_pct is not None and reversal_signal == side:
                 # Already positioned the way the current regime wants (no reversal trade
@@ -1305,8 +1429,10 @@ class StochBot:
                 reversal_ready = age_s is not None and age_s >= cfg.reversal_guard_seconds
 
             if gap_hit:
-                await self.close_all(gap_hit, state, side, legs, best_bid, best_ask, candle_ts,
-                                     known_pos=real_pos)
+                closed_ok = await self.close_all(gap_hit, state, side, legs, best_bid, best_ask,
+                                                 candle_ts, known_pos=real_pos)
+                if closed_ok and gap_hit == "SL" and cfg.self_lock_enabled:
+                    await self._lock_real_trading()
             elif reversal_ready:
                 closed_ok = await self.close_all("REVERSAL", state, side, legs,
                                                  best_bid, best_ask, candle_ts,
@@ -1328,10 +1454,10 @@ class StochBot:
                     await self.log_run("equity_non_positive", {"eq": eq, "via": "reversal"})
                     await self.update_state({"enabled": False})
                     return
-                if self.entry_vol_paused:
+                if self.entry_vol_paused or (cfg.self_lock_enabled and self.real_trading_locked):
                     # Close leg of a reversal always runs (already happened above); only the
-                    # reopen leg respects the volatility gate -- left flat until it clears
-                    # instead of immediately flipping into the opposite side.
+                    # reopen leg respects the gate -- left flat until it clears instead of
+                    # immediately flipping into the opposite side.
                     await self.update_state({"last_processed_candle_ts": candle_ts})
                     return
                 price = best_ask if reversal_signal == "long" else best_bid
