@@ -1860,6 +1860,42 @@ async def t_tick_log_disabled_worker_never_participates():
     task.cancel()
 
 
+async def t_trading_hours_gate_default_disabled_passes_through():
+    print("\n[trading hours gate: trading_hours_utc=None (default) never touches the signal]")
+    ex = FakeExchange()
+    bot = make_bot(ex)  # no trading_hours_utc override -- default None
+    now_utc = _dt.datetime(2026, 9, 24, 3, 0, tzinfo=_dt.timezone.utc)  # any hour at all
+    sig = bot._apply_trading_hours_gate("long", now_utc=now_utc)
+    check("signal passes through unchanged", sig == "long", sig)
+
+
+async def t_trading_hours_gate_blocks_outside_open_hours():
+    print("\n[trading hours gate: current UTC hour not in the allowed set -> blocks]")
+    ex = FakeExchange()
+    bot = make_bot(ex, trading_hours_utc=[0, 1, 15, 16, 17])
+    now_utc = _dt.datetime(2026, 9, 24, 14, 0, tzinfo=_dt.timezone.utc)  # 14:00 not in the list
+    sig = bot._apply_trading_hours_gate("long", now_utc=now_utc)
+    check("entry signal suppressed", sig is None, sig)
+
+
+async def t_trading_hours_gate_passes_inside_open_hours():
+    print("\n[trading hours gate: current UTC hour in the allowed set -> passes through]")
+    ex = FakeExchange()
+    bot = make_bot(ex, trading_hours_utc=[0, 1, 15, 16, 17])
+    now_utc = _dt.datetime(2026, 9, 24, 16, 30, tzinfo=_dt.timezone.utc)  # 16:xx is in the list
+    sig = bot._apply_trading_hours_gate("short", now_utc=now_utc)
+    check("entry signal passes through", sig == "short", sig)
+
+
+async def t_trading_hours_gate_none_signal_stays_none():
+    print("\n[trading hours gate: no signal to begin with stays None regardless of the hour]")
+    ex = FakeExchange()
+    bot = make_bot(ex, trading_hours_utc=[16])
+    now_utc = _dt.datetime(2026, 9, 24, 16, 0, tzinfo=_dt.timezone.utc)
+    sig = bot._apply_trading_hours_gate(None, now_utc=now_utc)
+    check("still None", sig is None, sig)
+
+
 async def t_log_trade_upserts_to_prevent_duplicate_rows():
     print("\n[log_trade: posts with on_conflict + ignore-duplicates so a race can't double-insert]")
     cfg = BotConfig(name="t", worker_id="w", table_state="s", table_trades="lighter_test_trades",
@@ -1969,6 +2005,10 @@ async def main():
               t_tick_log_no_rows_yet_anyone_writes,
               t_tick_log_disabled_worker_never_participates,
               t_log_trade_upserts_to_prevent_duplicate_rows,
+              t_trading_hours_gate_default_disabled_passes_through,
+              t_trading_hours_gate_blocks_outside_open_hours,
+              t_trading_hours_gate_passes_inside_open_hours,
+              t_trading_hours_gate_none_signal_stays_none,
               t_timeout_constants):
         try:
             await t()

@@ -194,6 +194,16 @@ class BotConfig:
     # extra delay, if a signal is live right when the 2nd paper TP closes.
     self_lock_enabled: bool = False
     schema_has_self_lock: bool = False
+    # Trading-hours schedule (2026-09-24, Worker 1 -- stacked on top of its existing session
+    # breaker, not a replacement). Set of UTC hours (0-23) during which NEW entries (and the
+    # reopening leg of a reversal) are allowed; every other hour blocks new entries the same
+    # way the session breaker and entry-vol gate do -- TP/SL/reversal-close on an existing
+    # position are never gated by this, only new/reopening entries. None = disabled (every
+    # other bot). Stateless by design: just checks the wall-clock UTC hour each tick, so it
+    # needs no persistence/migration and can't be wiped by a restart. Built from 908 real
+    # Worker 2 trades bucketed by UTC close-hour (2026-09-22 to 2026-09-24): these are every
+    # hour where that real data came out net positive.
+    trading_hours_utc: Optional[list] = None
     market_index: int = 1
     price_decimals: int = 1
     size_decimals: int = 5
@@ -941,6 +951,17 @@ class StochBot:
             "session_breaker_trip_range_pct": self.session_trip_range_pct,
         }
 
+    def _apply_trading_hours_gate(self, entry_signal, now_utc=None):
+        """Blocks new entries outside cfg.trading_hours_utc (a set of allowed UTC hours,
+        0-23). Stateless -- just reads the wall-clock hour, no persistence needed. None
+        (the default) disables this entirely and returns entry_signal unchanged."""
+        if self.cfg.trading_hours_utc is None:
+            return entry_signal
+        now_utc = now_utc or datetime.now(timezone.utc)
+        if now_utc.hour in self.cfg.trading_hours_utc:
+            return entry_signal
+        return None
+
     async def _apply_session_breaker(self, state, entry_signal, now_utc=None):
         """Two trip conditions: drawdown from an established session peak, OR a raw loss from
         session start if the session was never yet profitable (closes the gap where an
@@ -1313,6 +1334,9 @@ class StochBot:
         if cfg.entry_vol_pause_at_pct is not None:
             entry_signal = await self._apply_entry_volatility_gate(state, candle_ts, entry_signal)
 
+        if cfg.trading_hours_utc is not None:
+            entry_signal = self._apply_trading_hours_gate(entry_signal)
+
         real_pos, collateral = await self.read_position()
         if real_pos is None:
             return
@@ -1454,7 +1478,9 @@ class StochBot:
                     await self.log_run("equity_non_positive", {"eq": eq, "via": "reversal"})
                     await self.update_state({"enabled": False})
                     return
-                if self.entry_vol_paused or (cfg.self_lock_enabled and self.real_trading_locked):
+                if (self.entry_vol_paused or (cfg.self_lock_enabled and self.real_trading_locked)
+                        or (cfg.trading_hours_utc is not None
+                            and self._apply_trading_hours_gate(reversal_signal) is None)):
                     # Close leg of a reversal always runs (already happened above); only the
                     # reopen leg respects the gate -- left flat until it clears instead of
                     # immediately flipping into the opposite side.

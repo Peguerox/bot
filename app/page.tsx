@@ -1497,12 +1497,12 @@ function currentSessionStart(nowUtc: Date): Date {
 
 function CompactStochBtcPanel({
   title, subtitle, table, state, trades, currentPrice, loading, onToggled, erValue, runs, cooldownMin,
-  showSelfLock, stats,
+  showSelfLock, stats, tradingHoursUtc,
 }: {
   title: string; subtitle: string; table: string; state: any; trades: any[];
   currentPrice: number | null; loading: boolean; onToggled: () => void;
   erValue?: number | null; runs?: any[]; cooldownMin?: number; showSelfLock?: boolean;
-  stats?: { total: number; wins: number };
+  stats?: { total: number; wins: number }; tradingHoursUtc?: number[];
 }) {
   const [toggling, setToggling] = useState(false);
   const [nowTick, setNowTick] = useState(() => Date.now());
@@ -1677,6 +1677,24 @@ function CompactStochBtcPanel({
               </div>
             </div>
           )}
+          {tradingHoursUtc && (() => {
+            const nowHour = new Date(nowTick).getUTCHours();
+            const isOpen = tradingHoursUtc.includes(nowHour);
+            return (
+              <div className="bg-gray-800/60 rounded-lg p-2">
+                <p className="text-gray-500 text-[10px] uppercase">Trading Hours</p>
+                <div className="flex items-center gap-1.5 flex-wrap">
+                  <span className={`text-[9px] font-bold px-1.5 py-0.5 rounded uppercase ${isOpen ? "bg-green-500/20 text-green-400" : "bg-red-500/20 text-red-400"}`}>
+                    {isOpen ? "open" : "closed"}
+                  </span>
+                  <span className="text-[10px] font-bold text-gray-300 tabular-nums"
+                        title="New entries only fire in scheduled hours; an existing position still manages to TP/SL/reversal normally">
+                    {String(nowHour).padStart(2, "0")}:00 UTC
+                  </span>
+                </div>
+              </div>
+            );
+          })()}
           {showSelfLock && (
             <div className="bg-gray-800/60 rounded-lg p-2">
               <p className="text-gray-500 text-[10px] uppercase">Self-Lock</p>
@@ -2260,7 +2278,7 @@ export default function Dashboard() {
         <div className="grid grid-cols-1 sm:grid-cols-3 gap-3">
           <CompactStochBtcPanel
             title="Worker 1 · Reversal Guard + Smart Breaker"
-            subtitle="TP 0.10% / SL 0.11% / 25-75 / window 5 / 120s reversal guard / 0.15% session stop, adaptive-volatility resume"
+            subtitle="TP 0.10% / SL 0.11% / 25-75 / window 5 / 120s reversal guard / 0.15% session stop, adaptive-volatility resume / hourly schedule (experiment)"
             table="lighter_btc_initial_state"
             state={initialBtcState}
             trades={initialBtcTrades}
@@ -2269,6 +2287,7 @@ export default function Dashboard() {
             onToggled={load}
             cooldownMin={15}
             stats={initialBtcStats}
+            tradingHoursUtc={[0, 1, 4, 7, 9, 10, 12, 15, 16, 17, 18, 19, 20, 21]}
           />
           <CompactStochBtcPanel
             title="Worker 2 · Optimal"

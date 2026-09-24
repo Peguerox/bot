@@ -48,6 +48,19 @@ trend-band value on close instead of leaving it stuck). schema_has_session_break
 proven costly on Worker 3 (an unrelated frontend-only deploy restarts every backend service,
 since Render redeploys everything on any push, and that wiped an active cooldown twice before
 persistence existed).
+
+2026-09-24, added trading_hours_utc on top of everything above (not a replacement -- the
+session breaker and reversal guard stay exactly as they were). Explicitly an experiment, not a
+validated config: built from Worker 2's real trade data (908 trades, 2026-09-22 to 2026-09-24)
+bucketed by raw UTC close-hour with zero filtering for sample size -- literally "every hour
+where that real data net positive stays open, every hour it net negative stays closed." Several
+of these hours have as few as ~20 trades behind them, nowhere near enough to trust individually;
+the plan is to re-run this exact bucketing as more real data accumulates and narrow the schedule
+to whatever keeps holding up, not to treat this list as final. Stateless gate (just reads the
+wall-clock UTC hour every tick) -- no migration needed, can't be wiped by a restart.
+
+Open hours (UTC): 00,01,04,07,09,10,12,15,16,17,18,19,20,21
+Closed hours (UTC): 02,03,05,06,08,11,13,14,22,23
 """
 from stoch_bot_core import BotConfig, run_bot
 
@@ -75,6 +88,7 @@ CONFIG = BotConfig(
     # whatever it was AT trip time, not a fixed number. Beat both the fixed 0.20% threshold
     # and no breaker at all on real tick+latency-replayed data (+0.86% vs +0.53% vs +0.62%).
     schema_has_session_breaker=True,
+    trading_hours_utc=[0, 1, 4, 7, 9, 10, 12, 15, 16, 17, 18, 19, 20, 21],
     schema_has_position_bands=True,
     # Price-tick logging: last resort. Only writes if both Worker 2 and Worker 3 are quiet.
     tick_log_defers_to=["worker2", "worker3"],
