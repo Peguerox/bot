@@ -1557,6 +1557,10 @@ function CompactStochBtcPanel({
   const closeRequested = Boolean(state?.close_requested);
 
   async function handleToggle() {
+    const question = enabled
+      ? `Turn OFF ${title}? This stops new entries -- it will NOT close an existing position.`
+      : `Turn ON ${title}? This resumes real trading.`;
+    if (!confirm(question)) return;
     setToggling(true);
     await fetch("/api/lighter-btc-toggle", {
       method: "POST", headers: { "Content-Type": "application/json" },
