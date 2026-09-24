@@ -1678,8 +1678,14 @@ function CompactStochBtcPanel({
             </div>
           )}
           {tradingHoursUtc && (() => {
-            const nowHour = new Date(nowTick).getUTCHours();
-            const isOpen = tradingHoursUtc.includes(nowHour);
+            const now = new Date(nowTick);
+            const nowHourUtc = now.getUTCHours();
+            const isOpen = tradingHoursUtc.includes(nowHourUtc);
+            // Display in Miami/Eastern time (DST-aware) -- the gate itself runs on UTC
+            // internally (stateless, unambiguous), this is purely a human-readable label.
+            const etLabel = new Intl.DateTimeFormat("en-US", {
+              timeZone: "America/New_York", hour: "numeric", minute: "2-digit", hour12: true,
+            }).format(now);
             return (
               <div className="bg-gray-800/60 rounded-lg p-2">
                 <p className="text-gray-500 text-[10px] uppercase">Trading Hours</p>
@@ -1689,7 +1695,7 @@ function CompactStochBtcPanel({
                   </span>
                   <span className="text-[10px] font-bold text-gray-300 tabular-nums"
                         title="New entries only fire in scheduled hours; an existing position still manages to TP/SL/reversal normally">
-                    {String(nowHour).padStart(2, "0")}:00 UTC
+                    {etLabel} ET
                   </span>
                 </div>
               </div>
@@ -2277,8 +2283,8 @@ export default function Dashboard() {
         {/* ── Lighter BTC Stochastic5: 3-worker comparison, real money, $100 each */}
         <div className="grid grid-cols-1 sm:grid-cols-3 gap-3">
           <CompactStochBtcPanel
-            title="Worker 1 · Reversal Guard + Smart Breaker"
-            subtitle="TP 0.10% / SL 0.11% / 25-75 / window 5 / 120s reversal guard / 0.15% session stop, adaptive-volatility resume / hourly schedule (experiment)"
+            title="Worker 1 · Hourly Schedule"
+            subtitle="TP 0.10% / SL 0.11% / 25-75 / window 5 -- identical to Worker 2, plus an hourly trading-hours schedule (experiment)"
             table="lighter_btc_initial_state"
             state={initialBtcState}
             trades={initialBtcTrades}
