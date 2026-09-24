@@ -1628,7 +1628,7 @@ function CompactStochBtcPanel({
             <p className="text-gray-500 text-[10px] uppercase">Win Rate</p>
             <p className="font-bold text-blue-400">{winRate}% <span className="text-[10px] font-normal text-gray-500">({trueTotal})</span></p>
           </div>
-          <div className={`bg-gray-800/60 rounded-lg p-2 ${erValue == null && cooldownMin == null && !showSelfLock ? "col-span-2" : ""}`}>
+          <div className={`bg-gray-800/60 rounded-lg p-2 ${erValue == null && cooldownMin == null && !showSelfLock && !tradingHoursUtc ? "col-span-2" : ""}`}>
             <p className="text-gray-500 text-[10px] uppercase">Position</p>
             <div className="flex items-center gap-1.5 flex-wrap">
               <span className={`font-bold ${side === "long" ? "text-green-400" : side === "short" ? "text-red-400" : "text-gray-400"}`}>
