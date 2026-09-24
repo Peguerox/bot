@@ -2336,36 +2336,6 @@ export default function Dashboard() {
           />
         </div>
 
-        {/* ── Live bots ── */}
-        <div className="grid grid-cols-1 md:grid-cols-2 gap-6 items-start">
-          <SurferUsdtPanel
-            trades={surferUsdtTrades}
-            surferState={surferUsdtState}
-            runs={surferUsdtRuns}
-            loading={loading}
-            enabled={surferUsdtState?.enabled ?? false}
-            onToggle={handleSurferUsdtToggle}
-            toggling={surferUsdtToggling}
-            onSellAll={handleSurferUsdtSellAll}
-            sellingAll={surferUsdtSellingAll}
-            onClearHistory={handleSurferUsdtClearHistory}
-            clearingHistory={surferUsdtClearing}
-          />
-          <SurferPanel
-            trades={surferTrades}
-            surferState={surferState}
-            runs={surferRuns}
-            loading={loading}
-            enabled={surferState?.enabled ?? false}
-            onToggle={handleSurferToggle}
-            toggling={surferToggling}
-            onSellAll={handleSurferSellAll}
-            sellingAll={surferSellingAll}
-            onClearHistory={handleSurferClearHistory}
-            clearingHistory={surferClearing}
-          />
-        </div>
-
       </div>
     </main>
   );
