@@ -869,6 +869,79 @@ async def t_session_breaker_smart_resume_clears_when_calm():
     check("peak/baseline reset fresh", bot.session_peak_pnl == 0.0, bot.session_peak_pnl)
 
 
+def make_flat_range_candles(range_pct, base=86000.0, n=8):
+    """n>=6 candles all sharing the same h/l spread -- compute_range_pct (window=5) reads
+    exactly `range_pct` off the last 5 CLOSED candles (candles[:-1][-5:])."""
+    half = range_pct / 100 * base / 2
+    t0 = 1700000000000
+    return [{"t": t0 + i*60000, "o": base, "h": base+half, "l": base-half, "c": base}
+            for i in range(n)]
+
+
+async def t_session_breaker_adaptive_calm_records_range_at_trip():
+    print("\n[adaptive calm: a real trip records the volatility AT that moment, not a fixed number]")
+    ex = FakeExchange()
+    bot = make_bot(ex, session_drawdown_stop_pct=0.15, session_breaker_cooldown_min=15,
+                   session_breaker_recheck_min=10, session_breaker_adaptive_calm=True)
+    seed = 20.0
+    bot.candles = make_flat_range_candles(0.27)
+    await bot._apply_session_breaker(_mk_session_state(seed, 0.0), None, now_utc=SESSION_A)
+    await bot._apply_session_breaker(_mk_session_state(seed, 0.10), None, now_utc=SESSION_A)
+    sig = await bot._apply_session_breaker(_mk_session_state(seed, 0.04), "long", now_utc=SESSION_A)
+    check("tripped", bot.session_paused is True and sig is None, (bot.session_paused, sig))
+    check("recorded the trip-moment range%, not None",
+          bot.session_trip_range_pct is not None and abs(bot.session_trip_range_pct - 0.27) < 1e-6,
+          bot.session_trip_range_pct)
+
+
+async def t_session_breaker_adaptive_calm_blocked_above_trip_level():
+    print("\n[adaptive calm: cooldown elapsed but volatility still ABOVE trip-moment level -> stays paused]")
+    ex = FakeExchange()
+    bot = make_bot(ex, session_drawdown_stop_pct=0.15, session_breaker_cooldown_min=15,
+                   session_breaker_recheck_min=10, session_breaker_adaptive_calm=True)
+    seed = 20.0
+    bot.session_index = bot._current_session_start(SESSION_A)
+    bot.session_baseline_pnl = 0.0
+    bot.session_peak_pnl = 0.10
+    bot.session_paused = True
+    bot.session_paused_at = SESSION_A
+    bot.session_next_check_at = SESSION_A + _dt.timedelta(minutes=15)
+    bot.session_trip_range_pct = 0.10  # tripped during LOW volatility
+    bot.session_start_equity = seed
+
+    bot.candles = make_flat_range_candles(0.15)  # calmer than a fixed 0.20% bar, but NOT
+    # calmer than this specific trip's own 0.10% -- adaptive should still block it.
+    check_time = SESSION_A + _dt.timedelta(minutes=15)
+    sig = await bot._apply_session_breaker(_mk_session_state(seed, 0.02), "long", now_utc=check_time)
+    check("still paused (0.15% > trip's own 0.10%)", bot.session_paused is True and sig is None,
+          (bot.session_paused, sig))
+
+
+async def t_session_breaker_adaptive_calm_resumes_at_or_below_trip_level():
+    print("\n[adaptive calm: volatility back to the trip-moment level -> resumes, even above a fixed 0.20%]")
+    ex = FakeExchange()
+    bot = make_bot(ex, session_drawdown_stop_pct=0.15, session_breaker_cooldown_min=15,
+                   session_breaker_recheck_min=10, session_breaker_adaptive_calm=True)
+    seed = 20.0
+    bot.session_index = bot._current_session_start(SESSION_A)
+    bot.session_baseline_pnl = 0.0
+    bot.session_peak_pnl = 0.10
+    bot.session_paused = True
+    bot.session_paused_at = SESSION_A
+    bot.session_next_check_at = SESSION_A + _dt.timedelta(minutes=15)
+    bot.session_trip_range_pct = 0.35  # tripped during genuinely HIGH volatility
+    bot.session_start_equity = seed
+
+    bot.candles = make_flat_range_candles(0.25)  # would FAIL a fixed 0.20% bar, but this is
+    # calmer than what this trip actually happened in -- adaptive should resume.
+    check_time = SESSION_A + _dt.timedelta(minutes=15)
+    sig = await bot._apply_session_breaker(_mk_session_state(seed, 0.02), "long", now_utc=check_time)
+    check("re-armed (0.25% <= trip's own 0.35%, even though it's above a fixed 0.20%)",
+          bot.session_paused is False and sig == "long", (bot.session_paused, sig))
+    check("trip_range_pct cleared on resume", bot.session_trip_range_pct is None,
+          bot.session_trip_range_pct)
+
+
 async def t_tick_skips_rest_when_disabled_and_flat():
     print("\n[tick: disabled AND flat -> never touches the REST position endpoint at all]")
     ex = FakeExchange()
@@ -1307,6 +1380,9 @@ async def main():
               t_session_breaker_smart_resume_blocked_by_matching_direction,
               t_session_breaker_smart_resume_blocked_by_volatility,
               t_session_breaker_smart_resume_clears_when_calm,
+              t_session_breaker_adaptive_calm_records_range_at_trip,
+              t_session_breaker_adaptive_calm_blocked_above_trip_level,
+              t_session_breaker_adaptive_calm_resumes_at_or_below_trip_level,
               t_tick_skips_rest_when_disabled_and_flat,
               t_tick_still_checks_rest_when_disabled_but_open,
               t_read_position_falls_back_to_cache_on_error,

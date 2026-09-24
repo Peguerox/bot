@@ -32,6 +32,16 @@ required). Live data showed that was too strict -- only 7 trades and -0.05% equi
 where Worker 2 and Worker 3 each ran 50 trades at +0.87%/+0.78% with no breaker slowing them
 down. Dropped the direction leg entirely; volatility alone is the gate now.
 
+2026-09-24: fixed calm_range_pct=0.20 dropped in favor of session_breaker_adaptive_calm --
+resume now requires volatility back to whatever it was AT the moment this specific trip
+happened, not a fixed global number. Real trade data over a 6.5h live window (tick+latency
+replayed, not just backtested) showed the fixed 0.20% threshold was actually the worse
+config of three tested here: no breaker at all beat it (+0.62% vs +0.53%), and adaptive beat
+both (+0.86%) with a materially higher win rate (67.3% vs 59.6%) on the same trip count (4) --
+3 of those 4 real trips had trip-moment volatility already below 0.20%, meaning the fixed rule
+was often demanding calmer conditions than even existed at the crash. Cooldown/recheck timing
+(15min / 10min) re-confirmed via the same real data as still the best of 5/10/15min tested.
+
 schema_has_position_bands stays True from the earlier regime-switch era (clears a leftover
 trend-band value on close instead of leaving it stuck). schema_has_session_breaker=True is new
 (migrated 2026-09-23) -- without it the breaker still works but resets on every restart,
@@ -60,7 +70,10 @@ CONFIG = BotConfig(
     # equity vs W2/W3's 50 trades at +0.87%/+0.78% over the same stretch) showed the AND-gate
     # (direction + volatility both required) kept it paused far longer than the market actually
     # warranted. Volatility alone is the gate now.
-    session_breaker_calm_range_pct=0.20,
+    session_breaker_calm_range_pct=None,  # unused now -- see session_breaker_adaptive_calm
+    session_breaker_adaptive_calm=True,  # 2026-09-24: resume once volatility is back to
+    # whatever it was AT trip time, not a fixed number. Beat both the fixed 0.20% threshold
+    # and no breaker at all on real tick+latency-replayed data (+0.86% vs +0.53% vs +0.62%).
     schema_has_session_breaker=True,
     schema_has_position_bands=True,
     # Price-tick logging: last resort. Only writes if both Worker 2 and Worker 3 are quiet.

@@ -156,6 +156,16 @@ class BotConfig:
     session_breaker_direction_window: Optional[int] = None
     session_breaker_calm_range_pct: Optional[float] = None
     session_breaker_recheck_min: float = 10.0
+    # Adaptive calm threshold (2026-09-24): instead of comparing recent volatility against a
+    # fixed session_breaker_calm_range_pct, compare it against whatever volatility was actually
+    # recorded AT the moment this trip happened -- "the volatility that got us kicked out
+    # should be over," not an arbitrary global number. Tested against real tick data: 3 of 4
+    # real trips this session had trip-moment volatility already BELOW the fixed 0.20%
+    # threshold, meaning the fixed rule was demanding calmer conditions than even existed at
+    # the crash -- pure wasted waiting. Adaptive beat both the fixed threshold and no breaker
+    # at all on the same data (+0.86% vs +0.53% vs +0.62%). When True, session_breaker_calm_
+    # range_pct is ignored in favor of the trip-moment reading.
+    session_breaker_adaptive_calm: bool = False
     # True only for bots whose table has the session_breaker_* columns (migrated 2026-09-23
     # after a restart -- caused by an unrelated frontend-only deploy -- wiped an active
     # cooldown twice in production). When True, the breaker's state survives a restart by
@@ -338,6 +348,7 @@ class StochBot:
         self.session_paused_at = None
         self.session_trip_direction = None   # direction the market was moving in at trip time
         self.session_next_check_at = None    # when to next evaluate whether resume is safe
+        self.session_trip_range_pct = None   # volatility recorded at trip time (adaptive calm)
 
     # ── Supabase (aiohttp: async, and actually cancellable) ─────────────────────────────────
     async def sb(self, method, path, body=None):
@@ -833,6 +844,7 @@ class StochBot:
             "session_breaker_paused_at": self.session_paused_at.isoformat() if self.session_paused_at else None,
             "session_breaker_trip_direction": self.session_trip_direction,
             "session_breaker_next_check_at": self.session_next_check_at.isoformat() if self.session_next_check_at else None,
+            "session_breaker_trip_range_pct": self.session_trip_range_pct,
         }
 
     async def _apply_session_breaker(self, state, entry_signal, now_utc=None):
@@ -874,6 +886,7 @@ class StochBot:
                     paused_at = state.get("session_breaker_paused_at")
                     self.session_paused_at = parse_iso(paused_at) if paused_at else None
                     self.session_trip_direction = state.get("session_breaker_trip_direction")
+                    self.session_trip_range_pct = state.get("session_breaker_trip_range_pct")
                     next_check = state.get("session_breaker_next_check_at")
                     if next_check:
                         self.session_next_check_at = parse_iso(next_check)
@@ -894,6 +907,7 @@ class StochBot:
                 self.session_paused_at = None
                 self.session_trip_direction = None
                 self.session_next_check_at = None
+                self.session_trip_range_pct = None
                 if persist:
                     await self.update_state(self._persist_session_breaker_patch())
             self.session_start_equity = state["seed_usd"] + self.session_baseline_pnl
@@ -905,9 +919,11 @@ class StochBot:
                 _, current_dir = compute_er_and_direction(self.candles, direction_window)
                 if current_dir is not None and current_dir == self.session_trip_direction:
                     can_rearm = False
-            if can_rearm and self.cfg.session_breaker_calm_range_pct:
+            calm_threshold = (self.session_trip_range_pct if self.cfg.session_breaker_adaptive_calm
+                             else self.cfg.session_breaker_calm_range_pct)
+            if can_rearm and calm_threshold:
                 range_pct = compute_range_pct(self.candles)
-                if range_pct is not None and range_pct > self.cfg.session_breaker_calm_range_pct:
+                if range_pct is not None and range_pct > calm_threshold:
                     can_rearm = False
             if can_rearm:
                 # Cleared (cooldown elapsed, and market has calmed/reversed if direction-gated)
@@ -917,6 +933,7 @@ class StochBot:
                 self.session_paused_at = None
                 self.session_trip_direction = None
                 self.session_next_check_at = None
+                self.session_trip_range_pct = None
                 self.session_baseline_pnl = state["realized_pnl_usd"]
                 self.session_peak_pnl = 0.0
                 self.session_start_equity = state["seed_usd"] + self.session_baseline_pnl
@@ -959,6 +976,8 @@ class StochBot:
                         self.candles, self.cfg.session_breaker_direction_window)
                 else:
                     self.session_trip_direction = None
+                self.session_trip_range_pct = (compute_range_pct(self.candles)
+                                               if self.cfg.session_breaker_adaptive_calm else None)
                 if persist:
                     await self.update_state(self._persist_session_breaker_patch())
                 await self.log_run("session_drawdown_stop", {
@@ -967,6 +986,7 @@ class StochBot:
                     "dd_pct": dd_pct, "threshold_pct": threshold,
                     "cooldown_min": self.cfg.session_breaker_cooldown_min,
                     "trip_direction": self.session_trip_direction,
+                    "trip_range_pct": self.session_trip_range_pct,
                 })
 
         return None if self.session_paused else entry_signal
