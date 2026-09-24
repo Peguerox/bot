@@ -1682,7 +1682,7 @@ function CompactStochBtcPanel({
               <p className="text-gray-500 text-[10px] uppercase">Self-Lock</p>
               <div className="flex items-center gap-1.5 flex-wrap">
                 <span className={`text-[9px] font-bold px-1.5 py-0.5 rounded uppercase ${state?.real_trading_locked ? "bg-red-500/20 text-red-400" : "bg-green-500/20 text-green-400"}`}>
-                  {state?.real_trading_locked ? "locked" : "active"}
+                  real {state?.real_trading_locked ? "locked" : "active"}
                 </span>
                 {state?.real_trading_locked && (
                   <span className="text-[10px] font-bold text-gray-300 tabular-nums"
@@ -1690,6 +1690,13 @@ function CompactStochBtcPanel({
                     {state?.paper_consecutive_tps ?? 0}/2 paper TPs
                   </span>
                 )}
+                <span className={`text-[9px] font-bold px-1.5 py-0.5 rounded uppercase ${
+                  state?.paper_side === "long" ? "bg-green-500/20 text-green-400"
+                  : state?.paper_side === "short" ? "bg-red-500/20 text-red-400"
+                  : "bg-gray-700/40 text-gray-500"
+                }`} title="What the internal paper shadow is currently holding, real or not">
+                  paper {state?.paper_side ? state.paper_side.toUpperCase() : "FLAT"}
+                </span>
               </div>
             </div>
           )}
