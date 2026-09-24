@@ -1,13 +1,14 @@
 """
-Worker 1 -- "HOURLY SCHEDULE". Real-money Lighter BTC stochastic bot.
+Worker 1 -- "BLANKING PERIOD + HOURLY SCHEDULE". Real-money Lighter BTC stochastic bot.
 
 All logic lives in stoch_bot_core; this file is settings only. 2026-09-24: stripped back to
-Worker 2's exact base config (window 5, 25/75, TP 0.10%/SL 0.11%, no reversal guard, no
-session breaker) plus exactly one thing on top: trading_hours_utc, a schedule that blocks new
-entries (and a reversal's reopen leg) outside a set of UTC hours -- an existing position still
-manages to TP/SL/reversal normally regardless of the hour. This replaces the previous
-reversal-guard + session-drawdown-breaker config entirely; this is now a clean A/B of "Worker
-2's exact strategy, but only trading certain hours" vs Worker 2 running around the clock.
+Worker 2's exact base config (window 5, 25/75, TP 0.10%/SL 0.11%, no session breaker) plus two
+things on top: reversal_guard_seconds=120 (the "blanking period" -- what this team has called
+it for the past 3 days: after entering a trade, ignore a fresh opposite-side signal until the
+position is at least 120s old; TP/SL still fire immediately regardless) and trading_hours_utc,
+a schedule that blocks new entries (and a reversal's reopen leg) outside a set of UTC hours --
+an existing position still manages to TP/SL/reversal normally regardless of the hour. The
+session drawdown breaker from the previous config is gone entirely -- not part of this round.
 
 Explicitly an experiment, not a validated config: built from Worker 2's real trade data (908
 trades, 2026-09-22 to 2026-09-24) bucketed by raw UTC close-hour with zero filtering for
@@ -32,7 +33,7 @@ stuck, and the table already has the columns from the earlier regime-switch era)
 from stoch_bot_core import BotConfig, run_bot
 
 CONFIG = BotConfig(
-    name="HOURLY SCHEDULE (worker 1)",
+    name="BLANKING PERIOD + HOURLY SCHEDULE (worker 1)",
     worker_id="worker1",
     table_state="lighter_btc_initial_state",
     table_trades="lighter_btc_initial_trades",
@@ -42,6 +43,7 @@ CONFIG = BotConfig(
     sl_pct=0.11,
     entry_lo=25, entry_hi=75,
     reversal_lo=25, reversal_hi=75,
+    reversal_guard_seconds=120,  # the "blanking period"
     trading_hours_utc=[0, 1, 4, 7, 9, 10, 12, 15, 16, 17, 18, 19, 20, 21],
     schema_has_position_bands=True,
     # Price-tick logging: last resort. Only writes if both Worker 2 and Worker 3 are quiet.
