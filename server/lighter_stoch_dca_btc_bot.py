@@ -27,6 +27,13 @@ Cooldown set from 4 real crash-recovery times measured on our OWN recorded tick 
 Binance): 18-50 minutes to stabilize, median ~40 min -- 45 min chosen as a round number inside
 that range. Live test, not a settled parameter.
 
+2026-09-24: cooldown shortened 45min -> 20min per direct request, not a re-swept parameter.
+A same-day counterfactual (real tick+latency-replayed data, isolating the breaker's own
+contribution) showed this blind fixed-cooldown design was net NEGATIVE overall (-$0.04 vs
+running with no breaker at all) -- unlike Worker 1's breaker, which switched to an adaptive
+volatility-based resume the same day. Worker 3 intentionally keeps the blind-cooldown design
+for the live A/B; only the duration changed here.
+
 schema_has_session_breaker=True (migrated 2026-09-23) after an unrelated frontend-only deploy
 restarted this backend (Render redeploys every service on any push to the watched branch) and
 silently wiped an active cooldown mid-pause -- twice, in production, on the very first day this
@@ -48,7 +55,7 @@ CONFIG = BotConfig(
     reversal_lo=25, reversal_hi=75,
     reversal_guard_seconds=120,
     session_drawdown_stop_pct=0.25,
-    session_breaker_cooldown_min=45.0,
+    session_breaker_cooldown_min=20.0,
     schema_has_session_breaker=True,
     schema_has_position_bands=True,
     # Price-tick logging: backup writer. Takes over the moment Worker 2 goes quiet.

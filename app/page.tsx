@@ -160,6 +160,48 @@ function SummaryCards({ rows }: { rows: SummaryRow[] }) {
   );
 }
 
+// ── Health banner ────────────────────────────────────────────────────────────
+// Surfaces exactly the failure mode that bit us on 2026-09-23: a blocked/erroring
+// exchange endpoint spamming "error" runs, or a worker that's gone quiet while it's
+// supposed to be enabled. Reads only from data already being polled -- no extra calls.
+type HealthIssue = { worker: string; text: string; detail: string };
+
+function checkWorkerHealth(worker: string, enabled: boolean, runs: any[], nowMs: number): HealthIssue | null {
+  const recent = runs.slice(0, 10);
+  const errorCount = recent.filter((r) => r.action === "error" || r.action === "tick_watchdog_timeout").length;
+  if (errorCount >= 3) {
+    const lastErr = recent.find((r) => r.action === "error" || r.action === "tick_watchdog_timeout");
+    const msg: string = lastErr?.detail?.error ?? "";
+    const short = msg.includes("captcha") || msg.includes("CloudFront")
+      ? "exchange endpoint blocked (CAPTCHA/WAF)" : msg.split("\n")[0].slice(0, 80) || "repeated errors";
+    return { worker, text: `${errorCount}/10 recent ticks failed`, detail: short };
+  }
+  if (enabled && runs.length > 0) {
+    const ageMs = nowMs - new Date(runs[0].ran_at ?? runs[0].run_at).getTime();
+    if (ageMs > 8 * 60_000) {
+      return { worker, text: `no activity in ${Math.round(ageMs / 60000)}m`, detail: "worker may be offline or stuck" };
+    }
+  }
+  return null;
+}
+
+function HealthBanner({ issues }: { issues: HealthIssue[] }) {
+  if (issues.length === 0) return null;
+  return (
+    <div className="bg-red-950/60 border border-red-800/60 rounded-xl px-4 py-3 flex items-start gap-3">
+      <span className="text-red-400 text-lg leading-none mt-0.5">⚠</span>
+      <div className="space-y-1">
+        <p className="text-red-300 font-semibold text-sm">Something needs attention</p>
+        {issues.map((iss, i) => (
+          <p key={i} className="text-red-400/90 text-xs">
+            <span className="font-semibold">{iss.worker}</span> — {iss.text} ({iss.detail})
+          </p>
+        ))}
+      </div>
+    </div>
+  );
+}
+
 function actionColor(action: string) {
   if (action === "OPEN")              return "text-green-400";
   if (action === "TP")                return "text-green-400";
@@ -1511,6 +1553,9 @@ function CompactStochBtcPanel({
     }
   }
 
+  const [closing, setClosing] = useState(false);
+  const closeRequested = Boolean(state?.close_requested);
+
   async function handleToggle() {
     setToggling(true);
     await fetch("/api/lighter-btc-toggle", {
@@ -1521,6 +1566,17 @@ function CompactStochBtcPanel({
     setToggling(false);
   }
 
+  async function handleClosePosition() {
+    if (!confirm(`Close the real ${side?.toUpperCase()} position on ${title} now? This places a real market order.`)) return;
+    setClosing(true);
+    await fetch("/api/lighter-btc-close-position", {
+      method: "POST", headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ table }),
+    });
+    await onToggled();
+    setClosing(false);
+  }
+
   return (
     <div className="bg-gray-900 rounded-xl p-4 space-y-3">
       <div className="flex items-center justify-between">
@@ -1528,13 +1584,25 @@ function CompactStochBtcPanel({
           <h3 className="text-white font-bold text-sm">{title}</h3>
           <p className="text-gray-500 text-[11px]">{subtitle}</p>
         </div>
-        <button
-          onClick={handleToggle}
-          disabled={toggling || loading}
-          className={`text-xs font-bold px-2.5 py-1 rounded-full ${enabled ? "bg-green-500/20 text-green-400" : "bg-gray-700/40 text-gray-500"}`}
-        >
-          {toggling ? "…" : enabled ? "ON" : "OFF"}
-        </button>
+        <div className="flex items-center gap-1.5 shrink-0">
+          {side != null && (
+            <button
+              onClick={handleClosePosition}
+              disabled={closing || closeRequested || loading}
+              className="text-xs font-semibold px-2.5 py-1 rounded-full bg-gray-800 text-red-400/70 hover:bg-red-950/60 hover:text-red-400 transition-all disabled:opacity-50"
+              title="Close the real position now, regardless of the ON/OFF toggle"
+            >
+              {closing ? "…" : closeRequested ? "Closing…" : "Close"}
+            </button>
+          )}
+          <button
+            onClick={handleToggle}
+            disabled={toggling || loading}
+            className={`text-xs font-bold px-2.5 py-1 rounded-full ${enabled ? "bg-green-500/20 text-green-400" : "bg-gray-700/40 text-gray-500"}`}
+          >
+            {toggling ? "…" : enabled ? "ON" : "OFF"}
+          </button>
+        </div>
       </div>
       {loading ? (
         <div className="h-16 bg-gray-800 rounded-lg animate-pulse" />
@@ -1785,8 +1853,10 @@ export default function Dashboard() {
   const [dcaBtcRuns,   setDcaBtcRuns]   = useState<any[]>([]);
   const [initialBtcState,  setInitialBtcState]  = useState<any>(null);
   const [initialBtcTrades, setInitialBtcTrades] = useState<any[]>([]);
+  const [initialBtcRuns,   setInitialBtcRuns]   = useState<any[]>([]);
   const [optimalBtcState,  setOptimalBtcState]  = useState<any>(null);
   const [optimalBtcTrades, setOptimalBtcTrades] = useState<any[]>([]);
+  const [optimalBtcRuns,   setOptimalBtcRuns]   = useState<any[]>([]);
 
   async function load() {
     const [
@@ -1807,8 +1877,10 @@ export default function Dashboard() {
       { data: dcaBtcRs },
       { data: initialBtcSt },
       { data: initialBtcTr },
+      { data: initialBtcRs },
       { data: optimalBtcSt },
       { data: optimalBtcTr },
+      { data: optimalBtcRs },
     ] = await Promise.all([
       getSupabase().from("surfer_state").select("*").eq("id", 1).single(),
       getSupabase().from("surfer_trades").select("*").order("exit_time", { ascending: false }).limit(5000),
@@ -1827,8 +1899,10 @@ export default function Dashboard() {
       getSupabase().from("lighter_stoch_dca_btc_runs").select("*").order("ran_at", { ascending: false }).limit(50),
       getSupabase().from("lighter_btc_initial_state").select("*").eq("id", 1).single(),
       getSupabase().from("lighter_btc_initial_trades").select("*").order("closed_at", { ascending: false }).limit(200),
+      getSupabase().from("lighter_btc_initial_runs").select("*").order("ran_at", { ascending: false }).limit(30),
       getSupabase().from("lighter_btc_optimal_state").select("*").eq("id", 1).single(),
       getSupabase().from("lighter_btc_optimal_trades").select("*").order("closed_at", { ascending: false }).limit(200),
+      getSupabase().from("lighter_btc_optimal_runs").select("*").order("ran_at", { ascending: false }).limit(30),
     ]);
     setSurferState(surferSt ?? null);
     setSurferTrades(surferTr ?? []);
@@ -1847,8 +1921,10 @@ export default function Dashboard() {
     setDcaBtcRuns(dcaBtcRs ?? []);
     setInitialBtcState(initialBtcSt ?? null);
     setInitialBtcTrades(initialBtcTr ?? []);
+    setInitialBtcRuns(initialBtcRs ?? []);
     setOptimalBtcState(optimalBtcSt ?? null);
     setOptimalBtcTrades(optimalBtcTr ?? []);
+    setOptimalBtcRuns(optimalBtcRs ?? []);
     fetch("https://mainnet.zklighter.elliot.ai/api/v1/orderBookOrders?market_id=1&limit=1")
       .then((r) => r.json())
       .then((ob) => {
@@ -2048,6 +2124,17 @@ export default function Dashboard() {
     setSummaryLoading(false);
   }
 
+  const [healthTick, setHealthTick] = useState(Date.now());
+  useEffect(() => {
+    const id = setInterval(() => setHealthTick(Date.now()), 15_000);
+    return () => clearInterval(id);
+  }, []);
+  const healthIssues: HealthIssue[] = loading ? [] : [
+    checkWorkerHealth("Worker 1", initialBtcState?.enabled ?? false, initialBtcRuns, healthTick),
+    checkWorkerHealth("Worker 2", optimalBtcState?.enabled ?? false, optimalBtcRuns, healthTick),
+    checkWorkerHealth("Worker 3", dcaBtcState?.enabled ?? false, dcaBtcRuns, healthTick),
+  ].filter((x): x is HealthIssue => x !== null);
+
   useEffect(() => {
     load();
     const sb = getSupabase();
@@ -2081,9 +2168,17 @@ export default function Dashboard() {
       .on("postgres_changes", { event: "*", schema: "public", table: "solbtc_sizeconf_trades" }, debouncedLoad)
       .on("postgres_changes", { event: "*", schema: "public", table: "solbtc_sizeconf_runs" }, debouncedLoad)
       .subscribe();
+    // Lighter BTC workers' runs tables aren't otherwise wired to realtime -- subscribed here
+    // specifically so the health banner (below) reflects an error burst live instead of only
+    // on the next manual action or full-page reload.
+    const ch5 = sb.channel("lighter-btc-runs")
+      .on("postgres_changes", { event: "INSERT", schema: "public", table: "lighter_btc_initial_runs" }, debouncedLoad)
+      .on("postgres_changes", { event: "INSERT", schema: "public", table: "lighter_btc_optimal_runs" }, debouncedLoad)
+      .on("postgres_changes", { event: "INSERT", schema: "public", table: "lighter_stoch_dca_btc_runs" }, debouncedLoad)
+      .subscribe();
     return () => {
       if (debounceTimer) clearTimeout(debounceTimer);
-      sb.removeChannel(ch1); sb.removeChannel(ch2); sb.removeChannel(ch3); sb.removeChannel(ch4);
+      sb.removeChannel(ch1); sb.removeChannel(ch2); sb.removeChannel(ch3); sb.removeChannel(ch4); sb.removeChannel(ch5);
     };
   }, []);
 
@@ -2107,7 +2202,7 @@ export default function Dashboard() {
         <div className="grid grid-cols-1 sm:grid-cols-3 gap-3">
           <CompactStochBtcPanel
             title="Worker 1 · Reversal Guard + Smart Breaker"
-            subtitle="TP 0.10% / SL 0.11% / 25-75 / window 5 / 120s reversal guard / 0.15% session stop, direction+volatility resume"
+            subtitle="TP 0.10% / SL 0.11% / 25-75 / window 5 / 120s reversal guard / 0.15% session stop, adaptive-volatility resume"
             table="lighter_btc_initial_state"
             state={initialBtcState}
             trades={initialBtcTrades}
@@ -2128,7 +2223,7 @@ export default function Dashboard() {
           />
           <CompactStochBtcPanel
             title="Worker 3 · Reversal Guard + Session Breaker"
-            subtitle="TP 0.10% / SL 0.11% / 25-75 / window 5 / 120s reversal guard / 0.25% session stop, 45min cooldown"
+            subtitle="TP 0.10% / SL 0.11% / 25-75 / window 5 / 120s reversal guard / 0.25% session stop, 20min cooldown"
             table="lighter_stoch_dca_btc_state"
             state={dcaBtcState}
             trades={dcaBtcTrades}
@@ -2136,7 +2231,7 @@ export default function Dashboard() {
             loading={loading}
             onToggled={load}
             runs={dcaBtcRuns}
-            cooldownMin={45}
+            cooldownMin={20}
           />
         </div>
 

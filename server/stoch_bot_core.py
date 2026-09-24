@@ -996,6 +996,28 @@ class StochBot:
         cfg = self.cfg
         state = await self.get_state()
 
+        if state.get("close_requested"):
+            # Dashboard "Close Position" button -- a manual kill switch independent of the
+            # enabled toggle (which only blocks new entries, never closes an existing one).
+            # Runs before anything else, including the disabled+flat skip below, so it works
+            # even on an already-disabled bot -- exactly the state a real incident leaves it
+            # in. Keeps retrying next tick (does not clear the flag) until either nothing is
+            # left to close or close_all actually confirms flat -- a fire-once attempt would
+            # silently give up on exactly the kind of transient failure this button exists for.
+            if state.get("side") is None:
+                await self.update_state({"close_requested": False, "enabled": False})
+                return
+            best_bid, best_ask = self.live.best_bid_ask()
+            if best_bid is None or best_ask is None:
+                await self.log_run("close_requested_no_book", {})
+                return
+            closed_ok = await self.close_all("MANUAL_BUTTON", state, state["side"],
+                                             state.get("legs") or [], best_bid, best_ask,
+                                             self.now_ms(), known_pos=None)
+            if closed_ok:
+                await self.update_state({"close_requested": False, "enabled": False})
+            return
+
         if not state.get("enabled", True) and state.get("side") is None:
             # Disabled AND flat -- nothing to protect, so don't hit the REST position endpoint
             # at all. Proven necessary 2026-09-23: two disabled, already-flat workers kept

@@ -970,6 +970,75 @@ async def t_tick_still_checks_rest_when_disabled_but_open():
           getattr(bot, "get_position_rest_calls", 0) >= 1, getattr(bot, "get_position_rest_calls", 0))
 
 
+async def t_tick_close_requested_closes_open_position():
+    print("\n[tick: close_requested=True closes the real position and clears the flag]")
+    entry = 86000.0
+    ex = FakeExchange(position=round(20.0 / entry, 5), collateral=20.0)
+    state = {
+        "id": 1, "side": "long", "legs": [{"price": entry, "usd_size": 20.0}],
+        "first_entry_price": entry, "first_entry_time": 1700000000000, "dca_level": 0,
+        "seed_usd": 20.0, "realized_pnl_usd": 0.0, "collateral_before_entry": 20.0,
+        "enabled": True, "consecutive_entry_failures": 0, "last_processed_candle_ts": 0,
+        "close_requested": True,
+    }
+    bot = make_bot(ex, state=state, candles_kind="mid")
+    await bot.tick()
+    check("position actually closed on the exchange", abs(ex.position) < 1e-9, ex.position)
+    check("side cleared", bot.state_row["side"] is None)
+    check("close_requested cleared", bot.state_row["close_requested"] is False)
+    check("force-disabled so it doesn't re-enter next tick", bot.state_row["enabled"] is False)
+
+
+async def t_tick_close_requested_works_even_when_disabled():
+    print("\n[tick: close_requested fires even on an already-disabled bot -- the whole point]")
+    entry = 86000.0
+    ex = FakeExchange(position=round(20.0 / entry, 5), collateral=20.0)
+    state = {
+        "id": 1, "side": "long", "legs": [{"price": entry, "usd_size": 20.0}],
+        "first_entry_price": entry, "first_entry_time": 1700000000000, "dca_level": 0,
+        "seed_usd": 20.0, "realized_pnl_usd": 0.0, "collateral_before_entry": 20.0,
+        "enabled": False, "consecutive_entry_failures": 0, "last_processed_candle_ts": 0,
+        "close_requested": True,
+    }
+    bot = make_bot(ex, state=state, candles_kind="mid")
+    await bot.tick()
+    check("position closed despite enabled=False", abs(ex.position) < 1e-9, ex.position)
+    check("side cleared", bot.state_row["side"] is None)
+
+
+async def t_tick_close_requested_with_no_position_just_clears_flag():
+    print("\n[tick: close_requested but already flat -> no order, just clears the flag]")
+    ex = FakeExchange()
+    bot = make_bot(ex, candles_kind="mid")
+    bot.state_row["close_requested"] = True
+    bot.state_row["side"] = None
+    await bot.tick()
+    check("no order attempted", ex.orders == [], ex.orders)
+    check("close_requested cleared", bot.state_row["close_requested"] is False)
+    check("force-disabled", bot.state_row["enabled"] is False)
+
+
+async def t_tick_close_requested_keeps_retrying_if_close_fails():
+    print("\n[tick: close_requested stays set if the close doesn't actually confirm flat -- retries next tick]")
+    entry = 86000.0
+    ex = FakeExchange(position=round(20.0 / entry, 5), collateral=20.0)
+    ex.order_error = "boom"
+    ex.fills_when_erroring = False  # the order never actually fills
+    state = {
+        "id": 1, "side": "long", "legs": [{"price": entry, "usd_size": 20.0}],
+        "first_entry_price": entry, "first_entry_time": 1700000000000, "dca_level": 0,
+        "seed_usd": 20.0, "realized_pnl_usd": 0.0, "collateral_before_entry": 20.0,
+        "enabled": True, "consecutive_entry_failures": 0, "last_processed_candle_ts": 0,
+        "close_requested": True,
+    }
+    bot = make_bot(ex, state=state, candles_kind="mid")
+    await bot.tick()
+    check("still holding (order never filled)", abs(ex.position) > 1e-9, ex.position)
+    check("close_requested was NOT cleared -- will retry next tick",
+          bot.state_row["close_requested"] is True, bot.state_row["close_requested"])
+    check("side still tracked (nothing was falsely cleared)", bot.state_row["side"] == "long")
+
+
 async def t_read_position_falls_back_to_cache_on_error():
     print("\n[read_position: REST call fails, but we have a prior cached read -> use it, don't crash]")
     ex = FakeExchange(position=0.0005, collateral=20.0)
@@ -1385,6 +1454,10 @@ async def main():
               t_session_breaker_adaptive_calm_resumes_at_or_below_trip_level,
               t_tick_skips_rest_when_disabled_and_flat,
               t_tick_still_checks_rest_when_disabled_but_open,
+              t_tick_close_requested_closes_open_position,
+              t_tick_close_requested_works_even_when_disabled,
+              t_tick_close_requested_with_no_position_just_clears_flag,
+              t_tick_close_requested_keeps_retrying_if_close_fails,
               t_read_position_falls_back_to_cache_on_error,
               t_read_position_raises_without_any_cache,
               t_tick_error_backoff_formula,
