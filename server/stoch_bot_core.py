@@ -339,6 +339,8 @@ class StochBot:
         self._auth_token_expiry_at = 0.0
         self._close_retry_failures = 0    # backoff counter for the close_requested retry loop
         self._close_retry_next_at = 0.0
+        self._pos_read_consecutive_failures = 0   # backoff counter for read_position()'s REST retries
+        self._pos_read_next_attempt_at = 0.0
         # Session drawdown breaker state -- in-memory only (not DB-persisted), so a restart
         # re-arms it. That's an accepted tradeoff: restarts already happen every few hours in
         # this project, and re-arming on restart is a safe default direction to err in.
@@ -582,8 +584,19 @@ class StochBot:
         now = time.time()
         if self._pos_cache is not None and now - self._pos_cache_at < POSITION_TTL:
             return self._pos_cache
+        if self._pos_cache is not None and now < self._pos_read_next_attempt_at:
+            # Still backing off from a recent failure -- reuse the cache past its normal TTL
+            # instead of retrying. Proven necessary 2026-09-24: falling back to cache on
+            # failure let tick() return successfully every time, so run()'s own error-backoff
+            # (which only engages when an exception actually escapes tick()) never triggered --
+            # this silently hammered a WAF-blocked endpoint every tick, indefinitely, at full
+            # tick cadence, with no growing delay at all.
+            return self._pos_cache
         try:
-            return await self.get_position_rest()
+            pos = await self.get_position_rest()
+            self._pos_read_consecutive_failures = 0
+            self._pos_read_next_attempt_at = 0.0
+            return pos
         except Exception as e:
             # Proven necessary in production (2026-09-23): Lighter's CloudFront WAF started
             # returning a CAPTCHA challenge (HTTP 405) to Render's IP specifically -- every
@@ -593,9 +606,13 @@ class StochBot:
             # still evaluate and act on TP/SL using slightly stale size data, instead of
             # giving up entirely. If we've never successfully read a position at all, there
             # is nothing safe to fall back to, so this still raises in that case.
+            self._pos_read_consecutive_failures += 1
+            self._pos_read_next_attempt_at = now + tick_error_backoff_seconds(
+                self._pos_read_consecutive_failures)
             if self._pos_cache is not None:
                 await self.log_run("position_read_failed_using_cache", {
                     "error": str(e)[:300], "cache_age_s": round(now - self._pos_cache_at, 1),
+                    "consecutive": self._pos_read_consecutive_failures,
                 })
                 return self._pos_cache
             raise

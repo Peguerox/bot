@@ -1086,6 +1086,50 @@ async def t_read_position_falls_back_to_cache_on_error():
           bot.runs)
 
 
+async def t_read_position_backs_off_instead_of_retrying_every_call():
+    print("\n[read_position: a failing REST endpoint doesn't get hammered every call -- backs off]")
+    ex = FakeExchange(position=0.0005, collateral=20.0)
+    bot = make_bot(ex, candles_kind="mid")
+    bot._pos_cache = (0.0005, 20.0)
+    bot._pos_cache_at = time.time() - 999
+
+    calls = {"n": 0}
+    async def failing_get_position_rest():
+        calls["n"] += 1
+        raise RuntimeError("(405) captcha")
+    bot.get_position_rest = failing_get_position_rest
+
+    await bot.read_position()
+    check("first call actually attempted the REST read", calls["n"] == 1, calls["n"])
+
+    # Force the TTL fallback to look stale again so this call would retry the REST read
+    # if there were no backoff -- proven necessary 2026-09-24: falling back to cache let
+    # tick() "succeed" every time, so the general error-backoff (which only triggers on an
+    # exception escaping tick()) never engaged, and this hammered a WAF-blocked endpoint at
+    # full tick cadence with zero growing delay.
+    bot._pos_cache_at = time.time() - 999
+    await bot.read_position()
+    check("second call within the backoff window did NOT hit the REST endpoint again",
+          calls["n"] == 1, calls["n"])
+
+    check("consecutive failure counter incremented on the real attempt",
+          bot._pos_read_consecutive_failures == 1, bot._pos_read_consecutive_failures)
+
+
+async def t_read_position_resumes_normal_polling_after_a_success():
+    print("\n[read_position: a successful read resets the backoff counter]")
+    ex = FakeExchange(position=0.0007, collateral=22.0)
+    bot = make_bot(ex, candles_kind="mid")
+    bot._pos_read_consecutive_failures = 4
+    bot._pos_read_next_attempt_at = 0.0  # backoff window already elapsed
+    pos, coll = await bot.read_position()
+    check("real read succeeded", pos == 0.0007, pos)
+    check("failure counter reset", bot._pos_read_consecutive_failures == 0,
+          bot._pos_read_consecutive_failures)
+    check("next-attempt gate cleared", bot._pos_read_next_attempt_at == 0.0,
+          bot._pos_read_next_attempt_at)
+
+
 async def t_read_position_raises_without_any_cache():
     print("\n[read_position: REST call fails AND we've never read a position -> still raises]")
     ex = FakeExchange()
@@ -1489,6 +1533,8 @@ async def main():
               t_tick_close_requested_keeps_retrying_if_close_fails,
               t_tick_close_requested_backs_off_between_retries,
               t_read_position_falls_back_to_cache_on_error,
+              t_read_position_backs_off_instead_of_retrying_every_call,
+              t_read_position_resumes_normal_polling_after_a_success,
               t_read_position_raises_without_any_cache,
               t_tick_error_backoff_formula,
               t_auth_token_cached_across_calls,
