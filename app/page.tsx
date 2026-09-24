@@ -1497,10 +1497,11 @@ function currentSessionStart(nowUtc: Date): Date {
 
 function CompactStochBtcPanel({
   title, subtitle, table, state, trades, currentPrice, loading, onToggled, erValue, runs, cooldownMin,
+  showVolGate,
 }: {
   title: string; subtitle: string; table: string; state: any; trades: any[];
   currentPrice: number | null; loading: boolean; onToggled: () => void;
-  erValue?: number | null; runs?: any[]; cooldownMin?: number;
+  erValue?: number | null; runs?: any[]; cooldownMin?: number; showVolGate?: boolean;
 }) {
   const [toggling, setToggling] = useState(false);
   const [nowTick, setNowTick] = useState(() => Date.now());
@@ -1622,7 +1623,7 @@ function CompactStochBtcPanel({
             <p className="text-gray-500 text-[10px] uppercase">Win Rate</p>
             <p className="font-bold text-blue-400">{winRate}% <span className="text-[10px] font-normal text-gray-500">({closedTrades.length})</span></p>
           </div>
-          <div className={`bg-gray-800/60 rounded-lg p-2 ${erValue == null && cooldownMin == null ? "col-span-2" : ""}`}>
+          <div className={`bg-gray-800/60 rounded-lg p-2 ${erValue == null && cooldownMin == null && !showVolGate ? "col-span-2" : ""}`}>
             <p className="text-gray-500 text-[10px] uppercase">Position</p>
             <div className="flex items-center gap-1.5 flex-wrap">
               <span className={`font-bold ${side === "long" ? "text-green-400" : side === "short" ? "text-red-400" : "text-gray-400"}`}>
@@ -1669,6 +1670,14 @@ function CompactStochBtcPanel({
                   </span>
                 )}
               </div>
+            </div>
+          )}
+          {showVolGate && (
+            <div className="bg-gray-800/60 rounded-lg p-2">
+              <p className="text-gray-500 text-[10px] uppercase">Vol Gate</p>
+              <span className={`text-[9px] font-bold px-1.5 py-0.5 rounded uppercase ${state?.entry_vol_paused ? "bg-red-500/20 text-red-400" : "bg-green-500/20 text-green-400"}`}>
+                {state?.entry_vol_paused ? "paused" : "active"}
+              </span>
             </div>
           )}
         </div>
@@ -2226,8 +2235,8 @@ export default function Dashboard() {
             onToggled={load}
           />
           <CompactStochBtcPanel
-            title="Worker 3 · Reversal Guard + Session Breaker"
-            subtitle="TP 0.10% / SL 0.11% / 25-75 / window 5 / 120s reversal guard / 0.25% session stop, 20min cooldown"
+            title="Worker 3 · Entry Volatility Guard"
+            subtitle="TP 0.10% / SL 0.11% / 25-75 / window 5 / 180s reversal guard / entry pause TR>=0.15%, resume TR<=0.1125%"
             table="lighter_stoch_dca_btc_state"
             state={dcaBtcState}
             trades={dcaBtcTrades}
@@ -2235,7 +2244,7 @@ export default function Dashboard() {
             loading={loading}
             onToggled={load}
             runs={dcaBtcRuns}
-            cooldownMin={20}
+            showVolGate
           />
         </div>
 
