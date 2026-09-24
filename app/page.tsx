@@ -32,134 +32,6 @@ function Stat({ label, value, sub, color }: { label: string; value: React.ReactN
   );
 }
 
-type SummaryRow = {
-  name: string;
-  badge: string;
-  trades: number;
-  winRate: string;
-  winRateNum: number;
-  pnl: number;
-  pnlDisplay: string;
-  positive: boolean;
-  returnPct: string;
-  returnPctNum: number;
-  ratePerDay: number;
-  ratePerDayDisplay: string;
-  running: string;
-  elapsedMs: number;
-  holdReturnPctNum: number | null;
-  holdReturnDisplay: string;
-  backtestReturnPctNum: number | null;
-  backtestReturnDisplay: string;
-};
-
-type SortKey = "name" | "pnl" | "returnPctNum" | "ratePerDay" | "winRateNum" | "trades" | "elapsedMs" | "holdReturnPctNum" | "backtestReturnPctNum";
-
-function SummaryCards({ rows }: { rows: SummaryRow[] }) {
-  const [sortKey, setSortKey] = useState<SortKey>("ratePerDay");
-  const [sortDir, setSortDir] = useState<"asc" | "desc">("desc");
-
-  function handleSort(key: SortKey) {
-    if (key === sortKey) {
-      setSortDir(d => (d === "asc" ? "desc" : "asc"));
-    } else {
-      setSortKey(key);
-      setSortDir(key === "name" ? "asc" : "desc");
-    }
-  }
-
-  const sortedRows = [...rows].sort((a, b) => {
-    const dir = sortDir === "asc" ? 1 : -1;
-    if (sortKey === "name") return a.name.localeCompare(b.name) * dir;
-    const av = a[sortKey] ?? 0;
-    const bv = b[sortKey] ?? 0;
-    return (av - bv) * dir;
-  });
-
-  function SortHeader({ label, sortKey: key, align = "right" }: { label: string; sortKey: SortKey; align?: "left" | "right" }) {
-    const active = sortKey === key;
-    return (
-      <th
-        className={`${align === "left" ? "text-left pr-4" : "text-right px-4"} py-2 cursor-pointer select-none hover:text-gray-300`}
-        onClick={() => handleSort(key)}
-      >
-        {label}{active ? (sortDir === "asc" ? " ▲" : " ▼") : ""}
-      </th>
-    );
-  }
-
-  return (
-    <div className="bg-gray-900 rounded-xl p-5 overflow-x-auto">
-      <h2 className="text-white font-bold text-lg mb-4">Summary — click a column to sort</h2>
-      <table className="w-full text-sm">
-        <thead>
-          <tr className="text-gray-500 text-xs uppercase tracking-wide border-b border-gray-700">
-            <SortHeader label="Bot" sortKey="name" align="left" />
-            <SortHeader label="PnL" sortKey="pnl" />
-            <SortHeader label="Return" sortKey="returnPctNum" />
-            <SortHeader label="Buy & Hold" sortKey="holdReturnPctNum" />
-            <SortHeader label="Backtest" sortKey="backtestReturnPctNum" />
-            <SortHeader label="Speed" sortKey="ratePerDay" />
-            <SortHeader label="Win Rate" sortKey="winRateNum" />
-            <SortHeader label="Trades" sortKey="trades" />
-            <SortHeader label="Running" sortKey="elapsedMs" />
-          </tr>
-        </thead>
-        <tbody>
-          {sortedRows.map((r) => (
-            <tr key={r.name} className="border-b border-gray-800/60 hover:bg-gray-800/30">
-              <td className="py-3 pr-4">
-                <div className="flex items-center gap-2">
-                  <span className="text-white font-semibold">{r.name}</span>
-                  <span className={`text-[10px] font-bold px-2 py-0.5 rounded-full ${
-                    r.badge === "LIVE" ? "bg-green-500/20 text-green-400" : "bg-blue-500/20 text-blue-400"
-                  }`}>{r.badge}</span>
-                </div>
-              </td>
-              <td className={`text-right py-3 px-4 text-xl font-bold ${r.positive ? "text-green-400" : "text-red-400"}`}>
-                {r.pnlDisplay}
-              </td>
-              <td className={`text-right py-3 px-4 font-semibold ${r.positive ? "text-green-400" : "text-red-400"}`}>
-                {r.returnPct}
-              </td>
-              <td className="text-right py-3 px-4">
-                {r.holdReturnPctNum == null ? (
-                  <span className="text-gray-600">—</span>
-                ) : (
-                  <span className={r.holdReturnPctNum >= 0 ? "text-gray-400" : "text-gray-500"}>
-                    {r.holdReturnDisplay}
-                    {r.returnPctNum >= r.holdReturnPctNum
-                      ? <span className="text-green-500 ml-1" title="Beating buy &amp; hold">▲</span>
-                      : <span className="text-red-500 ml-1" title="Lagging buy &amp; hold">▼</span>}
-                  </span>
-                )}
-              </td>
-              <td className="text-right py-3 px-4">
-                {r.backtestReturnPctNum == null ? (
-                  <span className="text-gray-600" title="No replay engine built for this bot yet">—</span>
-                ) : (
-                  <span className={r.backtestReturnPctNum >= 0 ? "text-gray-400" : "text-gray-500"}>
-                    {r.backtestReturnDisplay}
-                    {Math.abs(r.returnPctNum - r.backtestReturnPctNum) > 0.2
-                      ? <span className="text-yellow-500 ml-1" title="Live and backtest diverge by more than 0.2pp -- worth investigating">⚠</span>
-                      : <span className="text-green-500 ml-1" title="Live matches backtest closely">✓</span>}
-                  </span>
-                )}
-              </td>
-              <td className={`text-right py-3 px-4 font-semibold ${r.ratePerDay >= 0 ? "text-green-400" : "text-red-400"}`}>
-                {r.ratePerDayDisplay}
-              </td>
-              <td className="text-right py-3 px-4 text-white">{r.winRate}</td>
-              <td className="text-right py-3 px-4 text-white">{r.trades}</td>
-              <td className="text-right py-3 pl-4 text-gray-300">{r.running}</td>
-            </tr>
-          ))}
-        </tbody>
-      </table>
-    </div>
-  );
-}
-
 // ── Health banner ────────────────────────────────────────────────────────────
 // Surfaces exactly the failure mode that bit us on 2026-09-23: a blocked/erroring
 // exchange endpoint spamming "error" runs, or a worker that's gone quiet while it's
@@ -1907,8 +1779,6 @@ export default function Dashboard() {
   const [surferUsdtToggling,   setSurferUsdtToggling]   = useState(false);
   const [surferUsdtSellingAll, setSurferUsdtSellingAll] = useState(false);
   const [surferUsdtClearing,   setSurferUsdtClearing]   = useState(false);
-  const [summaryData, setSummaryData] = useState<SummaryRow[] | null>(null);
-  const [summaryLoading, setSummaryLoading] = useState(false);
   const [htState,   setHtState]   = useState<any>(null);
   const [htTrades,  setHtTrades]  = useState<any[]>([]);
   const [htRuns,    setHtRuns]    = useState<any[]>([]);
@@ -2134,93 +2004,6 @@ export default function Dashboard() {
     setSzClearing(false);
   }
 
-  function formatElapsed(ms: number): string {
-    if (ms <= 0) return "just started";
-    const mins = Math.floor(ms / 60000);
-    const days = Math.floor(mins / 1440);
-    const hours = Math.floor((mins % 1440) / 60);
-    const remMins = mins % 60;
-    if (days > 0) return `${days}d ${hours}h`;
-    if (hours > 0) return `${hours}h ${remMins}m`;
-    return `${remMins}m`;
-  }
-
-  async function handleShowSummary() {
-    setSummaryLoading(true);
-    const sb = getSupabase();
-
-    // Surfer SOLBTC's first real trade sized $50 as 0.00075241 BTC at deployment —
-    // same $50 seed as every other bot, just BTC-denominated.
-    const SURFER_BTC_INITIAL = 0.00075241;
-
-    // venue/symbol for the buy-and-hold comparison — the asset each bot actually trades.
-    // Order matches the panels top-to-bottom: SurferUsdt, Surfer, Hypertrade, SizeConf.
-    const bots = [
-      { name: "Surfer SOLUSDT", badge: "LIVE",  state: surferUsdtState, runsTable: "surfer_usdt_runs",          pnlField: "realized_pnl_usdt", initial: 50, unit: "$", venue: "us" as const,       symbol: "SOLUSDT", backtestBotKey: "surfer-solusdt" },
-      { name: "Surfer SOLBTC",  badge: "LIVE",  state: surferState,     runsTable: "surfer_runs",               pnlField: "realized_pnl_btc",  initial: SURFER_BTC_INITIAL, unit: "₿", venue: "us" as const,       symbol: "SOLBTC", backtestBotKey: "surfer-solbtc" },
-    ];
-
-    const rows: SummaryRow[] = [];
-
-    for (const b of bots) {
-      const { data: firstRun } = await sb.from(b.runsTable).select("run_at").order("run_at", { ascending: true }).limit(1).single();
-      const startMs = firstRun?.run_at ? new Date(firstRun.run_at).getTime() : null;
-      const elapsedMs = startMs ? Date.now() - startMs : 0;
-      const running = startMs ? formatElapsed(elapsedMs) : "unknown";
-      const days = Math.max(elapsedMs / 86400000, 1 / 24); // floor at 1 hour to avoid divide-by-near-zero
-      const pnl = b.state?.[b.pnlField] ?? 0;
-      const trades = b.state?.[(b as any).tradesField ?? "total_trades"] ?? 0;
-      const wins = b.state?.total_wins ?? 0;
-      const winRateNum = trades > 0 ? (wins / trades * 100) : -1;
-      const winRate = trades > 0 ? `${winRateNum.toFixed(1)}%` : "—";
-      const returnPctNum = pnl / b.initial * 100;
-      const returnPct = `${returnPctNum >= 0 ? "+" : ""}${returnPctNum.toFixed(1)}%`;
-      const ratePerDay = returnPctNum / days;
-      const ratePerDayDisplay = `${ratePerDay >= 0 ? "+" : ""}${ratePerDay.toFixed(2)}%/day`;
-
-      let holdReturnPctNum: number | null = null;
-      let holdReturnDisplay = "—";
-      if (startMs) {
-        try {
-          const res = await fetch(`/api/buy-hold?venue=${b.venue}&symbol=${b.symbol}&sinceMs=${startMs}`);
-          const data = await res.json();
-          if (data.ok) {
-            const pct: number = data.pctChange;
-            holdReturnPctNum = pct;
-            holdReturnDisplay = `${pct >= 0 ? "+" : ""}${pct.toFixed(1)}%`;
-          }
-        } catch { /* leave as unknown */ }
-      }
-
-      let backtestReturnPctNum: number | null = null;
-      let backtestReturnDisplay = "—";
-      const backtestBotKey = (b as any).backtestBotKey as string | undefined;
-      if (backtestBotKey) {
-        try {
-          const res = await fetch(`/api/expected-vs-actual?bot=${backtestBotKey}`);
-          const data = await res.json();
-          if (data.ok && typeof data.backtestTotalReturnPct === "number") {
-            const pct: number = data.backtestTotalReturnPct;
-            backtestReturnPctNum = pct;
-            backtestReturnDisplay = `${pct >= 0 ? "+" : ""}${pct.toFixed(2)}%`;
-          }
-        } catch { /* leave as unavailable */ }
-      }
-
-      rows.push({
-        name: b.name, badge: b.badge, trades, winRate, winRateNum, running, elapsedMs,
-        pnl,
-        pnlDisplay: b.unit === "₿" ? `${pnl >= 0 ? "+" : ""}${pnl.toFixed(8)}₿` : `${pnl >= 0 ? "+" : ""}$${pnl.toFixed(2)}`,
-        positive: pnl >= 0, returnPct, returnPctNum, ratePerDay, ratePerDayDisplay,
-        holdReturnPctNum, holdReturnDisplay,
-        backtestReturnPctNum, backtestReturnDisplay,
-      });
-    }
-
-    rows.sort((a, b) => b.ratePerDay - a.ratePerDay);
-    setSummaryData(rows);
-    setSummaryLoading(false);
-  }
 
   const [healthTick, setHealthTick] = useState(Date.now());
   useEffect(() => {
@@ -2285,16 +2068,7 @@ export default function Dashboard() {
       <div className="max-w-6xl mx-auto space-y-6">
         <div className="flex items-center justify-between">
           <h1 className="text-2xl font-bold text-white">TradeBot Dashboard</h1>
-          <button
-            onClick={handleShowSummary}
-            disabled={summaryLoading}
-            className="text-xs font-semibold px-3 py-1.5 rounded-md bg-gray-800 text-gray-300 hover:bg-gray-700 transition-all disabled:opacity-50"
-          >
-            {summaryLoading ? "Loading…" : "Show Summary"}
-          </button>
         </div>
-
-        {summaryData && <SummaryCards rows={summaryData} />}
 
         {/* ── Lighter BTC Stochastic5: 3-worker comparison, real money, $100 each */}
         <div className="grid grid-cols-1 sm:grid-cols-3 gap-3">
