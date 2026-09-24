@@ -388,7 +388,7 @@ class StochBot:
         self._entry_vol_loaded = False
 
     # ── Supabase (aiohttp: async, and actually cancellable) ─────────────────────────────────
-    async def sb(self, method, path, body=None):
+    async def sb(self, method, path, body=None, extra_headers=None):
         """All Supabase I/O. Deliberately NOT urllib.
 
         urllib blocks, so calling it inline froze the WS task for the duration of every DB
@@ -407,6 +407,8 @@ class StochBot:
         }
         if method in ("POST", "PATCH"):
             headers["Prefer"] = "return=representation"
+        if extra_headers:
+            headers.update(extra_headers)
         async with self.http.request(method, url, json=body, headers=headers) as resp:
             text = await resp.text()
             if resp.status >= 400:
@@ -430,11 +432,23 @@ class StochBot:
             print(f"  (log_run failed: {e})", flush=True)
 
     async def log_trade(self, side, ae, exit_price, base_amount, pnl_usd, reason, legs_used, opened_at):
-        await self.sb("POST", self.cfg.table_trades, {
-            "side": side, "avg_entry_price": ae, "exit_price": exit_price,
-            "base_amount_btc": base_amount, "pnl_usd": pnl_usd, "reason": reason,
-            "legs_used": legs_used, "opened_at": opened_at,
-        })
+        # Idempotent insert (proven necessary 2026-09-24): a Render restart can briefly leave
+        # the old and new process both alive, and both independently finish closing the same
+        # real position -- each computes and writes the identical realized_pnl_usd update (so
+        # money was never actually double-counted), but each also INSERTs its own trade row,
+        # which duplicates unlike an UPDATE. on_conflict + resolution=ignore-duplicates makes
+        # a repeat insert for the same (opened_at, side, avg_entry_price) a silent no-op
+        # instead of a second row. Requires a matching unique constraint on table_trades.
+        await self.sb(
+            "POST",
+            f"{self.cfg.table_trades}?on_conflict=opened_at,side,avg_entry_price",
+            {
+                "side": side, "avg_entry_price": ae, "exit_price": exit_price,
+                "base_amount_btc": base_amount, "pnl_usd": pnl_usd, "reason": reason,
+                "legs_used": legs_used, "opened_at": opened_at,
+            },
+            extra_headers={"Prefer": "resolution=ignore-duplicates,return=representation"},
+        )
 
     # ── Candles ─────────────────────────────────────────────────────────────────────────────
     async def fetch_candles(self, count=60):

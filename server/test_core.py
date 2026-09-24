@@ -1662,6 +1662,34 @@ async def t_tick_log_disabled_worker_never_participates():
     task.cancel()
 
 
+async def t_log_trade_upserts_to_prevent_duplicate_rows():
+    print("\n[log_trade: posts with on_conflict + ignore-duplicates so a race can't double-insert]")
+    cfg = BotConfig(name="t", worker_id="w", table_state="s", table_trades="lighter_test_trades",
+                    table_runs="r", stoch_window=5, tp_pct=0.10, sl_pct=0.11,
+                    entry_lo=25, entry_hi=75, reversal_lo=25, reversal_hi=75)
+    bot = StochBot(cfg)
+    calls = []
+    async def spy_sb(method, path, body=None, extra_headers=None):
+        calls.append({"method": method, "path": path, "body": body, "extra_headers": extra_headers})
+        return []
+    bot.sb = spy_sb
+
+    await core.StochBot.log_trade(bot, "long", 86000.0, 86100.0, 0.00023, 0.023, "TP", 1,
+                                  "2026-09-24T00:00:00+00:00")
+
+    check("exactly one sb call", len(calls) == 1, calls)
+    call = calls[0]
+    check("POST method", call["method"] == "POST", call["method"])
+    check("targets the trades table with on_conflict on the natural key",
+          call["path"] == "lighter_test_trades?on_conflict=opened_at,side,avg_entry_price", call["path"])
+    check("Prefer header requests ignore-duplicates (not a plain insert)",
+          call["extra_headers"] == {"Prefer": "resolution=ignore-duplicates,return=representation"},
+          call["extra_headers"])
+    check("body carries the real trade fields", call["body"]["side"] == "long"
+          and call["body"]["avg_entry_price"] == 86000.0 and call["body"]["pnl_usd"] == 0.023,
+          call["body"])
+
+
 async def main():
     for t in (t_normal_entry, t_phantom_double_fill, t_nonce_error_but_filled,
               t_order_error_no_fill, t_circuit_breaker, t_close_uses_real_size,
@@ -1731,6 +1759,7 @@ async def main():
               t_tick_log_last_resort_defers_to_either,
               t_tick_log_no_rows_yet_anyone_writes,
               t_tick_log_disabled_worker_never_participates,
+              t_log_trade_upserts_to_prevent_duplicate_rows,
               t_timeout_constants):
         try:
             await t()
