@@ -1497,11 +1497,12 @@ function currentSessionStart(nowUtc: Date): Date {
 
 function CompactStochBtcPanel({
   title, subtitle, table, state, trades, currentPrice, loading, onToggled, erValue, runs, cooldownMin,
-  showVolGate, trPct,
+  showVolGate, trPct, stats,
 }: {
   title: string; subtitle: string; table: string; state: any; trades: any[];
   currentPrice: number | null; loading: boolean; onToggled: () => void;
   erValue?: number | null; runs?: any[]; cooldownMin?: number; showVolGate?: boolean; trPct?: number | null;
+  stats?: { total: number; wins: number };
 }) {
   const [toggling, setToggling] = useState(false);
   const [nowTick, setNowTick] = useState(() => Date.now());
@@ -1529,8 +1530,12 @@ function CompactStochBtcPanel({
     : null;
 
   const closedTrades = trades.filter((t) => t.pnl_usd != null);
-  const wins = closedTrades.filter((t) => t.pnl_usd > 0).length;
-  const winRate = closedTrades.length > 0 ? (wins / closedTrades.length * 100).toFixed(1) : "—";
+  // True lifetime count when available (stats), not the capped-at-200 fetch used for the
+  // recent-trades list below -- that array alone silently freezes both numbers once a
+  // worker passes 200 real trades.
+  const trueTotal = stats?.total ?? closedTrades.length;
+  const trueWins = stats?.wins ?? closedTrades.filter((t) => t.pnl_usd > 0).length;
+  const winRate = trueTotal > 0 ? (trueWins / trueTotal * 100).toFixed(1) : "—";
 
   // Session drawdown breaker status: read directly from the persisted state row (the
   // backend's own authoritative source of truth) rather than re-deriving it from the runs
@@ -1621,7 +1626,7 @@ function CompactStochBtcPanel({
           </div>
           <div className="bg-gray-800/60 rounded-lg p-2">
             <p className="text-gray-500 text-[10px] uppercase">Win Rate</p>
-            <p className="font-bold text-blue-400">{winRate}% <span className="text-[10px] font-normal text-gray-500">({closedTrades.length})</span></p>
+            <p className="font-bold text-blue-400">{winRate}% <span className="text-[10px] font-normal text-gray-500">({trueTotal})</span></p>
           </div>
           <div className={`bg-gray-800/60 rounded-lg p-2 ${erValue == null && cooldownMin == null && !showVolGate ? "col-span-2" : ""}`}>
             <p className="text-gray-500 text-[10px] uppercase">Position</p>
@@ -1880,6 +1885,12 @@ export default function Dashboard() {
   const [optimalBtcState,  setOptimalBtcState]  = useState<any>(null);
   const [optimalBtcTrades, setOptimalBtcTrades] = useState<any[]>([]);
   const [optimalBtcRuns,   setOptimalBtcRuns]   = useState<any[]>([]);
+  // True lifetime trade/win counts -- the trades arrays above are capped at 200 rows for
+  // display purposes, which silently froze the win-rate % and trade count once any worker
+  // passed 200 real trades (Worker 2 hit this first, at 606 real trades and counting).
+  const [dcaBtcStats,     setDcaBtcStats]     = useState({ total: 0, wins: 0 });
+  const [initialBtcStats, setInitialBtcStats] = useState({ total: 0, wins: 0 });
+  const [optimalBtcStats, setOptimalBtcStats] = useState({ total: 0, wins: 0 });
 
   async function load() {
     const [
@@ -1904,6 +1915,12 @@ export default function Dashboard() {
       { data: optimalBtcSt },
       { data: optimalBtcTr },
       { data: optimalBtcRs },
+      { count: dcaBtcTotal },
+      { count: dcaBtcWins },
+      { count: initialBtcTotal },
+      { count: initialBtcWins },
+      { count: optimalBtcTotal },
+      { count: optimalBtcWins },
     ] = await Promise.all([
       getSupabase().from("surfer_state").select("*").eq("id", 1).single(),
       getSupabase().from("surfer_trades").select("*").order("exit_time", { ascending: false }).limit(5000),
@@ -1926,6 +1943,16 @@ export default function Dashboard() {
       getSupabase().from("lighter_btc_optimal_state").select("*").eq("id", 1).single(),
       getSupabase().from("lighter_btc_optimal_trades").select("*").order("closed_at", { ascending: false }).limit(200),
       getSupabase().from("lighter_btc_optimal_runs").select("*").order("ran_at", { ascending: false }).limit(30),
+      // True lifetime win-rate / trade-count stats -- the .limit(200) fetches above are for
+      // display (recent trades list) only and silently freeze any count derived from them
+      // once a worker passes 200 real trades. These use Supabase's exact-count instead of
+      // fetching rows, so the number is correct however large the real total gets.
+      getSupabase().from("lighter_stoch_dca_btc_trades").select("id", { count: "exact", head: true }),
+      getSupabase().from("lighter_stoch_dca_btc_trades").select("id", { count: "exact", head: true }).gt("pnl_usd", 0),
+      getSupabase().from("lighter_btc_initial_trades").select("id", { count: "exact", head: true }),
+      getSupabase().from("lighter_btc_initial_trades").select("id", { count: "exact", head: true }).gt("pnl_usd", 0),
+      getSupabase().from("lighter_btc_optimal_trades").select("id", { count: "exact", head: true }),
+      getSupabase().from("lighter_btc_optimal_trades").select("id", { count: "exact", head: true }).gt("pnl_usd", 0),
     ]);
     setSurferState(surferSt ?? null);
     setSurferTrades(surferTr ?? []);
@@ -1948,6 +1975,9 @@ export default function Dashboard() {
     setOptimalBtcState(optimalBtcSt ?? null);
     setOptimalBtcTrades(optimalBtcTr ?? []);
     setOptimalBtcRuns(optimalBtcRs ?? []);
+    setDcaBtcStats({ total: dcaBtcTotal ?? 0, wins: dcaBtcWins ?? 0 });
+    setInitialBtcStats({ total: initialBtcTotal ?? 0, wins: initialBtcWins ?? 0 });
+    setOptimalBtcStats({ total: optimalBtcTotal ?? 0, wins: optimalBtcWins ?? 0 });
     fetch("https://mainnet.zklighter.elliot.ai/api/v1/orderBookOrders?market_id=1&limit=1")
       .then((r) => r.json())
       .then((ob) => {
@@ -2249,6 +2279,7 @@ export default function Dashboard() {
             loading={loading}
             onToggled={load}
             cooldownMin={15}
+            stats={initialBtcStats}
           />
           <CompactStochBtcPanel
             title="Worker 2 · Optimal"
@@ -2259,6 +2290,7 @@ export default function Dashboard() {
             currentPrice={ocoBtcPrice}
             loading={loading}
             onToggled={load}
+            stats={optimalBtcStats}
           />
           <CompactStochBtcPanel
             title="Worker 3 · Entry Volatility Guard"
@@ -2272,6 +2304,7 @@ export default function Dashboard() {
             runs={dcaBtcRuns}
             showVolGate
             trPct={btcTrPct}
+            stats={dcaBtcStats}
           />
         </div>
 
