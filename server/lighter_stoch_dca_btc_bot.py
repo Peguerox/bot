@@ -1,49 +1,54 @@
 """
-Worker 3 -- "REVERSAL GUARD + SESSION BREAKER". Real-money Lighter BTC stochastic bot.
+Worker 3 -- "ENTRY VOLATILITY GUARD". Real-money Lighter BTC stochastic bot.
 
-All logic lives in stoch_bot_core; this file is settings only. Identical to Worker 1's
-strategy (window 5, 25/75, TP 0.10%/SL 0.11%, reversal_guard_seconds=120) -- the ONLY
-difference is the session drawdown breaker, isolating that as a live A/B against Worker 1.
+All logic lives in stoch_bot_core; this file is settings only. Same base strategy as Worker
+2's plain fade-only (window 5, 25/75, TP 0.10%/SL 0.11%).
 
-History: pure ER filter, then regime switch, then pure ER-fade (window 6) -- none of these
-beat plain fade-only (Worker 2) or Worker 1's reversal guard in live trading or backtests.
+History: pure ER filter, then regime switch, then pure ER-fade (window 6), then a session
+drawdown breaker (blind fixed cooldown, 45min then 20min) -- none of these beat plain
+fade-only (Worker 2) decisively enough to keep. Worker 3 has been the deliberately
+lower-commitment slot for trying a new mechanism each round, unlike Worker 1's more settled
+config -- see [[project_lighter_btc_3worker_comparison]].
 
-2026-09-23: cloned Worker 1's winning config and added a session drawdown breaker. The day
-splits into 3 fixed 8h sessions (11am-7pm ET, 7pm-3am ET, 3am-11am ET), tracked independently.
-Two trip conditions: (1) once a session has been realized-profitable at least once, giving
-back session_drawdown_stop_pct of total account equity from that peak; (2) if the session has
-NEVER been profitable yet, losing that same percentage from the session's own start (protects
-against an immediate bad start, not just giving back gains). Either blocks new entries for
-session_breaker_cooldown_min, then re-arms fresh *within the same session* -- does not wait
-for the next 8h boundary.
+2026-09-24: replaced the session breaker entirely with a different mechanism, proposed and
+backtested by a separate agent working from the same real recorded tick/candle data this
+project already uses. Instead of tracking PnL drawdown, this gates purely on raw market
+volatility:
 
-Tightened same-day after a real -1.86% BTC crash (85,753 -> 84,158 in 18 minutes) hit all
-three live bots, worst on Worker 1 (no protection at all, -1.68% to -2.99% mid-crash) vs
-Worker 2 (-1.27%) -- confirms Worker 1's reversal guard is a double-edged sword: it helps in
-chop by not reversing on noise, but delays a legitimate reversal during a real sustained move,
-letting more fade entries get run over before it finally flips. Threshold tightened from an
-initial 0.4% to 0.25% (still calibrated to clear normal chop noise -- see stoch_bot_core.py).
-Cooldown set from 4 real crash-recovery times measured on our OWN recorded tick data (not
-Binance): 18-50 minutes to stabilize, median ~40 min -- 45 min chosen as a round number inside
-that range. Live test, not a settled parameter.
+1. At each completed 1-min candle, compute true range % = 100 * max(high-low,
+   abs(high-prev_close), abs(low-prev_close)) / close -- true range (not just high-low)
+   catches a candle that opens on a gap even if its own span is narrow.
+2. Pause new entries (including the reopening leg of a reversal) once TR% >= 0.15%.
+3. Resume only once a later completed candle comes in at or under TR% <= 0.1125% -- a
+   deliberately LOWER bar than the pause threshold, so it doesn't flap on/off right at one
+   boundary. No fixed cooldown on top -- resumes the moment a calm candle prints.
+4. Reversal-driven CLOSE (not reopen) requires 180s minimum position age (was 120s) --
+   longer than before, on the same reasoning as the original guard: a fresh position
+   shouldn't get flipped by noise, and the wider margin held up better in the backtest.
+5. TP/SL and the reversal close leg are NEVER gated by any of this -- risk management always
+   runs regardless of whether entries are paused.
 
-2026-09-24: cooldown shortened 45min -> 20min per direct request, not a re-swept parameter.
-A same-day counterfactual (real tick+latency-replayed data, isolating the breaker's own
-contribution) showed this blind fixed-cooldown design was net NEGATIVE overall (-$0.04 vs
-running with no breaker at all) -- unlike Worker 1's breaker, which switched to an adaptive
-volatility-based resume the same day. Worker 3 intentionally keeps the blind-cooldown design
-for the live A/B; only the duration changed here.
+Backtested (quote-replay, real recorded ticks/candles, execution-latency modeled) on ~25h of
+data: return +0.20% -> +1.59%, max drawdown 2.59% -> 1.27%, stop count 124 -> 93, paused ~6%
+of the time (median pause ~2 minutes, not a fixed lockout). Walk-forward validated on a held-
+out later block (not just fit-and-reported on the same window): +1.88% vs Worker 2's +1.18%
+on that block alone. Full report + implementation reference delivered directly, not committed
+to this repo -- this file is the applied config, tuned to match.
 
-schema_has_session_breaker=True (migrated 2026-09-23) after an unrelated frontend-only deploy
-restarted this backend (Render redeploys every service on any push to the watched branch) and
-silently wiped an active cooldown mid-pause -- twice, in production, on the very first day this
-existed. The breaker's state now survives a restart by reading/writing DB columns instead of
-living only in process memory.
+Known limitation, disclosed in that report and worth remembering: under combined execution
+stress (wider spread, extra slippage, slower fills, delayed reversal re-entry) the modeled
+edge nearly disappears (-1.23%, though still better than Worker 2's -2.47% under the same
+stress) -- this is the same tight-margin fee/slippage sensitivity this project has run into
+before (TP/SL of 0.10%/0.11% leaves very little room). Live result is the real test.
+
+schema_has_entry_vol_gate=True (migrated 2026-09-24) persists the pause state across a
+restart, for the same reason schema_has_session_breaker existed -- Render redeploys every
+service on any push, and an active pause shouldn't silently reset.
 """
 from stoch_bot_core import BotConfig, run_bot
 
 CONFIG = BotConfig(
-    name="REVERSAL GUARD + SESSION BREAKER (worker 3)",
+    name="ENTRY VOLATILITY GUARD (worker 3)",
     worker_id="worker3",
     table_state="lighter_stoch_dca_btc_state",
     table_trades="lighter_stoch_dca_btc_trades",
@@ -53,10 +58,10 @@ CONFIG = BotConfig(
     sl_pct=0.11,
     entry_lo=25, entry_hi=75,
     reversal_lo=25, reversal_hi=75,
-    reversal_guard_seconds=120,
-    session_drawdown_stop_pct=0.25,
-    session_breaker_cooldown_min=20.0,
-    schema_has_session_breaker=True,
+    reversal_guard_seconds=180,  # was 120 -- widened per the new strategy's own backtest
+    entry_vol_pause_at_pct=0.15,
+    entry_vol_resume_at_pct=0.1125,
+    schema_has_entry_vol_gate=True,
     schema_has_position_bands=True,
     # Price-tick logging: backup writer. Takes over the moment Worker 2 goes quiet.
     tick_log_defers_to=["worker2"],

@@ -173,6 +173,18 @@ class BotConfig:
     # only behavior (safe default for any bot that sets session_drawdown_stop_pct without the
     # migration having been run on its table).
     schema_has_session_breaker: bool = False
+    # Entry volatility gate (2026-09-24, Worker 1 replacement for the PnL-drawdown session
+    # breaker above -- a different mechanism entirely, gates on raw market volatility instead
+    # of realized PnL). Pauses NEW entries (including the reopening leg of a reversal, but NOT
+    # the closing leg -- TP/SL/signal-driven exits are never gated by this) once a completed
+    # candle's true-range % hits entry_vol_pause_at_pct, resuming only once a later completed
+    # candle comes in at or under entry_vol_resume_at_pct -- a lower bar on purpose, so it
+    # doesn't flap right at one boundary. None (either field) disables this gate entirely.
+    entry_vol_pause_at_pct: Optional[float] = None
+    entry_vol_resume_at_pct: Optional[float] = None
+    # Same persistence rationale as schema_has_session_breaker -- without this, a restart
+    # (which happens on every push, to every service) forgets an active pause.
+    schema_has_entry_vol_gate: bool = False
     market_index: int = 1
     price_decimals: int = 1
     size_decimals: int = 5
@@ -259,6 +271,23 @@ def compute_range_pct(candles, window=5):
     hh = max(c["h"] for c in w)
     ll = min(c["l"] for c in w)
     return (hh - ll) / w[-1]["c"] * 100
+
+
+def compute_true_range_pct(candles):
+    """Single-candle true range as % of close, on the latest CLOSED candle only -- the entry
+    volatility gate's signal. True range (not just high-low) includes the gap from the prior
+    close, so a candle that opens on a jump still reads as volatile even if its own high/low
+    span is narrow. Reacts to one spike immediately, unlike compute_range_pct's multi-candle
+    window, which only catches a spike once it's rolled all the way through the window."""
+    closed = candles[:-1]
+    if len(closed) < 2:
+        return None
+    last = closed[-1]
+    prev_close = closed[-2]["c"]
+    if last["c"] <= 0:
+        return None
+    tr = max(last["h"] - last["l"], abs(last["h"] - prev_close), abs(last["l"] - prev_close))
+    return tr / last["c"] * 100
 
 
 # ── Live state cache, fed by the WebSocket ──────────────────────────────────────────────────
@@ -353,6 +382,10 @@ class StochBot:
         self.session_trip_direction = None   # direction the market was moving in at trip time
         self.session_next_check_at = None    # when to next evaluate whether resume is safe
         self.session_trip_range_pct = None   # volatility recorded at trip time (adaptive calm)
+        # Entry volatility gate (independent of the session breaker above)
+        self.entry_vol_paused = False
+        self.entry_vol_last_bar_ts = None
+        self._entry_vol_loaded = False
 
     # ── Supabase (aiohttp: async, and actually cancellable) ─────────────────────────────────
     async def sb(self, method, path, body=None):
@@ -1022,6 +1055,45 @@ class StochBot:
 
         return None if self.session_paused else entry_signal
 
+    async def _apply_entry_volatility_gate(self, state, candle_ts, entry_signal):
+        """Pause new entries once a completed candle's true range spikes, resume once a later
+        completed candle calms back down -- a different mechanism than the session breaker
+        above (pure market volatility, no PnL tracking at all). Asymmetric thresholds
+        (pause_at > resume_at) on purpose, so it doesn't flap on/off right at one boundary.
+
+        Only gates entry_signal here; the reopening leg of a reversal (handled separately in
+        tick(), via self.entry_vol_paused directly) also respects this, but the closing leg
+        of a reversal and TP/SL never do -- risk management always runs regardless of pause.
+        """
+        cfg = self.cfg
+        if cfg.entry_vol_pause_at_pct is None:
+            return entry_signal
+        if not self._entry_vol_loaded:
+            self._entry_vol_loaded = True
+            if cfg.schema_has_entry_vol_gate:
+                self.entry_vol_paused = bool(state.get("entry_vol_paused"))
+                self.entry_vol_last_bar_ts = state.get("entry_vol_last_bar_ts")
+        if self.entry_vol_last_bar_ts != candle_ts:
+            self.entry_vol_last_bar_ts = candle_ts
+            tr_pct = compute_true_range_pct(self.candles)
+            changed = False
+            if tr_pct is not None:
+                if tr_pct >= cfg.entry_vol_pause_at_pct and not self.entry_vol_paused:
+                    self.entry_vol_paused = True
+                    changed = True
+                elif self.entry_vol_paused and tr_pct <= cfg.entry_vol_resume_at_pct:
+                    self.entry_vol_paused = False
+                    changed = True
+            if cfg.schema_has_entry_vol_gate:
+                patch = {"entry_vol_last_bar_ts": self.entry_vol_last_bar_ts}
+                if changed:
+                    patch["entry_vol_paused"] = self.entry_vol_paused
+                await self.update_state(patch)
+            if changed:
+                await self.log_run("entry_vol_gate_toggled",
+                                   {"paused": self.entry_vol_paused, "tr_pct": tr_pct})
+        return None if self.entry_vol_paused else entry_signal
+
     # ── One decision cycle ──────────────────────────────────────────────────────────────────
     async def tick(self):
         cfg = self.cfg
@@ -1107,6 +1179,9 @@ class StochBot:
 
         if cfg.session_drawdown_stop_pct is not None:
             entry_signal = await self._apply_session_breaker(state, entry_signal)
+
+        if cfg.entry_vol_pause_at_pct is not None:
+            entry_signal = await self._apply_entry_volatility_gate(state, candle_ts, entry_signal)
 
         real_pos, collateral = await self.read_position()
         if real_pos is None:
@@ -1238,6 +1313,12 @@ class StochBot:
                 if eq <= 0:
                     await self.log_run("equity_non_positive", {"eq": eq, "via": "reversal"})
                     await self.update_state({"enabled": False})
+                    return
+                if self.entry_vol_paused:
+                    # Close leg of a reversal always runs (already happened above); only the
+                    # reopen leg respects the volatility gate -- left flat until it clears
+                    # instead of immediately flipping into the opposite side.
+                    await self.update_state({"last_processed_candle_ts": candle_ts})
                     return
                 price = best_ask if reversal_signal == "long" else best_bid
                 await self.try_enter(reversal_signal, price, eq, "reversal", candle_ts,

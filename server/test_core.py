@@ -599,6 +599,131 @@ async def t_reversal_guard_does_not_delay_tp_or_sl():
     check("logged as an SL close", closed_logs and closed_logs[0].get("reason") == "SL", closed_logs)
 
 
+def make_tr_candles(tr_pct, base=86000.0, n=5):
+    """n>=3 flat candles (no gap) whose true range reads exactly `tr_pct` off the latest
+    CLOSED candle -- compute_true_range_pct compares it against the one before it."""
+    half = tr_pct / 100 * base / 2
+    t0 = 1700000000000
+    return [{"t": t0 + i*60000, "o": base, "h": base+half, "l": base-half, "c": base}
+            for i in range(n)]
+
+
+async def t_entry_vol_gate_pauses_on_high_true_range():
+    print("\n[entry vol gate: a completed candle spiking past the pause threshold blocks entries]")
+    ex = FakeExchange()
+    bot = make_bot(ex, candles_kind="mid", entry_vol_pause_at_pct=0.15, entry_vol_resume_at_pct=0.1125)
+    bot.candles = make_tr_candles(0.20)
+    candle_ts = bot.candles[-2]["t"]
+    sig = await bot._apply_entry_volatility_gate({}, candle_ts, "long")
+    check("entry blocked", sig is None, sig)
+    check("gate marked paused", bot.entry_vol_paused is True)
+
+
+async def t_entry_vol_gate_stays_paused_inside_hysteresis_band():
+    print("\n[entry vol gate: calmer than the pause bar but not calm enough to resume -> stays paused]")
+    ex = FakeExchange()
+    bot = make_bot(ex, candles_kind="mid", entry_vol_pause_at_pct=0.15, entry_vol_resume_at_pct=0.1125)
+    bot.entry_vol_paused = True
+    bot.entry_vol_last_bar_ts = 0
+    bot.candles = make_tr_candles(0.13)  # between 0.1125 and 0.15
+    candle_ts = bot.candles[-2]["t"]
+    sig = await bot._apply_entry_volatility_gate({}, candle_ts, "long")
+    check("still blocked (inside the hysteresis band)", sig is None, sig)
+    check("gate still marked paused", bot.entry_vol_paused is True)
+
+
+async def t_entry_vol_gate_resumes_at_or_below_resume_threshold():
+    print("\n[entry vol gate: a calm completed candle at or under the resume bar re-arms entries]")
+    ex = FakeExchange()
+    bot = make_bot(ex, candles_kind="mid", entry_vol_pause_at_pct=0.15, entry_vol_resume_at_pct=0.1125)
+    bot.entry_vol_paused = True
+    bot.entry_vol_last_bar_ts = 0
+    bot.candles = make_tr_candles(0.10)
+    candle_ts = bot.candles[-2]["t"]
+    sig = await bot._apply_entry_volatility_gate({}, candle_ts, "long")
+    check("entry allowed through", sig == "long", sig)
+    check("gate cleared", bot.entry_vol_paused is False)
+
+
+async def t_entry_vol_gate_only_reevaluates_once_per_new_candle():
+    print("\n[entry vol gate: re-checking the SAME candle_ts a second time doesn't re-toggle it]")
+    ex = FakeExchange()
+    bot = make_bot(ex, candles_kind="mid", entry_vol_pause_at_pct=0.15, entry_vol_resume_at_pct=0.1125)
+    bot.candles = make_tr_candles(0.20)
+    candle_ts = bot.candles[-2]["t"]
+    await bot._apply_entry_volatility_gate({}, candle_ts, "long")
+    check("paused after first evaluation", bot.entry_vol_paused is True)
+    # Even though the underlying candles now look calm, re-passing the SAME candle_ts must
+    # not re-evaluate -- only a genuinely NEW completed candle should move the gate.
+    bot.candles = make_tr_candles(0.05)
+    sig = await bot._apply_entry_volatility_gate({}, candle_ts, "long")
+    check("still paused (same candle_ts, not re-evaluated)", bot.entry_vol_paused is True, sig)
+
+
+async def t_entry_vol_gate_disabled_when_unconfigured():
+    print("\n[entry vol gate: entry_vol_pause_at_pct=None -> gate is a complete no-op]")
+    ex = FakeExchange()
+    bot = make_bot(ex, candles_kind="mid")  # no entry_vol_pause_at_pct override -> None
+    bot.candles = make_tr_candles(50.0)  # absurdly volatile
+    sig = await bot._apply_entry_volatility_gate({}, bot.candles[-2]["t"], "long")
+    check("signal passes through untouched", sig == "long", sig)
+    check("never marked paused", bot.entry_vol_paused is False)
+
+
+async def t_entry_vol_gate_persists_when_schema_enabled():
+    print("\n[entry vol gate: paused state is written to the DB when schema_has_entry_vol_gate=True]")
+    ex = FakeExchange()
+    bot = make_bot(ex, candles_kind="mid", entry_vol_pause_at_pct=0.15, entry_vol_resume_at_pct=0.1125,
+                   schema_has_entry_vol_gate=True)
+    bot.candles = make_tr_candles(0.20)
+    await bot._apply_entry_volatility_gate(dict(bot.state_row), bot.candles[-2]["t"], "long")
+    check("paused flag persisted", bot.state_row.get("entry_vol_paused") is True,
+          bot.state_row.get("entry_vol_paused"))
+    check("last_bar_ts persisted", bot.state_row.get("entry_vol_last_bar_ts") == bot.candles[-2]["t"],
+          bot.state_row.get("entry_vol_last_bar_ts"))
+
+
+async def t_entry_vol_gate_rehydrates_paused_state_after_restart():
+    print("\n[entry vol gate: a fresh bot instance rehydrates paused=True from a persisted row]")
+    ex = FakeExchange()
+    bot = make_bot(ex, candles_kind="mid", entry_vol_pause_at_pct=0.15, entry_vol_resume_at_pct=0.1125,
+                   schema_has_entry_vol_gate=True)
+    candle_ts = 1234567890000
+    persisted_state = dict(bot.state_row)
+    persisted_state["entry_vol_paused"] = True
+    persisted_state["entry_vol_last_bar_ts"] = candle_ts
+    # Same candle_ts as what was persisted -- no new candle since the restart, so the
+    # rehydrated paused=True should carry through untouched.
+    bot.candles = make_tr_candles(0.05)  # would look calm if freshly evaluated
+    sig = await bot._apply_entry_volatility_gate(persisted_state, candle_ts, "long")
+    check("still paused immediately after restart, before any new candle", sig is None, sig)
+
+
+async def t_entry_vol_gate_blocks_reversal_reopen_but_not_the_close():
+    print("\n[entry vol gate: while paused, a reversal CLOSES the position but does not reopen it]")
+    entry = 86000.0
+    ex = FakeExchange(position=-round(20.0 / entry, 5), collateral=20.0)  # short position
+    candles = make_candles("long")  # K near 0 -> reversal signal "long", opposite of held short
+    entry_time = candles[-1]["t"] - 200_000  # well past a 180s guard
+    state = {
+        "id": 1, "side": "short", "legs": [{"price": entry, "usd_size": 20.0}],
+        "first_entry_price": entry, "first_entry_time": entry_time, "dca_level": 0,
+        "seed_usd": 20.0, "realized_pnl_usd": 0.0, "collateral_before_entry": 20.0,
+        "enabled": True, "consecutive_entry_failures": 0, "last_processed_candle_ts": 0,
+    }
+    bot = make_bot(ex, state=state, candles=candles, reversal_guard_seconds=180,
+                   entry_vol_pause_at_pct=0.15, entry_vol_resume_at_pct=0.1125)
+    bot.entry_vol_paused = True  # simulate an already-active volatility pause
+    bot._entry_vol_loaded = True  # skip rehydration -- test the in-memory pause directly
+    bot.entry_vol_last_bar_ts = candles[-2]["t"]  # same candle -- gate won't re-evaluate this tick
+    await bot.tick()
+    check("position closed (reversal close leg is never gated)", bot.state_row["side"] is None,
+          bot.state_row["side"])
+    check("logged as a REVERSAL close", any(d.get("reason") == "REVERSAL" for a, d in bot.runs if a == "closed"),
+          bot.runs)
+    check("only one order placed (the close, no reopen)", len(ex.orders) == 1, ex.orders)
+
+
 def _mk_session_state(seed_usd, realized_pnl_usd):
     return {"id": 1, "seed_usd": seed_usd, "realized_pnl_usd": realized_pnl_usd}
 
@@ -1556,6 +1681,14 @@ async def main():
               t_reversal_guard_blocks_reversal_before_threshold,
               t_reversal_guard_allows_reversal_after_threshold,
               t_reversal_guard_does_not_delay_tp_or_sl,
+              t_entry_vol_gate_pauses_on_high_true_range,
+              t_entry_vol_gate_stays_paused_inside_hysteresis_band,
+              t_entry_vol_gate_resumes_at_or_below_resume_threshold,
+              t_entry_vol_gate_only_reevaluates_once_per_new_candle,
+              t_entry_vol_gate_disabled_when_unconfigured,
+              t_entry_vol_gate_persists_when_schema_enabled,
+              t_entry_vol_gate_rehydrates_paused_state_after_restart,
+              t_entry_vol_gate_blocks_reversal_reopen_but_not_the_close,
               t_session_breaker_stays_off_below_threshold,
               t_session_breaker_trips_and_blocks_new_entries,
               t_session_breaker_rearms_at_next_session,
