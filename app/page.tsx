@@ -1497,11 +1497,11 @@ function currentSessionStart(nowUtc: Date): Date {
 
 function CompactStochBtcPanel({
   title, subtitle, table, state, trades, currentPrice, loading, onToggled, erValue, runs, cooldownMin,
-  showVolGate, trPct, stats,
+  showSelfLock, stats,
 }: {
   title: string; subtitle: string; table: string; state: any; trades: any[];
   currentPrice: number | null; loading: boolean; onToggled: () => void;
-  erValue?: number | null; runs?: any[]; cooldownMin?: number; showVolGate?: boolean; trPct?: number | null;
+  erValue?: number | null; runs?: any[]; cooldownMin?: number; showSelfLock?: boolean;
   stats?: { total: number; wins: number };
 }) {
   const [toggling, setToggling] = useState(false);
@@ -1628,7 +1628,7 @@ function CompactStochBtcPanel({
             <p className="text-gray-500 text-[10px] uppercase">Win Rate</p>
             <p className="font-bold text-blue-400">{winRate}% <span className="text-[10px] font-normal text-gray-500">({trueTotal})</span></p>
           </div>
-          <div className={`bg-gray-800/60 rounded-lg p-2 ${erValue == null && cooldownMin == null && !showVolGate ? "col-span-2" : ""}`}>
+          <div className={`bg-gray-800/60 rounded-lg p-2 ${erValue == null && cooldownMin == null && !showSelfLock ? "col-span-2" : ""}`}>
             <p className="text-gray-500 text-[10px] uppercase">Position</p>
             <div className="flex items-center gap-1.5 flex-wrap">
               <span className={`font-bold ${side === "long" ? "text-green-400" : side === "short" ? "text-red-400" : "text-gray-400"}`}>
@@ -1677,18 +1677,17 @@ function CompactStochBtcPanel({
               </div>
             </div>
           )}
-          {showVolGate && (
+          {showSelfLock && (
             <div className="bg-gray-800/60 rounded-lg p-2">
-              <p className="text-gray-500 text-[10px] uppercase">Vol Gate</p>
+              <p className="text-gray-500 text-[10px] uppercase">Self-Lock</p>
               <div className="flex items-center gap-1.5 flex-wrap">
-                <span className={`text-[9px] font-bold px-1.5 py-0.5 rounded uppercase ${state?.entry_vol_paused ? "bg-red-500/20 text-red-400" : "bg-green-500/20 text-green-400"}`}>
-                  {state?.entry_vol_paused ? "paused" : "active"}
+                <span className={`text-[9px] font-bold px-1.5 py-0.5 rounded uppercase ${state?.real_trading_locked ? "bg-red-500/20 text-red-400" : "bg-green-500/20 text-green-400"}`}>
+                  {state?.real_trading_locked ? "locked" : "active"}
                 </span>
-                {trPct != null && (
-                  <span className={`text-[10px] font-bold tabular-nums ${
-                    trPct >= 0.15 ? "text-red-400" : trPct >= 0.12 ? "text-yellow-400" : "text-gray-300"
-                  }`} title="Last closed candle's true range %, vs pause 0.15% / resume 0.1125%">
-                    TR {trPct.toFixed(3)}%
+                {state?.real_trading_locked && (
+                  <span className="text-[10px] font-bold text-gray-300 tabular-nums"
+                        title="Consecutive paper TPs needed to unlock real trading">
+                    {state?.paper_consecutive_tps ?? 0}/2 paper TPs
                   </span>
                 )}
               </div>
@@ -1875,7 +1874,6 @@ export default function Dashboard() {
   const [szClearing, setSzClearing] = useState(false);
   const [ocoBtcPrice,  setOcoBtcPrice]  = useState<number | null>(null);
   const [btcEr6, setBtcEr6] = useState<number | null>(null);
-  const [btcTrPct, setBtcTrPct] = useState<number | null>(null);
   const [dcaBtcState,  setDcaBtcState]  = useState<any>(null);
   const [dcaBtcTrades, setDcaBtcTrades] = useState<any[]>([]);
   const [dcaBtcRuns,   setDcaBtcRuns]   = useState<any[]>([]);
@@ -1999,22 +1997,6 @@ export default function Dashboard() {
         let path = 0;
         for (let i = 1; i < closes.length; i++) path += Math.abs(closes[i] - closes[i - 1]);
         setBtcEr6(path > 0 ? net / path : 0);
-      })
-      .catch(() => {});
-    // Live true-range % -- exact same formula and candle indexing as Worker 3's entry
-    // volatility gate (compute_true_range_pct in stoch_bot_core.py): drop the still-forming
-    // candle, compare the latest CLOSED one against the close before it. This is the actual
-    // number the gate trips on at 0.15% and resumes on at 0.1125%.
-    fetch(`https://mainnet.zklighter.elliot.ai/api/v1/candles?market_id=1&resolution=1m&start_timestamp=0&end_timestamp=${Date.now()}&count_back=5`)
-      .then((r) => r.json())
-      .then((d) => {
-        const c = (d?.c ?? []).slice().sort((a: any, b: any) => a.t - b.t);
-        const closed = c.slice(0, -1);
-        if (closed.length < 2) return;
-        const last = closed[closed.length - 1];
-        const prevClose = closed[closed.length - 2].c;
-        const tr = Math.max(last.h - last.l, Math.abs(last.h - prevClose), Math.abs(last.l - prevClose));
-        setBtcTrPct(last.c > 0 ? (tr / last.c) * 100 : null);
       })
       .catch(() => {});
     setLoading(false);
@@ -2293,8 +2275,8 @@ export default function Dashboard() {
             stats={optimalBtcStats}
           />
           <CompactStochBtcPanel
-            title="Worker 3 · Entry Volatility Guard"
-            subtitle="TP 0.10% / SL 0.11% / 25-75 / window 5 / 180s reversal guard / entry pause TR>=0.15%, resume TR<=0.1125%"
+            title="Worker 3 · Self-Lock"
+            subtitle="TP 0.10% / SL 0.11% / 25-75 / window 5 / 120s reversal guard / real SL locks real orders, 2 consecutive paper TPs unlock"
             table="lighter_stoch_dca_btc_state"
             state={dcaBtcState}
             trades={dcaBtcTrades}
@@ -2302,8 +2284,7 @@ export default function Dashboard() {
             loading={loading}
             onToggled={load}
             runs={dcaBtcRuns}
-            showVolGate
-            trPct={btcTrPct}
+            showSelfLock
             stats={dcaBtcStats}
           />
         </div>
