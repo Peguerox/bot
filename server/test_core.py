@@ -1086,44 +1086,89 @@ async def t_read_position_falls_back_to_cache_on_error():
           bot.runs)
 
 
-async def t_read_position_backs_off_instead_of_retrying_every_call():
-    print("\n[read_position: a failing REST endpoint doesn't get hammered every call -- backs off]")
-    ex = FakeExchange(position=0.0005, collateral=20.0)
-    bot = make_bot(ex, candles_kind="mid")
-    bot._pos_cache = (0.0005, 20.0)
-    bot._pos_cache_at = time.time() - 999
-
+async def t_get_position_rest_backs_off_instead_of_retrying_every_call():
+    print("\n[get_position_rest: a failing REST endpoint doesn't get hammered every call -- backs off]")
+    # Backoff must live in get_position_rest() itself, not just read_position() -- proven
+    # necessary 2026-09-24: confirm_fill/close_all/emergency_flatten/try_enter all call
+    # get_position_rest() directly, bypassing read_position() entirely, so a backoff placed
+    # only in read_position() left every other caller free to keep hammering a WAF-blocked
+    # endpoint at full tick cadence the moment a bot held an open position.
     calls = {"n": 0}
-    async def failing_get_position_rest():
-        calls["n"] += 1
-        raise RuntimeError("(405) captcha")
-    bot.get_position_rest = failing_get_position_rest
 
-    await bot.read_position()
-    check("first call actually attempted the REST read", calls["n"] == 1, calls["n"])
+    class FailingAccountApi:
+        def __init__(self, api_client):
+            pass
+        async def account(self, by, value, _headers=None, _request_timeout=None):
+            calls["n"] += 1
+            raise RuntimeError("(405) captcha")
 
-    # Force the TTL fallback to look stale again so this call would retry the REST read
-    # if there were no backoff -- proven necessary 2026-09-24: falling back to cache let
-    # tick() "succeed" every time, so the general error-backoff (which only triggers on an
-    # exception escaping tick()) never engaged, and this hammered a WAF-blocked endpoint at
-    # full tick cadence with zero growing delay.
-    bot._pos_cache_at = time.time() - 999
-    await bot.read_position()
-    check("second call within the backoff window did NOT hit the REST endpoint again",
-          calls["n"] == 1, calls["n"])
+    ex = FakeExchange()
+    bot = make_bot(ex, candles_kind="mid")
+    bot.client = FakeSigner(token="tok-xyz")
+
+    orig_account_api = core.lighter.AccountApi
+    core.lighter.AccountApi = FailingAccountApi
+    try:
+        raised = False
+        try:
+            await core.StochBot.get_position_rest(bot)
+        except Exception:
+            raised = True
+        check("first call actually attempted the REST read and raised", raised and calls["n"] == 1, calls["n"])
+
+        raised2 = False
+        try:
+            await core.StochBot.get_position_rest(bot)
+        except Exception:
+            raised2 = True
+        check("second call within the backoff window still raises but did NOT hit the network again",
+              raised2 and calls["n"] == 1, calls["n"])
+    finally:
+        core.lighter.AccountApi = orig_account_api
 
     check("consecutive failure counter incremented on the real attempt",
           bot._pos_read_consecutive_failures == 1, bot._pos_read_consecutive_failures)
+    check("next-attempt gate pushed into the future", bot._pos_read_next_attempt_at > time.time(),
+          bot._pos_read_next_attempt_at - time.time())
 
 
-async def t_read_position_resumes_normal_polling_after_a_success():
-    print("\n[read_position: a successful read resets the backoff counter]")
-    ex = FakeExchange(position=0.0007, collateral=22.0)
+async def t_get_position_rest_resumes_normal_polling_after_a_success():
+    print("\n[get_position_rest: a successful read resets the backoff counter]")
+
+    class FakePosition:
+        def __init__(self, market_id, position, sign):
+            self.market_id = market_id; self.position = position; self.sign = sign
+
+    class FakeAccountRow:
+        def __init__(self, position, collateral, market_index):
+            sign = "1" if position >= 0 else "-1"
+            self.positions = [FakePosition(market_index, str(abs(position)), sign)]
+            self.collateral = collateral
+
+    class FakeAcctResp:
+        def __init__(self, position, collateral, market_index):
+            self.accounts = [FakeAccountRow(position, collateral, market_index)]
+
+    class SucceedingAccountApi:
+        def __init__(self, api_client):
+            pass
+        async def account(self, by, value, _headers=None, _request_timeout=None):
+            return FakeAcctResp(0.0007, 22.0, 1)
+
+    ex = FakeExchange()
     bot = make_bot(ex, candles_kind="mid")
+    bot.client = FakeSigner(token="tok-xyz")
     bot._pos_read_consecutive_failures = 4
     bot._pos_read_next_attempt_at = 0.0  # backoff window already elapsed
-    pos, coll = await bot.read_position()
-    check("real read succeeded", pos == 0.0007, pos)
+
+    orig_account_api = core.lighter.AccountApi
+    core.lighter.AccountApi = SucceedingAccountApi
+    try:
+        pos, coll = await core.StochBot.get_position_rest(bot)
+    finally:
+        core.lighter.AccountApi = orig_account_api
+
+    check("real read succeeded", abs(pos - 0.0007) < 1e-9, pos)
     check("failure counter reset", bot._pos_read_consecutive_failures == 0,
           bot._pos_read_consecutive_failures)
     check("next-attempt gate cleared", bot._pos_read_next_attempt_at == 0.0,
@@ -1533,8 +1578,8 @@ async def main():
               t_tick_close_requested_keeps_retrying_if_close_fails,
               t_tick_close_requested_backs_off_between_retries,
               t_read_position_falls_back_to_cache_on_error,
-              t_read_position_backs_off_instead_of_retrying_every_call,
-              t_read_position_resumes_normal_polling_after_a_success,
+              t_get_position_rest_backs_off_instead_of_retrying_every_call,
+              t_get_position_rest_resumes_normal_polling_after_a_success,
               t_read_position_raises_without_any_cache,
               t_tick_error_backoff_formula,
               t_auth_token_cached_across_calls,
