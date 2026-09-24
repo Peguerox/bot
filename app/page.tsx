@@ -1681,11 +1681,27 @@ function CompactStochBtcPanel({
             const now = new Date(nowTick);
             const nowHourUtc = now.getUTCHours();
             const isOpen = tradingHoursUtc.includes(nowHourUtc);
-            // Display in Miami/Eastern time (DST-aware) -- the gate itself runs on UTC
-            // internally (stateless, unambiguous), this is purely a human-readable label.
-            const etLabel = new Intl.DateTimeFormat("en-US", {
+            // Find the next hour where open/closed status flips, in UTC (matches the gate's
+            // own clock), then label that boundary in Miami/Eastern time -- what's actually
+            // useful here is "when does this change," not the current time (a watch covers
+            // that already).
+            let boundaryHourUtc = nowHourUtc;
+            let daysAhead = 0;
+            for (let i = 1; i <= 24; i++) {
+              const h = (nowHourUtc + i) % 24;
+              if (tradingHoursUtc.includes(h) !== isOpen) {
+                boundaryHourUtc = h;
+                daysAhead = Math.floor((nowHourUtc + i) / 24);
+                break;
+              }
+            }
+            const boundaryDate = new Date(Date.UTC(
+              now.getUTCFullYear(), now.getUTCMonth(), now.getUTCDate() + daysAhead,
+              boundaryHourUtc, 0, 0
+            ));
+            const boundaryLabel = new Intl.DateTimeFormat("en-US", {
               timeZone: "America/New_York", hour: "numeric", minute: "2-digit", hour12: true,
-            }).format(now);
+            }).format(boundaryDate);
             return (
               <div className="bg-gray-800/60 rounded-lg p-2">
                 <p className="text-gray-500 text-[10px] uppercase">Trading Hours</p>
@@ -1695,7 +1711,7 @@ function CompactStochBtcPanel({
                   </span>
                   <span className="text-[10px] font-bold text-gray-300 tabular-nums"
                         title="New entries only fire in scheduled hours; an existing position still manages to TP/SL/reversal normally">
-                    {etLabel} ET
+                    {isOpen ? "closes" : "opens"} {boundaryLabel} ET
                   </span>
                 </div>
               </div>
@@ -2291,7 +2307,6 @@ export default function Dashboard() {
             currentPrice={ocoBtcPrice}
             loading={loading}
             onToggled={load}
-            cooldownMin={15}
             stats={initialBtcStats}
             tradingHoursUtc={[0, 1, 4, 7, 9, 10, 12, 15, 16, 17, 18, 19, 20, 21]}
           />
