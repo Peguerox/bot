@@ -44,6 +44,15 @@ from Worker 1's result in a different context -- no guard gave +1.14% return / $
 drawdown over 46h; adding 120s gave +2.18% / $0.235 max drawdown. Return nearly doubled for a
 modest drawdown increase.
 
+2026-09-25: self_lock_reversal_counts_as_win=True broadens step 4 above -- a paper REVERSAL
+close now counts the same as a literal TP if it closed favorably (a losing/breakeven reversal
+stays neutral, doesn't reset the count; a paper SL still resets it to zero either way). An
+earlier same-session test on a smaller ~45h sample found literal-TP-only was better; re-tested
+on 79.9h of real tick data and it flipped -- literal-TP-only: +1.663% (231 trades, 60.6% win);
+this broadened rule: +2.327% (473 trades, 62.6% win, unlocks faster) -- more return and a
+higher win rate, for a slightly higher maxDD ($1.56 vs $1.44). Kept for direct comparison
+against Worker 2's combined config, which still uses literal-TP-only.
+
 schema_has_self_lock=True (migrated 2026-09-24) persists the lock state and paper shadow's
 position across a restart, for the same reason every other gate on this table has needed it --
 Render redeploys every service on any push, and an active lock or in-progress paper position
@@ -65,6 +74,7 @@ CONFIG = BotConfig(
     reversal_guard_seconds=120,
     self_lock_enabled=True,
     schema_has_self_lock=True,
+    self_lock_reversal_counts_as_win=True,
     schema_has_position_bands=True,
     # Price-tick logging: backup writer. Takes over the moment Worker 2 goes quiet.
     tick_log_defers_to=["worker2"],

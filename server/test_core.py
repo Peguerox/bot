@@ -922,6 +922,78 @@ async def t_self_lock_paper_shadow_respects_reversal_guard():
     check("reversed to paper long once the guard has elapsed", bot.paper_side == "long", bot.paper_side)
 
 
+async def t_self_lock_reversal_counts_as_win_disabled_by_default():
+    print("\n[self-lock: self_lock_reversal_counts_as_win=False (default) -- a winning reversal stays neutral]")
+    ex = FakeExchange()
+    bot = make_bot(ex, candles_kind="mid", self_lock_enabled=True)
+    bot._self_lock_loaded = True
+    bot.paper_side = "long"
+    bot.paper_entry = 86000.0
+    bot.paper_entry_ms = 1700000000000
+    state = dict(bot.state_row)
+    # entry 86000, tp_pct=0.10/sl_pct=0.11 -> TP=86086, SL=85905.4. best_bid=86040 is a real
+    # win (above entry) but stays INSIDE the band, so this closes via reversal, not literal TP.
+    await bot._update_paper_shadow(state, None, "short", 86040.0, 86041.0, 1700000000000)
+    check("counter untouched by a winning reversal when the flag is off",
+          bot.paper_consecutive_tps == 0, bot.paper_consecutive_tps)
+
+
+async def t_self_lock_winning_reversal_counts_toward_unlock():
+    print("\n[self-lock: self_lock_reversal_counts_as_win=True -- a WINNING reversal counts like a TP]")
+    ex = FakeExchange()
+    bot = make_bot(ex, candles_kind="mid", self_lock_enabled=True, self_lock_reversal_counts_as_win=True)
+    bot._self_lock_loaded = True
+    bot.paper_side = "long"
+    bot.paper_entry = 86000.0
+    bot.paper_entry_ms = 1700000000000
+    state = dict(bot.state_row)
+    # Closing a long at best_bid=86040 (above the 86000 entry, inside the TP band) is a real
+    # win via reversal, not a literal TP.
+    await bot._update_paper_shadow(state, None, "short", 86040.0, 86041.0, 1700000000000)
+    check("counter incremented by the winning reversal", bot.paper_consecutive_tps == 1,
+          bot.paper_consecutive_tps)
+
+
+async def t_self_lock_losing_reversal_stays_neutral_even_with_flag_on():
+    print("\n[self-lock: self_lock_reversal_counts_as_win=True -- a LOSING reversal does NOT reset (unlike SL)]")
+    ex = FakeExchange()
+    bot = make_bot(ex, candles_kind="mid", self_lock_enabled=True, self_lock_reversal_counts_as_win=True)
+    bot._self_lock_loaded = True
+    bot.paper_side = "long"
+    bot.paper_entry = 86000.0
+    bot.paper_entry_ms = 1700000000000
+    bot.paper_consecutive_tps = 1  # already has one win banked
+    state = dict(bot.state_row)
+    # Closing a long at best_bid=85960 (below the 86000 entry, inside the SL band) is a real
+    # loss via reversal, not a literal SL.
+    await bot._update_paper_shadow(state, None, "short", 85960.0, 85961.0, 1700000000000)
+    check("counter untouched by a losing reversal -- stays neutral, not reset to 0",
+          bot.paper_consecutive_tps == 1, bot.paper_consecutive_tps)
+
+
+async def t_self_lock_two_winning_reversals_unlock():
+    print("\n[self-lock: two consecutive WINNING reversals unlock real trading, same as two TPs]")
+    ex = FakeExchange()
+    bot = make_bot(ex, candles_kind="mid", self_lock_enabled=True, self_lock_reversal_counts_as_win=True)
+    bot.real_trading_locked = True
+    bot._self_lock_loaded = True
+    bot.paper_side = "long"
+    bot.paper_entry = 86000.0
+    bot.paper_entry_ms = 1700000000000
+    state = dict(bot.state_row)
+    # First winning reversal: long closed at best_bid=86040 (win, inside the TP band), reopens
+    # short at best_ask=86041.
+    await bot._update_paper_shadow(state, None, "short", 86040.0, 86041.0, 1700000000000)
+    check("still locked after 1 winning reversal", bot.real_trading_locked is True)
+    check("counter at 1", bot.paper_consecutive_tps == 1, bot.paper_consecutive_tps)
+    # Second winning reversal: the reopened short (entry 86041) closed at best_ask=86010 --
+    # below entry, a real win for a short, but inside its own TP band (86041*0.999=85955.96).
+    await bot._update_paper_shadow(state, None, "long", 86009.0, 86010.0, 1700000060000)
+    check("unlocked after the 2nd consecutive winning reversal", bot.real_trading_locked is False,
+          bot.real_trading_locked)
+    check("counter reset to 0", bot.paper_consecutive_tps == 0, bot.paper_consecutive_tps)
+
+
 def _mk_session_state(seed_usd, realized_pnl_usd):
     return {"id": 1, "seed_usd": seed_usd, "realized_pnl_usd": realized_pnl_usd}
 
@@ -2050,6 +2122,10 @@ async def main():
               t_self_lock_rehydrates_after_restart,
               t_self_lock_unlocks_and_enters_real_same_tick,
               t_self_lock_paper_shadow_respects_reversal_guard,
+              t_self_lock_reversal_counts_as_win_disabled_by_default,
+              t_self_lock_winning_reversal_counts_toward_unlock,
+              t_self_lock_losing_reversal_stays_neutral_even_with_flag_on,
+              t_self_lock_two_winning_reversals_unlock,
               t_session_breaker_stays_off_below_threshold,
               t_session_breaker_trips_and_blocks_new_entries,
               t_session_breaker_rearms_at_next_session,

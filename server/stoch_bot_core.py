@@ -194,6 +194,15 @@ class BotConfig:
     # extra delay, if a signal is live right when the 2nd paper TP closes.
     self_lock_enabled: bool = False
     schema_has_self_lock: bool = False
+    # Reversal-counts-as-win (2026-09-25, Worker 3): broadens what counts toward the 2-in-a-row
+    # unlock requirement -- a paper REVERSAL close with positive pnl counts the same as a
+    # literal TP (a losing/breakeven reversal stays neutral, same as before; a paper SL still
+    # resets the count to zero either way). Backtested on 79.9h of real tick data: literal-TP-
+    # only was +1.663% (231 trades, 60.6% win); this variant was +2.327% (473 trades, 62.6%
+    # win) -- more trades (unlocks faster) and a better return, at a slightly higher maxDD
+    # ($1.56 vs $1.44). An earlier test on a smaller ~45h sample had found the opposite
+    # (literal-TP-only won then) -- that finding didn't hold up once more data came in.
+    self_lock_reversal_counts_as_win: bool = False
     # Trading-hours schedule (2026-09-24, Worker 1 -- stacked on top of its existing session
     # breaker, not a replacement). Set of UTC hours (0-23) during which NEW entries (and the
     # reopening leg of a reversal) are allowed; every other hour blocks new entries the same
@@ -1255,7 +1264,18 @@ class StochBot:
         self.paper_entry_ms = None
 
         confirmation_just_cleared = False
-        if reason == "TP":
+        # A pure reversal close (reason is None here, only reached because reversal_ready was
+        # True) counts as a win too when self_lock_reversal_counts_as_win is set -- but only if
+        # it actually closed favorably. A losing/breakeven reversal stays neutral (does NOT
+        # reset the count, unlike a real SL) -- backtested both ways, resetting on a losing
+        # reversal tested worse.
+        counts_as_tp = reason == "TP"
+        if not counts_as_tp and reason is None and cfg.self_lock_reversal_counts_as_win:
+            pnl_pct = ((check_price - entry) / entry * 100 if closed_side == "long"
+                       else (entry - check_price) / entry * 100)
+            counts_as_tp = pnl_pct > 0
+
+        if counts_as_tp:
             self.paper_consecutive_tps += 1
             if self.paper_consecutive_tps >= 2:
                 self.paper_consecutive_tps = 0
