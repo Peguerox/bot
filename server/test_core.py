@@ -1901,7 +1901,7 @@ async def t_hour_open_confirmation_disabled_by_default():
     ex = FakeExchange()
     bot = make_bot(ex, trading_hours_utc=[16])
     now_utc = _dt.datetime(2026, 9, 24, 16, 0, tzinfo=_dt.timezone.utc)
-    bot._check_hour_open_confirmation(now_utc=now_utc)
+    await bot._check_hour_open_confirmation(now_utc=now_utc)
     check("never armed", bot.awaiting_open_confirmation is False)
 
 
@@ -1911,7 +1911,7 @@ async def t_hour_open_confirmation_never_arms_without_self_lock():
     bot = make_bot(ex, trading_hours_utc=[16], hour_open_requires_paper_tp=True,
                     self_lock_enabled=False)
     open_utc = _dt.datetime(2026, 9, 24, 16, 0, tzinfo=_dt.timezone.utc)
-    bot._check_hour_open_confirmation(now_utc=open_utc)
+    await bot._check_hour_open_confirmation(now_utc=open_utc)
     check("stays unarmed -- would be a permanent lockout otherwise",
           bot.awaiting_open_confirmation is False)
 
@@ -1922,10 +1922,10 @@ async def t_hour_open_confirmation_arms_on_closed_to_open_transition():
     bot = make_bot(ex, trading_hours_utc=[16], hour_open_requires_paper_tp=True,
                     self_lock_enabled=True)
     closed_utc = _dt.datetime(2026, 9, 24, 15, 59, tzinfo=_dt.timezone.utc)
-    bot._check_hour_open_confirmation(now_utc=closed_utc)
+    await bot._check_hour_open_confirmation(now_utc=closed_utc)
     check("not armed while still closed", bot.awaiting_open_confirmation is False)
     open_utc = _dt.datetime(2026, 9, 24, 16, 0, tzinfo=_dt.timezone.utc)
-    bot._check_hour_open_confirmation(now_utc=open_utc)
+    await bot._check_hour_open_confirmation(now_utc=open_utc)
     check("armed the moment it opens", bot.awaiting_open_confirmation is True)
 
 
@@ -1936,7 +1936,7 @@ async def t_hour_open_confirmation_arms_on_boot_mid_open_hour():
                     self_lock_enabled=True)
     check("starts unarmed, no tick yet", bot.awaiting_open_confirmation is False)
     open_utc = _dt.datetime(2026, 9, 24, 16, 30, tzinfo=_dt.timezone.utc)  # already mid-open-hour
-    bot._check_hour_open_confirmation(now_utc=open_utc)
+    await bot._check_hour_open_confirmation(now_utc=open_utc)
     check("armed on the very first check, no restart-skip", bot.awaiting_open_confirmation is True)
 
 
@@ -1945,9 +1945,9 @@ async def t_hour_open_confirmation_does_not_rearm_while_staying_open():
     ex = FakeExchange()
     bot = make_bot(ex, trading_hours_utc=[16], hour_open_requires_paper_tp=True,
                     self_lock_enabled=True)
-    bot._check_hour_open_confirmation(now_utc=_dt.datetime(2026, 9, 24, 16, 0, tzinfo=_dt.timezone.utc))
+    await bot._check_hour_open_confirmation(now_utc=_dt.datetime(2026, 9, 24, 16, 0, tzinfo=_dt.timezone.utc))
     bot.awaiting_open_confirmation = False  # simulate the 1 paper TP having already cleared it
-    bot._check_hour_open_confirmation(now_utc=_dt.datetime(2026, 9, 24, 16, 30, tzinfo=_dt.timezone.utc))
+    await bot._check_hour_open_confirmation(now_utc=_dt.datetime(2026, 9, 24, 16, 30, tzinfo=_dt.timezone.utc))
     check("stays cleared -- same open hour, not a new transition", bot.awaiting_open_confirmation is False)
 
 

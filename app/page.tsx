@@ -1604,17 +1604,28 @@ function CompactStochBtcPanel({
             </div>
           );
         })();
+        const awaitingOpenConfirm = !state?.real_trading_locked && state?.awaiting_open_confirmation;
         const selfLockPill = showSelfLock && (
           <div className="bg-gray-800/60 rounded-lg p-2">
             <p className="text-gray-500 text-[10px] uppercase">Self-Lock</p>
             <div className="flex items-center gap-1.5 flex-wrap">
-              <span className={`text-[9px] font-bold px-1.5 py-0.5 rounded uppercase ${state?.real_trading_locked ? "bg-red-500/20 text-red-400" : "bg-green-500/20 text-green-400"}`}>
-                real {state?.real_trading_locked ? "locked" : "active"}
+              <span className={`text-[9px] font-bold px-1.5 py-0.5 rounded uppercase ${
+                state?.real_trading_locked ? "bg-red-500/20 text-red-400"
+                : awaitingOpenConfirm ? "bg-amber-500/20 text-amber-400"
+                : "bg-green-500/20 text-green-400"
+              }`}>
+                real {state?.real_trading_locked ? "locked" : awaitingOpenConfirm ? "awaiting TP" : "active"}
               </span>
               {state?.real_trading_locked && (
                 <span className="text-[10px] font-bold text-gray-300 tabular-nums"
                       title="Consecutive paper TPs needed to unlock real trading">
                   {state?.paper_consecutive_tps ?? 0}/2 paper TPs
+                </span>
+              )}
+              {awaitingOpenConfirm && (
+                <span className="text-[10px] font-bold text-gray-300 tabular-nums"
+                      title="1 paper TP required before real entries resume this open-hour session">
+                  0/1 paper TP
                 </span>
               )}
               <span className={`text-[9px] font-bold px-1.5 py-0.5 rounded uppercase ${

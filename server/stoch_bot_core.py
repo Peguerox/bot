@@ -977,7 +977,7 @@ class StochBot:
             return entry_signal
         return None
 
-    def _check_hour_open_confirmation(self, now_utc=None):
+    async def _check_hour_open_confirmation(self, now_utc=None):
         """Detects a closed->open transition on cfg.trading_hours_utc and arms
         awaiting_open_confirmation -- cleared by the next paper TP in _update_paper_shadow.
         self._last_hour_open starts None, so the very first tick counts as a transition too if
@@ -986,7 +986,12 @@ class StochBot:
         self_lock_enabled are all set -- self_lock_enabled is required even though this isn't
         the self-lock's own counter, because _update_paper_shadow (the only place that clears
         this flag) never runs without it. Arming the flag with no paper shadow running to ever
-        clear it would permanently lock out real entries after the first hour-open transition."""
+        clear it would permanently lock out real entries after the first hour-open transition.
+
+        Writes awaiting_open_confirmation to state on the transition -- display-only (the
+        dashboard has no other way to show why real trading looks idle despite not being
+        self-lock-locked), the in-memory flag stays the actual source of truth so a restart
+        still re-arms per the design, this DB copy is just a mirror of it."""
         cfg = self.cfg
         if (not cfg.hour_open_requires_paper_tp or cfg.trading_hours_utc is None
                 or not cfg.self_lock_enabled):
@@ -995,6 +1000,7 @@ class StochBot:
         is_open_now = now_utc.hour in cfg.trading_hours_utc
         if is_open_now and self._last_hour_open is not True:
             self.awaiting_open_confirmation = True
+            await self.update_state({"awaiting_open_confirmation": True})
         self._last_hour_open = is_open_now
 
     async def _apply_session_breaker(self, state, entry_signal, now_utc=None):
@@ -1248,6 +1254,7 @@ class StochBot:
         self.paper_entry = None
         self.paper_entry_ms = None
 
+        confirmation_just_cleared = False
         if reason == "TP":
             self.paper_consecutive_tps += 1
             if self.paper_consecutive_tps >= 2:
@@ -1257,6 +1264,7 @@ class StochBot:
                     unlocked_now = True
             if cfg.hour_open_requires_paper_tp and self.awaiting_open_confirmation:
                 self.awaiting_open_confirmation = False
+                confirmation_just_cleared = True
         elif reason == "SL":
             self.paper_consecutive_tps = 0
 
@@ -1275,6 +1283,8 @@ class StochBot:
             }
             if unlocked_now:
                 patch["real_trading_locked"] = False
+            if confirmation_just_cleared:
+                patch["awaiting_open_confirmation"] = False
             await self.update_state(patch)
         if unlocked_now:
             await self.log_run("real_trading_unlocked", {"via": "two_consecutive_paper_tps"})
@@ -1375,7 +1385,7 @@ class StochBot:
             entry_signal = self._apply_trading_hours_gate(entry_signal)
 
         if cfg.hour_open_requires_paper_tp:
-            self._check_hour_open_confirmation()
+            await self._check_hour_open_confirmation()
             if self.awaiting_open_confirmation:
                 entry_signal = None
 
