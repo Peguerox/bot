@@ -2082,7 +2082,7 @@ export default function Dashboard() {
             loading={loading}
             onToggled={load}
             stats={initialBtcStats}
-            tradingHoursUtc={[0, 1, 4, 7, 9, 10, 12, 15, 16, 17, 18, 19, 20, 21]}
+            tradingHoursUtc={[0, 1, 4, 9, 10, 12, 15, 16, 17, 18, 19, 20, 21]}
           />
           <CompactStochBtcPanel
             title="Worker 2 · Optimal"

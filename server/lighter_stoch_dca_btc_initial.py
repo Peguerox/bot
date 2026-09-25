@@ -19,12 +19,18 @@ bucketing as more real data accumulates and narrow the schedule to whatever keep
 not to treat this list as final. Stateless gate (just reads the wall-clock UTC hour every
 tick) -- no migration needed, can't be wiped by a restart.
 
-Open hours, ET (Miami time, matches the dashboard badge): 12am-1am, 3am-4am, 5am-7am, 8am-9am,
-11am-6pm (the big one), 8pm-10pm. Closed the rest: 1am-3am, 4am-5am, 7am-8am, 9am-11am,
-6pm-8pm, 10pm-12am. Stored on trading_hours_utc as UTC hours (0,1,4,7,9,10,12,15,16,17,18,19,
-20,21) because the gate itself runs in UTC internally -- ET is just how this file and the
-dashboard describe it to a human, subtract 4h for EDT (Sept 2026) to go from the UTC list to
-the ET hours above.
+2026-09-25: closed 3am-4am ET (07:00 UTC). It was slightly positive in the original fitting
+data (+$0.04, 65.6% win, 32 trades) but turned clearly negative in the first live overnight
+session for both Worker 1 (-$0.47, 41.7% win, 12 trades) and Worker 2 (-$0.48, 50% win, 14
+trades) at that same hour -- thin samples either way, but bad in the most recent real data is
+enough to trim it given the whole point of this schedule is narrowing to what keeps holding up.
+
+Open hours, ET (Miami time, matches the dashboard badge): 12am-1am, 5am-7am, 8am-9am, 11am-6pm
+(the big one), 8pm-10pm. Closed the rest: 1am-3am, 3am-5am, 7am-8am, 9am-11am, 6pm-8pm,
+10pm-12am. Stored on trading_hours_utc as UTC hours (0,1,4,9,10,12,15,16,17,18,19,20,21) --
+UTC 4 = 12am ET (stays open), UTC 7 = 3am ET (just closed, see above) -- because the gate
+itself runs in UTC internally; ET is just how this file and the dashboard describe it to a
+human, subtract 4h for EDT (Sept 2026) to go from the UTC list to the ET hours above.
 
 schema_has_position_bands stays True (unused while trend_tp_pct/trend_sl_pct are unset, but
 harmless to leave on -- clears a leftover trend-band value on close instead of leaving it
@@ -44,7 +50,7 @@ CONFIG = BotConfig(
     entry_lo=25, entry_hi=75,
     reversal_lo=25, reversal_hi=75,
     reversal_guard_seconds=120,  # the "blanking period"
-    trading_hours_utc=[0, 1, 4, 7, 9, 10, 12, 15, 16, 17, 18, 19, 20, 21],
+    trading_hours_utc=[0, 1, 4, 9, 10, 12, 15, 16, 17, 18, 19, 20, 21],
     schema_has_position_bands=True,
     # Price-tick logging: last resort. Only writes if both Worker 2 and Worker 3 are quiet.
     tick_log_defers_to=["worker2", "worker3"],
