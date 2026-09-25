@@ -1620,8 +1620,14 @@ function CompactStochBtcPanel({
           {closedTrades.slice(0, 20).map((t) => {
             const notional = (t.avg_entry_price ?? 0) * (t.base_amount_btc ?? 0);
             const pnlPct = notional > 0 ? (t.pnl_usd / notional * 100) : null;
+            const timeLabel = t.closed_at
+              ? new Intl.DateTimeFormat("en-US", {
+                  timeZone: "America/New_York", hour: "numeric", minute: "2-digit", hour12: true,
+                }).format(new Date(t.closed_at))
+              : null;
             return (
               <div key={t.id} className="flex items-center justify-between text-[11px] bg-gray-800/50 rounded px-1.5 py-1">
+                {timeLabel && <span className="text-gray-600 tabular-nums">{timeLabel}</span>}
                 <span className={t.side === "long" ? "text-green-400" : "text-red-400"}>{t.side}·{t.reason}</span>
                 <span className="text-gray-500">${t.avg_entry_price?.toFixed(0)}→${t.exit_price?.toFixed(0)}</span>
                 <span className={t.pnl_usd >= 0 ? "text-green-400" : "text-red-400"}>
