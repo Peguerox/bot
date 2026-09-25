@@ -1503,7 +1503,7 @@ function CompactStochBtcPanel({
           <div className={`bg-gray-800/60 rounded-lg p-2 ${erValue == null && cooldownMin == null && !showSelfLock && !tradingHoursUtc ? "col-span-2" : ""}`}>
             <p className="text-gray-500 text-[10px] uppercase">Position</p>
             <div className="flex items-center gap-1.5 flex-wrap">
-              <span className={`font-bold ${side === "long" ? "text-green-400" : side === "short" ? "text-red-400" : "text-gray-400"}`}>
+              <span className={`font-bold ${side === "long" ? "text-green-400" : side === "short" ? "text-amber-400" : "text-gray-400"}`}>
                 {side ? side.toUpperCase() : "FLAT"}
               </span>
               {positionRegime && (
@@ -1604,7 +1604,7 @@ function CompactStochBtcPanel({
                 )}
                 <span className={`text-[9px] font-bold px-1.5 py-0.5 rounded uppercase ${
                   state?.paper_side === "long" ? "bg-green-500/20 text-green-400"
-                  : state?.paper_side === "short" ? "bg-red-500/20 text-red-400"
+                  : state?.paper_side === "short" ? "bg-amber-500/20 text-amber-400"
                   : "bg-gray-700/40 text-gray-500"
                 }`} title="What the internal paper shadow is currently holding, real or not">
                   paper {state?.paper_side ? state.paper_side.toUpperCase() : "FLAT"}
@@ -1628,7 +1628,7 @@ function CompactStochBtcPanel({
             return (
               <div key={t.id} className="flex items-center justify-between text-[11px] bg-gray-800/50 rounded px-1.5 py-1">
                 {timeLabel && <span className="text-gray-600 tabular-nums">{timeLabel}</span>}
-                <span className={t.side === "long" ? "text-green-400" : "text-red-400"}>{t.side}·{t.reason}</span>
+                <span className={t.side === "long" ? "text-green-400" : "text-amber-400"}>{t.side}·{t.reason}</span>
                 <span className="text-gray-500">${t.avg_entry_price?.toFixed(0)}→${t.exit_price?.toFixed(0)}</span>
                 <span className={t.pnl_usd >= 0 ? "text-green-400" : "text-red-400"}>
                   {t.pnl_usd >= 0 ? "+" : ""}${t.pnl_usd?.toFixed(3)}{pnlPct != null ? ` (${pnlPct >= 0 ? "+" : ""}${pnlPct.toFixed(2)}%)` : ""}
