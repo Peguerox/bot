@@ -1369,12 +1369,13 @@ function currentSessionStart(nowUtc: Date): Date {
 
 function CompactStochBtcPanel({
   title, subtitle, table, state, trades, currentPrice, loading, onToggled, erValue, runs, cooldownMin,
-  showSelfLock, stats, tradingHoursUtc,
+  showSelfLock, stats, tradingHoursUtc, combineEquityWinRate,
 }: {
   title: string; subtitle: string; table: string; state: any; trades: any[];
   currentPrice: number | null; loading: boolean; onToggled: () => void;
   erValue?: number | null; runs?: any[]; cooldownMin?: number; showSelfLock?: boolean;
   stats?: { total: number; wins: number }; tradingHoursUtc?: number[];
+  combineEquityWinRate?: boolean;
 }) {
   const [toggling, setToggling] = useState(false);
   const [nowTick, setNowTick] = useState(() => Date.now());
@@ -1488,19 +1489,32 @@ function CompactStochBtcPanel({
       </div>
       {loading ? (
         <div className="h-16 bg-gray-800 rounded-lg animate-pulse" />
-      ) : (
-        <div className="grid grid-cols-2 gap-2 text-xs">
+      ) : (() => {
+        const equityPill = (
           <div className="bg-gray-800/60 rounded-lg p-2">
             <p className="text-gray-500 text-[10px] uppercase">Equity</p>
             <p className={`font-bold ${realizedPnl >= 0 ? "text-green-400" : "text-red-400"}`}>
               ${equity.toFixed(2)} <span className="text-[10px] font-normal">({realizedPnl >= 0 ? "+" : ""}{(realizedPnl / seedUsd * 100).toFixed(2)}%)</span>
             </p>
           </div>
+        );
+        const winRatePill = (
           <div className="bg-gray-800/60 rounded-lg p-2">
             <p className="text-gray-500 text-[10px] uppercase">Win Rate</p>
             <p className="font-bold text-blue-400">{winRate}% <span className="text-[10px] font-normal text-gray-500">({trueTotal})</span></p>
           </div>
-          <div className={`bg-gray-800/60 rounded-lg p-2 ${erValue == null && cooldownMin == null && !showSelfLock && !tradingHoursUtc ? "col-span-2" : ""}`}>
+        );
+        const equityWinRatePill = (
+          <div className="bg-gray-800/60 rounded-lg p-2">
+            <p className="text-gray-500 text-[10px] uppercase">Equity / Win Rate</p>
+            <p className={`font-bold ${realizedPnl >= 0 ? "text-green-400" : "text-red-400"}`}>
+              ${equity.toFixed(2)} <span className="text-[10px] font-normal">({realizedPnl >= 0 ? "+" : ""}{(realizedPnl / seedUsd * 100).toFixed(2)}%)</span>
+            </p>
+            <p className="font-bold text-blue-400 text-[11px] mt-0.5">{winRate}% win <span className="text-[10px] font-normal text-gray-500">({trueTotal})</span></p>
+          </div>
+        );
+        const positionPill = (
+          <div className={`bg-gray-800/60 rounded-lg p-2 ${!combineEquityWinRate && erValue == null && cooldownMin == null && !showSelfLock && !tradingHoursUtc ? "col-span-2" : ""}`}>
             <p className="text-gray-500 text-[10px] uppercase">Position</p>
             <div className="flex items-center gap-1.5 flex-wrap">
               <span className={`font-bold ${side === "long" ? "text-green-400" : side === "short" ? "text-amber-400" : "text-gray-400"}`}>
@@ -1518,102 +1532,125 @@ function CompactStochBtcPanel({
               )}
             </div>
           </div>
-          {erValue != null && (
-            <div className="bg-gray-800/60 rounded-lg p-2">
-              <p className="text-gray-500 text-[10px] uppercase">Market ER(6)</p>
-              <div className="flex items-center gap-1.5">
-                <span className="font-bold text-white">{erValue.toFixed(2)}</span>
-                <span className={`text-[9px] font-bold px-1.5 py-0.5 rounded uppercase ${marketRegime === "trend" ? "bg-purple-500/20 text-purple-300" : "bg-blue-500/20 text-blue-300"}`}>
-                  {marketRegime}
-                </span>
-              </div>
+        );
+        const erPill = erValue != null && (
+          <div className="bg-gray-800/60 rounded-lg p-2">
+            <p className="text-gray-500 text-[10px] uppercase">Market ER(6)</p>
+            <div className="flex items-center gap-1.5">
+              <span className="font-bold text-white">{erValue.toFixed(2)}</span>
+              <span className={`text-[9px] font-bold px-1.5 py-0.5 rounded uppercase ${marketRegime === "trend" ? "bg-purple-500/20 text-purple-300" : "bg-blue-500/20 text-blue-300"}`}>
+                {marketRegime}
+              </span>
             </div>
-          )}
-          {cooldownMin != null && (
-            <div className="bg-gray-800/60 rounded-lg p-2">
-              <p className="text-gray-500 text-[10px] uppercase">Breaker</p>
-              <div className="flex items-center gap-1.5 flex-wrap">
-                <span className={`text-[9px] font-bold px-1.5 py-0.5 rounded uppercase ${breakerPaused ? "bg-red-500/20 text-red-400" : "bg-green-500/20 text-green-400"}`}>
-                  {breakerPaused ? "paused" : "active"}
+          </div>
+        );
+        const breakerPill = cooldownMin != null && (
+          <div className="bg-gray-800/60 rounded-lg p-2">
+            <p className="text-gray-500 text-[10px] uppercase">Breaker</p>
+            <div className="flex items-center gap-1.5 flex-wrap">
+              <span className={`text-[9px] font-bold px-1.5 py-0.5 rounded uppercase ${breakerPaused ? "bg-red-500/20 text-red-400" : "bg-green-500/20 text-green-400"}`}>
+                {breakerPaused ? "paused" : "active"}
+              </span>
+              {breakerPaused && breakerTripDirection && (
+                <span className="text-[9px] font-bold px-1.5 py-0.5 rounded uppercase bg-gray-700/50 text-gray-400">
+                  vs {breakerTripDirection}
                 </span>
-                {breakerPaused && breakerTripDirection && (
-                  <span className="text-[9px] font-bold px-1.5 py-0.5 rounded uppercase bg-gray-700/50 text-gray-400">
-                    vs {breakerTripDirection}
-                  </span>
-                )}
-                {breakerPaused && breakerResumeSec != null && (
-                  <span className="text-[10px] font-bold text-gray-300 tabular-nums">
-                    next check {String(Math.floor(breakerResumeSec / 60)).padStart(2, "0")}:{String(breakerResumeSec % 60).padStart(2, "0")}
-                  </span>
-                )}
-              </div>
+              )}
+              {breakerPaused && breakerResumeSec != null && (
+                <span className="text-[10px] font-bold text-gray-300 tabular-nums">
+                  next check {String(Math.floor(breakerResumeSec / 60)).padStart(2, "0")}:{String(breakerResumeSec % 60).padStart(2, "0")}
+                </span>
+              )}
             </div>
-          )}
-          {tradingHoursUtc && (() => {
-            const now = new Date(nowTick);
-            const nowHourUtc = now.getUTCHours();
-            const isOpen = tradingHoursUtc.includes(nowHourUtc);
-            // Find the next hour where open/closed status flips, in UTC (matches the gate's
-            // own clock), then label that boundary in Miami/Eastern time -- what's actually
-            // useful here is "when does this change," not the current time (a watch covers
-            // that already).
-            let boundaryHourUtc = nowHourUtc;
-            let daysAhead = 0;
-            for (let i = 1; i <= 24; i++) {
-              const h = (nowHourUtc + i) % 24;
-              if (tradingHoursUtc.includes(h) !== isOpen) {
-                boundaryHourUtc = h;
-                daysAhead = Math.floor((nowHourUtc + i) / 24);
-                break;
-              }
+          </div>
+        );
+        const tradingHoursPill = tradingHoursUtc && (() => {
+          const now = new Date(nowTick);
+          const nowHourUtc = now.getUTCHours();
+          const isOpen = tradingHoursUtc.includes(nowHourUtc);
+          // Find the next hour where open/closed status flips, in UTC (matches the gate's
+          // own clock), then label that boundary in Miami/Eastern time -- what's actually
+          // useful here is "when does this change," not the current time (a watch covers
+          // that already).
+          let boundaryHourUtc = nowHourUtc;
+          let daysAhead = 0;
+          for (let i = 1; i <= 24; i++) {
+            const h = (nowHourUtc + i) % 24;
+            if (tradingHoursUtc.includes(h) !== isOpen) {
+              boundaryHourUtc = h;
+              daysAhead = Math.floor((nowHourUtc + i) / 24);
+              break;
             }
-            const boundaryDate = new Date(Date.UTC(
-              now.getUTCFullYear(), now.getUTCMonth(), now.getUTCDate() + daysAhead,
-              boundaryHourUtc, 0, 0
-            ));
-            const boundaryLabel = new Intl.DateTimeFormat("en-US", {
-              timeZone: "America/New_York", hour: "numeric", minute: "2-digit", hour12: true,
-            }).format(boundaryDate);
-            return (
-              <div className="bg-gray-800/60 rounded-lg p-2">
-                <p className="text-gray-500 text-[10px] uppercase">Trading Hours</p>
-                <div className="flex items-center gap-1.5 flex-wrap">
-                  <span className={`text-[9px] font-bold px-1.5 py-0.5 rounded uppercase ${isOpen ? "bg-green-500/20 text-green-400" : "bg-red-500/20 text-red-400"}`}>
-                    {isOpen ? "open" : "closed"}
-                  </span>
-                  <span className="text-[10px] font-bold text-gray-300 tabular-nums"
-                        title="New entries only fire in scheduled hours; an existing position still manages to TP/SL/reversal normally">
-                    {isOpen ? "closes" : "opens"} {boundaryLabel} ET
-                  </span>
-                </div>
-              </div>
-            );
-          })()}
-          {showSelfLock && (
+          }
+          const boundaryDate = new Date(Date.UTC(
+            now.getUTCFullYear(), now.getUTCMonth(), now.getUTCDate() + daysAhead,
+            boundaryHourUtc, 0, 0
+          ));
+          const boundaryLabel = new Intl.DateTimeFormat("en-US", {
+            timeZone: "America/New_York", hour: "numeric", minute: "2-digit", hour12: true,
+          }).format(boundaryDate);
+          return (
             <div className="bg-gray-800/60 rounded-lg p-2">
-              <p className="text-gray-500 text-[10px] uppercase">Self-Lock</p>
+              <p className="text-gray-500 text-[10px] uppercase">Trading Hours</p>
               <div className="flex items-center gap-1.5 flex-wrap">
-                <span className={`text-[9px] font-bold px-1.5 py-0.5 rounded uppercase ${state?.real_trading_locked ? "bg-red-500/20 text-red-400" : "bg-green-500/20 text-green-400"}`}>
-                  real {state?.real_trading_locked ? "locked" : "active"}
+                <span className={`text-[9px] font-bold px-1.5 py-0.5 rounded uppercase ${isOpen ? "bg-green-500/20 text-green-400" : "bg-red-500/20 text-red-400"}`}>
+                  {isOpen ? "open" : "closed"}
                 </span>
-                {state?.real_trading_locked && (
-                  <span className="text-[10px] font-bold text-gray-300 tabular-nums"
-                        title="Consecutive paper TPs needed to unlock real trading">
-                    {state?.paper_consecutive_tps ?? 0}/2 paper TPs
-                  </span>
-                )}
-                <span className={`text-[9px] font-bold px-1.5 py-0.5 rounded uppercase ${
-                  state?.paper_side === "long" ? "bg-green-500/20 text-green-400"
-                  : state?.paper_side === "short" ? "bg-amber-500/20 text-amber-400"
-                  : "bg-gray-700/40 text-gray-500"
-                }`} title="What the internal paper shadow is currently holding, real or not">
-                  paper {state?.paper_side ? state.paper_side.toUpperCase() : "FLAT"}
+                <span className="text-[10px] font-bold text-gray-300 tabular-nums"
+                      title="New entries only fire in scheduled hours; an existing position still manages to TP/SL/reversal normally">
+                  {isOpen ? "closes" : "opens"} {boundaryLabel} ET
                 </span>
               </div>
             </div>
-          )}
-        </div>
-      )}
+          );
+        })();
+        const selfLockPill = showSelfLock && (
+          <div className="bg-gray-800/60 rounded-lg p-2">
+            <p className="text-gray-500 text-[10px] uppercase">Self-Lock</p>
+            <div className="flex items-center gap-1.5 flex-wrap">
+              <span className={`text-[9px] font-bold px-1.5 py-0.5 rounded uppercase ${state?.real_trading_locked ? "bg-red-500/20 text-red-400" : "bg-green-500/20 text-green-400"}`}>
+                real {state?.real_trading_locked ? "locked" : "active"}
+              </span>
+              {state?.real_trading_locked && (
+                <span className="text-[10px] font-bold text-gray-300 tabular-nums"
+                      title="Consecutive paper TPs needed to unlock real trading">
+                  {state?.paper_consecutive_tps ?? 0}/2 paper TPs
+                </span>
+              )}
+              <span className={`text-[9px] font-bold px-1.5 py-0.5 rounded uppercase ${
+                state?.paper_side === "long" ? "bg-green-500/20 text-green-400"
+                : state?.paper_side === "short" ? "bg-amber-500/20 text-amber-400"
+                : "bg-gray-700/40 text-gray-500"
+              }`} title="What the internal paper shadow is currently holding, real or not">
+                paper {state?.paper_side ? state.paper_side.toUpperCase() : "FLAT"}
+              </span>
+            </div>
+          </div>
+        );
+
+        if (combineEquityWinRate) {
+          // Fixed 2x2: [Equity+WinRate, Self-Lock] / [Position, Trading Hours]
+          return (
+            <div className="grid grid-cols-2 gap-2 text-xs">
+              {equityWinRatePill}
+              {selfLockPill}
+              {positionPill}
+              {tradingHoursPill}
+            </div>
+          );
+        }
+        return (
+          <div className="grid grid-cols-2 gap-2 text-xs">
+            {equityPill}
+            {winRatePill}
+            {positionPill}
+            {erPill}
+            {breakerPill}
+            {tradingHoursPill}
+            {selfLockPill}
+          </div>
+        );
+      })()}
       <div className="space-y-1">
         <p className="text-gray-500 text-[10px] uppercase">Recent trades</p>
         <div className="max-h-72 overflow-y-auto space-y-1 pr-0.5">
@@ -2102,6 +2139,7 @@ export default function Dashboard() {
             stats={optimalBtcStats}
             showSelfLock
             tradingHoursUtc={[0, 1, 4, 9, 10, 12, 15, 16, 17, 18, 19, 20, 21]}
+            combineEquityWinRate
           />
           <CompactStochBtcPanel
             title="Worker 3 · Self-Lock"
