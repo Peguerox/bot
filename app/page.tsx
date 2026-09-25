@@ -2091,8 +2091,8 @@ export default function Dashboard() {
             tradingHoursUtc={[0, 1, 4, 9, 10, 12, 15, 16, 17, 18, 19, 20, 21]}
           />
           <CompactStochBtcPanel
-            title="Worker 2 · Optimal"
-            subtitle="TP 0.10% / SL 0.11% / 25-75 / window 5"
+            title="Worker 2 · Combined"
+            subtitle="TP 0.10% / SL 0.11% / 25-75 / window 5 / 120s blanking period / hourly schedule / self-lock / 1 paper TP required at hour-open"
             table="lighter_btc_optimal_state"
             state={optimalBtcState}
             trades={optimalBtcTrades}
@@ -2100,6 +2100,8 @@ export default function Dashboard() {
             loading={loading}
             onToggled={load}
             stats={optimalBtcStats}
+            showSelfLock
+            tradingHoursUtc={[0, 1, 4, 9, 10, 12, 15, 16, 17, 18, 19, 20, 21]}
           />
           <CompactStochBtcPanel
             title="Worker 3 · Self-Lock"

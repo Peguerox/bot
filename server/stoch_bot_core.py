@@ -204,6 +204,17 @@ class BotConfig:
     # Worker 2 trades bucketed by UTC close-hour (2026-09-22 to 2026-09-24): these are every
     # hour where that real data came out net positive.
     trading_hours_utc: Optional[list] = None
+    # Hour-open confirmation (2026-09-25, prepared alongside the Worker 2 combined-strategy
+    # draft -- only meaningful with both trading_hours_utc and self_lock_enabled set). "Don't
+    # walk into a bloodbath": the instant a scheduled hour opens (closed->open transition,
+    # including right after a restart if the bot boots mid-open-hour -- a restart has no fresh
+    # evidence either), real entries stay paused until the internal paper shadow posts ONE TP
+    # (not the self-lock's usual two -- deliberately looser here so a real opportunity isn't
+    # missed waiting for a second confirmation). That single TP only needs to happen once per
+    # open-hour session; every real close after that is unaffected, including this window's own
+    # self-lock cycles. In-memory only, on purpose -- it's supposed to re-arm on every restart,
+    # so there is nothing to persist. None/False = disabled (every other bot).
+    hour_open_requires_paper_tp: bool = False
     market_index: int = 1
     price_decimals: int = 1
     size_decimals: int = 5
@@ -412,6 +423,10 @@ class StochBot:
         self.paper_entry_ms = None
         self.paper_consecutive_tps = 0
         self._self_lock_loaded = False
+        # Hour-open confirmation (independent of the self-lock counter above -- this one only
+        # ever needs a single TP, and re-arms on every restart by design).
+        self.awaiting_open_confirmation = False
+        self._last_hour_open = None
 
     # ── Supabase (aiohttp: async, and actually cancellable) ─────────────────────────────────
     async def sb(self, method, path, body=None, extra_headers=None):
@@ -962,6 +977,26 @@ class StochBot:
             return entry_signal
         return None
 
+    def _check_hour_open_confirmation(self, now_utc=None):
+        """Detects a closed->open transition on cfg.trading_hours_utc and arms
+        awaiting_open_confirmation -- cleared by the next paper TP in _update_paper_shadow.
+        self._last_hour_open starts None, so the very first tick counts as a transition too if
+        it's already inside an open hour (a restart has no fresher evidence than a real
+        transition would). No-op unless trading_hours_utc, hour_open_requires_paper_tp, AND
+        self_lock_enabled are all set -- self_lock_enabled is required even though this isn't
+        the self-lock's own counter, because _update_paper_shadow (the only place that clears
+        this flag) never runs without it. Arming the flag with no paper shadow running to ever
+        clear it would permanently lock out real entries after the first hour-open transition."""
+        cfg = self.cfg
+        if (not cfg.hour_open_requires_paper_tp or cfg.trading_hours_utc is None
+                or not cfg.self_lock_enabled):
+            return
+        now_utc = now_utc or datetime.now(timezone.utc)
+        is_open_now = now_utc.hour in cfg.trading_hours_utc
+        if is_open_now and self._last_hour_open is not True:
+            self.awaiting_open_confirmation = True
+        self._last_hour_open = is_open_now
+
     async def _apply_session_breaker(self, state, entry_signal, now_utc=None):
         """Two trip conditions: drawdown from an established session peak, OR a raw loss from
         session start if the session was never yet profitable (closes the gap where an
@@ -1220,6 +1255,8 @@ class StochBot:
                 if self.real_trading_locked:
                     self.real_trading_locked = False
                     unlocked_now = True
+            if cfg.hour_open_requires_paper_tp and self.awaiting_open_confirmation:
+                self.awaiting_open_confirmation = False
         elif reason == "SL":
             self.paper_consecutive_tps = 0
 
@@ -1336,6 +1373,11 @@ class StochBot:
 
         if cfg.trading_hours_utc is not None:
             entry_signal = self._apply_trading_hours_gate(entry_signal)
+
+        if cfg.hour_open_requires_paper_tp:
+            self._check_hour_open_confirmation()
+            if self.awaiting_open_confirmation:
+                entry_signal = None
 
         real_pos, collateral = await self.read_position()
         if real_pos is None:
@@ -1480,7 +1522,8 @@ class StochBot:
                     return
                 if (self.entry_vol_paused or (cfg.self_lock_enabled and self.real_trading_locked)
                         or (cfg.trading_hours_utc is not None
-                            and self._apply_trading_hours_gate(reversal_signal) is None)):
+                            and self._apply_trading_hours_gate(reversal_signal) is None)
+                        or (cfg.hour_open_requires_paper_tp and self.awaiting_open_confirmation)):
                     # Close leg of a reversal always runs (already happened above); only the
                     # reopen leg respects the gate -- left flat until it clears instead of
                     # immediately flipping into the opposite side.

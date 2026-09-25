@@ -1896,6 +1896,94 @@ async def t_trading_hours_gate_none_signal_stays_none():
     check("still None", sig is None, sig)
 
 
+async def t_hour_open_confirmation_disabled_by_default():
+    print("\n[hour-open confirmation: hour_open_requires_paper_tp=False (default) never arms it]")
+    ex = FakeExchange()
+    bot = make_bot(ex, trading_hours_utc=[16])
+    now_utc = _dt.datetime(2026, 9, 24, 16, 0, tzinfo=_dt.timezone.utc)
+    bot._check_hour_open_confirmation(now_utc=now_utc)
+    check("never armed", bot.awaiting_open_confirmation is False)
+
+
+async def t_hour_open_confirmation_never_arms_without_self_lock():
+    print("\n[hour-open confirmation: never arms without self_lock_enabled -- nothing would ever clear it]")
+    ex = FakeExchange()
+    bot = make_bot(ex, trading_hours_utc=[16], hour_open_requires_paper_tp=True,
+                    self_lock_enabled=False)
+    open_utc = _dt.datetime(2026, 9, 24, 16, 0, tzinfo=_dt.timezone.utc)
+    bot._check_hour_open_confirmation(now_utc=open_utc)
+    check("stays unarmed -- would be a permanent lockout otherwise",
+          bot.awaiting_open_confirmation is False)
+
+
+async def t_hour_open_confirmation_arms_on_closed_to_open_transition():
+    print("\n[hour-open confirmation: closed->open transition arms it]")
+    ex = FakeExchange()
+    bot = make_bot(ex, trading_hours_utc=[16], hour_open_requires_paper_tp=True,
+                    self_lock_enabled=True)
+    closed_utc = _dt.datetime(2026, 9, 24, 15, 59, tzinfo=_dt.timezone.utc)
+    bot._check_hour_open_confirmation(now_utc=closed_utc)
+    check("not armed while still closed", bot.awaiting_open_confirmation is False)
+    open_utc = _dt.datetime(2026, 9, 24, 16, 0, tzinfo=_dt.timezone.utc)
+    bot._check_hour_open_confirmation(now_utc=open_utc)
+    check("armed the moment it opens", bot.awaiting_open_confirmation is True)
+
+
+async def t_hour_open_confirmation_arms_on_boot_mid_open_hour():
+    print("\n[hour-open confirmation: booting fresh already inside an open hour arms it too (option 1)]")
+    ex = FakeExchange()
+    bot = make_bot(ex, trading_hours_utc=[16], hour_open_requires_paper_tp=True,
+                    self_lock_enabled=True)
+    check("starts unarmed, no tick yet", bot.awaiting_open_confirmation is False)
+    open_utc = _dt.datetime(2026, 9, 24, 16, 30, tzinfo=_dt.timezone.utc)  # already mid-open-hour
+    bot._check_hour_open_confirmation(now_utc=open_utc)
+    check("armed on the very first check, no restart-skip", bot.awaiting_open_confirmation is True)
+
+
+async def t_hour_open_confirmation_does_not_rearm_while_staying_open():
+    print("\n[hour-open confirmation: staying inside the same open hour does not keep re-arming]")
+    ex = FakeExchange()
+    bot = make_bot(ex, trading_hours_utc=[16], hour_open_requires_paper_tp=True,
+                    self_lock_enabled=True)
+    bot._check_hour_open_confirmation(now_utc=_dt.datetime(2026, 9, 24, 16, 0, tzinfo=_dt.timezone.utc))
+    bot.awaiting_open_confirmation = False  # simulate the 1 paper TP having already cleared it
+    bot._check_hour_open_confirmation(now_utc=_dt.datetime(2026, 9, 24, 16, 30, tzinfo=_dt.timezone.utc))
+    check("stays cleared -- same open hour, not a new transition", bot.awaiting_open_confirmation is False)
+
+
+async def t_hour_open_confirmation_blocks_entry_signal():
+    print("\n[hour-open confirmation: armed -> blocks a real entry signal even with self-lock unlocked]")
+    ex = FakeExchange()
+    candles = make_candles("long")
+    state = {
+        "id": 1, "side": None, "legs": [], "first_entry_price": None, "first_entry_time": None,
+        "dca_level": 0, "seed_usd": 20.0, "realized_pnl_usd": 0.0, "collateral_before_entry": None,
+        "enabled": True, "consecutive_entry_failures": 0, "last_processed_candle_ts": 0,
+    }
+    bot = make_bot(ex, state=state, candles=candles, self_lock_enabled=True,
+                    trading_hours_utc=list(range(24)), hour_open_requires_paper_tp=True)
+    bot.awaiting_open_confirmation = True  # armed, real trading not yet confirmed for this session
+    await bot.tick()
+    check("no real order placed while awaiting confirmation", len(ex.orders) == 0, ex.orders)
+    check("still armed -- nothing cleared it", bot.awaiting_open_confirmation is True)
+
+
+async def t_hour_open_confirmation_cleared_by_one_paper_tp():
+    print("\n[hour-open confirmation: a single paper TP clears it (not two, unlike the self-lock counter)]")
+    ex = FakeExchange()
+    bot = make_bot(ex, self_lock_enabled=True, hour_open_requires_paper_tp=True,
+                    trading_hours_utc=list(range(24)))
+    bot.awaiting_open_confirmation = True
+    bot.paper_side = "long"
+    bot.paper_entry = 86000.0
+    bot.paper_entry_ms = 1700000000000
+    tp_price = 86000.0 * 1.0011  # past the paper position's own 0.10% TP
+    await bot._update_paper_shadow({"id": 1}, None, None, tp_price, tp_price + 1, 1700000060000)
+    check("cleared by the first paper TP alone", bot.awaiting_open_confirmation is False)
+    check("self-lock's own 2-in-a-row counter is unaffected by this",
+          bot.paper_consecutive_tps == 1, bot.paper_consecutive_tps)
+
+
 async def t_log_trade_upserts_to_prevent_duplicate_rows():
     print("\n[log_trade: posts with on_conflict + ignore-duplicates so a race can't double-insert]")
     cfg = BotConfig(name="t", worker_id="w", table_state="s", table_trades="lighter_test_trades",
@@ -2009,6 +2097,13 @@ async def main():
               t_trading_hours_gate_blocks_outside_open_hours,
               t_trading_hours_gate_passes_inside_open_hours,
               t_trading_hours_gate_none_signal_stays_none,
+              t_hour_open_confirmation_disabled_by_default,
+              t_hour_open_confirmation_never_arms_without_self_lock,
+              t_hour_open_confirmation_arms_on_closed_to_open_transition,
+              t_hour_open_confirmation_arms_on_boot_mid_open_hour,
+              t_hour_open_confirmation_does_not_rearm_while_staying_open,
+              t_hour_open_confirmation_blocks_entry_signal,
+              t_hour_open_confirmation_cleared_by_one_paper_tp,
               t_timeout_constants):
         try:
             await t()
