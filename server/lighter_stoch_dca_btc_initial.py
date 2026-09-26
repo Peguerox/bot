@@ -46,6 +46,14 @@ forward comparison (weekday AND weekend) instead of trusting that single in-samp
 touches real trading in any way -- see compute_rsi_stoch_confirmed_signal and
 _update_rsi_paper_shadow in stoch_bot_core.py. Migration:
 lighter_btc_initial_rsi_paper_test.sql.
+
+2026-09-26, same day: rsi_paper_require_confirmation=False -- dropped the price-confirmation
+half of the signal at the user's explicit request, after seeing it had produced zero trades in
+~40 minutes since restart and wanting a live comparison against the other bots' trade volume.
+Backtested first: dropping confirmation roughly triples trade frequency but was WORSE in every
+period tested (full file -1.09%->-4.48%, Friday -0.86%->-2.24%, even Saturday itself
++1.02%->+0.29%). Deployed anyway, deliberately, to watch it live rather than trust only the
+backtest -- expect this to likely underperform the confirmed version.
 """
 from stoch_bot_core import BotConfig, run_bot
 
@@ -65,6 +73,7 @@ CONFIG = BotConfig(
     schema_has_position_bands=True,
     rsi_paper_test_enabled=True,
     schema_has_rsi_paper_test=True,  # requires lighter_btc_initial_rsi_paper_test.sql first
+    rsi_paper_require_confirmation=False,  # dropped 2026-09-26, see docstring above
     # Price-tick logging: last resort. Only writes if both Worker 2 and Worker 3 are quiet.
     tick_log_defers_to=["worker2", "worker3"],
 )

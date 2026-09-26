@@ -237,6 +237,10 @@ class BotConfig:
     # in-flight paper position across restarts.
     rsi_paper_test_enabled: bool = False
     schema_has_rsi_paper_test: bool = False
+    # False drops the price-confirmation half of the RSI signal (see
+    # compute_rsi_stoch_confirmed_signal's docstring for the backtest numbers). Default True
+    # keeps the original report's rule intact; only Worker 1's live experiment sets this False.
+    rsi_paper_require_confirmation: bool = True
     market_index: int = 1
     price_decimals: int = 1
     size_decimals: int = 5
@@ -342,13 +346,19 @@ def compute_true_range_pct(candles):
     return tr / last["c"] * 100
 
 
-def compute_rsi_stoch_confirmed_signal(candles, rsi_period=5, stoch_period=14):
+def compute_rsi_stoch_confirmed_signal(candles, rsi_period=5, stoch_period=14, require_confirmation=True):
     """"Confirmed Stochastic RSI" (2026-09-26 paper test): Wilder RSI(rsi_period) on completed
     1-min closes, then raw Stochastic RSI over the last stoch_period RSI values (no K/D
     smoothing) -- S = 100*(RSI-min)/(max-min) over that window. Long when S<20 AND the latest
     completed close is above the previous completed close; short when S>80 AND it closed
     below. Confirmation applies to both entries and reversals (same signal serves both -- there
-    is no separate reversal threshold in this design, unlike the plain stochastic signal)."""
+    is no separate reversal threshold in this design, unlike the plain stochastic signal).
+
+    require_confirmation=False drops the price-confirmation half of the rule (long on S<20
+    alone, short on S>80 alone) -- backtested 2026-09-26 on real data: roughly 3x more trades
+    but WORSE pnl in every period tested (full file -1.09%->-4.48%, Friday -0.86%->-2.24%,
+    even Saturday itself +1.02%->+0.29%). Deployed anyway at the user's explicit request, to
+    get a live comparison against the other bots rather than only a backtest."""
     closed = candles[:-1]
     need = rsi_period + stoch_period + 1  # +1 for the initial seed change dropped by diff()
     if len(closed) < need:
@@ -384,9 +394,9 @@ def compute_rsi_stoch_confirmed_signal(candles, rsi_period=5, stoch_period=14):
 
     prev_close, latest_close = closes[-2], closes[-1]
     signal = None
-    if s < 20 and latest_close > prev_close:
+    if s < 20 and (not require_confirmation or latest_close > prev_close):
         signal = "long"
-    elif s > 80 and latest_close < prev_close:
+    elif s > 80 and (not require_confirmation or latest_close < prev_close):
         signal = "short"
     return signal, closed[-1]["t"]
 
@@ -1401,7 +1411,8 @@ class StochBot:
         weekend performance can be watched forward, on data the signal was never fit to."""
         cfg = self.cfg
         await self._load_rsi_paper_state(state)
-        signal, _ts = compute_rsi_stoch_confirmed_signal(self.candles)
+        signal, _ts = compute_rsi_stoch_confirmed_signal(
+            self.candles, require_confirmation=cfg.rsi_paper_require_confirmation)
 
         if self.rsi_paper_side is None:
             if signal is not None:
