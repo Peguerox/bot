@@ -1988,6 +1988,22 @@ async def t_hour_open_confirmation_never_arms_without_self_lock():
           bot.awaiting_open_confirmation is False)
 
 
+async def t_hour_open_confirmation_skips_arming_with_an_open_real_position():
+    print("\n[hour-open confirmation: does NOT arm if a real position is already open -- nothing blind about it]")
+    ex = FakeExchange()
+    bot = make_bot(ex, trading_hours_utc=[16], hour_open_requires_paper_tp=True, self_lock_enabled=True)
+    open_utc = _dt.datetime(2026, 9, 24, 16, 0, tzinfo=_dt.timezone.utc)
+    await bot._check_hour_open_confirmation(has_open_position=True, now_utc=open_utc)
+    check("stays unarmed while a real position is open, despite a fresh transition",
+          bot.awaiting_open_confirmation is False)
+    # once flat again, a genuinely NEW transition should still arm it normally.
+    closed_utc = _dt.datetime(2026, 9, 24, 17, 0, tzinfo=_dt.timezone.utc)
+    await bot._check_hour_open_confirmation(has_open_position=True, now_utc=closed_utc)
+    reopen_utc = _dt.datetime(2026, 9, 25, 16, 0, tzinfo=_dt.timezone.utc)
+    await bot._check_hour_open_confirmation(has_open_position=False, now_utc=reopen_utc)
+    check("arms normally on the next real transition once flat", bot.awaiting_open_confirmation is True)
+
+
 async def t_hour_open_confirmation_arms_on_closed_to_open_transition():
     print("\n[hour-open confirmation: closed->open transition arms it]")
     ex = FakeExchange()
@@ -2175,6 +2191,7 @@ async def main():
               t_trading_hours_gate_none_signal_stays_none,
               t_hour_open_confirmation_disabled_by_default,
               t_hour_open_confirmation_never_arms_without_self_lock,
+              t_hour_open_confirmation_skips_arming_with_an_open_real_position,
               t_hour_open_confirmation_arms_on_closed_to_open_transition,
               t_hour_open_confirmation_arms_on_boot_mid_open_hour,
               t_hour_open_confirmation_does_not_rearm_while_staying_open,

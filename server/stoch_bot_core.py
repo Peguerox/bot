@@ -986,7 +986,7 @@ class StochBot:
             return entry_signal
         return None
 
-    async def _check_hour_open_confirmation(self, now_utc=None):
+    async def _check_hour_open_confirmation(self, has_open_position=False, now_utc=None):
         """Detects a closed->open transition on cfg.trading_hours_utc and arms
         awaiting_open_confirmation -- cleared by the next paper TP in _update_paper_shadow.
         self._last_hour_open starts None, so the very first tick counts as a transition too if
@@ -996,6 +996,14 @@ class StochBot:
         the self-lock's own counter, because _update_paper_shadow (the only place that clears
         this flag) never runs without it. Arming the flag with no paper shadow running to ever
         clear it would permanently lock out real entries after the first hour-open transition.
+
+        has_open_position skips arming entirely (2026-09-26 fix): the whole point is "don't
+        walk into a NEW real position blind" -- if a real position is already open, real
+        trading was already active, there is nothing blind about it, and arming here would
+        only needlessly gate the NEXT entry after this one closes. Caught live: a restart
+        landed 42s after a real entry (same open hour), which armed the flag despite the open
+        position being managed fine -- the position itself was never at risk, but the bot
+        would have demanded a fresh paper win before its next entry for no real reason.
 
         Writes awaiting_open_confirmation to state on the transition -- display-only (the
         dashboard has no other way to show why real trading looks idle despite not being
@@ -1007,7 +1015,7 @@ class StochBot:
             return
         now_utc = now_utc or datetime.now(timezone.utc)
         is_open_now = now_utc.hour in cfg.trading_hours_utc
-        if is_open_now and self._last_hour_open is not True:
+        if is_open_now and self._last_hour_open is not True and not has_open_position:
             self.awaiting_open_confirmation = True
             await self.update_state({"awaiting_open_confirmation": True})
         self._last_hour_open = is_open_now
@@ -1405,7 +1413,7 @@ class StochBot:
             entry_signal = self._apply_trading_hours_gate(entry_signal)
 
         if cfg.hour_open_requires_paper_tp:
-            await self._check_hour_open_confirmation()
+            await self._check_hour_open_confirmation(has_open_position=state.get("side") is not None)
             if self.awaiting_open_confirmation:
                 entry_signal = None
 
