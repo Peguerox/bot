@@ -2245,6 +2245,7 @@ export default function Dashboard() {
             runs={dcaBtcRuns}
             showSelfLock
             stats={dcaBtcStats}
+            combineEquityWinRate
           />
         </div>
 
