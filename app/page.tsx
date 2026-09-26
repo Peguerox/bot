@@ -1640,18 +1640,18 @@ function CompactStochBtcPanel({
                 : awaitingOpenConfirm ? "bg-amber-500/20 text-amber-400"
                 : "bg-green-500/20 text-green-400"
               }`}>
-                real {state?.real_trading_locked ? "locked" : awaitingOpenConfirm ? "awaiting TP" : "active"}
+                real {state?.real_trading_locked ? "locked" : awaitingOpenConfirm ? "awaiting win" : "active"}
               </span>
               {state?.real_trading_locked && (
                 <span className="text-[10px] font-bold text-gray-300 tabular-nums"
-                      title="Consecutive paper TPs needed to unlock real trading">
-                  {state?.paper_consecutive_tps ?? 0}/2 paper TPs
+                      title="Consecutive paper wins needed to unlock real trading (TP, or a winning reversal if enabled)">
+                  {state?.paper_consecutive_tps ?? 0}/2 paper wins
                 </span>
               )}
               {awaitingOpenConfirm && (
                 <span className="text-[10px] font-bold text-gray-300 tabular-nums"
-                      title="1 paper TP required before real entries resume this open-hour session">
-                  0/1 paper TP
+                      title="1 paper win required before real entries resume this open-hour session (TP, or a winning reversal if enabled)">
+                  0/1 paper win
                 </span>
               )}
               <span className={`text-[9px] font-bold px-1.5 py-0.5 rounded uppercase ${
@@ -2166,7 +2166,7 @@ export default function Dashboard() {
           />
           <CompactStochBtcPanel
             title="Worker 2 · Combined"
-            subtitle="TP 0.10% / SL 0.11% / 25-75 / window 5 / 120s blanking period / hourly schedule / self-lock / 1 paper TP required at hour-open"
+            subtitle="TP 0.10% / SL 0.11% / 25-75 / window 5 / 120s blanking period / hourly schedule / self-lock / 1 paper win required at hour-open (winning reversals count too)"
             table="lighter_btc_optimal_state"
             state={optimalBtcState}
             trades={optimalBtcTrades}
