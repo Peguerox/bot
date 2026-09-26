@@ -50,6 +50,16 @@ Losing the pure no-gates baseline is a real tradeoff worth confirming before thi
 right now Worker 2 is the only bot with nothing filtering it, which has been useful as the
 reference point for how much each gate actually helps. After this change, all 3 bots would be
 gated in some way.
+
+2026-09-26: self_lock_reversal_counts_as_win=True added -- the literal-TP-only hour-open
+confirmation was too strict, missing good trading windows waiting for a clean TP that might
+not come for a long time in choppy conditions (confirmed live: sat 90+ minutes on paper
+without ever landing a literal TP, despite real price action that would have closed favorably
+via reversal). This flag broadens BOTH gates it touches at once, since they share the same
+counts_as_tp check in stoch_bot_core.py: the self-lock's 2-in-a-row unlock AND the hour-open
+confirmation now both accept a winning paper reversal, not just a literal TP (a losing/
+breakeven reversal stays neutral either way, doesn't reset). Same flag already validated on
+Worker 3 (79.9h real data: +2.327% vs literal-TP-only's +1.663%, 62.6% vs 60.6% win).
 """
 from stoch_bot_core import BotConfig, run_bot
 
@@ -68,7 +78,8 @@ CONFIG = BotConfig(
     trading_hours_utc=[0, 1, 4, 9, 10, 12, 15, 16, 17, 18, 19, 20, 21],  # Worker 1's current schedule
     self_lock_enabled=True,
     schema_has_self_lock=True,  # requires the migration above to be run first
-    hour_open_requires_paper_tp=True,  # 1 paper TP required at the start of every open window
+    hour_open_requires_paper_tp=True,  # 1 paper win required at the start of every open window
+    self_lock_reversal_counts_as_win=True,  # a winning reversal satisfies both gates too, not just literal TP
     # Price-tick logging: primary writer (trades most, so it's up most reliably). Worker 3
     # takes over if this one goes quiet, Worker 1 as last resort. See stoch_bot_core.py.
     tick_log_defers_to=[],
