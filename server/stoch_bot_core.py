@@ -1620,7 +1620,13 @@ class StochBot:
             return
 
         if cfg.rsi_paper_test_enabled:
-            await self._update_rsi_paper_shadow(state, best_bid, best_ask, self.now_ms())
+            # Isolated on purpose: a failure here (e.g. the migration hasn't run yet) must
+            # never abort the rest of this tick -- real TP/SL management runs below this line,
+            # and this paper-only experiment is not allowed to delay it even transiently.
+            try:
+                await self._update_rsi_paper_shadow(state, best_bid, best_ask, self.now_ms())
+            except Exception as e:
+                await self.log_run("rsi_paper_shadow_error", {"error": str(e)[:300]})
 
         if cfg.self_lock_enabled:
             await self._update_paper_shadow(state, paper_entry_signal, paper_reversal_signal,
