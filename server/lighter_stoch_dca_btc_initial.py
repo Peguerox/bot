@@ -54,11 +54,26 @@ Backtested first: dropping confirmation roughly triples trade frequency but was 
 period tested (full file -1.09%->-4.48%, Friday -0.86%->-2.24%, even Saturday itself
 +1.02%->+0.29%). Deployed anyway, deliberately, to watch it live rather than trust only the
 backtest -- expect this to likely underperform the confirmed version.
+
+2026-09-26, same day: use_rsi_stoch_signal=True -- promoted from paper to REAL, at the user's
+explicit request, after 8 live paper trades ran +0.158% at 75% win (small sample, not enough to
+override the backtest on its own -- the backtest for this exact unconfirmed variant still says
+worse in 3 of 4 periods tested: full file -4.48%, Friday -2.24%, only Saturday improved
++1.02%->+0.29%, and even that's still a decline). Deployed as real money anyway per direct
+instruction, explicitly to watch it live rather than trust the backtest.
+
+reversal_guard_seconds dropped to None (the 120s blanking period is gone) -- the RSI paper test
+was never run WITH a blanking guard (the source report used none for this signal), so to keep
+this a faithful "same strategy that's been running" swap rather than a new untested
+combination, the guard comes off too. trading_hours_utc stays, per explicit instruction to hold
+the hourly schedule. rsi_paper_test_enabled is now off -- the shadow is redundant once this IS
+the real signal; the equity/win-rate/position/trading-hours pills now show its real performance
+directly instead. Historical paper data stays in lighter_btc_rsi_paper_trades for reference.
 """
 from stoch_bot_core import BotConfig, run_bot
 
 CONFIG = BotConfig(
-    name="BLANKING PERIOD + HOURLY SCHEDULE (worker 1)",
+    name="RSI-STOCH + HOURLY SCHEDULE (worker 1)",
     worker_id="worker1",
     table_state="lighter_btc_initial_state",
     table_trades="lighter_btc_initial_trades",
@@ -68,12 +83,12 @@ CONFIG = BotConfig(
     sl_pct=0.11,
     entry_lo=25, entry_hi=75,
     reversal_lo=25, reversal_hi=75,
-    reversal_guard_seconds=120,  # the "blanking period"
     trading_hours_utc=[0, 1, 4, 9, 10, 12, 15, 16, 17, 18, 19, 20, 21],
     schema_has_position_bands=True,
-    rsi_paper_test_enabled=True,
-    schema_has_rsi_paper_test=True,  # requires lighter_btc_initial_rsi_paper_test.sql first
-    rsi_paper_require_confirmation=False,  # dropped 2026-09-26, see docstring above
+    use_rsi_stoch_signal=True,
+    rsi_paper_require_confirmation=False,  # unconfirmed variant -- see docstring above
+    rsi_paper_test_enabled=False,  # redundant now that this drives real trading
+    schema_has_rsi_paper_test=True,  # keep True: still reads the old rsi_paper_* columns harmlessly
     # Price-tick logging: last resort. Only writes if both Worker 2 and Worker 3 are quiet.
     tick_log_defers_to=["worker2", "worker3"],
 )

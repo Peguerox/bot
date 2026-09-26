@@ -2225,8 +2225,8 @@ export default function Dashboard() {
         {/* ── Lighter BTC Stochastic5: 3-worker comparison, real money, $100 each */}
         <div className="grid grid-cols-1 sm:grid-cols-3 gap-3">
           <CompactStochBtcPanel
-            title="Worker 1 · Blanking Period + Hourly Schedule"
-            subtitle="TP 0.10% / SL 0.11% / 25-75 / window 5 / 120s blanking period after entry -- Worker 2's config plus that and an hourly trading-hours schedule (experiment)"
+            title="Worker 1 · RSI-Stoch + Hourly Schedule"
+            subtitle="TP 0.10% / SL 0.11% / Wilder RSI5 + Stochastic RSI over 14 bars, 20/80, no price confirmation / hourly trading-hours schedule -- promoted from paper 2026-09-26"
             table="lighter_btc_initial_state"
             state={initialBtcState}
             trades={initialBtcTrades}
@@ -2235,7 +2235,6 @@ export default function Dashboard() {
             onToggled={load}
             stats={initialBtcStats}
             tradingHoursUtc={[0, 1, 4, 9, 10, 12, 15, 16, 17, 18, 19, 20, 21]}
-            rsiPaperStats={rsiPaperStats}
           />
           <CompactStochBtcPanel
             title="Worker 2 · Combined"

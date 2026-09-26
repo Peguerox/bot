@@ -237,6 +237,13 @@ class BotConfig:
     # in-flight paper position across restarts.
     rsi_paper_test_enabled: bool = False
     schema_has_rsi_paper_test: bool = False
+    # 2026-09-26 (Worker 1): promotes the RSI-Stoch signal (see
+    # compute_rsi_stoch_confirmed_signal) from paper-only to driving REAL entries/reversals --
+    # a straight swap of the top-level signal source. Every downstream gate (trading_hours_utc,
+    # session breaker, etc.) is unchanged and still applies to whatever this returns. The same
+    # value serves both entry and reversal (no separate reversal threshold in this signal, so
+    # entry_signal == reversal_signal here, unlike the plain stochastic's separate lo/hi bands).
+    use_rsi_stoch_signal: bool = False
     # False drops the price-confirmation half of the RSI signal (see
     # compute_rsi_stoch_confirmed_signal's docstring for the backtest numbers). Default True
     # keeps the original report's rule intact; only Worker 1's live experiment sets this False.
@@ -1684,7 +1691,12 @@ class StochBot:
             # the retry budget and likely makes an IP-level block look more abusive, not less.
             return
 
-        entry_signal, reversal_signal, candle_ts = self.compute_stoch_signal()
+        if cfg.use_rsi_stoch_signal:
+            entry_signal, candle_ts = compute_rsi_stoch_confirmed_signal(
+                self.candles, require_confirmation=cfg.rsi_paper_require_confirmation)
+            reversal_signal = entry_signal
+        else:
+            entry_signal, reversal_signal, candle_ts = self.compute_stoch_signal()
         now_open = self.candles[-1]["o"] if self.candles else None
         if candle_ts is None or now_open is None:
             return
