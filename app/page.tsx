@@ -1531,6 +1531,29 @@ function CompactStochBtcPanel({
                 </span>
               )}
             </div>
+            {side && avgEntry != null && currentPrice != null && (() => {
+              // Progress toward TP -- position_tp_pct is per-position (trend leg vs fade leg
+              // can differ), falls back to the bot's default fade tp_pct like the backend does.
+              const tpPct = state?.position_tp_pct ?? 0.10;
+              const gainPct = side === "long"
+                ? (currentPrice - avgEntry) / avgEntry * 100
+                : (avgEntry - currentPrice) / avgEntry * 100;
+              const progress = Math.max(0, Math.min(100, (gainPct / tpPct) * 100));
+              return (
+                <div className="mt-1.5">
+                  <div className="flex items-center justify-between text-[9px] text-gray-500 tabular-nums">
+                    <span className={gainPct >= 0 ? "text-green-400" : "text-red-400"}>
+                      {gainPct >= 0 ? "+" : ""}{gainPct.toFixed(3)}%
+                    </span>
+                    <span>TP {tpPct.toFixed(2)}%</span>
+                  </div>
+                  <div className="w-full h-1 bg-gray-700 rounded-full overflow-hidden mt-0.5">
+                    <div className={`h-full rounded-full ${gainPct >= 0 ? "bg-green-400" : "bg-red-400"}`}
+                         style={{ width: `${gainPct >= 0 ? progress : 0}%` }} />
+                  </div>
+                </div>
+              );
+            })()}
           </div>
         );
         const erPill = erValue != null && (
