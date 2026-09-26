@@ -1375,14 +1375,13 @@ function currentSessionStart(nowUtc: Date): Date {
 
 function CompactStochBtcPanel({
   title, subtitle, table, state, trades, currentPrice, loading, onToggled, erValue, runs, cooldownMin,
-  showSelfLock, stats, tradingHoursUtc, combineEquityWinRate, rsiPaperStats, tightTpPaperStats,
+  showSelfLock, stats, tradingHoursUtc, combineEquityWinRate, rsiPaperStats,
 }: {
   title: string; subtitle: string; table: string; state: any; trades: any[];
   currentPrice: number | null; loading: boolean; onToggled: () => void;
   erValue?: number | null; runs?: any[]; cooldownMin?: number; showSelfLock?: boolean;
   stats?: { total: number; wins: number }; tradingHoursUtc?: number[];
   combineEquityWinRate?: boolean; rsiPaperStats?: { total: number; wins: number; pnlPct: number };
-  tightTpPaperStats?: { total: number; wins: number; pnlPct: number };
 }) {
   const [toggling, setToggling] = useState(false);
   const [nowTick, setNowTick] = useState(() => Date.now());
@@ -1701,9 +1700,6 @@ function CompactStochBtcPanel({
         const rsiPaperPill = paperTestPill(
           "RSI Paper Test", state?.rsi_paper_side ?? null, rsiPaperStats,
           "Confirmed Stochastic RSI, paper-only shadow -- never touches real money");
-        const tightTpPaperPill = paperTestPill(
-          "Tight TP Paper Test", state?.tight_sim_side ?? null, tightTpPaperStats,
-          "Same self-lock mechanism at TP 0.05% / SL 0.05% instead of 0.10%/0.11%, paper-only shadow -- never touches real money");
 
         if (combineEquityWinRate) {
           // Fixed 2x2: [Equity+WinRate, Self-Lock] / [Position, Trading Hours]
@@ -1727,7 +1723,6 @@ function CompactStochBtcPanel({
             {tradingHoursPill}
             {selfLockPill}
             {rsiPaperPill}
-            {tightTpPaperPill}
           </div>
         );
       })()}
@@ -1930,7 +1925,6 @@ export default function Dashboard() {
   const [initialBtcStats, setInitialBtcStats] = useState({ total: 0, wins: 0 });
   const [optimalBtcStats, setOptimalBtcStats] = useState({ total: 0, wins: 0 });
   const [rsiPaperStats, setRsiPaperStats] = useState({ total: 0, wins: 0, pnlPct: 0 });
-  const [tightTpPaperStats, setTightTpPaperStats] = useState({ total: 0, wins: 0, pnlPct: 0 });
 
   async function load() {
     const [
@@ -1964,9 +1958,6 @@ export default function Dashboard() {
       { count: rsiPaperTotal },
       { count: rsiPaperWins },
       { data: rsiPaperPnlRows },
-      { count: tightTpTotal },
-      { count: tightTpWins },
-      { data: tightTpPnlRows },
     ] = await Promise.all([
       getSupabase().from("surfer_state").select("*").eq("id", 1).single(),
       getSupabase().from("surfer_trades").select("*").order("exit_time", { ascending: false }).limit(5000),
@@ -2005,10 +1996,6 @@ export default function Dashboard() {
       getSupabase().from("lighter_btc_rsi_paper_trades").select("id", { count: "exact", head: true }).eq("worker_id", "worker1"),
       getSupabase().from("lighter_btc_rsi_paper_trades").select("id", { count: "exact", head: true }).eq("worker_id", "worker1").gt("pnl_pct", 0),
       getSupabase().from("lighter_btc_rsi_paper_trades").select("pnl_pct").eq("worker_id", "worker1"),
-      // Tight-TP self-lock paper test (Worker 3 shadow, 2026-09-26) -- same pattern.
-      getSupabase().from("lighter_btc_tight_tp_paper_trades").select("id", { count: "exact", head: true }).eq("worker_id", "worker3"),
-      getSupabase().from("lighter_btc_tight_tp_paper_trades").select("id", { count: "exact", head: true }).eq("worker_id", "worker3").gt("pnl_pct", 0),
-      getSupabase().from("lighter_btc_tight_tp_paper_trades").select("pnl_pct").eq("worker_id", "worker3"),
     ]);
     setSurferState(surferSt ?? null);
     setSurferTrades(surferTr ?? []);
@@ -2038,11 +2025,6 @@ export default function Dashboard() {
       total: rsiPaperTotal ?? 0,
       wins: rsiPaperWins ?? 0,
       pnlPct: (rsiPaperPnlRows ?? []).reduce((s: number, r: any) => s + (r.pnl_pct ?? 0), 0),
-    });
-    setTightTpPaperStats({
-      total: tightTpTotal ?? 0,
-      wins: tightTpWins ?? 0,
-      pnlPct: (tightTpPnlRows ?? []).reduce((s: number, r: any) => s + (r.pnl_pct ?? 0), 0),
     });
     fetch("https://mainnet.zklighter.elliot.ai/api/v1/orderBookOrders?market_id=1&limit=1")
       .then((r) => r.json())
@@ -2211,13 +2193,10 @@ export default function Dashboard() {
     const ch6 = sb.channel("lighter-btc-rsi-paper")
       .on("postgres_changes", { event: "INSERT", schema: "public", table: "lighter_btc_rsi_paper_trades" }, debouncedLoad)
       .subscribe();
-    const ch7 = sb.channel("lighter-btc-tight-tp-paper")
-      .on("postgres_changes", { event: "INSERT", schema: "public", table: "lighter_btc_tight_tp_paper_trades" }, debouncedLoad)
-      .subscribe();
     return () => {
       if (debounceTimer) clearTimeout(debounceTimer);
       sb.removeChannel(ch1); sb.removeChannel(ch2); sb.removeChannel(ch3); sb.removeChannel(ch4); sb.removeChannel(ch5);
-      sb.removeChannel(ch6); sb.removeChannel(ch7);
+      sb.removeChannel(ch6);
     };
   }, []);
 
@@ -2266,7 +2245,6 @@ export default function Dashboard() {
             runs={dcaBtcRuns}
             showSelfLock
             stats={dcaBtcStats}
-            tightTpPaperStats={tightTpPaperStats}
           />
         </div>
 
