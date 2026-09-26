@@ -57,6 +57,15 @@ schema_has_self_lock=True (migrated 2026-09-24) persists the lock state and pape
 position across a restart, for the same reason every other gate on this table has needed it --
 Render redeploys every service on any push, and an active lock or in-progress paper position
 shouldn't silently reset.
+
+2026-09-26: tight_tp_paper_test_enabled=True -- a second, fully independent self-lock strategy
+running entirely on paper alongside the real one above, at TP 0.05%/SL 0.05% instead of
+0.10%/0.11%. Built after the user noticed real TPs almost never hit at 0.10% (confirmed on
+Worker 1's real data the same day: 2 literal TPs out of 330 trades in 12h) and wanted to check
+whether a tighter, symmetric band captures more of what's actually available. Never touches
+real trading in any way -- see compute_rsi_stoch_confirmed_signal's sibling,
+_update_tight_tp_paper_shadow, in stoch_bot_core.py. Migration:
+lighter_stoch_dca_btc_tight_tp_paper_test.sql.
 """
 from stoch_bot_core import BotConfig, run_bot
 
@@ -76,6 +85,10 @@ CONFIG = BotConfig(
     schema_has_self_lock=True,
     self_lock_reversal_counts_as_win=True,
     schema_has_position_bands=True,
+    tight_tp_paper_test_enabled=True,
+    schema_has_tight_tp_paper_test=True,  # requires lighter_stoch_dca_btc_tight_tp_paper_test.sql first
+    tight_tp_pct=0.05,
+    tight_sl_pct=0.05,
     # Price-tick logging: backup writer. Takes over the moment Worker 2 goes quiet.
     tick_log_defers_to=["worker2"],
 )

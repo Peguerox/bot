@@ -241,6 +241,26 @@ class BotConfig:
     # compute_rsi_stoch_confirmed_signal's docstring for the backtest numbers). Default True
     # keeps the original report's rule intact; only Worker 1's live experiment sets this False.
     rsi_paper_require_confirmation: bool = True
+    # Tight-TP self-lock paper test (2026-09-26, Worker 3): a full second, independent
+    # self-lock strategy running the SAME plain stochastic signal + blanking period as this
+    # bot's real trading, but with its own (tighter) TP/SL and entirely on paper -- built after
+    # the user's suspicion that tp_pct=0.10 rarely gets hit (confirmed on Worker 1's real data
+    # the same day: 2 literal TPs out of 330 trades in 12h). Two layers, both simulated, to
+    # faithfully mirror what deploying this for real would look like:
+    #   1. An inner shadow (tight_paper_*) that always trades the signal continuously, purely
+    #      to decide lock/unlock -- 2 consecutive wins (TP, or a winning reversal if
+    #      self_lock_reversal_counts_as_win) unlock; a loss locks and resets the counter. Same
+    #      rule as the real self-lock, just running at the tight TP/SL instead of cfg.tp_pct/
+    #      sl_pct.
+    #   2. An outer simulated position (tight_sim_*) that only "enters" while the inner shadow
+    #      says unlocked -- this is what actually gets logged to
+    #      lighter_btc_tight_tp_paper_trades as a trade, standing in for what a real order
+    #      would have done. Never places a real order, never touches real_trading_locked or any
+    #      other real-trading state.
+    tight_tp_paper_test_enabled: bool = False
+    schema_has_tight_tp_paper_test: bool = False
+    tight_tp_pct: float = 0.05
+    tight_sl_pct: float = 0.05
     market_index: int = 1
     price_decimals: int = 1
     size_decimals: int = 5
@@ -513,6 +533,16 @@ class StochBot:
         self.rsi_paper_entry = None
         self.rsi_paper_entry_ms = None
         self._rsi_paper_loaded = False
+        # Tight-TP self-lock paper test (also fully independent -- two layers, see BotConfig)
+        self.tight_paper_side = None
+        self.tight_paper_entry = None
+        self.tight_paper_entry_ms = None
+        self.tight_paper_consecutive_tps = 0
+        self.tight_real_locked = False
+        self.tight_sim_side = None
+        self.tight_sim_entry = None
+        self.tight_sim_entry_ms = None
+        self._tight_loaded = False
 
     # ── Supabase (aiohttp: async, and actually cancellable) ─────────────────────────────────
     async def sb(self, method, path, body=None, extra_headers=None):
@@ -1470,6 +1500,135 @@ class StochBot:
                 "rsi_paper_entry_time": self.rsi_paper_entry_ms,
             })
 
+    async def _load_tight_tp_paper_state(self, state):
+        if self._tight_loaded:
+            return
+        self._tight_loaded = True
+        if self.cfg.schema_has_tight_tp_paper_test:
+            self.tight_paper_side = state.get("tight_paper_side")
+            self.tight_paper_entry = state.get("tight_paper_entry_price")
+            self.tight_paper_entry_ms = state.get("tight_paper_entry_time")
+            self.tight_paper_consecutive_tps = state.get("tight_paper_consecutive_tps") or 0
+            self.tight_real_locked = bool(state.get("tight_real_locked"))
+            self.tight_sim_side = state.get("tight_sim_side")
+            self.tight_sim_entry = state.get("tight_sim_entry_price")
+            self.tight_sim_entry_ms = state.get("tight_sim_entry_time")
+
+    def _tight_tp_check(self, side, entry, check_price):
+        """Shared TP/SL check at the tight TP/SL, used by both layers below."""
+        cfg = self.cfg
+        if side == "long":
+            tp = entry * (1 + cfg.tight_tp_pct / 100); sl = entry * (1 - cfg.tight_sl_pct / 100)
+            hit_sl = check_price <= sl; hit_tp = check_price >= tp
+        else:
+            tp = entry * (1 - cfg.tight_tp_pct / 100); sl = entry * (1 + cfg.tight_sl_pct / 100)
+            hit_sl = check_price >= sl; hit_tp = check_price <= tp
+        return "SL" if hit_sl else ("TP" if hit_tp else None)
+
+    async def _update_tight_tp_paper_shadow(self, state, entry_signal, reversal_signal,
+                                             best_bid, best_ask, now_ms):
+        """Two fully independent paper layers at cfg.tight_tp_pct/tight_sl_pct instead of the
+        real bot's tp_pct/sl_pct -- see BotConfig for why. Never places a real order, never
+        touches real_trading_locked or any other real-trading state."""
+        cfg = self.cfg
+        await self._load_tight_tp_paper_state(state)
+        patch = {}
+
+        # ── Layer 1: inner shadow, always trades, decides lock/unlock only ──────────────────
+        if self.tight_paper_side is None:
+            if entry_signal is not None:
+                self.tight_paper_side = entry_signal
+                self.tight_paper_entry = best_ask if entry_signal == "long" else best_bid
+                self.tight_paper_entry_ms = now_ms
+        else:
+            side, entry = self.tight_paper_side, self.tight_paper_entry
+            check_price = best_bid if side == "long" else best_ask
+            reason = self._tight_tp_check(side, entry, check_price)
+            reversal_ready = reversal_signal is not None and reversal_signal != side
+            if reversal_ready and cfg.reversal_guard_seconds:
+                age_s = (now_ms - self.tight_paper_entry_ms) / 1000 if self.tight_paper_entry_ms is not None else None
+                reversal_ready = age_s is not None and age_s >= cfg.reversal_guard_seconds
+
+            if reason is not None or reversal_ready:
+                closed_side = side
+                counts_as_tp = reason == "TP"
+                if not counts_as_tp and reason is None and cfg.self_lock_reversal_counts_as_win:
+                    pnl_pct = ((check_price - entry) / entry * 100 if closed_side == "long"
+                               else (entry - check_price) / entry * 100)
+                    counts_as_tp = pnl_pct > 0
+
+                if counts_as_tp:
+                    self.tight_paper_consecutive_tps += 1
+                    if self.tight_paper_consecutive_tps >= 2:
+                        self.tight_paper_consecutive_tps = 0
+                        self.tight_real_locked = False
+                elif reason == "SL":
+                    self.tight_paper_consecutive_tps = 0
+                    self.tight_real_locked = True
+
+                # Reopen leg deliberately ignores the blanking-guard check above (matches
+                # _update_paper_shadow): the guard only delays an EXIT while already
+                # positioned, it was never meant to also delay re-entering once already flat.
+                if reversal_signal is not None and reversal_signal != closed_side:
+                    self.tight_paper_side = reversal_signal
+                    self.tight_paper_entry = best_ask if reversal_signal == "long" else best_bid
+                    self.tight_paper_entry_ms = now_ms
+                else:
+                    self.tight_paper_side = None
+                    self.tight_paper_entry = None
+                    self.tight_paper_entry_ms = None
+
+        patch.update({
+            "tight_paper_side": self.tight_paper_side,
+            "tight_paper_entry_price": self.tight_paper_entry,
+            "tight_paper_entry_time": self.tight_paper_entry_ms,
+            "tight_paper_consecutive_tps": self.tight_paper_consecutive_tps,
+            "tight_real_locked": self.tight_real_locked,
+        })
+
+        # ── Layer 2: outer simulated position, only trades while layer 1 says unlocked ──────
+        if self.tight_sim_side is None:
+            if not self.tight_real_locked and entry_signal is not None:
+                self.tight_sim_side = entry_signal
+                self.tight_sim_entry = best_ask if entry_signal == "long" else best_bid
+                self.tight_sim_entry_ms = now_ms
+        else:
+            side, entry = self.tight_sim_side, self.tight_sim_entry
+            check_price = best_bid if side == "long" else best_ask
+            reason = self._tight_tp_check(side, entry, check_price)
+            reversal_ready = reversal_signal is not None and reversal_signal != side
+            if reversal_ready and cfg.reversal_guard_seconds:
+                age_s = (now_ms - self.tight_sim_entry_ms) / 1000 if self.tight_sim_entry_ms is not None else None
+                reversal_ready = age_s is not None and age_s >= cfg.reversal_guard_seconds
+
+            if reason is not None or reversal_ready:
+                pnl_pct = ((check_price - entry) / entry * 100 if side == "long"
+                           else (entry - check_price) / entry * 100)
+                await self.sb("POST", "lighter_btc_tight_tp_paper_trades", {
+                    "worker_id": cfg.worker_id, "side": side, "entry_price": entry,
+                    "exit_price": check_price, "pnl_pct": pnl_pct,
+                    "reason": reason or "REV", "opened_at": ms_to_iso(self.tight_sim_entry_ms),
+                })
+                closed_side = side
+                reopen_wanted = reversal_signal is not None and reversal_signal != closed_side
+                if reopen_wanted and not self.tight_real_locked:
+                    self.tight_sim_side = reversal_signal
+                    self.tight_sim_entry = best_ask if reversal_signal == "long" else best_bid
+                    self.tight_sim_entry_ms = now_ms
+                else:
+                    self.tight_sim_side = None
+                    self.tight_sim_entry = None
+                    self.tight_sim_entry_ms = None
+
+        patch.update({
+            "tight_sim_side": self.tight_sim_side,
+            "tight_sim_entry_price": self.tight_sim_entry,
+            "tight_sim_entry_time": self.tight_sim_entry_ms,
+        })
+
+        if cfg.schema_has_tight_tp_paper_test:
+            await self.update_state(patch)
+
     # ── One decision cycle ──────────────────────────────────────────────────────────────────
     async def tick(self):
         cfg = self.cfg
@@ -1638,6 +1797,14 @@ class StochBot:
                 await self._update_rsi_paper_shadow(state, best_bid, best_ask, self.now_ms())
             except Exception as e:
                 await self.log_run("rsi_paper_shadow_error", {"error": str(e)[:300]})
+
+        if cfg.tight_tp_paper_test_enabled:
+            # Same isolation guarantee as the RSI shadow above.
+            try:
+                await self._update_tight_tp_paper_shadow(
+                    state, paper_entry_signal, paper_reversal_signal, best_bid, best_ask, self.now_ms())
+            except Exception as e:
+                await self.log_run("tight_tp_paper_shadow_error", {"error": str(e)[:300]})
 
         if cfg.self_lock_enabled:
             await self._update_paper_shadow(state, paper_entry_signal, paper_reversal_signal,
