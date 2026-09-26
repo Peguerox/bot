@@ -1401,6 +1401,9 @@ function CompactStochBtcPanel({
   const unrealizedUsd = side && avgEntry && totalQty && currentPrice
     ? (side === "long" ? (currentPrice - avgEntry) : (avgEntry - currentPrice)) * totalQty
     : null;
+  const unrealizedPct = side && avgEntry && currentPrice
+    ? (side === "long" ? (currentPrice - avgEntry) / avgEntry : (avgEntry - currentPrice) / avgEntry) * 100
+    : null;
 
   const closedTrades = trades.filter((t) => t.pnl_usd != null);
   // True lifetime count when available (stats), not the capped-at-200 fetch used for the
@@ -1527,7 +1530,7 @@ function CompactStochBtcPanel({
               )}
               {unrealizedUsd != null && (
                 <span className={`text-[10px] font-normal ${unrealizedUsd >= 0 ? "text-green-400" : "text-red-400"}`}>
-                  ({unrealizedUsd >= 0 ? "+" : ""}${unrealizedUsd.toFixed(2)})
+                  ({unrealizedUsd >= 0 ? "+" : ""}${unrealizedUsd.toFixed(2)}{unrealizedPct != null ? ` / ${unrealizedPct >= 0 ? "+" : ""}${unrealizedPct.toFixed(3)}%` : ""})
                 </span>
               )}
             </div>
