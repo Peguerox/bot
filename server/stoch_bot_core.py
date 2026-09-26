@@ -43,7 +43,7 @@ import time
 import json as jsonlib
 from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
-from typing import Optional
+from typing import Optional, Union
 
 import aiohttp
 import lighter
@@ -212,19 +212,15 @@ class BotConfig:
     # needs no persistence/migration and can't be wiped by a restart. Built from 908 real
     # Worker 2 trades bucketed by UTC close-hour (2026-09-22 to 2026-09-24): these are every
     # hour where that real data came out net positive.
-    trading_hours_utc: Optional[list] = None
-    # Day-of-week override (2026-09-26): trading_hours_utc alone has no concept of WHICH day it
-    # is -- the same UTC-hour rule applies every day, so it can't express "close this hour only
-    # on Saturdays" without also closing it on every weekday. This adds a second, optional layer
-    # on top: {weekday: [utc_hours]} where weekday follows Python's datetime.weekday()
-    # convention (Monday=0 ... Sunday=6). An hour listed here is ADDITIONALLY closed on that
-    # weekday, on top of whatever trading_hours_utc already allows -- it only ever closes hours,
-    # never opens one trading_hours_utc would have blocked. Checked against now_utc.weekday(),
-    # so watch the UTC/ET day-boundary crossing when picking values: an ET evening event can
-    # land on the NEXT day in UTC (e.g. Sunday 9pm ET is already Monday 01:00 UTC). None/empty
-    # (the default) disables this entirely -- built but intentionally unpopulated for every
-    # worker until specific hours are decided.
-    extra_closed_hours_by_weekday: Optional[dict] = None
+    #
+    # Also accepts a dict instead of a list (2026-09-26), for when the open hours need to
+    # differ by day -- a flat list has no concept of which day it is, so it can't express
+    # "close this hour only on Saturdays" without also closing it every other day. Dict form:
+    # {weekday: [utc_hours]}, weekday per Python's datetime.weekday() (Monday=0 ... Sunday=6).
+    # Any weekday not present in the dict has no open hours at all that day. Watch the UTC/ET
+    # day-boundary crossing when picking values: an ET evening event can land on the NEXT day
+    # in UTC (e.g. Sunday 9pm ET is already Monday 01:00 UTC).
+    trading_hours_utc: Optional[Union[list, dict]] = None
     # Hour-open confirmation (2026-09-25, prepared alongside the Worker 2 combined-strategy
     # draft -- only meaningful with both trading_hours_utc and self_lock_enabled set). "Don't
     # walk into a bloodbath": the instant a scheduled hour opens (closed->open transition,
@@ -1071,21 +1067,22 @@ class StochBot:
         }
 
     def _apply_trading_hours_gate(self, entry_signal, now_utc=None):
-        """Blocks new entries outside cfg.trading_hours_utc (a set of allowed UTC hours,
-        0-23). Stateless -- just reads the wall-clock hour, no persistence needed. None
-        (the default) disables this entirely and returns entry_signal unchanged.
+        """Blocks new entries outside cfg.trading_hours_utc. Stateless -- just reads the
+        wall-clock hour (and, for the dict form, weekday), no persistence needed. None (the
+        default) disables this entirely and returns entry_signal unchanged.
 
-        cfg.extra_closed_hours_by_weekday layers a day-specific override on top: even an hour
-        trading_hours_utc allows can be additionally closed on one particular weekday. Checked
-        after the base schedule so it can only narrow, never widen, what's open."""
+        trading_hours_utc is either a flat list of allowed UTC hours (same every day), or a
+        {weekday: [utc_hours]} dict for when open hours need to differ by day -- weekday
+        follows Python's datetime.weekday() (Monday=0 ... Sunday=6); a weekday missing from the
+        dict has no open hours that day."""
+        if self.cfg.trading_hours_utc is None:
+            return entry_signal
         now_utc = now_utc or datetime.now(timezone.utc)
-        if self.cfg.trading_hours_utc is not None and now_utc.hour not in self.cfg.trading_hours_utc:
-            return None
-        if self.cfg.extra_closed_hours_by_weekday:
-            closed_today = self.cfg.extra_closed_hours_by_weekday.get(now_utc.weekday(), [])
-            if now_utc.hour in closed_today:
-                return None
-        return entry_signal
+        schedule = self.cfg.trading_hours_utc
+        open_hours = schedule.get(now_utc.weekday(), []) if isinstance(schedule, dict) else schedule
+        if now_utc.hour in open_hours:
+            return entry_signal
+        return None
 
     async def _check_hour_open_confirmation(self, has_open_position=False, now_utc=None):
         """Detects a closed->open transition on cfg.trading_hours_utc and arms

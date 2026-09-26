@@ -75,7 +75,24 @@ CONFIG = BotConfig(
     entry_lo=25, entry_hi=75,
     reversal_lo=25, reversal_hi=75,
     reversal_guard_seconds=120,  # the "blanking period"
-    trading_hours_utc=[0, 1, 4, 9, 10, 12, 15, 16, 17, 18, 19, 20, 21],  # Worker 1's current schedule
+    # 2026-09-26: switched from a flat list to a per-weekday dict (Python datetime.weekday(),
+    # Monday=0...Sunday=6) so Saturday can drop hour 9 UTC (5am ET) without touching any other
+    # day. That hour was today's single worst 5-min window by both volatility (0.240%, the
+    # highest of the day) and pnl (-$0.41 in 15 minutes) -- it lines up with CME crypto futures'
+    # scheduled Saturday reopen after their 3-5am ET maintenance break, independently confirmed
+    # against a second estimate (0.241% for the same window). Every other day keeps the
+    # unchanged base schedule. No Sunday-specific change yet -- the candidate Sunday risk
+    # windows (US equity-futures reopen 6pm ET, Hong Kong's Monday session starting 9:30pm ET)
+    # are untested theory with zero real data behind them so far.
+    trading_hours_utc={
+        0: [0, 1, 4, 9, 10, 12, 15, 16, 17, 18, 19, 20, 21],   # Monday
+        1: [0, 1, 4, 9, 10, 12, 15, 16, 17, 18, 19, 20, 21],   # Tuesday
+        2: [0, 1, 4, 9, 10, 12, 15, 16, 17, 18, 19, 20, 21],   # Wednesday
+        3: [0, 1, 4, 9, 10, 12, 15, 16, 17, 18, 19, 20, 21],   # Thursday
+        4: [0, 1, 4, 9, 10, 12, 15, 16, 17, 18, 19, 20, 21],   # Friday
+        5: [0, 1, 4, 10, 12, 15, 16, 17, 18, 19, 20, 21],      # Saturday -- hour 9 (5am ET) removed
+        6: [0, 1, 4, 9, 10, 12, 15, 16, 17, 18, 19, 20, 21],   # Sunday
+    },
     self_lock_enabled=True,
     schema_has_self_lock=True,  # requires the migration above to be run first
     hour_open_requires_paper_tp=True,  # 1 paper win required at the start of every open window

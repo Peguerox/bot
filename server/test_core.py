@@ -1968,50 +1968,30 @@ async def t_trading_hours_gate_none_signal_stays_none():
     check("still None", sig is None, sig)
 
 
-async def t_extra_closed_hours_default_disabled():
-    print("\n[extra closed hours: unset (default) never touches the signal]")
+async def t_trading_hours_dict_form_uses_that_days_own_list():
+    print("\n[trading hours gate: dict form looks up the current weekday's own open-hours list]")
     ex = FakeExchange()
-    bot = make_bot(ex, trading_hours_utc=[9, 10])
-    now_utc = _dt.datetime(2026, 9, 26, 9, 0, tzinfo=_dt.timezone.utc)  # Saturday, hour open
-    sig = bot._apply_trading_hours_gate("long", now_utc=now_utc)
-    check("signal passes through unchanged", sig == "long", sig)
+    # Saturday=5 closes hour 9; every other listed day keeps it open.
+    schedule = {0: [9, 10], 1: [9, 10], 2: [9, 10], 3: [9, 10], 4: [9, 10], 5: [10], 6: [9, 10]}
+    bot = make_bot(ex, trading_hours_utc=schedule)
 
-
-async def t_extra_closed_hours_blocks_only_the_named_weekday():
-    print("\n[extra closed hours: closes an otherwise-open hour, but only on the named weekday]")
-    ex = FakeExchange()
-    bot = make_bot(ex, trading_hours_utc=[9, 10],
-                   extra_closed_hours_by_weekday={5: [9]})  # Saturday=5, close hour 9 UTC
     saturday_9am = _dt.datetime(2026, 9, 26, 9, 0, tzinfo=_dt.timezone.utc)  # a Saturday
     sig = bot._apply_trading_hours_gate("long", now_utc=saturday_9am)
-    check("blocked on the named weekday", sig is None, sig)
+    check("blocked on Saturday specifically", sig is None, sig)
 
     friday_9am = _dt.datetime(2026, 9, 25, 9, 0, tzinfo=_dt.timezone.utc)  # a Friday, same hour
     sig2 = bot._apply_trading_hours_gate("long", now_utc=friday_9am)
     check("same hour still open on a different weekday", sig2 == "long", sig2)
 
 
-async def t_extra_closed_hours_only_narrows_never_widens():
-    print("\n[extra closed hours: cannot reopen an hour trading_hours_utc already blocks]")
+async def t_trading_hours_dict_form_missing_weekday_is_fully_closed():
+    print("\n[trading hours gate: dict form -- a weekday absent from the dict has no open hours]")
     ex = FakeExchange()
-    bot = make_bot(ex, trading_hours_utc=[9],
-                   extra_closed_hours_by_weekday={5: [10]})  # unrelated hour listed here
-    now_utc = _dt.datetime(2026, 9, 26, 14, 0, tzinfo=_dt.timezone.utc)  # 14:00 not in trading_hours_utc
-    sig = bot._apply_trading_hours_gate("short", now_utc=now_utc)
-    check("still blocked by the base schedule", sig is None, sig)
-
-
-async def t_extra_closed_hours_works_without_a_base_schedule():
-    print("\n[extra closed hours: applies even with trading_hours_utc=None (no base schedule)]")
-    ex = FakeExchange()
-    bot = make_bot(ex, extra_closed_hours_by_weekday={5: [9]})
-    saturday_9am = _dt.datetime(2026, 9, 26, 9, 0, tzinfo=_dt.timezone.utc)
+    schedule = {0: [9, 10]}  # only Monday listed
+    bot = make_bot(ex, trading_hours_utc=schedule)
+    saturday_9am = _dt.datetime(2026, 9, 26, 9, 0, tzinfo=_dt.timezone.utc)  # Saturday, not in dict
     sig = bot._apply_trading_hours_gate("long", now_utc=saturday_9am)
-    check("blocked despite no base schedule", sig is None, sig)
-
-    saturday_10am = _dt.datetime(2026, 9, 26, 10, 0, tzinfo=_dt.timezone.utc)
-    sig2 = bot._apply_trading_hours_gate("long", now_utc=saturday_10am)
-    check("every other hour still passes through", sig2 == "long", sig2)
+    check("blocked -- Saturday has no entry at all", sig is None, sig)
 
 
 async def t_hour_open_confirmation_disabled_by_default():
@@ -2235,10 +2215,8 @@ async def main():
               t_trading_hours_gate_blocks_outside_open_hours,
               t_trading_hours_gate_passes_inside_open_hours,
               t_trading_hours_gate_none_signal_stays_none,
-              t_extra_closed_hours_default_disabled,
-              t_extra_closed_hours_blocks_only_the_named_weekday,
-              t_extra_closed_hours_only_narrows_never_widens,
-              t_extra_closed_hours_works_without_a_base_schedule,
+              t_trading_hours_dict_form_uses_that_days_own_list,
+              t_trading_hours_dict_form_missing_weekday_is_fully_closed,
               t_hour_open_confirmation_disabled_by_default,
               t_hour_open_confirmation_never_arms_without_self_lock,
               t_hour_open_confirmation_skips_arming_with_an_open_real_position,
