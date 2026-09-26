@@ -1665,12 +1665,17 @@ function CompactStochBtcPanel({
           </div>
         );
 
+        const rsiPaperSide = state?.rsi_paper_side ?? null;
         const rsiPaperPill = rsiPaperStats && (
           <div className="bg-gray-800/60 rounded-lg p-2" title="Confirmed Stochastic RSI, paper-only shadow -- never touches real money">
             <p className="text-gray-500 text-[10px] uppercase">RSI Paper Test</p>
             <div className="flex items-center gap-1.5 flex-wrap">
-              <span className="text-[9px] font-bold px-1.5 py-0.5 rounded uppercase bg-blue-500/20 text-blue-400">
-                running
+              <span className={`text-[9px] font-bold px-1.5 py-0.5 rounded uppercase ${
+                rsiPaperSide === "long" ? "bg-green-500/20 text-green-400"
+                : rsiPaperSide === "short" ? "bg-amber-500/20 text-amber-400"
+                : "bg-gray-700/40 text-gray-500"
+              }`}>
+                {rsiPaperSide ? rsiPaperSide.toUpperCase() : "FLAT"}
               </span>
               <span className={`text-[10px] font-bold tabular-nums ${
                 rsiPaperStats.pnlPct > 0 ? "text-green-400" : rsiPaperStats.pnlPct < 0 ? "text-red-400" : "text-gray-400"
