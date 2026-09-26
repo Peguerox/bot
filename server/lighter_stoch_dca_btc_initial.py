@@ -35,6 +35,17 @@ human, subtract 4h for EDT (Sept 2026) to go from the UTC list to the ET hours a
 schema_has_position_bands stays True (unused while trend_tp_pct/trend_sl_pct are unset, but
 harmless to leave on -- clears a leftover trend-band value on close instead of leaving it
 stuck, and the table already has the columns from the earlier regime-switch era).
+
+2026-09-26: rsi_paper_test_enabled=True -- runs "Confirmed Stochastic RSI" (Wilder RSI5,
+Stochastic RSI over 14 bars, 20/80 + price confirmation) as a pure paper shadow alongside real
+trading, per an external backtest report that found it beat plain stochastic on the one
+Saturday tested (+0.51% vs -0.40%) but lost badly on Friday and the full file (-1.96%/-2.66%)
+-- the report's own conclusion was "supports another quiet-market comparison, not an all-hours
+replacement," fit and tested on the same historical file. This shadow exists to get a real
+forward comparison (weekday AND weekend) instead of trusting that single in-sample day. Never
+touches real trading in any way -- see compute_rsi_stoch_confirmed_signal and
+_update_rsi_paper_shadow in stoch_bot_core.py. Migration:
+lighter_btc_initial_rsi_paper_test.sql.
 """
 from stoch_bot_core import BotConfig, run_bot
 
@@ -52,6 +63,8 @@ CONFIG = BotConfig(
     reversal_guard_seconds=120,  # the "blanking period"
     trading_hours_utc=[0, 1, 4, 9, 10, 12, 15, 16, 17, 18, 19, 20, 21],
     schema_has_position_bands=True,
+    rsi_paper_test_enabled=True,
+    schema_has_rsi_paper_test=True,  # requires lighter_btc_initial_rsi_paper_test.sql first
     # Price-tick logging: last resort. Only writes if both Worker 2 and Worker 3 are quiet.
     tick_log_defers_to=["worker2", "worker3"],
 )

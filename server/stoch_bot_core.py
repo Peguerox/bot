@@ -224,6 +224,19 @@ class BotConfig:
     # self-lock cycles. In-memory only, on purpose -- it's supposed to re-arm on every restart,
     # so there is nothing to persist. None/False = disabled (every other bot).
     hour_open_requires_paper_tp: bool = False
+    # RSI paper test (2026-09-26): a second, fully independent shadow strategy -- "Confirmed
+    # Stochastic RSI" (Wilder RSI5, raw Stochastic RSI over the last 14 RSI values, no K/D
+    # smoothing, entry/reversal requires S<20 or S>80 PLUS the latest completed candle closing
+    # in the signal direction vs the previous completed candle) -- run purely on paper
+    # alongside real trading. Never places a real order, never touches real_trading_locked or
+    # any other real-trading gate; only logs simulated fills to lighter_btc_rsi_paper_trades so
+    # weekday vs weekend performance can be compared with real forward data instead of a
+    # backtest on the same historical file. Same TP 0.10%/SL 0.11% as the real bot, no
+    # reversal-guard (the source report used none for this signal). Requires
+    # schema_has_rsi_paper_test (the 3 rsi_paper_* columns on table_state) to persist an
+    # in-flight paper position across restarts.
+    rsi_paper_test_enabled: bool = False
+    schema_has_rsi_paper_test: bool = False
     market_index: int = 1
     price_decimals: int = 1
     size_decimals: int = 5
@@ -327,6 +340,55 @@ def compute_true_range_pct(candles):
         return None
     tr = max(last["h"] - last["l"], abs(last["h"] - prev_close), abs(last["l"] - prev_close))
     return tr / last["c"] * 100
+
+
+def compute_rsi_stoch_confirmed_signal(candles, rsi_period=5, stoch_period=14):
+    """"Confirmed Stochastic RSI" (2026-09-26 paper test): Wilder RSI(rsi_period) on completed
+    1-min closes, then raw Stochastic RSI over the last stoch_period RSI values (no K/D
+    smoothing) -- S = 100*(RSI-min)/(max-min) over that window. Long when S<20 AND the latest
+    completed close is above the previous completed close; short when S>80 AND it closed
+    below. Confirmation applies to both entries and reversals (same signal serves both -- there
+    is no separate reversal threshold in this design, unlike the plain stochastic signal)."""
+    closed = candles[:-1]
+    need = rsi_period + stoch_period + 1  # +1 for the initial seed change dropped by diff()
+    if len(closed) < need:
+        return None, None
+    closes = [c["c"] for c in closed]
+    changes = [closes[i] - closes[i - 1] for i in range(1, len(closes))]
+    if len(changes) < rsi_period + stoch_period:
+        return None, None
+
+    gains = [max(ch, 0.0) for ch in changes]
+    losses = [max(-ch, 0.0) for ch in changes]
+    avg_gain = sum(gains[:rsi_period]) / rsi_period
+    avg_loss = sum(losses[:rsi_period]) / rsi_period
+
+    def rsi_from(avg_gain, avg_loss):
+        if avg_loss == 0:
+            return 100.0
+        return 100 - 100 / (1 + avg_gain / avg_loss)
+
+    rsi_values = [rsi_from(avg_gain, avg_loss)]
+    for i in range(rsi_period, len(changes)):
+        avg_gain = (avg_gain * (rsi_period - 1) + gains[i]) / rsi_period
+        avg_loss = (avg_loss * (rsi_period - 1) + losses[i]) / rsi_period
+        rsi_values.append(rsi_from(avg_gain, avg_loss))
+
+    if len(rsi_values) < stoch_period:
+        return None, None
+    window = rsi_values[-stoch_period:]
+    lo, hi = min(window), max(window)
+    if hi == lo:
+        return None, None
+    s = 100 * (rsi_values[-1] - lo) / (hi - lo)
+
+    prev_close, latest_close = closes[-2], closes[-1]
+    signal = None
+    if s < 20 and latest_close > prev_close:
+        signal = "long"
+    elif s > 80 and latest_close < prev_close:
+        signal = "short"
+    return signal, closed[-1]["t"]
 
 
 # ── Live state cache, fed by the WebSocket ──────────────────────────────────────────────────
@@ -436,6 +498,11 @@ class StochBot:
         # ever needs a single TP, and re-arms on every restart by design).
         self.awaiting_open_confirmation = False
         self._last_hour_open = None
+        # RSI paper test (fully independent shadow -- never reads or writes anything above)
+        self.rsi_paper_side = None
+        self.rsi_paper_entry = None
+        self.rsi_paper_entry_ms = None
+        self._rsi_paper_loaded = False
 
     # ── Supabase (aiohttp: async, and actually cancellable) ─────────────────────────────────
     async def sb(self, method, path, body=None, extra_headers=None):
@@ -1317,6 +1384,81 @@ class StochBot:
         if unlocked_now:
             await self.log_run("real_trading_unlocked", {"via": "two_consecutive_paper_tps"})
 
+    async def _load_rsi_paper_state(self, state):
+        if self._rsi_paper_loaded:
+            return
+        self._rsi_paper_loaded = True
+        if self.cfg.schema_has_rsi_paper_test:
+            self.rsi_paper_side = state.get("rsi_paper_side")
+            self.rsi_paper_entry = state.get("rsi_paper_entry_price")
+            self.rsi_paper_entry_ms = state.get("rsi_paper_entry_time")
+
+    async def _update_rsi_paper_shadow(self, state, best_bid, best_ask, now_ms):
+        """Fully independent paper-only shadow of "Confirmed Stochastic RSI" (see
+        compute_rsi_stoch_confirmed_signal) -- never places a real order, never reads or
+        writes real_trading_locked/awaiting_open_confirmation/any real-trading state. Only
+        purpose is to log simulated trades to lighter_btc_rsi_paper_trades so weekday vs
+        weekend performance can be watched forward, on data the signal was never fit to."""
+        cfg = self.cfg
+        await self._load_rsi_paper_state(state)
+        signal, _ts = compute_rsi_stoch_confirmed_signal(self.candles)
+
+        if self.rsi_paper_side is None:
+            if signal is not None:
+                self.rsi_paper_side = signal
+                self.rsi_paper_entry = best_ask if signal == "long" else best_bid
+                self.rsi_paper_entry_ms = now_ms
+                if cfg.schema_has_rsi_paper_test:
+                    await self.update_state({
+                        "rsi_paper_side": self.rsi_paper_side,
+                        "rsi_paper_entry_price": self.rsi_paper_entry,
+                        "rsi_paper_entry_time": self.rsi_paper_entry_ms,
+                    })
+            return
+
+        side = self.rsi_paper_side
+        entry = self.rsi_paper_entry
+        check_price = best_bid if side == "long" else best_ask
+        if side == "long":
+            tp = entry * (1 + cfg.tp_pct / 100); sl = entry * (1 - cfg.sl_pct / 100)
+            hit_sl = check_price <= sl; hit_tp = check_price >= tp
+        else:
+            tp = entry * (1 - cfg.tp_pct / 100); sl = entry * (1 + cfg.sl_pct / 100)
+            hit_sl = check_price >= sl; hit_tp = check_price <= tp
+        reason = "SL" if hit_sl else ("TP" if hit_tp else None)
+        reversal_ready = signal is not None and signal != side
+
+        if reason is None and not reversal_ready:
+            return
+
+        close_price = check_price
+        pnl_pct = ((close_price - entry) / entry * 100 if side == "long"
+                   else (entry - close_price) / entry * 100)
+        opened_at = ms_to_iso(self.rsi_paper_entry_ms)
+        await self.sb("POST", "lighter_btc_rsi_paper_trades", {
+            "worker_id": cfg.worker_id, "side": side, "entry_price": entry,
+            "exit_price": close_price, "pnl_pct": pnl_pct,
+            "reason": reason or "REV", "opened_at": opened_at,
+        })
+
+        # Same close+reopen shape as the real position: a qualifying opposite signal reopens
+        # immediately, regardless of whether this close was TP/SL or a pure reversal.
+        if reversal_ready:
+            self.rsi_paper_side = signal
+            self.rsi_paper_entry = best_ask if signal == "long" else best_bid
+            self.rsi_paper_entry_ms = now_ms
+        else:
+            self.rsi_paper_side = None
+            self.rsi_paper_entry = None
+            self.rsi_paper_entry_ms = None
+
+        if cfg.schema_has_rsi_paper_test:
+            await self.update_state({
+                "rsi_paper_side": self.rsi_paper_side,
+                "rsi_paper_entry_price": self.rsi_paper_entry,
+                "rsi_paper_entry_time": self.rsi_paper_entry_ms,
+            })
+
     # ── One decision cycle ──────────────────────────────────────────────────────────────────
     async def tick(self):
         cfg = self.cfg
@@ -1476,6 +1618,9 @@ class StochBot:
         best_bid, best_ask = self.live.best_bid_ask()
         if best_bid is None or best_ask is None:
             return
+
+        if cfg.rsi_paper_test_enabled:
+            await self._update_rsi_paper_shadow(state, best_bid, best_ask, self.now_ms())
 
         if cfg.self_lock_enabled:
             await self._update_paper_shadow(state, paper_entry_signal, paper_reversal_signal,

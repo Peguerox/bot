@@ -1369,13 +1369,13 @@ function currentSessionStart(nowUtc: Date): Date {
 
 function CompactStochBtcPanel({
   title, subtitle, table, state, trades, currentPrice, loading, onToggled, erValue, runs, cooldownMin,
-  showSelfLock, stats, tradingHoursUtc, combineEquityWinRate,
+  showSelfLock, stats, tradingHoursUtc, combineEquityWinRate, rsiPaperStats,
 }: {
   title: string; subtitle: string; table: string; state: any; trades: any[];
   currentPrice: number | null; loading: boolean; onToggled: () => void;
   erValue?: number | null; runs?: any[]; cooldownMin?: number; showSelfLock?: boolean;
   stats?: { total: number; wins: number }; tradingHoursUtc?: number[];
-  combineEquityWinRate?: boolean;
+  combineEquityWinRate?: boolean; rsiPaperStats?: { total: number; wins: number; pnlPct: number };
 }) {
   const [toggling, setToggling] = useState(false);
   const [nowTick, setNowTick] = useState(() => Date.now());
@@ -1665,6 +1665,26 @@ function CompactStochBtcPanel({
           </div>
         );
 
+        const rsiPaperPill = rsiPaperStats && (
+          <div className="bg-gray-800/60 rounded-lg p-2" title="Confirmed Stochastic RSI, paper-only shadow -- never touches real money">
+            <p className="text-gray-500 text-[10px] uppercase">RSI Paper Test</p>
+            <div className="flex items-center gap-1.5 flex-wrap">
+              <span className="text-[9px] font-bold px-1.5 py-0.5 rounded uppercase bg-blue-500/20 text-blue-400">
+                running
+              </span>
+              <span className={`text-[10px] font-bold tabular-nums ${
+                rsiPaperStats.pnlPct > 0 ? "text-green-400" : rsiPaperStats.pnlPct < 0 ? "text-red-400" : "text-gray-400"
+              }`}>
+                {rsiPaperStats.pnlPct >= 0 ? "+" : ""}{rsiPaperStats.pnlPct.toFixed(3)}%
+              </span>
+              <span className="text-[10px] text-gray-400 tabular-nums">
+                {rsiPaperStats.total} trades
+                {rsiPaperStats.total > 0 ? ` · ${(rsiPaperStats.wins / rsiPaperStats.total * 100).toFixed(0)}% win` : ""}
+              </span>
+            </div>
+          </div>
+        );
+
         if (combineEquityWinRate) {
           // Fixed 2x2: [Equity+WinRate, Self-Lock] / [Position, Trading Hours]
           return (
@@ -1673,6 +1693,7 @@ function CompactStochBtcPanel({
               {selfLockPill}
               {positionPill}
               {tradingHoursPill}
+              {rsiPaperPill}
             </div>
           );
         }
@@ -1685,6 +1706,7 @@ function CompactStochBtcPanel({
             {breakerPill}
             {tradingHoursPill}
             {selfLockPill}
+            {rsiPaperPill}
           </div>
         );
       })()}
@@ -1886,6 +1908,7 @@ export default function Dashboard() {
   const [dcaBtcStats,     setDcaBtcStats]     = useState({ total: 0, wins: 0 });
   const [initialBtcStats, setInitialBtcStats] = useState({ total: 0, wins: 0 });
   const [optimalBtcStats, setOptimalBtcStats] = useState({ total: 0, wins: 0 });
+  const [rsiPaperStats, setRsiPaperStats] = useState({ total: 0, wins: 0, pnlPct: 0 });
 
   async function load() {
     const [
@@ -1916,6 +1939,9 @@ export default function Dashboard() {
       { count: initialBtcWins },
       { count: optimalBtcTotal },
       { count: optimalBtcWins },
+      { count: rsiPaperTotal },
+      { count: rsiPaperWins },
+      { data: rsiPaperPnlRows },
     ] = await Promise.all([
       getSupabase().from("surfer_state").select("*").eq("id", 1).single(),
       getSupabase().from("surfer_trades").select("*").order("exit_time", { ascending: false }).limit(5000),
@@ -1948,6 +1974,12 @@ export default function Dashboard() {
       getSupabase().from("lighter_btc_initial_trades").select("id", { count: "exact", head: true }).gt("pnl_usd", 0),
       getSupabase().from("lighter_btc_optimal_trades").select("id", { count: "exact", head: true }),
       getSupabase().from("lighter_btc_optimal_trades").select("id", { count: "exact", head: true }).gt("pnl_usd", 0),
+      // RSI paper test (Worker 1 shadow, 2026-09-26) -- separate table, never touches real
+      // money. pnl_pct rows fetched in full (volume is low, a selective signal) to sum
+      // cumulative % client-side; Supabase's query builder has no SUM aggregate.
+      getSupabase().from("lighter_btc_rsi_paper_trades").select("id", { count: "exact", head: true }).eq("worker_id", "worker1"),
+      getSupabase().from("lighter_btc_rsi_paper_trades").select("id", { count: "exact", head: true }).eq("worker_id", "worker1").gt("pnl_pct", 0),
+      getSupabase().from("lighter_btc_rsi_paper_trades").select("pnl_pct").eq("worker_id", "worker1"),
     ]);
     setSurferState(surferSt ?? null);
     setSurferTrades(surferTr ?? []);
@@ -1973,6 +2005,11 @@ export default function Dashboard() {
     setDcaBtcStats({ total: dcaBtcTotal ?? 0, wins: dcaBtcWins ?? 0 });
     setInitialBtcStats({ total: initialBtcTotal ?? 0, wins: initialBtcWins ?? 0 });
     setOptimalBtcStats({ total: optimalBtcTotal ?? 0, wins: optimalBtcWins ?? 0 });
+    setRsiPaperStats({
+      total: rsiPaperTotal ?? 0,
+      wins: rsiPaperWins ?? 0,
+      pnlPct: (rsiPaperPnlRows ?? []).reduce((s: number, r: any) => s + (r.pnl_pct ?? 0), 0),
+    });
     fetch("https://mainnet.zklighter.elliot.ai/api/v1/orderBookOrders?market_id=1&limit=1")
       .then((r) => r.json())
       .then((ob) => {
@@ -2137,9 +2174,13 @@ export default function Dashboard() {
       .on("postgres_changes", { event: "INSERT", schema: "public", table: "lighter_btc_optimal_runs" }, debouncedLoad)
       .on("postgres_changes", { event: "INSERT", schema: "public", table: "lighter_stoch_dca_btc_runs" }, debouncedLoad)
       .subscribe();
+    const ch6 = sb.channel("lighter-btc-rsi-paper")
+      .on("postgres_changes", { event: "INSERT", schema: "public", table: "lighter_btc_rsi_paper_trades" }, debouncedLoad)
+      .subscribe();
     return () => {
       if (debounceTimer) clearTimeout(debounceTimer);
       sb.removeChannel(ch1); sb.removeChannel(ch2); sb.removeChannel(ch3); sb.removeChannel(ch4); sb.removeChannel(ch5);
+      sb.removeChannel(ch6);
     };
   }, []);
 
@@ -2163,6 +2204,7 @@ export default function Dashboard() {
             onToggled={load}
             stats={initialBtcStats}
             tradingHoursUtc={[0, 1, 4, 9, 10, 12, 15, 16, 17, 18, 19, 20, 21]}
+            rsiPaperStats={rsiPaperStats}
           />
           <CompactStochBtcPanel
             title="Worker 2 · Combined"
