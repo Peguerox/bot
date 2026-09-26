@@ -78,6 +78,15 @@ was fit entirely to the OLD plain-stochastic strategy's real trade data (see the
 file) and was never part of what the RSI signal was paper-tested with. Keeping it would have
 made this a new, untested combination rather than the faithful "same strategy that's been
 running" swap the promotion was supposed to be. Worker 1 now trades 24/7, no hour restriction.
+
+2026-09-26, same day: self_lock_enabled=True -- added after the RSI signal hit 3 real SLs in a
+15-minute window (20:39-20:54 UTC), erasing its earlier gains. Same mechanism as Worker 2/3: a
+real SL locks real order placement immediately; a continuous internal paper shadow (running the
+identical RSI-Stoch signal, since paper_entry_signal/paper_reversal_signal are captured from
+whatever entry_signal/reversal_signal ended up being -- RSI here) keeps trading on paper; 2
+consecutive paper wins unlock real trading again. self_lock_reversal_counts_as_win=True to match
+Worker 2/3's current rule (a winning reversal counts the same as a literal TP). Migration:
+lighter_btc_initial_self_lock.sql.
 """
 from stoch_bot_core import BotConfig, run_bot
 
@@ -97,6 +106,9 @@ CONFIG = BotConfig(
     rsi_paper_require_confirmation=False,  # unconfirmed variant -- see docstring above
     rsi_paper_test_enabled=False,  # redundant now that this drives real trading
     schema_has_rsi_paper_test=True,  # keep True: still reads the old rsi_paper_* columns harmlessly
+    self_lock_enabled=True,
+    schema_has_self_lock=True,  # requires lighter_btc_initial_self_lock.sql first
+    self_lock_reversal_counts_as_win=True,
     # Price-tick logging: last resort. Only writes if both Worker 2 and Worker 3 are quiet.
     tick_log_defers_to=["worker2", "worker3"],
 )
