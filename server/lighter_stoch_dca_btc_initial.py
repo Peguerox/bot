@@ -65,15 +65,24 @@ instruction, explicitly to watch it live rather than trust the backtest.
 reversal_guard_seconds dropped to None (the 120s blanking period is gone) -- the RSI paper test
 was never run WITH a blanking guard (the source report used none for this signal), so to keep
 this a faithful "same strategy that's been running" swap rather than a new untested
-combination, the guard comes off too. trading_hours_utc stays, per explicit instruction to hold
-the hourly schedule. rsi_paper_test_enabled is now off -- the shadow is redundant once this IS
-the real signal; the equity/win-rate/position/trading-hours pills now show its real performance
-directly instead. Historical paper data stays in lighter_btc_rsi_paper_trades for reference.
+combination, the guard comes off too. rsi_paper_test_enabled is now off -- the shadow is
+redundant once this IS the real signal; the equity/win-rate/position pills now show its real
+performance directly instead. Historical paper data stays in lighter_btc_rsi_paper_trades for
+reference. Real equity reset 2026-09-26 17:42 UTC to the account's real collateral ($99.88)
+with realized_pnl_usd zeroed, and the dashboard filters trades to that same cutoff -- a clean
+baseline to compare this strategy's real performance against Worker 3, not one inflated by the
+old plain-stochastic strategy's history.
+
+trading_hours_utc REMOVED same day, reversing an earlier instruction to hold it -- the schedule
+was fit entirely to the OLD plain-stochastic strategy's real trade data (see the top of this
+file) and was never part of what the RSI signal was paper-tested with. Keeping it would have
+made this a new, untested combination rather than the faithful "same strategy that's been
+running" swap the promotion was supposed to be. Worker 1 now trades 24/7, no hour restriction.
 """
 from stoch_bot_core import BotConfig, run_bot
 
 CONFIG = BotConfig(
-    name="RSI-STOCH + HOURLY SCHEDULE (worker 1)",
+    name="RSI-STOCH, 24/7 (worker 1)",
     worker_id="worker1",
     table_state="lighter_btc_initial_state",
     table_trades="lighter_btc_initial_trades",
@@ -83,7 +92,6 @@ CONFIG = BotConfig(
     sl_pct=0.11,
     entry_lo=25, entry_hi=75,
     reversal_lo=25, reversal_hi=75,
-    trading_hours_utc=[0, 1, 4, 9, 10, 12, 15, 16, 17, 18, 19, 20, 21],
     schema_has_position_bands=True,
     use_rsi_stoch_signal=True,
     rsi_paper_require_confirmation=False,  # unconfirmed variant -- see docstring above

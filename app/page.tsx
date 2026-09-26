@@ -10,6 +10,12 @@ const SURFER_BUF_UP = 0.0025;
 const SURFER_BUF_DN = 0.0020;
 const SURFER_ARM = 0.18;
 const SURFER_GIVEBACK = 0.15;
+// Worker 1's real strategy swapped from plain stochastic to RSI-Stoch at this moment
+// (2026-09-26) -- equity was reset to real collateral the same instant. Trades before this are
+// the old strategy's history and get filtered out of the dashboard so the win-rate/trade-count
+// shown is a clean comparison against Worker 3, not blended with the old strategy's numbers.
+// Non-destructive: the old rows stay in lighter_btc_initial_trades, just hidden from display.
+const WORKER1_RSI_RESET_AT = "2026-09-26T17:42:17.327325+00:00";
 
 function formatDurationShort(ms: number): string {
   if (ms <= 0) return "0m";
@@ -2225,16 +2231,14 @@ export default function Dashboard() {
         {/* ── Lighter BTC Stochastic5: 3-worker comparison, real money, $100 each */}
         <div className="grid grid-cols-1 sm:grid-cols-3 gap-3">
           <CompactStochBtcPanel
-            title="Worker 1 · RSI-Stoch + Hourly Schedule"
-            subtitle="TP 0.10% / SL 0.11% / Wilder RSI5 + Stochastic RSI over 14 bars, 20/80, no price confirmation / hourly trading-hours schedule -- promoted from paper 2026-09-26"
+            title="Worker 1 · RSI-Stoch, 24/7"
+            subtitle="TP 0.10% / SL 0.11% / Wilder RSI5 + Stochastic RSI over 14 bars, 20/80, no price confirmation, no reversal guard, no hour restriction -- promoted from paper 2026-09-26"
             table="lighter_btc_initial_state"
             state={initialBtcState}
-            trades={initialBtcTrades}
+            trades={initialBtcTrades.filter((t: any) => t.closed_at >= WORKER1_RSI_RESET_AT)}
             currentPrice={ocoBtcPrice}
             loading={loading}
             onToggled={load}
-            stats={initialBtcStats}
-            tradingHoursUtc={[0, 1, 4, 9, 10, 12, 15, 16, 17, 18, 19, 20, 21]}
           />
           <CompactStochBtcPanel
             title="Worker 2 · Combined"
