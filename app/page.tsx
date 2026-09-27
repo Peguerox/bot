@@ -26,7 +26,7 @@ const WORKER1_RSI_RESET_AT = "2026-09-27T15:00:49.777450+00:00";
 const WORKER2_RESET_AT = "2026-09-27T15:00:49.777450+00:00";
 // Worker 3 reset 2026-09-27 ahead of testing the volatility-adaptive window formula + the
 // order-flow entry filter -- clean baseline before that config lands.
-const WORKER3_RESET_AT = "2026-09-27T15:59:18.593220+00:00";
+const WORKER3_RESET_AT = "2026-09-27T17:31:46.755963+00:00";
 
 function formatDurationShort(ms: number): string {
   if (ms <= 0) return "0m";
