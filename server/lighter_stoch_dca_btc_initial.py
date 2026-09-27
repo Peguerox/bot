@@ -111,26 +111,38 @@ to a real SL. Once unrealized profit hits 0.05%, the peak is tracked tick by tic
 it ticks down at all from that peak, the position closes ("PROFIT_LOCK" in the trades table).
 Zero give-back by design -- the user's own words: "very simple, 0.05, you lock, if it goes down
 then you come out." Can only fire EARLIER than or instead of the fixed TP (0.10%)/SL (0.11%),
-never blocks them. Migration: lighter_btc_initial_profit_lock.sql.
+never blocks them. Migration: lighter_btc_initial_profit_lock.sql. Trigger tightened 0.05->0.02
+same day after a real trade peaked at 0.04% and never armed, went straight to SL instead.
+
+2026-09-27, new experiment: RSI-Stoch removed entirely (use_rsi_stoch_signal gone) -- Worker 1
+goes back to plain stochastic (the same mechanism Worker 2/3 run), and window/thresholds go
+back to the ORIGINAL pre-widening values (window 5, 25/75), not the 20/10-90 combo Worker 2/3
+are running. On top of that original signal: flow_entry_filter_enabled=True, the order-flow
+entry veto (price + aggressive-size confirmation, see _check_flow_entry_filter in
+stoch_bot_core.py) that was just removed from Worker 3 after it vetoed nearly every real entry
+there for hours. Direct request: run the SAME filter here instead, but paired with the
+ORIGINAL plain signal rather than Worker 3's adaptive-window + K10/90 combo, as a cleaner
+one-variable test of whether the filter itself helps once it's not stacked with other
+restrictive changes at the same time. Reads the shared lighter_btc_trade_flow table Worker 3 is
+already actively writing -- trade_flow_log_defers_to stays None here, no need for a second
+writer. self_lock and the profit-lock trail above are unchanged, both still active.
 """
 from stoch_bot_core import BotConfig, run_bot
 
 CONFIG = BotConfig(
-    name="RSI-STOCH, 24/7 (worker 1)",
+    name="PLAIN STOCHASTIC + FLOW FILTER (worker 1)",
     worker_id="worker1",
     table_state="lighter_btc_initial_state",
     table_trades="lighter_btc_initial_trades",
     table_runs="lighter_btc_initial_runs",
-    stoch_window=20,  # 2026-09-27: 5 -> 20, less sensitive to weekend whipsaw -- see docstring
+    stoch_window=5,  # 2026-09-27: back to the original value (was 20) -- new experiment, see docstring
     tp_pct=0.10,
-    sl_pct=0.11,  # reverted 2026-09-27 -- was 0.05 for a same-day experiment, put back to original
-    entry_lo=10, entry_hi=90,  # 2026-09-27: 25/75 -> 10/90, see docstring
-    reversal_lo=10, reversal_hi=90,
+    sl_pct=0.11,
+    entry_lo=25, entry_hi=75,  # 2026-09-27: back to the original values (was 10/90)
+    reversal_lo=25, reversal_hi=75,
     schema_has_position_bands=True,
-    use_rsi_stoch_signal=True,
-    rsi_paper_require_confirmation=False,  # unconfirmed variant -- see docstring above
-    rsi_paper_test_enabled=False,  # redundant now that this drives real trading
-    schema_has_rsi_paper_test=True,  # keep True: still reads the old rsi_paper_* columns harmlessly
+    flow_entry_filter_enabled=True,  # 2026-09-27: moved here from Worker 3, see docstring
+    flow_max_adverse_move_pct=0.02,
     self_lock_enabled=True,
     schema_has_self_lock=True,  # requires lighter_btc_initial_self_lock.sql first
     self_lock_reversal_counts_as_win=True,
@@ -139,7 +151,9 @@ CONFIG = BotConfig(
     schema_has_profit_lock=True,  # requires lighter_btc_initial_profit_lock.sql first
     # Price-tick logging: last resort. Only writes if both Worker 2 and Worker 3 are quiet.
     tick_log_defers_to=["worker2", "worker3"],
-    trade_flow_log_defers_to=None,  # disabled 2026-09-27: triggered a WAF block that degraded real position reads
+    # Trade-flow logging: not a writer here -- Worker 3 already actively logs the shared table
+    # this bot's flow filter reads from.
+    trade_flow_log_defers_to=None,
 )
 
 if __name__ == "__main__":

@@ -2211,8 +2211,8 @@ export default function Dashboard() {
         {/* ── Lighter BTC Stochastic5: 3-worker comparison, real money, $100 each */}
         <div className="grid grid-cols-1 sm:grid-cols-3 gap-3">
           <CompactStochBtcPanel
-            title="Worker 1 · RSI-Stoch, 24/7"
-            subtitle="TP 0.10% / SL 0.11% / Wilder RSI5 + Stochastic RSI over 20 bars, 10/90, no price confirmation, no reversal guard, no hour restriction, self-lock (2 consecutive paper wins unlock, winning reversals count too) -- window/threshold widened 2026-09-27, untested for this signal"
+            title="Worker 1 · Plain Stochastic + Flow Filter"
+            subtitle="TP 0.10% / SL 0.11% / window 5, 25-75 (original) / 0.02% profit-lock trail / order-flow entry veto ON (moved here from Worker 3) / self-lock (2 consecutive paper wins unlock, winning reversals count too)"
             table="lighter_btc_initial_state"
             state={initialBtcState}
             trades={initialBtcTrades.filter((t: any) => t.closed_at >= WORKER1_RSI_RESET_AT)}
