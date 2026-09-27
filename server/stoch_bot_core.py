@@ -720,8 +720,11 @@ class StochBot:
                     cutoff = (datetime.now(timezone.utc)
                              - timedelta(days=TRADE_FLOW_LOG_RETENTION_DAYS)).isoformat()
                     await self.sb("DELETE", f"lighter_btc_trade_flow?ts=lt.{cutoff}")
-            except Exception:
-                pass  # never let trade-flow logging affect trading
+            except Exception as e:
+                try:
+                    await self.log_run("trade_flow_log_error", {"error": str(e)[:300]})
+                except Exception:
+                    pass  # never let trade-flow logging affect trading
             await asyncio.sleep(TRADE_FLOW_LOG_EVERY)
 
     def compute_stoch_signal(self):
