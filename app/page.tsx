@@ -2236,7 +2236,7 @@ export default function Dashboard() {
           />
           <CompactStochBtcPanel
             title="Worker 3 · Adaptive V2"
-            subtitle="TP 0.10% / SL 0.11% / K10-90 / adaptive window 5-15 (by trailing vol) / 120s reversal guard / order-flow entry veto OFF (was vetoing nearly every entry) / real SL locks real orders, 2 consecutive paper wins unlock (winning reversals count too)"
+            subtitle="TP 0.10% / SL 0.11% / K10-90 / adaptive window 5-15 (by trailing vol) / 0.02% profit-lock trail / 120s reversal guard / order-flow entry veto OFF (was vetoing nearly every entry) / real SL locks real orders, 2 consecutive paper wins unlock (winning reversals count too)"
             table="lighter_stoch_dca_btc_state"
             state={dcaBtcState}
             trades={dcaBtcTrades.filter((t: any) => t.closed_at >= WORKER3_RESET_AT)}

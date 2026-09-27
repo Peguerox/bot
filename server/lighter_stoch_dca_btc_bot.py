@@ -146,6 +146,13 @@ CONFIG = BotConfig(
     self_lock_enabled=True,
     schema_has_self_lock=True,
     self_lock_reversal_counts_as_win=True,
+    # Profit-lock trail (2026-09-27): same mechanism as Worker 1/2 -- once unrealized profit
+    # hits 0.02%, tracks the peak; the instant it ticks down at all from that peak, closes
+    # immediately. schema_has_profit_lock stays False (no migration for this table yet) --
+    # peak tracking lives in-process (self.profit_lock_peak_pct) so it still works correctly
+    # this session, just without cross-restart persistence until that migration is added.
+    profit_lock_enabled=True,
+    profit_lock_trigger_pct=0.02,
     schema_has_position_bands=True,
     # Price-tick logging: backup writer. Takes over the moment Worker 2 goes quiet.
     tick_log_defers_to=["worker2"],

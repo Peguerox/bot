@@ -580,6 +580,10 @@ class StochBot:
         # a requirement for correctness within one continuous run.
         self.profit_lock_peak_pct = None
         self._profit_lock_restored = False
+        # Paper shadow's own copy of the same trail -- without this, real could exit early via
+        # PROFIT_LOCK while paper (running the identical signal) kept holding, making the two
+        # visibly diverge even while real is unlocked and trading the exact same thing paper is.
+        self.paper_profit_lock_peak_pct = None
 
     # ── Supabase (aiohttp: async, and actually cancellable) ─────────────────────────────────
     async def sb(self, method, path, body=None, extra_headers=None):
@@ -1601,6 +1605,24 @@ class StochBot:
             tp = entry * (1 - cfg.tp_pct / 100); sl = entry * (1 + cfg.sl_pct / 100)
             hit_sl = check_price >= sl; hit_tp = check_price <= tp
         reason = "SL" if hit_sl else ("TP" if hit_tp else None)
+
+        if reason is None and cfg.profit_lock_enabled:
+            # Same zero-give-back trail as the real position (see the gap_hit block in tick()) --
+            # kept in exact lockstep so paper stays a faithful mirror of whatever real is doing.
+            unrealized_pct = (100 * (check_price - entry) / entry if side == "long"
+                              else 100 * (entry - check_price) / entry)
+            peak = self.paper_profit_lock_peak_pct
+            new_peak = None
+            if peak is None:
+                if unrealized_pct >= cfg.profit_lock_trigger_pct:
+                    new_peak = unrealized_pct
+            elif unrealized_pct > peak:
+                new_peak = unrealized_pct
+            elif unrealized_pct < peak:
+                reason = "PROFIT_LOCK"
+            if new_peak is not None:
+                self.paper_profit_lock_peak_pct = new_peak
+
         reversal_ready = reversal_signal is not None and reversal_signal != side
         if reversal_ready and cfg.reversal_guard_seconds:
             age_s = (now_ms - self.paper_entry_ms) / 1000 if self.paper_entry_ms is not None else None
@@ -1614,6 +1636,7 @@ class StochBot:
         self.paper_side = None
         self.paper_entry = None
         self.paper_entry_ms = None
+        self.paper_profit_lock_peak_pct = None
 
         confirmation_just_cleared = False
         # A pure reversal close (reason is None here, only reached because reversal_ready was
@@ -1621,7 +1644,7 @@ class StochBot:
         # it actually closed favorably. A losing/breakeven reversal stays neutral (does NOT
         # reset the count, unlike a real SL) -- backtested both ways, resetting on a losing
         # reversal tested worse.
-        counts_as_tp = reason == "TP"
+        counts_as_tp = reason in ("TP", "PROFIT_LOCK")
         if not counts_as_tp and reason is None and cfg.self_lock_reversal_counts_as_win:
             pnl_pct = ((check_price - entry) / entry * 100 if closed_side == "long"
                        else (entry - check_price) / entry * 100)
