@@ -148,6 +148,10 @@ CONFIG = BotConfig(
     self_lock_reversal_counts_as_win=True,
     profit_lock_enabled=True,
     profit_lock_trigger_pct=0.02,  # 2026-09-27: 0.05 -> 0.02 -- a real trade peaked at 0.04% and never armed, went to SL
+    # Mirror-paper fallback (2026-09-27), same fix as Worker 3, same symptom here: real went
+    # flat (self-lock unlock or a close) with no live entry_signal this tick while paper --
+    # running the identical signal -- already held a position from an earlier valid entry.
+    mirror_paper_position=True,
     schema_has_profit_lock=True,  # requires lighter_btc_initial_profit_lock.sql first
     # Price-tick logging: last resort. Only writes if both Worker 2 and Worker 3 are quiet.
     tick_log_defers_to=["worker2", "worker3"],

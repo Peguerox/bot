@@ -1832,19 +1832,26 @@ class StochBot:
             reversal_signal = entry_signal
         else:
             entry_signal, reversal_signal, candle_ts = self.compute_stoch_signal()
-        if (cfg.use_adaptive_window and cfg.schema_has_adaptive_fields
-                and self.adaptive_last_window != self._adaptive_last_persisted_window):
-            # Only write when the window actually changes (rare by design -- see
-            # compute_adaptive_stoch_signal) rather than every tick, matching the "why this
-            # bot is doing what it's doing should be visible" ask without spamming writes.
-            self._adaptive_last_persisted_window = self.adaptive_last_window
-            try:
-                await self.update_state({
-                    "adaptive_last_vol_pct": self.adaptive_last_vol_pct,
-                    "adaptive_last_window": self.adaptive_last_window,
-                })
-            except Exception:
-                pass
+        if cfg.use_adaptive_window and cfg.schema_has_adaptive_fields:
+            # 2026-09-27: was write-on-change-only, which made the dashboard number look frozen
+            # between window flips even though vol_pct is actually recomputed every tick --
+            # confirmed live: window silently flipped 15->5 with the panel showing no visible
+            # movement the whole time (only the window/vol_pct AT the flip moment ever got
+            # written). Now also writes on a plain 10s cadence so "what is the bot doing right
+            # now" stays live, not just "when did it last decide something new."
+            now_s = time.time()
+            window_changed = self.adaptive_last_window != self._adaptive_last_persisted_window
+            time_elapsed = now_s - getattr(self, "_adaptive_last_persist_ts", 0.0)
+            if window_changed or time_elapsed >= 10.0:
+                self._adaptive_last_persisted_window = self.adaptive_last_window
+                self._adaptive_last_persist_ts = now_s
+                try:
+                    await self.update_state({
+                        "adaptive_last_vol_pct": self.adaptive_last_vol_pct,
+                        "adaptive_last_window": self.adaptive_last_window,
+                    })
+                except Exception:
+                    pass
         now_open = self.candles[-1]["o"] if self.candles else None
         if candle_ts is None or now_open is None:
             return
