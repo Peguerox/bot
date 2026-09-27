@@ -15,13 +15,15 @@ const SURFER_GIVEBACK = 0.15;
 // the old strategy's history and get filtered out of the dashboard so the win-rate/trade-count
 // shown is a clean comparison against Worker 3, not blended with the old strategy's numbers.
 // Non-destructive: the old rows stay in lighter_btc_initial_trades, just hidden from display.
-// Reset again 2026-09-27 when stoch_window/thresholds changed (5,25/75 -> 20,10/90) -- same
-// reasoning, a clean baseline for a strategy that just changed again.
-const WORKER1_RSI_RESET_AT = "2026-09-27T13:57:38.734620+00:00";
+// Reset again 2026-09-27 when stoch_window/thresholds changed (5,25/75 -> 20,10/90), then once
+// more the same day after SL briefly went live at 0.05% before being reverted to 0.11% -- a few
+// trades ran under the wrong SL, so the baseline moved past those too.
+const WORKER1_RSI_RESET_AT = "2026-09-27T15:00:49.777450+00:00";
 // Worker 2's schedule was removed and SL tightened (0.11% -> 0.05%) at this moment -- same
 // reasoning as Worker 1's reset above, a clean baseline for a config that changed twice at once.
-// Reset again 2026-09-27 when stoch_window/thresholds changed (5,25/75 -> 20,10/90).
-const WORKER2_RESET_AT = "2026-09-27T13:57:38.734620+00:00";
+// Reset again 2026-09-27 when stoch_window/thresholds changed, then once more after the SL
+// revert (0.05% -> 0.11%) -- same reasoning as Worker 1's reset above.
+const WORKER2_RESET_AT = "2026-09-27T15:00:49.777450+00:00";
 
 function formatDurationShort(ms: number): string {
   if (ms <= 0) return "0m";
