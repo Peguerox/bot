@@ -84,7 +84,14 @@ backtested, not an analogy. Equity reset again alongside this change, same reaso
 
 2026-09-27, same day: profit_lock_enabled=True, trigger 0.05% -- same feature, same reasoning,
 same migration pattern as Worker 1 (see that file's docstring). Migration:
-lighter_btc_optimal_profit_lock.sql.
+lighter_btc_optimal_profit_lock.sql. Trigger tightened 0.05->0.02 same day, same reason as
+Worker 1 (a real trade peaked at 0.04% and never armed).
+
+2026-09-27, same day: sl_pct 0.11->0.06 -- direct user request after reviewing real data: 82%
+win rate over the last 111 real closes (76 REVERSAL avg +$0.011, 14 PROFIT_LOCK avg +$0.025, 1
+TP avg +$0.097) but net -$0.70, because 20 real SLs averaged -$0.098 each -- a 5-10x asymmetry
+against the typical win size. Only SL moves; TP stays 0.10%. Not a repeat of the earlier 0.05%
+experiment (that compressed TP+SL together under a different signal and got reverted same day).
 """
 from stoch_bot_core import BotConfig, run_bot
 
@@ -96,7 +103,11 @@ CONFIG = BotConfig(
     table_runs="lighter_btc_optimal_runs",
     stoch_window=20,  # 2026-09-27: 5 -> 20, less sensitive to weekend whipsaw -- see docstring
     tp_pct=0.10,
-    sl_pct=0.11,  # reverted 2026-09-27 -- was 0.05 for a same-day experiment, put back to original
+    sl_pct=0.06,  # 2026-09-27: 0.11 -> 0.06 -- real data: 82% win rate but net -$0.70 over the
+    # last 111 real closes, because wins average $0.01-0.03 (reversal/profit-lock) while every
+    # SL takes the full -0.11%, a 5-10x asymmetry. Not the same as the earlier 0.05% experiment
+    # (that compressed TP+SL together on a different signal); this only tightens SL, holding TP
+    # at 0.10%.
     entry_lo=10, entry_hi=90,  # 2026-09-27: 25/75 -> 10/90, see docstring
     reversal_lo=10, reversal_hi=90,
     reversal_guard_seconds=120,  # the "blanking period"
