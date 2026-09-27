@@ -104,6 +104,14 @@ stoch_confirmed_signal now reads stoch_period/lo/hi from cfg (was hardcoded 14/2
 bot's RSI-Stoch signal can use the same values -- but that specific combination was NEVER
 backtested for RSI-Stoch specifically, only for plain stochastic (Worker 2's mechanism). This
 is an analogy applied to real money, not a tested result -- watch it closely.
+
+2026-09-27, same day: profit_lock_enabled=True, trigger 0.05% -- direct user request after
+watching real positions repeatedly run up well past this level and round-trip all the way back
+to a real SL. Once unrealized profit hits 0.05%, the peak is tracked tick by tick; the instant
+it ticks down at all from that peak, the position closes ("PROFIT_LOCK" in the trades table).
+Zero give-back by design -- the user's own words: "very simple, 0.05, you lock, if it goes down
+then you come out." Can only fire EARLIER than or instead of the fixed TP (0.10%)/SL (0.11%),
+never blocks them. Migration: lighter_btc_initial_profit_lock.sql.
 """
 from stoch_bot_core import BotConfig, run_bot
 
@@ -126,6 +134,9 @@ CONFIG = BotConfig(
     self_lock_enabled=True,
     schema_has_self_lock=True,  # requires lighter_btc_initial_self_lock.sql first
     self_lock_reversal_counts_as_win=True,
+    profit_lock_enabled=True,
+    profit_lock_trigger_pct=0.05,
+    schema_has_profit_lock=True,  # requires lighter_btc_initial_profit_lock.sql first
     # Price-tick logging: last resort. Only writes if both Worker 2 and Worker 3 are quiet.
     tick_log_defers_to=["worker2", "worker3"],
     trade_flow_log_defers_to=None,  # disabled 2026-09-27: triggered a WAF block that degraded real position reads

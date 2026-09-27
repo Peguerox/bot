@@ -295,6 +295,17 @@ class BotConfig:
     flow_entry_filter_enabled: bool = False
     flow_max_adverse_move_pct: float = 0.02
     schema_has_adaptive_fields: bool = False  # requires the adaptive_last_* columns migration
+    # Profit-lock trail (2026-09-27): once a real position's unrealized profit reaches
+    # profit_lock_trigger_pct, arm a peak tracker; the moment unrealized profit ticks down at
+    # all from that peak, exit immediately (reason "PROFIT_LOCK") -- doesn't wait for it to
+    # give back any specific amount, let alone retrace to the fixed TP or SL. Built after real
+    # trades were repeatedly seen running well above this level, then round-tripping all the way
+    # back to a real SL. Only ever fires EARLIER than (or instead of) the fixed TP/SL, never
+    # blocks them -- if price gaps straight through both bands in one tick, gap_hit (TP/SL) is
+    # checked first and still wins.
+    profit_lock_enabled: bool = False
+    profit_lock_trigger_pct: float = 0.05
+    schema_has_profit_lock: bool = False  # requires the profit_lock_peak_pct column migration
 
 
 # ── Pure helpers ────────────────────────────────────────────────────────────────────────────
@@ -563,6 +574,12 @@ class StochBot:
         self.adaptive_last_window = None
         self.adaptive_last_k = None
         self._adaptive_last_persisted_window = None
+        # Profit-lock trail -- lives here (not just in the DB row) so it works correctly this
+        # session even before the profit_lock_peak_pct migration has been run; DB persistence
+        # (best-effort, only if schema_has_profit_lock) is a bonus for surviving a restart, not
+        # a requirement for correctness within one continuous run.
+        self.profit_lock_peak_pct = None
+        self._profit_lock_restored = False
 
     # ── Supabase (aiohttp: async, and actually cancellable) ─────────────────────────────────
     async def sb(self, method, path, body=None, extra_headers=None):
@@ -1135,6 +1152,12 @@ class StochBot:
             patch["position_tp_pct"] = None
             patch["position_sl_pct"] = None
         await self.update_state(patch)
+        self.profit_lock_peak_pct = None
+        if self.cfg.schema_has_profit_lock:
+            try:
+                await self.update_state({"profit_lock_peak_pct": None})
+            except Exception:
+                pass
         await self.log_run("emergency_flatten", {"reason": reason, "flat": flat,
                                                  "residual": pos_after})
 
@@ -1245,6 +1268,12 @@ class StochBot:
             close_patch["position_tp_pct"] = None
             close_patch["position_sl_pct"] = None
         await self.update_state(close_patch)
+        self.profit_lock_peak_pct = None
+        if self.cfg.schema_has_profit_lock:
+            try:
+                await self.update_state({"profit_lock_peak_pct": None})
+            except Exception:
+                pass
         await self.log_trade(side, ae, exit_price, qty, pnl, reason, len(legs),
                              ms_to_iso(state.get("first_entry_time")))
         await self.log_run("closed", {"reason": reason, "pnl": pnl, "side": side})
@@ -1871,6 +1900,12 @@ class StochBot:
                 ext_patch["position_tp_pct"] = None
                 ext_patch["position_sl_pct"] = None
             await self.update_state(ext_patch)
+            self.profit_lock_peak_pct = None
+            if cfg.schema_has_profit_lock:
+                try:
+                    await self.update_state({"profit_lock_peak_pct": None})
+                except Exception:
+                    pass
             await self.log_trade(side, ae, implied_exit, qty, pnl, "EXTERNAL", len(legs),
                                  ms_to_iso(state.get("first_entry_time")))
             await self.log_run("resolved_externally", {"side": side, "pnl": pnl})
@@ -1957,6 +1992,34 @@ class StochBot:
                     gap_hit = "SL"
                 elif check_price <= tp:
                     gap_hit = "TP"
+
+            if gap_hit is None and cfg.profit_lock_enabled and ae:
+                # Restore from the DB once per boot if a prior run persisted a peak (only
+                # possible once the profit_lock_peak_pct migration has actually been run) --
+                # safe to read even if the column doesn't exist yet (state.get just returns
+                # None; only a WRITE to a missing column errors).
+                if not self._profit_lock_restored:
+                    self._profit_lock_restored = True
+                    if self.profit_lock_peak_pct is None and state.get("profit_lock_peak_pct") is not None:
+                        self.profit_lock_peak_pct = state["profit_lock_peak_pct"]
+                unrealized_pct = (100 * (check_price - ae) / ae if side == "long"
+                                  else 100 * (ae - check_price) / ae)
+                peak = self.profit_lock_peak_pct
+                new_peak = None
+                if peak is None:
+                    if unrealized_pct >= cfg.profit_lock_trigger_pct:
+                        new_peak = unrealized_pct
+                elif unrealized_pct > peak:
+                    new_peak = unrealized_pct
+                elif unrealized_pct < peak:
+                    gap_hit = "PROFIT_LOCK"
+                if new_peak is not None:
+                    self.profit_lock_peak_pct = new_peak
+                    if cfg.schema_has_profit_lock:
+                        try:
+                            await self.update_state({"profit_lock_peak_pct": new_peak})
+                        except Exception:
+                            pass  # best-effort only -- in-memory tracking above is authoritative
 
             reversal_ready = reversal_signal is not None and reversal_signal != side
             if reversal_ready and cfg.reversal_guard_seconds:

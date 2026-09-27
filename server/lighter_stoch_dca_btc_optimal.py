@@ -81,6 +81,10 @@ to every small wiggle and getting whipsawed by exactly the volatility that's bee
 bots; window=20 waits for a much more committed move before flipping. This is Worker 2's actual
 mechanism (plain stochastic), so unlike Worker 1's RSI-Stoch this combination WAS directly
 backtested, not an analogy. Equity reset again alongside this change, same reasoning as above.
+
+2026-09-27, same day: profit_lock_enabled=True, trigger 0.05% -- same feature, same reasoning,
+same migration pattern as Worker 1 (see that file's docstring). Migration:
+lighter_btc_optimal_profit_lock.sql.
 """
 from stoch_bot_core import BotConfig, run_bot
 
@@ -99,6 +103,9 @@ CONFIG = BotConfig(
     self_lock_enabled=True,
     schema_has_self_lock=True,  # requires the migration above to be run first
     self_lock_reversal_counts_as_win=True,  # a winning reversal satisfies both gates too, not just literal TP
+    profit_lock_enabled=True,
+    profit_lock_trigger_pct=0.05,
+    schema_has_profit_lock=True,  # requires lighter_btc_optimal_profit_lock.sql first
     # Price-tick logging: primary writer (trades most, so it's up most reliably). Worker 3
     # takes over if this one goes quiet, Worker 1 as last resort. See stoch_bot_core.py.
     tick_log_defers_to=[],
