@@ -24,6 +24,9 @@ const WORKER1_RSI_RESET_AT = "2026-09-27T15:00:49.777450+00:00";
 // Reset again 2026-09-27 when stoch_window/thresholds changed, then once more after the SL
 // revert (0.05% -> 0.11%) -- same reasoning as Worker 1's reset above.
 const WORKER2_RESET_AT = "2026-09-27T15:00:49.777450+00:00";
+// Worker 3 reset 2026-09-27 ahead of testing the volatility-adaptive window formula + the
+// order-flow entry filter -- clean baseline before that config lands.
+const WORKER3_RESET_AT = "2026-09-27T15:59:18.593220+00:00";
 
 function formatDurationShort(ms: number): string {
   if (ms <= 0) return "0m";
@@ -2217,13 +2220,12 @@ export default function Dashboard() {
             subtitle="TP 0.10% / SL 0.11% / 25-75 / window 5 / 120s reversal guard / real SL locks real orders, 2 consecutive paper wins unlock (winning reversals count too)"
             table="lighter_stoch_dca_btc_state"
             state={dcaBtcState}
-            trades={dcaBtcTrades}
+            trades={dcaBtcTrades.filter((t: any) => t.closed_at >= WORKER3_RESET_AT)}
             currentPrice={ocoBtcPrice}
             loading={loading}
             onToggled={load}
             runs={dcaBtcRuns}
             showSelfLock
-            stats={dcaBtcStats}
             combineEquityWinRate
           />
         </div>
