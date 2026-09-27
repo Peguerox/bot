@@ -16,6 +16,9 @@ const SURFER_GIVEBACK = 0.15;
 // shown is a clean comparison against Worker 3, not blended with the old strategy's numbers.
 // Non-destructive: the old rows stay in lighter_btc_initial_trades, just hidden from display.
 const WORKER1_RSI_RESET_AT = "2026-09-26T17:42:17.327325+00:00";
+// Worker 2's schedule was removed and SL tightened (0.11% -> 0.05%) at this moment -- same
+// reasoning as Worker 1's reset above, a clean baseline for a config that changed twice at once.
+const WORKER2_RESET_AT = "2026-09-27T03:21:42.878763+00:00";
 
 function formatDurationShort(ms: number): string {
   if (ms <= 0) return "0m";
@@ -2193,17 +2196,15 @@ export default function Dashboard() {
             combineEquityWinRate
           />
           <CompactStochBtcPanel
-            title="Worker 2 · Combined"
-            subtitle="TP 0.10% / SL 0.11% / 25-75 / window 5 / 120s blanking period / hourly schedule / self-lock / 1 paper win required at hour-open (winning reversals count too)"
+            title="Worker 2 · Combined, 24/7"
+            subtitle="TP 0.10% / SL 0.05% / 25-75 / window 5 / 120s blanking period / self-lock (2 consecutive paper wins unlock, winning reversals count too), no hour restriction"
             table="lighter_btc_optimal_state"
             state={optimalBtcState}
-            trades={optimalBtcTrades}
+            trades={optimalBtcTrades.filter((t: any) => t.closed_at >= WORKER2_RESET_AT)}
             currentPrice={ocoBtcPrice}
             loading={loading}
             onToggled={load}
-            stats={optimalBtcStats}
             showSelfLock
-            tradingHoursUtc={[0, 1, 4, 9, 10, 12, 15, 16, 17, 18, 19, 20, 21]}
             combineEquityWinRate
           />
           <CompactStochBtcPanel

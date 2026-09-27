@@ -60,42 +60,34 @@ counts_as_tp check in stoch_bot_core.py: the self-lock's 2-in-a-row unlock AND t
 confirmation now both accept a winning paper reversal, not just a literal TP (a losing/
 breakeven reversal stays neutral either way, doesn't reset). Same flag already validated on
 Worker 3 (79.9h real data: +2.327% vs literal-TP-only's +1.663%, 62.6% vs 60.6% win).
+
+2026-09-27: trading_hours_utc REMOVED entirely (was the per-weekday dict with the Saturday CME
+block) and hour_open_requires_paper_tp turned off with it -- that gate is a no-op without a
+schedule anyway (guarded in _check_hour_open_confirmation). Worker 2 now trades 24/7, no hour
+restriction, matching Worker 1. sl_pct tightened from 0.11 to 0.05 (TP unchanged at 0.10),
+mirroring the same live experiment already running on Worker 1 -- typical real wins have been
+$0.01-0.03 against SL losses of $0.10-0.14, a 5-10x asymmetry; this caps the downside per loss
+directly, and since self-lock's paper shadow shares the same sl_pct, its own recovery bar drops
+too. Real equity reset to actual account collateral ($97.16) with realized_pnl_usd zeroed, and
+the dashboard filters trades to that same cutoff -- a clean baseline now that both the schedule
+and TP/SL band changed at once.
 """
 from stoch_bot_core import BotConfig, run_bot
 
 CONFIG = BotConfig(
-    name="COMBINED: BLANKING + HOURLY SCHEDULE + SELF-LOCK (worker 2)",
+    name="COMBINED: BLANKING + SELF-LOCK, 24/7 (worker 2)",
     worker_id="worker2",
     table_state="lighter_btc_optimal_state",
     table_trades="lighter_btc_optimal_trades",
     table_runs="lighter_btc_optimal_runs",
     stoch_window=5,
     tp_pct=0.10,
-    sl_pct=0.11,
+    sl_pct=0.05,  # 2026-09-27 experiment: tightened from 0.11 to 0.05, TP unchanged
     entry_lo=25, entry_hi=75,
     reversal_lo=25, reversal_hi=75,
     reversal_guard_seconds=120,  # the "blanking period"
-    # 2026-09-26: switched from a flat list to a per-weekday dict (Python datetime.weekday(),
-    # Monday=0...Sunday=6) so Saturday can drop hour 9 UTC (5am ET) without touching any other
-    # day. That hour was today's single worst 5-min window by both volatility (0.240%, the
-    # highest of the day) and pnl (-$0.41 in 15 minutes) -- it lines up with CME crypto futures'
-    # scheduled Saturday reopen after their 3-5am ET maintenance break, independently confirmed
-    # against a second estimate (0.241% for the same window). Every other day keeps the
-    # unchanged base schedule. No Sunday-specific change yet -- the candidate Sunday risk
-    # windows (US equity-futures reopen 6pm ET, Hong Kong's Monday session starting 9:30pm ET)
-    # are untested theory with zero real data behind them so far.
-    trading_hours_utc={
-        0: [0, 1, 4, 9, 10, 12, 15, 16, 17, 18, 19, 20, 21],   # Monday
-        1: [0, 1, 4, 9, 10, 12, 15, 16, 17, 18, 19, 20, 21],   # Tuesday
-        2: [0, 1, 4, 9, 10, 12, 15, 16, 17, 18, 19, 20, 21],   # Wednesday
-        3: [0, 1, 4, 9, 10, 12, 15, 16, 17, 18, 19, 20, 21],   # Thursday
-        4: [0, 1, 4, 9, 10, 12, 15, 16, 17, 18, 19, 20, 21],   # Friday
-        5: [0, 1, 4, 10, 12, 15, 16, 17, 18, 19, 20, 21],      # Saturday -- hour 9 (5am ET) removed
-        6: [0, 1, 4, 9, 10, 12, 15, 16, 17, 18, 19, 20, 21],   # Sunday
-    },
     self_lock_enabled=True,
     schema_has_self_lock=True,  # requires the migration above to be run first
-    hour_open_requires_paper_tp=True,  # 1 paper win required at the start of every open window
     self_lock_reversal_counts_as_win=True,  # a winning reversal satisfies both gates too, not just literal TP
     # Price-tick logging: primary writer (trades most, so it's up most reliably). Worker 3
     # takes over if this one goes quiet, Worker 1 as last resort. See stoch_bot_core.py.

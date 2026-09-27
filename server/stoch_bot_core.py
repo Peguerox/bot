@@ -661,8 +661,11 @@ class StochBot:
                                       {"best_bid": bid, "best_ask": ask, "source": cfg.worker_id})
                 if cfg.tick_log_prune and time.time() - last_prune > 3600:
                     last_prune = time.time()
+                    # "+" must be percent-encoded -- the raw ISO offset (+00:00) otherwise gets
+                    # read as a literal space by the time it reaches Postgres (found 2026-09-26
+                    # debugging the trade-flow logger's identical DELETE call below).
                     cutoff = (datetime.now(timezone.utc)
-                             - timedelta(days=TICK_LOG_RETENTION_DAYS)).isoformat()
+                             - timedelta(days=TICK_LOG_RETENTION_DAYS)).isoformat().replace("+", "%2B")
                     await self.sb("DELETE", f"lighter_btc_price_ticks?ts=lt.{cutoff}")
             except Exception:
                 pass  # never let tick logging affect trading
@@ -718,7 +721,7 @@ class StochBot:
                 if cfg.trade_flow_log_prune and time.time() - last_prune > 3600:
                     last_prune = time.time()
                     cutoff = (datetime.now(timezone.utc)
-                             - timedelta(days=TRADE_FLOW_LOG_RETENTION_DAYS)).isoformat()
+                             - timedelta(days=TRADE_FLOW_LOG_RETENTION_DAYS)).isoformat().replace("+", "%2B")
                     await self.sb("DELETE", f"lighter_btc_trade_flow?ts=lt.{cutoff}")
             except Exception as e:
                 try:
