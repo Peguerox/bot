@@ -92,6 +92,18 @@ lighter_btc_initial_self_lock.sql.
 live experiment (user's words: "let's do an experiment"), not backed by a prior backtest on this
 specific pairing. Asymmetric the other way now (SL tighter than TP, was TP tighter than SL
 before). Self-lock above still applies -- a real SL still locks real trading the same way.
+
+2026-09-27: stoch_window 5->20, entry_lo/hi 25/75->10/90 -- user's read after two straight
+bloodbath days: at window=5 the signal reacts to every small wiggle and gets whipsawed by
+exactly the volatility that's been hurting the weekend bots; wider window + more extreme
+threshold means waiting for a much more committed move before flipping. Backtested for PLAIN
+stochastic over the full weekend (Sat 00:00 UTC through Sun) and confirmed real: window=20 was
+positive at all three thresholds tested (25/75, 10/90, 5/95), window=5 was negative at all
+three, best combo window=20/10-90 at +1.37% cumulative, 67.0% win, 109 trades. compute_rsi_
+stoch_confirmed_signal now reads stoch_period/lo/hi from cfg (was hardcoded 14/20/80) so this
+bot's RSI-Stoch signal can use the same values -- but that specific combination was NEVER
+backtested for RSI-Stoch specifically, only for plain stochastic (Worker 2's mechanism). This
+is an analogy applied to real money, not a tested result -- watch it closely.
 """
 from stoch_bot_core import BotConfig, run_bot
 
@@ -101,11 +113,11 @@ CONFIG = BotConfig(
     table_state="lighter_btc_initial_state",
     table_trades="lighter_btc_initial_trades",
     table_runs="lighter_btc_initial_runs",
-    stoch_window=5,
+    stoch_window=20,  # 2026-09-27: 5 -> 20, less sensitive to weekend whipsaw -- see docstring
     tp_pct=0.10,
     sl_pct=0.05,  # 2026-09-26 experiment: tightened from 0.11 to 0.05, TP unchanged
-    entry_lo=25, entry_hi=75,
-    reversal_lo=25, reversal_hi=75,
+    entry_lo=10, entry_hi=90,  # 2026-09-27: 25/75 -> 10/90, see docstring
+    reversal_lo=10, reversal_hi=90,
     schema_has_position_bands=True,
     use_rsi_stoch_signal=True,
     rsi_paper_require_confirmation=False,  # unconfirmed variant -- see docstring above

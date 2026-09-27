@@ -71,6 +71,16 @@ directly, and since self-lock's paper shadow shares the same sl_pct, its own rec
 too. Real equity reset to actual account collateral ($97.16) with realized_pnl_usd zeroed, and
 the dashboard filters trades to that same cutoff -- a clean baseline now that both the schedule
 and TP/SL band changed at once.
+
+2026-09-27, same day: stoch_window 5->20, entry_lo/hi and reversal_lo/hi 25/75->10/90 -- after
+two straight weekend bloodbath days, backtested (plain stochastic, full weekend Sat 00:00 UTC
+through Sun) and confirmed real: window=20 was positive at all three thresholds tested (25/75,
+10/90, 5/95), window=5 (the old setting) was negative at all three. Best combo window=20/10-90:
++1.37% cumulative, 67.0% win, 109 trades over the weekend -- the signal at window=5 was reacting
+to every small wiggle and getting whipsawed by exactly the volatility that's been hurting these
+bots; window=20 waits for a much more committed move before flipping. This is Worker 2's actual
+mechanism (plain stochastic), so unlike Worker 1's RSI-Stoch this combination WAS directly
+backtested, not an analogy. Equity reset again alongside this change, same reasoning as above.
 """
 from stoch_bot_core import BotConfig, run_bot
 
@@ -80,11 +90,11 @@ CONFIG = BotConfig(
     table_state="lighter_btc_optimal_state",
     table_trades="lighter_btc_optimal_trades",
     table_runs="lighter_btc_optimal_runs",
-    stoch_window=5,
+    stoch_window=20,  # 2026-09-27: 5 -> 20, less sensitive to weekend whipsaw -- see docstring
     tp_pct=0.10,
     sl_pct=0.05,  # 2026-09-27 experiment: tightened from 0.11 to 0.05, TP unchanged
-    entry_lo=25, entry_hi=75,
-    reversal_lo=25, reversal_hi=75,
+    entry_lo=10, entry_hi=90,  # 2026-09-27: 25/75 -> 10/90, see docstring
+    reversal_lo=10, reversal_hi=90,
     reversal_guard_seconds=120,  # the "blanking period"
     self_lock_enabled=True,
     schema_has_self_lock=True,  # requires the migration above to be run first

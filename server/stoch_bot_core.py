@@ -373,7 +373,7 @@ def compute_true_range_pct(candles):
     return tr / last["c"] * 100
 
 
-def compute_rsi_stoch_confirmed_signal(candles, rsi_period=5, stoch_period=14, require_confirmation=True):
+def compute_rsi_stoch_confirmed_signal(candles, rsi_period=5, stoch_period=14, require_confirmation=True, lo=20, hi=80):
     """"Confirmed Stochastic RSI" (2026-09-26 paper test): Wilder RSI(rsi_period) on completed
     1-min closes, then raw Stochastic RSI over the last stoch_period RSI values (no K/D
     smoothing) -- S = 100*(RSI-min)/(max-min) over that window. Long when S<20 AND the latest
@@ -421,9 +421,9 @@ def compute_rsi_stoch_confirmed_signal(candles, rsi_period=5, stoch_period=14, r
 
     prev_close, latest_close = closes[-2], closes[-1]
     signal = None
-    if s < 20 and (not require_confirmation or latest_close > prev_close):
+    if s < lo and (not require_confirmation or latest_close > prev_close):
         signal = "long"
-    elif s > 80 and (not require_confirmation or latest_close < prev_close):
+    elif s > hi and (not require_confirmation or latest_close < prev_close):
         signal = "short"
     return signal, closed[-1]["t"]
 
@@ -1515,7 +1515,8 @@ class StochBot:
         cfg = self.cfg
         await self._load_rsi_paper_state(state)
         signal, _ts = compute_rsi_stoch_confirmed_signal(
-            self.candles, require_confirmation=cfg.rsi_paper_require_confirmation)
+            self.candles, stoch_period=cfg.stoch_window, require_confirmation=cfg.rsi_paper_require_confirmation,
+            lo=cfg.entry_lo, hi=cfg.entry_hi)
 
         if self.rsi_paper_side is None:
             if signal is not None:
@@ -1630,7 +1631,8 @@ class StochBot:
 
         if cfg.use_rsi_stoch_signal:
             entry_signal, candle_ts = compute_rsi_stoch_confirmed_signal(
-                self.candles, require_confirmation=cfg.rsi_paper_require_confirmation)
+                self.candles, stoch_period=cfg.stoch_window, require_confirmation=cfg.rsi_paper_require_confirmation,
+                lo=cfg.entry_lo, hi=cfg.entry_hi)
             reversal_signal = entry_signal
         else:
             entry_signal, reversal_signal, candle_ts = self.compute_stoch_signal()
