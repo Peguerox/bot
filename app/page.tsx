@@ -2188,7 +2188,7 @@ export default function Dashboard() {
         <div className="grid grid-cols-1 sm:grid-cols-3 gap-3">
           <CompactStochBtcPanel
             title="Worker 1 · RSI-Stoch, 24/7"
-            subtitle="TP 0.10% / SL 0.05% / Wilder RSI5 + Stochastic RSI over 20 bars, 10/90, no price confirmation, no reversal guard, no hour restriction, self-lock (2 consecutive paper wins unlock, winning reversals count too) -- window/threshold widened 2026-09-27, untested for this signal"
+            subtitle="TP 0.10% / SL 0.11% / Wilder RSI5 + Stochastic RSI over 20 bars, 10/90, no price confirmation, no reversal guard, no hour restriction, self-lock (2 consecutive paper wins unlock, winning reversals count too) -- window/threshold widened 2026-09-27, untested for this signal"
             table="lighter_btc_initial_state"
             state={initialBtcState}
             trades={initialBtcTrades.filter((t: any) => t.closed_at >= WORKER1_RSI_RESET_AT)}
@@ -2200,7 +2200,7 @@ export default function Dashboard() {
           />
           <CompactStochBtcPanel
             title="Worker 2 · Combined, 24/7"
-            subtitle="TP 0.10% / SL 0.05% / 10-90 / window 20 / 120s blanking period / self-lock (2 consecutive paper wins unlock, winning reversals count too), no hour restriction -- window/threshold widened 2026-09-27, backtested over the weekend (+1.37%, 67% win)"
+            subtitle="TP 0.10% / SL 0.11% / 10-90 / window 20 / 120s blanking period / self-lock (2 consecutive paper wins unlock, winning reversals count too), no hour restriction -- window/threshold widened 2026-09-27, backtested over the weekend (+1.37%, 67% win)"
             table="lighter_btc_optimal_state"
             state={optimalBtcState}
             trades={optimalBtcTrades.filter((t: any) => t.closed_at >= WORKER2_RESET_AT)}

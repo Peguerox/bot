@@ -115,7 +115,7 @@ CONFIG = BotConfig(
     table_runs="lighter_btc_initial_runs",
     stoch_window=20,  # 2026-09-27: 5 -> 20, less sensitive to weekend whipsaw -- see docstring
     tp_pct=0.10,
-    sl_pct=0.05,  # 2026-09-26 experiment: tightened from 0.11 to 0.05, TP unchanged
+    sl_pct=0.11,  # reverted 2026-09-27 -- was 0.05 for a same-day experiment, put back to original
     entry_lo=10, entry_hi=90,  # 2026-09-27: 25/75 -> 10/90, see docstring
     reversal_lo=10, reversal_hi=90,
     schema_has_position_bands=True,
