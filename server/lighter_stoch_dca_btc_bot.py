@@ -103,11 +103,21 @@ right now, not a static label).
 Explicitly the user's suspicion going in: this combination (K10/90 + adaptive window + an
 entry veto) is selective enough that the bot may barely trade at all for a while. That's an
 expected, not a broken, outcome of stacking two deliberately restrictive filters.
+
+2026-09-27, same day: flow_entry_filter_enabled flipped to False. Confirmed live: real trading
+sat at 0 trades for hours while the internal paper shadow (which never consults this filter --
+it trades on paper_entry_signal/paper_reversal_signal captured before any real-trading gate)
+flipped sides 3 times over the same window. Flow data coverage itself was fine (spot-checked:
+1,250 rows in a random 5-minute window), so this was the filter genuinely vetoing nearly every
+real entry, not failing closed on missing data -- and a normal deny logs nothing at all (only
+an exception does), so it was invisible in the runs log the whole time it was happening. Left
+the adaptive window switch running alone for now; the flow-filter code stays in stoch_bot_core
+for later re-tuning, just off.
 """
 from stoch_bot_core import BotConfig, run_bot
 
 CONFIG = BotConfig(
-    name="ADAPTIVE V2 + FLOW FILTER (worker 3)",
+    name="ADAPTIVE V2 (worker 3)",  # flow filter disabled 2026-09-27, see below
     worker_id="worker3",
     table_state="lighter_stoch_dca_btc_state",
     table_trades="lighter_stoch_dca_btc_trades",
@@ -124,7 +134,14 @@ CONFIG = BotConfig(
     adaptive_quiet_window=15,
     adaptive_active_window=5,
     schema_has_adaptive_fields=True,  # requires lighter_stoch_dca_btc_adaptive_v2.sql first
-    flow_entry_filter_enabled=True,
+    flow_entry_filter_enabled=False,  # 2026-09-27: disabled -- 0 real trades for hours while the
+    # paper shadow flipped sides 3 times (paper ignores this filter entirely, by design -- it
+    # reads paper_entry_signal/paper_reversal_signal captured BEFORE any real-trading gate).
+    # Root-caused live: flow data itself was fine (1,250 rows in a random 5-min window), so the
+    # filter was genuinely vetoing nearly every real entry, not failing closed on thin data. A
+    # normal deny is also silent by design (only exceptions get logged as flow_entry_filter_
+    # error), so this was invisible in the runs log the whole time. Code stays in stoch_bot_core
+    # for later re-tuning; just off for now so real trading actually gets a chance to run.
     flow_max_adverse_move_pct=0.02,
     self_lock_enabled=True,
     schema_has_self_lock=True,
