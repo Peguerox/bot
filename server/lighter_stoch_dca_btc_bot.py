@@ -153,6 +153,10 @@ CONFIG = BotConfig(
     # this session, just without cross-restart persistence until that migration is added.
     profit_lock_enabled=True,
     profit_lock_trigger_pct=0.02,
+    # Mirror-paper fallback (2026-09-27), Worker 3 only per direct request: if real is flat,
+    # unlocked, and enabled but the paper shadow already holds a position with no fresh
+    # entry_signal this tick, real enters to match paper's side directly.
+    mirror_paper_position=True,
     schema_has_position_bands=True,
     # Price-tick logging: backup writer. Takes over the moment Worker 2 goes quiet.
     tick_log_defers_to=["worker2"],

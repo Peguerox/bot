@@ -306,6 +306,13 @@ class BotConfig:
     profit_lock_enabled: bool = False
     profit_lock_trigger_pct: float = 0.05
     schema_has_profit_lock: bool = False  # requires the profit_lock_peak_pct column migration
+    # Mirror-paper fallback (2026-09-27): if real is flat, unlocked, and enabled, but has no
+    # live entry_signal this tick while the paper shadow already holds a position, real enters
+    # to match paper's side directly instead of waiting for its own fresh signal. See the
+    # mirror_signal block in tick() for why this gap exists at all (level-triggered signal,
+    # not edge-triggered -- a late/reopened real bot can otherwise miss an entry paper already
+    # caught and never catch back up until the next full signal transition).
+    mirror_paper_position: bool = False
 
 
 # ── Pure helpers ────────────────────────────────────────────────────────────────────────────
@@ -2109,27 +2116,43 @@ class StochBot:
                     "dca_level": 0, "collateral_before_entry": collateral,
                     "last_processed_candle_ts": candle_ts})
                 await self.log_run("adopted_orphan_position", {"side": adopted, "qty": abs(real_pos)})
-            elif entry_signal is not None and state.get("enabled"):
-                fail_count = state.get("consecutive_entry_failures", 0) or 0
-                if fail_count >= 3:
-                    # Hard stop rather than another retry -- unbounded retries are what
-                    # stacked 19 real orders into one position on 2026-09-21.
-                    await self.log_run("entry_circuit_breaker",
-                                       {"signal": entry_signal, "fail_count": fail_count})
-                    await self.update_state({"enabled": False,
-                                             "last_processed_candle_ts": candle_ts})
-                    return
-                eq = state["seed_usd"] + state["realized_pnl_usd"]
-                if eq <= 0:
-                    await self.log_run("equity_non_positive", {"eq": eq})
-                    await self.update_state({"enabled": False,
-                                             "last_processed_candle_ts": candle_ts})
-                    return
-                price = best_ask if entry_signal == "long" else best_bid
-                await self.try_enter(entry_signal, price, eq, "entry", candle_ts,
-                                     state, collateral, is_trending=is_trending)
             else:
-                await self.update_state({"last_processed_candle_ts": candle_ts})
+                # Mirror fallback (2026-09-27, Worker 3 only): real just went flat (e.g. a
+                # manual close) while the paper shadow -- running the identical signal -- is
+                # already holding a position from an earlier valid entry that's since gone
+                # quiet (compute_*_signal is level-triggered on the current candle only; it
+                # doesn't keep firing once price has drifted back out of the extreme zone, so
+                # a freshly-flat real bot has nothing to enter on even though paper is still
+                # riding a perfectly live position). Only kicks in while genuinely unlocked --
+                # never overrides the self-lock, which is checked the same way real entries
+                # already are (entry_signal is nulled above at "if self.real_trading_locked").
+                mirror_signal = None
+                if (entry_signal is None and cfg.mirror_paper_position and cfg.self_lock_enabled
+                        and not self.real_trading_locked and self.paper_side is not None):
+                    mirror_signal = self.paper_side
+                effective_signal = entry_signal if entry_signal is not None else mirror_signal
+                if effective_signal is not None and state.get("enabled"):
+                    fail_count = state.get("consecutive_entry_failures", 0) or 0
+                    if fail_count >= 3:
+                        # Hard stop rather than another retry -- unbounded retries are what
+                        # stacked 19 real orders into one position on 2026-09-21.
+                        await self.log_run("entry_circuit_breaker",
+                                           {"signal": effective_signal, "fail_count": fail_count})
+                        await self.update_state({"enabled": False,
+                                                 "last_processed_candle_ts": candle_ts})
+                        return
+                    eq = state["seed_usd"] + state["realized_pnl_usd"]
+                    if eq <= 0:
+                        await self.log_run("equity_non_positive", {"eq": eq})
+                        await self.update_state({"enabled": False,
+                                                 "last_processed_candle_ts": candle_ts})
+                        return
+                    via = "entry" if entry_signal is not None else "mirror_paper"
+                    price = best_ask if effective_signal == "long" else best_bid
+                    await self.try_enter(effective_signal, price, eq, via, candle_ts,
+                                         state, collateral, is_trending=is_trending)
+                else:
+                    await self.update_state({"last_processed_candle_ts": candle_ts})
 
     async def heartbeat(self):
         now = time.time()
