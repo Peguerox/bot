@@ -703,10 +703,18 @@ class StochBot:
                         rows = await self.sb(
                             "GET", "lighter_btc_trade_flow?select=trade_id&order=trade_id.desc&limit=1")
                         last_trade_id = rows[0]["trade_id"] if rows else 0
+                    # limit=100 is this endpoint's actual max -- 200 (the original value)
+                    # silently returned zero trades every cycle for hours: the endpoint replies
+                    # 400 "invalid param" above 100, but this call never checked resp.status, so
+                    # the error body just parsed as JSON with no "trades" key and looked like an
+                    # empty-but-valid response instead of a failure (found 2026-09-27).
                     url = (f"https://mainnet.zklighter.elliot.ai/api/v1/recentTrades"
-                           f"?market_id={cfg.market_index}&limit=200")
+                           f"?market_id={cfg.market_index}&limit=100")
                     async with self.http.get(url) as resp:
-                        data = jsonlib.loads(await resp.text())
+                        text = await resp.text()
+                        if resp.status >= 400:
+                            raise RuntimeError(f"recentTrades {resp.status}: {text[:200]}")
+                        data = jsonlib.loads(text)
                     new_trades = sorted(
                         (t for t in data.get("trades", []) if t["trade_id"] > last_trade_id),
                         key=lambda t: t["trade_id"])
