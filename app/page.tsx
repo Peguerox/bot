@@ -1670,6 +1670,24 @@ function CompactStochBtcPanel({
           </div>
         );
 
+        const adaptiveWindow = state?.adaptive_last_window ?? null;
+        const adaptiveVolPct = state?.adaptive_last_vol_pct ?? null;
+        const adaptivePill = adaptiveWindow != null && (
+          <div className="bg-gray-800/60 rounded-lg p-2" title="Live output of the volatility-adaptive window formula -- exactly what the bot is using right now">
+            <p className="text-gray-500 text-[10px] uppercase">Adaptive Window</p>
+            <div className="flex items-center gap-1.5 flex-wrap">
+              <span className="text-[9px] font-bold px-1.5 py-0.5 rounded uppercase bg-blue-500/20 text-blue-400">
+                window {adaptiveWindow}
+              </span>
+              {adaptiveVolPct != null && (
+                <span className="text-[10px] text-gray-400 tabular-nums">
+                  vol {adaptiveVolPct.toFixed(4)}%
+                </span>
+              )}
+            </div>
+          </div>
+        );
+
         const paperTestPill = (
           label: string, sideValue: string | null,
           s: { total: number; wins: number; pnlPct: number } | undefined, tooltip: string
@@ -1707,7 +1725,7 @@ function CompactStochBtcPanel({
               {equityWinRatePill}
               {selfLockPill}
               {positionPill}
-              {tradingHoursPill}
+              {adaptivePill || tradingHoursPill}
               {rsiPaperPill}
             </div>
           );
@@ -1720,6 +1738,7 @@ function CompactStochBtcPanel({
             {breakerPill}
             {tradingHoursPill}
             {selfLockPill}
+            {adaptivePill}
             {rsiPaperPill}
           </div>
         );
@@ -2216,8 +2235,8 @@ export default function Dashboard() {
             combineEquityWinRate
           />
           <CompactStochBtcPanel
-            title="Worker 3 · Self-Lock"
-            subtitle="TP 0.10% / SL 0.11% / 25-75 / window 5 / 120s reversal guard / real SL locks real orders, 2 consecutive paper wins unlock (winning reversals count too)"
+            title="Worker 3 · Adaptive V2 + Flow Filter"
+            subtitle="TP 0.10% / SL 0.11% / K10-90 / adaptive window 5-15 (by trailing vol) / 120s reversal guard / order-flow entry veto / real SL locks real orders, 2 consecutive paper wins unlock (winning reversals count too)"
             table="lighter_stoch_dca_btc_state"
             state={dcaBtcState}
             trades={dcaBtcTrades.filter((t: any) => t.closed_at >= WORKER3_RESET_AT)}

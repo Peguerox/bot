@@ -67,7 +67,9 @@ TICK_LOG_EVERY = 2.5      # seconds between price-tick log rows (candle-vs-real-
                           # on 2026-09-22 showed 1-min candles are too coarse to backtest
                           # against; this records the real book for a proper replay later)
 TICK_LOG_RETENTION_DAYS = 14
-TRADE_FLOW_LOG_EVERY = 3.0   # seconds between recentTrades polls
+TRADE_FLOW_LOG_EVERY = 10.0  # seconds between recentTrades polls -- raised from 3.0 2026-09-27
+                              # after that rate triggered a WAF block; still frequent enough
+                              # for the flow entry filter's 30s/120s lookback windows
 TRADE_FLOW_LOG_RETENTION_DAYS = 14
 
 QTY_EPS = 1e-6
@@ -278,6 +280,21 @@ class BotConfig:
     # ever see trades from the moment logging starts forward. None = doesn't participate.
     trade_flow_log_defers_to: Optional[list] = None
     trade_flow_log_prune: bool = False
+    # Adaptive V2 signal (2026-09-27): see compute_adaptive_stoch_signal's docstring. False =
+    # use compute_stoch_signal (the plain, fixed-window signal) as before.
+    use_adaptive_window: bool = False
+    adaptive_vol_lookback: int = 30
+    adaptive_vol_switch_pct: float = 0.04
+    adaptive_quiet_window: int = 15
+    adaptive_active_window: int = 5
+    # Order-flow entry filter (2026-09-27): an additional veto on NEW entries (and the reopen
+    # leg of a reversal) -- never blocks an exit. Requires real trade-flow data
+    # (lighter_btc_trade_flow) to be actively logging; if the query returns no data in any of
+    # the required windows, the filter denies (fails closed, matching the source report's
+    # "otherwise skip"). See _check_flow_entry_filter.
+    flow_entry_filter_enabled: bool = False
+    flow_max_adverse_move_pct: float = 0.02
+    schema_has_adaptive_fields: bool = False  # requires the adaptive_last_* columns migration
 
 
 # ── Pure helpers ────────────────────────────────────────────────────────────────────────────
@@ -540,6 +557,13 @@ class StochBot:
         self.rsi_paper_entry = None
         self.rsi_paper_entry_ms = None
         self._rsi_paper_loaded = False
+        # Adaptive V2 signal -- live formula output, for dashboard display (see
+        # compute_adaptive_stoch_signal)
+        self.adaptive_last_vol_pct = None
+        self.adaptive_last_window = None
+        self.adaptive_last_k = None
+        self._adaptive_last_persisted_window = None
+
     # ── Supabase (aiohttp: async, and actually cancellable) ─────────────────────────────────
     async def sb(self, method, path, body=None, extra_headers=None):
         """All Supabase I/O. Deliberately NOT urllib.
@@ -677,14 +701,26 @@ class StochBot:
         order flow. Same single-writer-with-failover pattern as run_tick_logger_forever above.
         recentTrades has no historical backfill (confirmed 2026-09-26: timestamp/cursor params
         are silently ignored, it always returns only the current live trades), so this can only
-        ever see trades from the moment logging starts forward."""
+        ever see trades from the moment logging starts forward.
+
+        2026-09-27: polling every TRADE_FLOW_LOG_EVERY (3s originally) triggered a WAF/CAPTCHA
+        block on the shared outbound IP that also degraded real position reads on other
+        workers -- a real incident, not a hypothetical. Fixed two ways: (1) interval raised to
+        a much safer cadence, (2) real exponential backoff on ANY error now, capped at
+        MAX_BACKOFF_S, with an even longer forced pause specifically on a WAF-shaped response
+        (HTML body instead of JSON -- the earlier incident's exact symptom) so a block can
+        never be hammered into a worse one."""
         cfg = self.cfg
         if cfg.trade_flow_log_defers_to is None:
             return
         STALE_AFTER = TRADE_FLOW_LOG_EVERY * 3
+        MAX_BACKOFF_S = 300.0
+        WAF_BACKOFF_S = 600.0
         last_prune = 0.0
         last_trade_id = None
+        consecutive_errors = 0
         while True:
+            sleep_s = TRADE_FLOW_LOG_EVERY
             try:
                 should_write = len(cfg.trade_flow_log_defers_to) == 0
                 if not should_write:
@@ -703,17 +739,19 @@ class StochBot:
                         rows = await self.sb(
                             "GET", "lighter_btc_trade_flow?select=trade_id&order=trade_id.desc&limit=1")
                         last_trade_id = rows[0]["trade_id"] if rows else 0
-                    # limit=100 is this endpoint's actual max -- 200 (the original value)
-                    # silently returned zero trades every cycle for hours: the endpoint replies
-                    # 400 "invalid param" above 100, but this call never checked resp.status, so
-                    # the error body just parsed as JSON with no "trades" key and looked like an
-                    # empty-but-valid response instead of a failure (found 2026-09-27).
+                    # limit=100 is this endpoint's actual max -- 200 silently returned zero
+                    # trades for hours before this call checked resp.status (found 2026-09-27).
                     url = (f"https://mainnet.zklighter.elliot.ai/api/v1/recentTrades"
                            f"?market_id={cfg.market_index}&limit=100")
                     async with self.http.get(url) as resp:
                         text = await resp.text()
-                        if resp.status >= 400:
-                            raise RuntimeError(f"recentTrades {resp.status}: {text[:200]}")
+                        content_type = resp.headers.get("Content-Type", "")
+                        if resp.status >= 400 or "json" not in content_type:
+                            # WAF/CAPTCHA responses are HTML with a 2xx-or-40x status, not
+                            # reliably >=400 -- content-type is the more robust tell.
+                            consecutive_errors += 1
+                            sleep_s = WAF_BACKOFF_S
+                            raise RuntimeError(f"recentTrades {resp.status} ct={content_type}: {text[:150]}")
                         data = jsonlib.loads(text)
                     new_trades = sorted(
                         (t for t in data.get("trades", []) if t["trade_id"] > last_trade_id),
@@ -731,12 +769,18 @@ class StochBot:
                     cutoff = (datetime.now(timezone.utc)
                              - timedelta(days=TRADE_FLOW_LOG_RETENTION_DAYS)).isoformat().replace("+", "%2B")
                     await self.sb("DELETE", f"lighter_btc_trade_flow?ts=lt.{cutoff}")
+                consecutive_errors = 0
             except Exception as e:
+                consecutive_errors += 1
+                if sleep_s == TRADE_FLOW_LOG_EVERY:  # not already forced to WAF_BACKOFF_S above
+                    sleep_s = min(TRADE_FLOW_LOG_EVERY * (2 ** consecutive_errors), MAX_BACKOFF_S)
                 try:
-                    await self.log_run("trade_flow_log_error", {"error": str(e)[:300]})
+                    await self.log_run("trade_flow_log_error",
+                                       {"error": str(e)[:300], "consecutive": consecutive_errors,
+                                        "backoff_s": sleep_s})
                 except Exception:
                     pass  # never let trade-flow logging affect trading
-            await asyncio.sleep(TRADE_FLOW_LOG_EVERY)
+            await asyncio.sleep(sleep_s)
 
     def compute_stoch_signal(self):
         c = self.candles
@@ -753,6 +797,97 @@ class StochBot:
         k = 100 * (closed[-1]["c"] - ll) / (hh - ll)
         return (_sig(k, self.cfg.entry_lo, self.cfg.entry_hi),
                 _sig(k, self.cfg.reversal_lo, self.cfg.reversal_hi), ts)
+
+    def compute_adaptive_stoch_signal(self):
+        """"Adaptive V2" (2026-09-27): binary window switch instead of a continuous formula --
+        an earlier continuous version changed window on nearly every candle (1,311 times over
+        ~98h), which is itself a source of instability (the indicator's meaning shifts even
+        when price hasn't really changed regime). This switches between exactly two windows,
+        rarely (55 times over the same period in back-testing).
+
+        vol_pct = mean 1-min (high-low)/close %, trailing cfg.adaptive_vol_lookback CLOSED
+        candles. window = cfg.adaptive_quiet_window if vol_pct < cfg.adaptive_vol_switch_pct
+        else cfg.adaptive_active_window. Same K/threshold (cfg.entry_lo/hi) serves both entry
+        and reversal, same as the plain signal. Stores the live vol_pct/window on
+        self.adaptive_last_vol_pct/self.adaptive_last_window so the dashboard can show exactly
+        what the bot is doing right now."""
+        c = self.candles
+        cfg = self.cfg
+        closed = c[:-1]
+        if len(closed) < cfg.adaptive_vol_lookback + 1:
+            self.adaptive_last_vol_pct = None
+            self.adaptive_last_window = None
+            return None, None, None
+        vol_window = closed[-cfg.adaptive_vol_lookback:]
+        ranges = [(x["h"] - x["l"]) / x["c"] * 100 for x in vol_window if x["c"] > 0]
+        vol_pct = sum(ranges) / len(ranges) if ranges else None
+        window = (cfg.adaptive_quiet_window if vol_pct is not None and vol_pct < cfg.adaptive_vol_switch_pct
+                  else cfg.adaptive_active_window)
+        self.adaptive_last_vol_pct = vol_pct
+        self.adaptive_last_window = window
+        ts = closed[-1]["t"]
+        if len(closed) < window:
+            return None, None, ts
+        w = closed[-window:]
+        hh = max(x["h"] for x in w); ll = min(x["l"] for x in w)
+        if hh == ll:
+            return None, None, ts
+        k = 100 * (closed[-1]["c"] - ll) / (hh - ll)
+        signal = _sig(k, cfg.entry_lo, cfg.entry_hi)
+        self.adaptive_last_k = k
+        return signal, signal, ts
+
+    async def _check_flow_entry_filter(self, side, now_ms):
+        """Order-flow entry veto (2026-09-27): requires BOTH (1) price hasn't already moved
+        more than cfg.flow_max_adverse_move_pct against `side` over the trailing 120s, and (2)
+        average aggressive trade size over the trailing 30s favors `side`. Fails CLOSED -- any
+        missing data in a required window denies the entry rather than allowing it. Only gates
+        a NEW entry or the reopening leg of a reversal (see call site in tick()); never affects
+        an exit. is_maker_ask=True means the resting order was an ask -> the taker/aggressor
+        bought."""
+        cfg = self.cfg
+        if not cfg.flow_entry_filter_enabled:
+            return True
+        now = datetime.fromtimestamp(now_ms / 1000, tz=timezone.utc)
+        cutoff = now - timedelta(seconds=1)
+        start = cutoff - timedelta(seconds=125)
+        try:
+            rows = await self.sb(
+                "GET",
+                f"lighter_btc_trade_flow?select=ts,size,usd_amount,is_maker_ask"
+                f"&ts=gte.{start.isoformat().replace('+', '%2B')}"
+                f"&ts=lt.{cutoff.isoformat().replace('+', '%2B')}&order=ts.asc")
+        except Exception:
+            return False
+        if not rows:
+            return False
+        direction = 1 if side == "long" else -1
+        now_start = cutoff - timedelta(seconds=5)
+        old_start = cutoff - timedelta(seconds=125)
+        old_end = cutoff - timedelta(seconds=120)
+        recent_start = cutoff - timedelta(seconds=30)
+
+        def parse(r):
+            return datetime.fromisoformat(r["ts"].replace("Z", "+00:00"))
+
+        now_rows = [r for r in rows if now_start <= parse(r) < cutoff]
+        old_rows = [r for r in rows if old_start <= parse(r) < old_end]
+        recent_rows = [r for r in rows if recent_start <= parse(r) < cutoff]
+        if not now_rows or not old_rows:
+            return False
+        p_now = sum(r["usd_amount"] for r in now_rows) / sum(r["size"] for r in now_rows)
+        p_old = sum(r["usd_amount"] for r in old_rows) / sum(r["size"] for r in old_rows)
+        price_ok = direction * 100 * (p_now / p_old - 1) >= -cfg.flow_max_adverse_move_pct
+
+        buy_rows = [r for r in recent_rows if r["is_maker_ask"]]
+        sell_rows = [r for r in recent_rows if not r["is_maker_ask"]]
+        if not buy_rows or not sell_rows:
+            return False
+        avg_buy = sum(r["usd_amount"] for r in buy_rows) / len(buy_rows)
+        avg_sell = sum(r["usd_amount"] for r in sell_rows) / len(sell_rows)
+        size_ok = direction * (avg_buy - avg_sell) >= 0
+
+        return price_ok and size_ok
 
     # ── WebSocket with a staleness watchdog ─────────────────────────────────────────────────
     async def _ws_session(self):
@@ -1629,13 +1764,28 @@ class StochBot:
             # the retry budget and likely makes an IP-level block look more abusive, not less.
             return
 
-        if cfg.use_rsi_stoch_signal:
+        if cfg.use_adaptive_window:
+            entry_signal, reversal_signal, candle_ts = self.compute_adaptive_stoch_signal()
+        elif cfg.use_rsi_stoch_signal:
             entry_signal, candle_ts = compute_rsi_stoch_confirmed_signal(
                 self.candles, stoch_period=cfg.stoch_window, require_confirmation=cfg.rsi_paper_require_confirmation,
                 lo=cfg.entry_lo, hi=cfg.entry_hi)
             reversal_signal = entry_signal
         else:
             entry_signal, reversal_signal, candle_ts = self.compute_stoch_signal()
+        if (cfg.use_adaptive_window and cfg.schema_has_adaptive_fields
+                and self.adaptive_last_window != self._adaptive_last_persisted_window):
+            # Only write when the window actually changes (rare by design -- see
+            # compute_adaptive_stoch_signal) rather than every tick, matching the "why this
+            # bot is doing what it's doing should be visible" ask without spamming writes.
+            self._adaptive_last_persisted_window = self.adaptive_last_window
+            try:
+                await self.update_state({
+                    "adaptive_last_vol_pct": self.adaptive_last_vol_pct,
+                    "adaptive_last_window": self.adaptive_last_window,
+                })
+            except Exception:
+                pass
         now_open = self.candles[-1]["o"] if self.candles else None
         if candle_ts is None or now_open is None:
             return
@@ -1678,6 +1828,16 @@ class StochBot:
         if cfg.hour_open_requires_paper_tp:
             await self._check_hour_open_confirmation(has_open_position=state.get("side") is not None)
             if self.awaiting_open_confirmation:
+                entry_signal = None
+
+        if cfg.flow_entry_filter_enabled and entry_signal is not None:
+            # Isolated on purpose, same guarantee as the paper-shadow loggers: a failure here
+            # denies the entry (fails closed) but must never crash the rest of the tick.
+            try:
+                if not await self._check_flow_entry_filter(entry_signal, int(time.time() * 1000)):
+                    entry_signal = None
+            except Exception as e:
+                await self.log_run("flow_entry_filter_error", {"error": str(e)[:300]})
                 entry_signal = None
 
         real_pos, collateral = await self.read_position()
@@ -1830,10 +1990,19 @@ class StochBot:
                     await self.log_run("equity_non_positive", {"eq": eq, "via": "reversal"})
                     await self.update_state({"enabled": False})
                     return
+                reopen_flow_blocked = False
+                if cfg.flow_entry_filter_enabled:
+                    try:
+                        reopen_flow_blocked = not await self._check_flow_entry_filter(
+                            reversal_signal, int(time.time() * 1000))
+                    except Exception as e:
+                        await self.log_run("flow_entry_filter_error", {"error": str(e)[:300], "via": "reversal"})
+                        reopen_flow_blocked = True
                 if (self.entry_vol_paused or (cfg.self_lock_enabled and self.real_trading_locked)
                         or (cfg.trading_hours_utc is not None
                             and self._apply_trading_hours_gate(reversal_signal) is None)
-                        or (cfg.hour_open_requires_paper_tp and self.awaiting_open_confirmation)):
+                        or (cfg.hour_open_requires_paper_tp and self.awaiting_open_confirmation)
+                        or reopen_flow_blocked):
                     # Close leg of a reversal always runs (already happened above); only the
                     # reopen leg respects the gate -- left flat until it clears instead of
                     # immediately flipping into the opposite side.
