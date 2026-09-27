@@ -2182,7 +2182,7 @@ export default function Dashboard() {
         <div className="grid grid-cols-1 sm:grid-cols-3 gap-3">
           <CompactStochBtcPanel
             title="Worker 1 · RSI-Stoch, 24/7"
-            subtitle="TP 0.10% / SL 0.11% / Wilder RSI5 + Stochastic RSI over 14 bars, 20/80, no price confirmation, no reversal guard, no hour restriction, self-lock (2 consecutive paper wins unlock, winning reversals count too) -- promoted from paper 2026-09-26"
+            subtitle="TP 0.10% / SL 0.05% / Wilder RSI5 + Stochastic RSI over 14 bars, 20/80, no price confirmation, no reversal guard, no hour restriction, self-lock (2 consecutive paper wins unlock, winning reversals count too) -- promoted from paper 2026-09-26"
             table="lighter_btc_initial_state"
             state={initialBtcState}
             trades={initialBtcTrades.filter((t: any) => t.closed_at >= WORKER1_RSI_RESET_AT)}
