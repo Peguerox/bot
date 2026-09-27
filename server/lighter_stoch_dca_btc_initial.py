@@ -87,6 +87,11 @@ whatever entry_signal/reversal_signal ended up being -- RSI here) keeps trading 
 consecutive paper wins unlock real trading again. self_lock_reversal_counts_as_win=True to match
 Worker 2/3's current rule (a winning reversal counts the same as a literal TP). Migration:
 lighter_btc_initial_self_lock.sql.
+
+2026-09-26, same day: sl_pct tightened from 0.11 to 0.05, TP unchanged at 0.10 -- an explicit
+live experiment (user's words: "let's do an experiment"), not backed by a prior backtest on this
+specific pairing. Asymmetric the other way now (SL tighter than TP, was TP tighter than SL
+before). Self-lock above still applies -- a real SL still locks real trading the same way.
 """
 from stoch_bot_core import BotConfig, run_bot
 
@@ -98,7 +103,7 @@ CONFIG = BotConfig(
     table_runs="lighter_btc_initial_runs",
     stoch_window=5,
     tp_pct=0.10,
-    sl_pct=0.11,
+    sl_pct=0.05,  # 2026-09-26 experiment: tightened from 0.11 to 0.05, TP unchanged
     entry_lo=25, entry_hi=75,
     reversal_lo=25, reversal_hi=75,
     schema_has_position_bands=True,
