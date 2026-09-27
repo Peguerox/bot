@@ -1374,12 +1374,12 @@ function currentSessionStart(nowUtc: Date): Date {
 }
 
 function CompactStochBtcPanel({
-  title, subtitle, table, state, trades, currentPrice, loading, onToggled, erValue, runs, cooldownMin,
+  title, subtitle, table, state, trades, currentPrice, loading, onToggled, runs, cooldownMin,
   showSelfLock, stats, tradingHoursUtc, combineEquityWinRate, rsiPaperStats,
 }: {
   title: string; subtitle: string; table: string; state: any; trades: any[];
   currentPrice: number | null; loading: boolean; onToggled: () => void;
-  erValue?: number | null; runs?: any[]; cooldownMin?: number; showSelfLock?: boolean;
+  runs?: any[]; cooldownMin?: number; showSelfLock?: boolean;
   stats?: { total: number; wins: number }; tradingHoursUtc?: number[];
   combineEquityWinRate?: boolean; rsiPaperStats?: { total: number; wins: number; pnlPct: number };
 }) {
@@ -1399,7 +1399,6 @@ function CompactStochBtcPanel({
   // the only signal we have client-side for which regime this open position belongs to.
   const posTpPct = state?.position_tp_pct ?? null;
   const positionRegime = side == null ? null : (posTpPct != null && posTpPct > 0.15 ? "trend" : "fade");
-  const marketRegime = erValue == null ? null : (erValue > 0.75 ? "trend" : "chop");
 
   const totalNotional = legs.reduce((s, l) => s + l.usd_size, 0);
   const totalQty = legs.reduce((s, l) => s + l.usd_size / l.price, 0);
@@ -1523,7 +1522,7 @@ function CompactStochBtcPanel({
           </div>
         );
         const positionPill = (
-          <div className={`bg-gray-800/60 rounded-lg p-2 ${!combineEquityWinRate && erValue == null && cooldownMin == null && !showSelfLock && !tradingHoursUtc ? "col-span-2" : ""}`}>
+          <div className={`bg-gray-800/60 rounded-lg p-2 ${!combineEquityWinRate && cooldownMin == null && !showSelfLock && !tradingHoursUtc ? "col-span-2" : ""}`}>
             <p className="text-gray-500 text-[10px] uppercase">Position</p>
             <div className="flex items-center gap-1.5 flex-wrap">
               <span className={`font-bold ${side === "long" ? "text-green-400" : side === "short" ? "text-amber-400" : "text-gray-400"}`}>
@@ -1563,17 +1562,6 @@ function CompactStochBtcPanel({
                 </div>
               );
             })()}
-          </div>
-        );
-        const erPill = erValue != null && (
-          <div className="bg-gray-800/60 rounded-lg p-2">
-            <p className="text-gray-500 text-[10px] uppercase">Market ER(6)</p>
-            <div className="flex items-center gap-1.5">
-              <span className="font-bold text-white">{erValue.toFixed(2)}</span>
-              <span className={`text-[9px] font-bold px-1.5 py-0.5 rounded uppercase ${marketRegime === "trend" ? "bg-purple-500/20 text-purple-300" : "bg-blue-500/20 text-blue-300"}`}>
-                {marketRegime}
-              </span>
-            </div>
           </div>
         );
         const breakerPill = cooldownMin != null && (
@@ -1718,7 +1706,6 @@ function CompactStochBtcPanel({
             {equityPill}
             {winRatePill}
             {positionPill}
-            {erPill}
             {breakerPill}
             {tradingHoursPill}
             {selfLockPill}
@@ -1908,7 +1895,6 @@ export default function Dashboard() {
   const [szToggling, setSzToggling] = useState(false);
   const [szClearing, setSzClearing] = useState(false);
   const [ocoBtcPrice,  setOcoBtcPrice]  = useState<number | null>(null);
-  const [btcEr6, setBtcEr6] = useState<number | null>(null);
   const [dcaBtcState,  setDcaBtcState]  = useState<any>(null);
   const [dcaBtcTrades, setDcaBtcTrades] = useState<any[]>([]);
   const [dcaBtcRuns,   setDcaBtcRuns]   = useState<any[]>([]);
@@ -2032,21 +2018,6 @@ export default function Dashboard() {
         const bid = parseFloat(ob?.bids?.[0]?.price);
         const ask = parseFloat(ob?.asks?.[0]?.price);
         if (bid && ask) setOcoBtcPrice((bid + ask) / 2);
-      })
-      .catch(() => {});
-    // Live Efficiency Ratio(6) -- same formula Worker 1/3's regime switch uses -- computed
-    // client-side from public candles so the panel shows the actual market condition, not
-    // just the bot's last trade.
-    fetch(`https://mainnet.zklighter.elliot.ai/api/v1/candles?market_id=1&resolution=1m&start_timestamp=0&end_timestamp=${Date.now()}&count_back=10`)
-      .then((r) => r.json())
-      .then((d) => {
-        const c = (d?.c ?? []).slice().sort((a: any, b: any) => a.t - b.t);
-        if (c.length < 7) return;
-        const closes = c.slice(-7).map((x: any) => x.c);
-        const net = Math.abs(closes[closes.length - 1] - closes[0]);
-        let path = 0;
-        for (let i = 1; i < closes.length; i++) path += Math.abs(closes[i] - closes[i - 1]);
-        setBtcEr6(path > 0 ? net / path : 0);
       })
       .catch(() => {});
     setLoading(false);
