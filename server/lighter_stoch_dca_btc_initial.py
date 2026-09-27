@@ -135,7 +135,7 @@ CONFIG = BotConfig(
     schema_has_self_lock=True,  # requires lighter_btc_initial_self_lock.sql first
     self_lock_reversal_counts_as_win=True,
     profit_lock_enabled=True,
-    profit_lock_trigger_pct=0.05,
+    profit_lock_trigger_pct=0.02,  # 2026-09-27: 0.05 -> 0.02 -- a real trade peaked at 0.04% and never armed, went to SL
     schema_has_profit_lock=True,  # requires lighter_btc_initial_profit_lock.sql first
     # Price-tick logging: last resort. Only writes if both Worker 2 and Worker 3 are quiet.
     tick_log_defers_to=["worker2", "worker3"],

@@ -104,7 +104,7 @@ CONFIG = BotConfig(
     schema_has_self_lock=True,  # requires the migration above to be run first
     self_lock_reversal_counts_as_win=True,  # a winning reversal satisfies both gates too, not just literal TP
     profit_lock_enabled=True,
-    profit_lock_trigger_pct=0.05,
+    profit_lock_trigger_pct=0.02,  # 2026-09-27: 0.05 -> 0.02 -- a real Worker 1 trade peaked at 0.04% and never armed, went to SL
     schema_has_profit_lock=True,  # requires lighter_btc_optimal_profit_lock.sql first
     # Price-tick logging: primary writer (trades most, so it's up most reliably). Worker 3
     # takes over if this one goes quiet, Worker 1 as last resort. See stoch_bot_core.py.
