@@ -105,7 +105,7 @@ CONFIG = BotConfig(
     tick_log_prune=True,
     # Trade-flow logging (real executed trades, aggressor side): same ownership chain as tick
     # logging above.
-    trade_flow_log_defers_to=[],
+    trade_flow_log_defers_to=None,  # disabled 2026-09-27: triggered a WAF block that degraded real position reads
     trade_flow_log_prune=True,
 )
 
