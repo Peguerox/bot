@@ -18,7 +18,7 @@ const SURFER_GIVEBACK = 0.15;
 // Reset again 2026-09-27 when stoch_window/thresholds changed (5,25/75 -> 20,10/90), then once
 // more the same day after SL briefly went live at 0.05% before being reverted to 0.11% -- a few
 // trades ran under the wrong SL, so the baseline moved past those too.
-const WORKER1_RSI_RESET_AT = "2026-09-27T15:00:49.777450+00:00";
+const WORKER1_RESET_AT = "2026-09-27T21:24:23.165269+00:00";
 // Worker 2's schedule was removed and SL tightened (0.11% -> 0.05%) at this moment -- same
 // reasoning as Worker 1's reset above, a clean baseline for a config that changed twice at once.
 // Reset again 2026-09-27 when stoch_window/thresholds changed, then once more after the SL
@@ -2215,7 +2215,7 @@ export default function Dashboard() {
             subtitle="TP 0.10% / SL 0.11% / window 5, 25-75 (original) / 0.02% profit-lock trail / order-flow entry veto ON (moved here from Worker 3) / self-lock (2 consecutive paper wins unlock, winning reversals count too)"
             table="lighter_btc_initial_state"
             state={initialBtcState}
-            trades={initialBtcTrades.filter((t: any) => t.closed_at >= WORKER1_RSI_RESET_AT)}
+            trades={initialBtcTrades.filter((t: any) => t.closed_at >= WORKER1_RESET_AT)}
             currentPrice={ocoBtcPrice}
             loading={loading}
             onToggled={load}
