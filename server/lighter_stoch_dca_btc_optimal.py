@@ -101,6 +101,10 @@ CONFIG = BotConfig(
     # takes over if this one goes quiet, Worker 1 as last resort. See stoch_bot_core.py.
     tick_log_defers_to=[],
     tick_log_prune=True,
+    # Trade-flow logging (real executed trades, aggressor side): same ownership chain as tick
+    # logging above.
+    trade_flow_log_defers_to=[],
+    trade_flow_log_prune=True,
 )
 
 if __name__ == "__main__":

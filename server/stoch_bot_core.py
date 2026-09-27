@@ -67,6 +67,8 @@ TICK_LOG_EVERY = 2.5      # seconds between price-tick log rows (candle-vs-real-
                           # on 2026-09-22 showed 1-min candles are too coarse to backtest
                           # against; this records the real book for a proper replay later)
 TICK_LOG_RETENTION_DAYS = 14
+TRADE_FLOW_LOG_EVERY = 3.0   # seconds between recentTrades polls
+TRADE_FLOW_LOG_RETENTION_DAYS = 14
 
 QTY_EPS = 1e-6
 OVERSIZE_FACTOR = 1.5     # real position this much bigger than intended => emergency flatten
@@ -266,6 +268,16 @@ class BotConfig:
     tick_log_defers_to: Optional[list] = None
     tick_log_prune: bool = False  # only one bot should run the retention prune; keep it True
                                   # on exactly one worker (the primary) to avoid redundant deletes
+    # Trade-flow logging (2026-09-26): same single-writer-with-failover pattern as the tick
+    # logger above, but records actual executed trades (size, price, aggressor side) from
+    # Lighter's public recentTrades endpoint -- data the tick logger doesn't capture at all.
+    # Built toward eventually detecting "the signal is about to be wrong" from real order flow
+    # (e.g. a burst of aggressive one-sided taker volume right before a losing reversal) and
+    # either pausing entries or flipping the signal -- but that analysis needs real data first;
+    # this step only collects it. recentTrades has no historical backfill, so this can only
+    # ever see trades from the moment logging starts forward. None = doesn't participate.
+    trade_flow_log_defers_to: Optional[list] = None
+    trade_flow_log_prune: bool = False
 
 
 # ── Pure helpers ────────────────────────────────────────────────────────────────────────────
@@ -655,6 +667,62 @@ class StochBot:
             except Exception:
                 pass  # never let tick logging affect trading
             await asyncio.sleep(TICK_LOG_EVERY)
+
+    async def run_trade_flow_logger_forever(self):
+        """Records actual executed trades (size, price, aggressor side) from Lighter's public
+        recentTrades endpoint -- lighter_btc_price_ticks only has best bid/ask, never real
+        order flow. Same single-writer-with-failover pattern as run_tick_logger_forever above.
+        recentTrades has no historical backfill (confirmed 2026-09-26: timestamp/cursor params
+        are silently ignored, it always returns only the current live trades), so this can only
+        ever see trades from the moment logging starts forward."""
+        cfg = self.cfg
+        if cfg.trade_flow_log_defers_to is None:
+            return
+        STALE_AFTER = TRADE_FLOW_LOG_EVERY * 3
+        last_prune = 0.0
+        last_trade_id = None
+        while True:
+            try:
+                should_write = len(cfg.trade_flow_log_defers_to) == 0
+                if not should_write:
+                    last = await self.sb(
+                        "GET", "lighter_btc_trade_flow?select=ts,source&order=ts.desc&limit=1")
+                    if not last:
+                        should_write = True
+                    else:
+                        last_ts = datetime.fromisoformat(last[0]["ts"].replace("Z", "+00:00"))
+                        age = time.time() - last_ts.timestamp()
+                        active_higher_priority = (
+                            last[0]["source"] in cfg.trade_flow_log_defers_to and age < STALE_AFTER)
+                        should_write = not active_higher_priority
+                if should_write:
+                    if last_trade_id is None:
+                        rows = await self.sb(
+                            "GET", "lighter_btc_trade_flow?select=trade_id&order=trade_id.desc&limit=1")
+                        last_trade_id = rows[0]["trade_id"] if rows else 0
+                    url = (f"https://mainnet.zklighter.elliot.ai/api/v1/recentTrades"
+                           f"?market_id={cfg.market_index}&limit=200")
+                    async with self.http.get(url) as resp:
+                        data = jsonlib.loads(await resp.text())
+                    new_trades = sorted(
+                        (t for t in data.get("trades", []) if t["trade_id"] > last_trade_id),
+                        key=lambda t: t["trade_id"])
+                    for t in new_trades:
+                        await self.sb("POST", "lighter_btc_trade_flow", {
+                            "trade_id": t["trade_id"], "ts": ms_to_iso(t["timestamp"]),
+                            "price": float(t["price"]), "size": float(t["size"]),
+                            "usd_amount": float(t["usd_amount"]),
+                            "is_maker_ask": t["is_maker_ask"], "source": cfg.worker_id,
+                        })
+                        last_trade_id = t["trade_id"]
+                if cfg.trade_flow_log_prune and time.time() - last_prune > 3600:
+                    last_prune = time.time()
+                    cutoff = (datetime.now(timezone.utc)
+                             - timedelta(days=TRADE_FLOW_LOG_RETENTION_DAYS)).isoformat()
+                    await self.sb("DELETE", f"lighter_btc_trade_flow?ts=lt.{cutoff}")
+            except Exception:
+                pass  # never let trade-flow logging affect trading
+            await asyncio.sleep(TRADE_FLOW_LOG_EVERY)
 
     def compute_stoch_signal(self):
         c = self.candles
@@ -1825,6 +1893,7 @@ class StochBot:
         ws_task = asyncio.create_task(self.run_ws_forever())
         candle_task = asyncio.create_task(self.run_candle_refresh_forever())
         tick_log_task = asyncio.create_task(self.run_tick_logger_forever())
+        trade_flow_log_task = asyncio.create_task(self.run_trade_flow_logger_forever())
 
         print("Waiting for initial WebSocket data...", flush=True)
         for _ in range(40):
@@ -1871,6 +1940,7 @@ class StochBot:
             ws_task.cancel()
             candle_task.cancel()
             tick_log_task.cancel()
+            trade_flow_log_task.cancel()
             with contextlib.suppress(BaseException):
                 await self.client.api_client.close()
             with contextlib.suppress(BaseException):

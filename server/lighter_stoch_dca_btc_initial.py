@@ -116,6 +116,7 @@ CONFIG = BotConfig(
     self_lock_reversal_counts_as_win=True,
     # Price-tick logging: last resort. Only writes if both Worker 2 and Worker 3 are quiet.
     tick_log_defers_to=["worker2", "worker3"],
+    trade_flow_log_defers_to=["worker2", "worker3"],
 )
 
 if __name__ == "__main__":

@@ -85,6 +85,7 @@ CONFIG = BotConfig(
     schema_has_position_bands=True,
     # Price-tick logging: backup writer. Takes over the moment Worker 2 goes quiet.
     tick_log_defers_to=["worker2"],
+    trade_flow_log_defers_to=["worker2"],
 )
 
 if __name__ == "__main__":
