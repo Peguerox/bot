@@ -141,6 +141,33 @@ open position's exit rules don't drift just because volatility changed after ent
 trade_flow_log_defers_to reset to None -- nothing on the fleet consults lighter_btc_trade_flow
 anymore now that both entry filters (this bot's and Worker 1's, from its own now-reverted
 experiment) are off; no reason to keep polling for data nobody reads.
+
+2026-09-28, stoch_turn_exit_enabled=True: "stochastic-turn protection" (external research,
+BTC_Stochastic_Turn_Exit.py / BTC_Stochastic_Turn_Exit_Results.md), a separate add-on on top of
+the joint adaptive formula above, not a replacement. Once a position's unrealized profit
+reaches 0.75x its (frozen, joint-adaptive) TP, arms a trail on the LIVE stochastic K value
+(recomputed every tick from a continuously-tracked partial-minute quote-mid high/low, not just
+once per closed candle -- see _update_partial_minute/_live_stoch_k) instead of price: tracks
+the best K reached since arming, closes ("STOCH_TURN") if K retreats by
+clip(10/sqrt(R), 2, 30) points from that best reading, R = entry-time vol_pct/0.0712. Verified
+this implementation reproduces the source report's worked example exactly (quiet anchor:
+activation=0.04778%, retreat=15.696 points) before deploying. Can close during the ordinary
+reversal blanking period (it's a hard exit like TP/SL/PROFIT_LOCK, not a signal reversal); hard
+SL/TP still take priority. Real and paper freeze/track independent copies of the same state, so
+paper stays a faithful mirror of what real is actually doing.
+
+Source report's simulated result on its primary replay: +$6.40/$100 vs the plain joint-adaptive
+formula's +$5.13 (both weekend days improved), but more trades and more SLs in absolute count
+(higher total PnL despite that) -- not a reduction in losses, a different trade-off. Simulated,
+not live; selected on the same Sep22-27 data the base formula was, so this is a research
+add-on, not an independent validation.
+
+Unlike the formula's five frozen-per-entry parameters, STOCH_TURN's armed/extreme-K state is
+NOT persisted across restarts -- a restart mid-position just means the protection doesn't
+resume for that position until it closes and a fresh one opens, judged not worth a migration
+for. Counts as a self-lock recovery win only if its actual net PnL was positive (it can close
+at a loss -- a fast move can still beat it to SL), same rule a plain reversal already follows;
+never resets the counter even when it does close at a loss (only a literal SL does that).
 """
 from stoch_bot_core import BotConfig, run_bot
 
@@ -160,6 +187,9 @@ CONFIG = BotConfig(
     reversal_lo=25, reversal_hi=75,
     use_joint_adaptive=True,
     schema_has_joint_adaptive=True,  # requires lighter_stoch_dca_btc_joint_adaptive.sql first
+    # Stochastic-turn protection (2026-09-28), see docstring. No migration needed -- its
+    # armed/extreme-K state is in-process only, not persisted.
+    stoch_turn_exit_enabled=True,
     schema_has_position_bands=True,  # needed for the frozen position_tp_pct/position_sl_pct
     self_lock_enabled=True,
     schema_has_self_lock=True,

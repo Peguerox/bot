@@ -37,6 +37,7 @@ Hardening pass 2026-09-21 (after a 32-minute silent freeze on Workers 1 and 2):
 """
 import asyncio
 import contextlib
+import math
 import os
 import sys
 import time
@@ -322,6 +323,14 @@ class BotConfig:
     # direction (long/short/neutral) regardless of which signal mode is active -- "what is the
     # paper bot looking at right now," on all 3 bots. See self.live_k/live_signal.
     schema_has_live_signal: bool = False  # requires the live_signal/live_k column migration
+    # Stochastic-turn protection (2026-09-28, external research): once a position's unrealized
+    # profit reaches 0.75x its (frozen, joint-adaptive) TP, arms a trail on the live stochastic
+    # K value instead of price -- closes if K retreats by stoch_turn_retreat_points from its
+    # best reading since arming. See _check_stoch_turn_exit's docstring. Only meaningful with
+    # use_joint_adaptive=True (needs a frozen per-position TP and an entry-time volatility
+    # ratio to compute the retreat threshold).
+    stoch_turn_exit_enabled: bool = False
+    schema_has_stoch_turn: bool = False  # requires the stoch-turn column migration
 
 
 # ── Pure helpers ────────────────────────────────────────────────────────────────────────────
@@ -387,6 +396,19 @@ def joint_adaptive_parameters(vol_pct):
     return tuple(out)
 
 
+def joint_adaptive_stoch_turn_params(vol_pct, tp_pct):
+    """Stochastic-turn protection's own two frozen-at-entry values (external research,
+    2026-09-28): activation_profit_percent = 0.75 * tp_pct (the position's own frozen TP, from
+    joint_adaptive_parameters); stochastic_retreat_points = clip(10/sqrt(R), 2, 30), same R as
+    the other five parameters. Verified against the source report's worked example: at the
+    quiet anchor (vol_pct=0.0289%, tp_pct=0.06371%) this returns activation=0.04778,
+    retreat=15.696 -- exact match."""
+    ratio = max(vol_pct, 1e-9) / JOINT_ADAPTIVE_REFERENCE_VOL_PCT
+    activation_pct = 0.75 * tp_pct
+    retreat_points = min(max(10.0 / math.sqrt(ratio), 2.0), 30.0)
+    return activation_pct, retreat_points
+
+
 def _stoch_k_interpolated(closed, window_float):
     """Interpolated stochastic %K for a possibly-fractional window: (1-f)*K(n) + f*K(n+1)
     where n=floor(window) clamped to [3,40], f=window-n. At n>=40, uses K(40) exactly (no
@@ -403,6 +425,41 @@ def _stoch_k_interpolated(closed, window_float):
         if hh == ll:
             return None
         return 100 * (closed[-1]["c"] - ll) / (hh - ll)
+
+    k_n = k_for_n(n)
+    if k_n is None:
+        return None
+    if f == 0.0:
+        return k_n
+    k_n2 = k_for_n(min(n + 1, 40))
+    if k_n2 is None:
+        return k_n
+    return (1 - f) * k_n + f * k_n2
+
+
+def _stoch_k_live(closed, live_h, live_l, live_c, window_float):
+    """Same fractional-window interpolation as _stoch_k_interpolated, but the most recent bar
+    is the LIVE, still-forming partial minute (live_h/live_l/live_c, continuously updated from
+    real-time quote-mid -- see StochBot._update_partial_minute) instead of the last CLOSED
+    candle. Used only by the stochastic-turn protection, which needs sub-minute resolution;
+    the underlying joint-adaptive entry/exit signal itself still uses closed candles only.
+    `closed` must NOT include any partial/forming bar -- pass self.candles[:-1], same as
+    everywhere else that reads closed candles."""
+    n = int(window_float)
+    n = max(3, min(n, 40))
+    f = 0.0 if n >= 40 else window_float - n
+
+    def k_for_n(w):
+        needed_closed = w - 1
+        if needed_closed > 0 and len(closed) < needed_closed:
+            return None
+        win = closed[-needed_closed:] if needed_closed > 0 else []
+        hh = live_h; ll = live_l
+        for x in win:
+            hh = max(hh, x["h"]); ll = min(ll, x["l"])
+        if hh == ll:
+            return None
+        return 100 * (live_c - ll) / (hh - ll)
 
     k_n = k_for_n(n)
     if k_n is None:
@@ -679,6 +736,26 @@ class StochBot:
         self.live_k = None
         self.live_signal = None
         self._live_signal_persist_ts = 0.0
+        # Stochastic-turn protection (2026-09-28, external research -- BTC_Stochastic_Turn_
+        # Exit.py / BTC_Stochastic_Turn_Exit_Results.md): a profit-armed trail on the LIVE
+        # (sub-minute) stochastic K, layered on the joint adaptive formula. See
+        # _stoch_k_live/_check_stoch_turn_exit's docstrings. partial_minute_* tracks the
+        # current, still-forming minute's quote-mid high/low continuously (self.candles only
+        # refreshes once a minute via REST poll, too coarse for this). position_stoch_* is the
+        # REAL position's frozen-at-entry activation/retreat plus live armed/extreme-K state;
+        # paper_stoch_* is the paper shadow's own independent copy of the same thing.
+        self.partial_minute_ts = None
+        self.partial_minute_h = None
+        self.partial_minute_l = None
+        self.position_stoch_activation_pct = None
+        self.position_stoch_retreat_points = None
+        self.position_stoch_armed = False
+        self.position_stoch_extreme_k = None
+        self._position_stoch_restored = False
+        self.paper_stoch_activation_pct = None
+        self.paper_stoch_retreat_points = None
+        self.paper_stoch_armed = False
+        self.paper_stoch_extreme_k = None
 
     # ── Supabase (aiohttp: async, and actually cancellable) ─────────────────────────────────
     async def sb(self, method, path, body=None, extra_headers=None):
@@ -1000,6 +1077,58 @@ class StochBot:
         self.live_signal = signal
         return signal, signal, ts
 
+    def _update_partial_minute(self, best_bid, best_ask, now_ms):
+        """Tracks the current, still-forming minute's quote-mid high/low continuously, for the
+        stochastic-turn protection's live-K calculation (see _stoch_k_live). self.candles only
+        refreshes once a minute via a REST poll (~1.5s after each boundary) -- far too coarse
+        for a check meant to react within a minute. Resets on every minute rollover; harmless
+        to call every tick regardless of position state, since accurate high/low needs every
+        tick observed, not just the ticks while a position happens to be open."""
+        mid = (best_bid + best_ask) / 2
+        minute_ts = (now_ms // 60000) * 60000
+        if self.partial_minute_ts != minute_ts:
+            self.partial_minute_ts = minute_ts
+            self.partial_minute_h = mid
+            self.partial_minute_l = mid
+        else:
+            self.partial_minute_h = max(self.partial_minute_h, mid)
+            self.partial_minute_l = min(self.partial_minute_l, mid)
+
+    def _live_stoch_k(self):
+        """Current live stochastic K using the partial-minute buffer + closed candles, at
+        whatever window the joint-adaptive formula is reading RIGHT NOW (not frozen at entry --
+        per the source report, "window changes can also change K; this behavior is included in
+        the replay"). None if any required input isn't ready yet."""
+        if (self.partial_minute_h is None or self.joint_adaptive_last is None
+                or not self.candles):
+            return None
+        window = self.joint_adaptive_last["window"]
+        closed = self.candles[:-1]
+        live_c = (self.partial_minute_h + self.partial_minute_l) / 2  # current quote-mid
+        return _stoch_k_live(closed, self.partial_minute_h, self.partial_minute_l, live_c, window)
+
+    @staticmethod
+    def _stoch_turn_check(side, unrealized_pct, live_k, activation_pct, retreat_points,
+                          armed, extreme_k):
+        """Shared arm/track/trigger logic (external research, 2026-09-28) -- used identically
+        by the real position and the paper shadow so they stay in lockstep, same principle as
+        the profit-lock trail. Once armed, STAYS armed even if unrealized profit later drops
+        back below the activation level ("activation is remembered"); only the position closing
+        clears it. Returns (new_armed, new_extreme_k, triggered)."""
+        if live_k is None:
+            return armed, extreme_k, False
+        if not armed:
+            if unrealized_pct >= activation_pct:
+                return True, live_k, False
+            return armed, extreme_k, False
+        if side == "long":
+            extreme_k = live_k if extreme_k is None else max(extreme_k, live_k)
+            triggered = (extreme_k - live_k) >= retreat_points
+        else:
+            extreme_k = live_k if extreme_k is None else min(extreme_k, live_k)
+            triggered = (live_k - extreme_k) >= retreat_points
+        return armed, extreme_k, triggered
+
     async def _check_flow_entry_filter(self, side, now_ms):
         """Order-flow entry veto (2026-09-27): requires BOTH (1) price hasn't already moved
         more than cfg.flow_max_adverse_move_pct against `side` over the trailing 120s, and (2)
@@ -1310,6 +1439,13 @@ class StochBot:
                 await self.update_state({"position_blank_seconds": None})
             except Exception:
                 pass
+        # Stoch-turn state is in-memory only (not persisted) -- a restart mid-position just
+        # means this protection doesn't resume for that position until it closes and a fresh
+        # one opens, not a correctness issue worth a migration for.
+        self.position_stoch_armed = False
+        self.position_stoch_extreme_k = None
+        self.position_stoch_activation_pct = None
+        self.position_stoch_retreat_points = None
         await self.log_run("emergency_flatten", {"reason": reason, "flat": flat,
                                                  "residual": pos_after})
 
@@ -1367,6 +1503,14 @@ class StochBot:
             if cfg.schema_has_position_bands:
                 patch["position_tp_pct"] = j["tp_pct"]
                 patch["position_sl_pct"] = j["sl_pct"]
+            if cfg.stoch_turn_exit_enabled:
+                # Same isolated-write reasoning as position_blank_seconds above -- these never
+                # touch the critical patch.
+                act, retreat = joint_adaptive_stoch_turn_params(j["vol_pct"], j["tp_pct"])
+                self.position_stoch_activation_pct = act
+                self.position_stoch_retreat_points = retreat
+                self.position_stoch_armed = False
+                self.position_stoch_extreme_k = None
             regime = "joint_adaptive"
         elif cfg.schema_has_position_bands:
             # Only bots whose table actually has these columns write them -- plain
@@ -1376,13 +1520,25 @@ class StochBot:
             patch["position_sl_pct"] = cfg.trend_sl_pct if trending_leg else cfg.sl_pct
             regime = "trend" if trending_leg else "fade"
         await self.update_state(patch)
+        entry_detail = {"signal": signal, "price": price, "via": via,
+                        "qty": abs(pos), "regime": regime}
         if regime == "joint_adaptive" and cfg.schema_has_joint_adaptive:
             try:
                 await self.update_state({"position_blank_seconds": self.position_blank_seconds})
             except Exception:
                 pass  # best-effort only -- self.position_blank_seconds above is authoritative
-        await self.log_run("entered", {"signal": signal, "price": price, "via": via,
-                                       "qty": abs(pos), "regime": regime})
+        if regime == "joint_adaptive":
+            # Entry-time volatility/settings, for comparing live results against the replay --
+            # direct request. self.joint_adaptive_last is this same tick's reading (frozen onto
+            # the position above), so this is exactly what the position is actually running.
+            j = self.joint_adaptive_last
+            entry_detail["joint_adaptive"] = j
+            if cfg.stoch_turn_exit_enabled:
+                entry_detail["stoch_turn"] = {
+                    "activation_pct": self.position_stoch_activation_pct,
+                    "retreat_points": self.position_stoch_retreat_points,
+                }
+        await self.log_run("entered", entry_detail)
         return True
 
     async def close_all(self, reason, state, side, legs, best_bid, best_ask, candle_ts,
@@ -1453,6 +1609,13 @@ class StochBot:
                 await self.update_state({"position_blank_seconds": None})
             except Exception:
                 pass
+        # Stoch-turn state is in-memory only (not persisted) -- a restart mid-position just
+        # means this protection doesn't resume for that position until it closes and a fresh
+        # one opens, not a correctness issue worth a migration for.
+        self.position_stoch_armed = False
+        self.position_stoch_extreme_k = None
+        self.position_stoch_activation_pct = None
+        self.position_stoch_retreat_points = None
         await self.log_trade(side, ae, exit_price, qty, pnl, reason, len(legs),
                              ms_to_iso(state.get("first_entry_time")))
         await self.log_run("closed", {"reason": reason, "pnl": pnl, "side": side})
@@ -1771,6 +1934,12 @@ class StochBot:
                     self.paper_joint_tp_pct = j["tp_pct"]
                     self.paper_joint_sl_pct = j["sl_pct"]
                     self.paper_joint_blank_s = j["blank_seconds"]
+                    if cfg.stoch_turn_exit_enabled:
+                        act, retreat = joint_adaptive_stoch_turn_params(j["vol_pct"], j["tp_pct"])
+                        self.paper_stoch_activation_pct = act
+                        self.paper_stoch_retreat_points = retreat
+                        self.paper_stoch_armed = False
+                        self.paper_stoch_extreme_k = None
                 if cfg.schema_has_self_lock:
                     await self.update_state({
                         "paper_side": self.paper_side, "paper_entry_price": self.paper_entry,
@@ -1810,6 +1979,21 @@ class StochBot:
             if new_peak is not None:
                 self.paper_profit_lock_peak_pct = new_peak
 
+        if (reason is None and cfg.use_joint_adaptive and cfg.stoch_turn_exit_enabled
+                and self.paper_stoch_activation_pct is not None):
+            # Same protection as real (see the gap_hit block in tick()), paper's own copy so it
+            # stays a faithful mirror.
+            live_k = self._live_stoch_k()
+            unrealized_pct = (100 * (check_price - entry) / entry if side == "long"
+                              else 100 * (entry - check_price) / entry)
+            armed, extreme_k, triggered = self._stoch_turn_check(
+                side, unrealized_pct, live_k, self.paper_stoch_activation_pct,
+                self.paper_stoch_retreat_points, self.paper_stoch_armed, self.paper_stoch_extreme_k)
+            self.paper_stoch_armed = armed
+            self.paper_stoch_extreme_k = extreme_k
+            if triggered:
+                reason = "STOCH_TURN"
+
         reversal_ready = reversal_signal is not None and reversal_signal != side
         if cfg.use_joint_adaptive:
             blank_s = self.paper_joint_blank_s
@@ -1832,15 +2016,23 @@ class StochBot:
         self.paper_joint_tp_pct = None
         self.paper_joint_sl_pct = None
         self.paper_joint_blank_s = None
+        self.paper_stoch_armed = False
+        self.paper_stoch_extreme_k = None
+        self.paper_stoch_activation_pct = None
+        self.paper_stoch_retreat_points = None
 
         confirmation_just_cleared = False
         # A pure reversal close (reason is None here, only reached because reversal_ready was
         # True) counts as a win too when self_lock_reversal_counts_as_win is set -- but only if
         # it actually closed favorably. A losing/breakeven reversal stays neutral (does NOT
         # reset the count, unlike a real SL) -- backtested both ways, resetting on a losing
-        # reversal tested worse.
+        # reversal tested worse. STOCH_TURN follows the exact same pnl>0 rule, unconditionally
+        # (not gated on self_lock_reversal_counts_as_win) -- per the source report, it can close
+        # at a loss (a fast move can still beat it to SL), so it must never count as a win
+        # blindly the way PROFIT_LOCK can (PROFIT_LOCK is structurally guaranteed non-negative).
         counts_as_tp = reason in ("TP", "PROFIT_LOCK")
-        if not counts_as_tp and reason is None and cfg.self_lock_reversal_counts_as_win:
+        if not counts_as_tp and (reason == "STOCH_TURN"
+                                 or (reason is None and cfg.self_lock_reversal_counts_as_win)):
             pnl_pct = ((check_price - entry) / entry * 100 if closed_side == "long"
                        else (entry - check_price) / entry * 100)
             counts_as_tp = pnl_pct > 0
@@ -1869,6 +2061,12 @@ class StochBot:
                 self.paper_joint_tp_pct = j["tp_pct"]
                 self.paper_joint_sl_pct = j["sl_pct"]
                 self.paper_joint_blank_s = j["blank_seconds"]
+                if cfg.stoch_turn_exit_enabled:
+                    act, retreat = joint_adaptive_stoch_turn_params(j["vol_pct"], j["tp_pct"])
+                    self.paper_stoch_activation_pct = act
+                    self.paper_stoch_retreat_points = retreat
+                    self.paper_stoch_armed = False
+                    self.paper_stoch_extreme_k = None
 
         if cfg.schema_has_self_lock:
             patch = {
@@ -2166,6 +2364,10 @@ class StochBot:
                     await self.update_state({"position_blank_seconds": None})
                 except Exception:
                     pass
+            self.position_stoch_armed = False
+            self.position_stoch_extreme_k = None
+            self.position_stoch_activation_pct = None
+            self.position_stoch_retreat_points = None
             await self.log_trade(side, ae, implied_exit, qty, pnl, "EXTERNAL", len(legs),
                                  ms_to_iso(state.get("first_entry_time")))
             await self.log_run("resolved_externally", {"side": side, "pnl": pnl})
@@ -2194,6 +2396,9 @@ class StochBot:
         best_bid, best_ask = self.live.best_bid_ask()
         if best_bid is None or best_ask is None:
             return
+
+        if cfg.use_joint_adaptive and cfg.stoch_turn_exit_enabled:
+            self._update_partial_minute(best_bid, best_ask, self.now_ms())
 
         if cfg.rsi_paper_test_enabled:
             # Isolated on purpose: a failure here (e.g. the migration hasn't run yet) must
@@ -2280,6 +2485,26 @@ class StochBot:
                             await self.update_state({"profit_lock_peak_pct": new_peak})
                         except Exception:
                             pass  # best-effort only -- in-memory tracking above is authoritative
+
+            if (gap_hit is None and cfg.use_joint_adaptive and cfg.stoch_turn_exit_enabled
+                    and ae and self.position_stoch_activation_pct is not None):
+                # Profit-armed trail on the LIVE stochastic K (external research, 2026-09-28) --
+                # see _stoch_turn_check's docstring. Deliberately checked here, alongside/after
+                # profit-lock and before the reversal-guard block below: it can fire even during
+                # the ordinary reversal blanking period (it's a hard exit like TP/SL/PROFIT_LOCK,
+                # not a signal reversal), which is why it goes through gap_hit and NOT
+                # reversal_ready.
+                live_k = self._live_stoch_k()
+                unrealized_pct = (100 * (check_price - ae) / ae if side == "long"
+                                  else 100 * (ae - check_price) / ae)
+                armed, extreme_k, triggered = self._stoch_turn_check(
+                    side, unrealized_pct, live_k, self.position_stoch_activation_pct,
+                    self.position_stoch_retreat_points, self.position_stoch_armed,
+                    self.position_stoch_extreme_k)
+                self.position_stoch_armed = armed
+                self.position_stoch_extreme_k = extreme_k
+                if triggered:
+                    gap_hit = "STOCH_TURN"
 
             reversal_ready = reversal_signal is not None and reversal_signal != side
             if cfg.use_joint_adaptive:
