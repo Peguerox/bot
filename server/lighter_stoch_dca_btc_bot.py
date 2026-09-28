@@ -235,6 +235,7 @@ CONFIG = BotConfig(
     schema_has_live_signal=True,  # requires lighter_stoch_dca_btc_live_signal.sql first
     self_lock_reversal_counts_as_win=True,
     self_lock_require_tp_in_streak=True,  # 2026-09-28: at least 1 of the 2 unlock wins must be a literal TP
+    self_lock_no_tp_fallback_wins=3,  # 2026-09-28: 3+ wins of any kind unlocks anyway, TP or not
     # Retired 2026-09-28: replaced by the unified market-data logger below. Worker 2 stays the
     # old system's primary writer, Worker 1 its backup -- unaffected by Worker 3 stepping out.
     tick_log_defers_to=None,

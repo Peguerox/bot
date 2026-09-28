@@ -2301,7 +2301,7 @@ export default function Dashboard() {
           />
           <CompactStochBtcPanel
             title="Worker 3 · Joint Adaptive"
-            subtitle="Window, K thresholds, TP, SL, and reversal blanking all move continuously with volatility (R = vol_pct/0.0712) -- no fixed base values / real SL locks real orders, 2 consecutive paper wins unlock, at least 1 must be a literal TP (winning reversals count toward the 2, but can't be both)"
+            subtitle="Window, K thresholds, TP, SL, and reversal blanking all move continuously with volatility (R = vol_pct/0.0712) -- no fixed base values / real SL locks real orders, 2 consecutive paper wins unlock (at least 1 must be a literal TP), OR 3 wins of any kind unlocks regardless"
             table="lighter_stoch_dca_btc_state"
             state={dcaBtcState}
             trades={dcaBtcTrades.filter((t: any) => t.closed_at >= WORKER3_RESET_AT)}

@@ -217,6 +217,12 @@ class BotConfig:
     # literal TP appears somewhere in it; unlocks the moment both "2+ wins" and "a TP happened"
     # are true together. Only a real loss (SL) resets it.
     self_lock_require_tp_in_streak: bool = False
+    # 2026-09-28, same day: escape hatch on the rule above -- direct request after watching a
+    # real 7-win streak with zero SL stay locked out the whole time because none of the 7 was a
+    # literal TP. If the streak reaches this many wins (any kind), unlock anyway, even with no
+    # TP yet -- a long enough streak is its own evidence. None = no fallback, waits for a TP
+    # indefinitely (the original 2026-09-28 behavior).
+    self_lock_no_tp_fallback_wins: Optional[int] = None
     # Trading-hours schedule (2026-09-24, Worker 1 -- stacked on top of its existing session
     # breaker, not a replacement). Set of UTC hours (0-23) during which NEW entries (and the
     # reopening leg of a reversal) are allowed; every other hour blocks new entries the same
@@ -2245,7 +2251,12 @@ class StochBot:
             # shows up somewhere in it; unlocks the moment both conditions are true together,
             # not necessarily right at the 2nd win. Only a real loss (SL) resets either flag.
             tp_requirement_met = (not cfg.self_lock_require_tp_in_streak) or self.paper_streak_has_tp
-            if self.paper_consecutive_tps >= 2 and tp_requirement_met:
+            # self_lock_no_tp_fallback_wins (2026-09-28, direct request): a long enough streak
+            # unlocks on its own even with no literal TP in it yet -- watched a real 7-win
+            # streak (zero SL) stay locked out the entire time waiting for a TP that never came.
+            fallback_met = (cfg.self_lock_no_tp_fallback_wins is not None
+                            and self.paper_consecutive_tps >= cfg.self_lock_no_tp_fallback_wins)
+            if self.paper_consecutive_tps >= 2 and (tp_requirement_met or fallback_met):
                 self.paper_consecutive_tps = 0
                 self.paper_streak_has_tp = False
                 if self.real_trading_locked:
