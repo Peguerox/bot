@@ -27,6 +27,18 @@ const WORKER2_RESET_AT = "2026-09-27T15:00:49.777450+00:00";
 // Worker 3 reset 2026-09-27 ahead of testing the volatility-adaptive window formula + the
 // order-flow entry filter -- clean baseline before that config lands.
 const WORKER3_RESET_AT = "2026-09-27T17:31:46.755963+00:00";
+// Must match lighter_stoch_dca_btc_initial.py's _WEEKDAY_SCHEDULE exactly -- the ET-shifted
+// weekend block (see that file's docstring for the derivation). Kept as a literal duplicate
+// rather than a shared import since the backend is Python and this is the frontend.
+const WORKER1_TRADING_HOURS: Record<number, number[]> = {
+  0: [4, 9, 10, 12, 15, 16, 17, 18, 19, 20, 21],
+  1: [0, 1, 4, 9, 10, 12, 15, 16, 17, 18, 19, 20, 21],
+  2: [0, 1, 4, 9, 10, 12, 15, 16, 17, 18, 19, 20, 21],
+  3: [0, 1, 4, 9, 10, 12, 15, 16, 17, 18, 19, 20, 21],
+  4: [0, 1, 4, 9, 10, 12, 15, 16, 17, 18, 19, 20, 21],
+  5: [0, 1],
+  6: [],
+};
 
 function formatDurationShort(ms: number): string {
   if (ms <= 0) return "0m";
@@ -1391,7 +1403,8 @@ function CompactStochBtcPanel({
   title: string; subtitle: string; table: string; state: any; trades: any[];
   currentPrice: number | null; loading: boolean; onToggled: () => void;
   runs?: any[]; cooldownMin?: number; showSelfLock?: boolean;
-  stats?: { total: number; wins: number }; tradingHoursUtc?: number[];
+  stats?: { total: number; wins: number };
+  tradingHoursUtc?: number[] | Record<number, number[]>;
   combineEquityWinRate?: boolean; rsiPaperStats?: { total: number; wins: number; pnlPct: number };
 }) {
   const [toggling, setToggling] = useState(false);
@@ -1596,29 +1609,34 @@ function CompactStochBtcPanel({
           </div>
         );
         const tradingHoursPill = tradingHoursUtc && (() => {
+          // Supports both forms: a flat hour list (same every day) or a {pythonWeekday: hours}
+          // dict (Monday=0...Sunday=6, matching stoch_bot_core.py's _apply_trading_hours_gate).
+          // JS's Date.getUTCDay() is Sunday=0...Saturday=6, so it's converted per lookup.
+          const isOpenAt = (d: Date) => {
+            const hour = d.getUTCHours();
+            if (Array.isArray(tradingHoursUtc)) return tradingHoursUtc.includes(hour);
+            const pyWeekday = (d.getUTCDay() + 6) % 7;
+            return (tradingHoursUtc[pyWeekday] || []).includes(hour);
+          };
           const now = new Date(nowTick);
-          const nowHourUtc = now.getUTCHours();
-          const isOpen = tradingHoursUtc.includes(nowHourUtc);
-          // Find the next hour where open/closed status flips, in UTC (matches the gate's
-          // own clock), then label that boundary in Miami/Eastern time -- what's actually
-          // useful here is "when does this change," not the current time (a watch covers
-          // that already).
-          let boundaryHourUtc = nowHourUtc;
-          let daysAhead = 0;
-          for (let i = 1; i <= 24; i++) {
-            const h = (nowHourUtc + i) % 24;
-            if (tradingHoursUtc.includes(h) !== isOpen) {
-              boundaryHourUtc = h;
-              daysAhead = Math.floor((nowHourUtc + i) / 24);
+          const isOpen = isOpenAt(now);
+          // Find the next hour where open/closed status flips -- walks real calendar hours
+          // forward (up to 8 days) rather than assuming the boundary is always within 24h,
+          // since a weekday-dict schedule can stay closed across an entire weekend.
+          let boundaryDate = now;
+          for (let i = 1; i <= 24 * 8; i++) {
+            const t = now.getTime() + i * 3600 * 1000;
+            const c = new Date(t);
+            const aligned = new Date(Date.UTC(
+              c.getUTCFullYear(), c.getUTCMonth(), c.getUTCDate(), c.getUTCHours(), 0, 0));
+            if (isOpenAt(aligned) !== isOpen) {
+              boundaryDate = aligned;
               break;
             }
           }
-          const boundaryDate = new Date(Date.UTC(
-            now.getUTCFullYear(), now.getUTCMonth(), now.getUTCDate() + daysAhead,
-            boundaryHourUtc, 0, 0
-          ));
           const boundaryLabel = new Intl.DateTimeFormat("en-US", {
-            timeZone: "America/New_York", hour: "numeric", minute: "2-digit", hour12: true,
+            timeZone: "America/New_York", weekday: "short", hour: "numeric", minute: "2-digit",
+            hour12: true,
           }).format(boundaryDate);
           return (
             <div className="bg-gray-800/60 rounded-lg p-2">
@@ -2212,7 +2230,7 @@ export default function Dashboard() {
         <div className="grid grid-cols-1 sm:grid-cols-3 gap-3">
           <CompactStochBtcPanel
             title="Worker 1 · Plain Stochastic, Weekend Blocked"
-            subtitle="TP 0.10% / SL 0.11% / window 5, 25-75 (original) / 120s blanking period / weekday hours only (original fitted schedule), Sat+Sun fully closed, resumes Monday 00:00 UTC / self-lock (2 consecutive paper wins unlock, winning reversals count too)"
+            subtitle="TP 0.10% / SL 0.11% / window 5, 25-75 (original) / 120s blanking period / weekday hours only (original fitted schedule), Sat+Sun fully closed ET, resumes Monday 12am ET / self-lock (2 consecutive paper wins unlock, winning reversals count too)"
             table="lighter_btc_initial_state"
             state={initialBtcState}
             trades={initialBtcTrades.filter((t: any) => t.closed_at >= WORKER1_RESET_AT)}
@@ -2221,6 +2239,7 @@ export default function Dashboard() {
             onToggled={load}
             showSelfLock
             combineEquityWinRate
+            tradingHoursUtc={WORKER1_TRADING_HOURS}
           />
           <CompactStochBtcPanel
             title="Worker 2 · Combined, 24/7"

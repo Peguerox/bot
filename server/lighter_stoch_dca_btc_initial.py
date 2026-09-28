@@ -127,27 +127,43 @@ column is harmless if unused, no need for a second migration to remove it). What
 - TP 0.10% / SL 0.11%
 - reversal_guard_seconds=120 (the "blanking period")
 - self_lock_enabled=True, self_lock_reversal_counts_as_win=True (unchanged from before)
-- trading_hours_utc, now a {weekday: [hours]} dict: Monday(0) through Friday(4) keep the exact
-  SAME narrowed hour list this bot ran before RSI-Stoch removed it (UTC 0,1,4,9,10,12,15,16,17,
-  18,19,20,21 -- fitted from real data, see the 2026-09-24/25 history above), not a blanket 24h
-  open. Saturday(5)/Sunday(6) both absent from the dict entirely (== no open hours that day, via
-  _apply_trading_hours_gate's dict-form lookup) -- new, per the CME/weekend loss findings from
-  this same session. Real trading (and a reversal's reopen leg) is blocked the whole weekend; an
-  existing position still manages TP/SL/reversal normally regardless of the hour, same as
-  always. Comes back on its own at Monday 00:00 UTC, no manual re-enable needed -- state.enabled
-  is set True as part of this reset specifically so the schedule (not the manual toggle) is
-  what's actually gating it over the weekend.
+- trading_hours_utc, now a {weekday: [hours]} dict: the exact SAME narrowed hour list this bot
+  ran before RSI-Stoch removed it (0,1,4,9,10,12,15,16,17,18,19,20,21) applies every weekday --
+  but ET (Miami time), not UTC, is the human calendar this schedule was always meant to track
+  (see the 2026-09-24/25 history above -- "ET is just how this file and the dashboard describe
+  it to a human"). _apply_trading_hours_gate itself has no ET awareness -- it keys purely off
+  Python's UTC weekday()/hour -- so the dict below is hand-shifted by the EDT offset (UTC-4) so
+  the BLOCKED window actually lines up with ET Saturday 00:00 through ET Sunday 23:59, not UTC
+  Saturday/Sunday. Gotten wrong on the first attempt: a plain Sat(5)/Sun(6)-blocked dict opened
+  right at UTC Monday 00:00, which is Sunday 8pm ET -- caught live when the bot took a real
+  entry hours before the user's actual Monday and had to be closed by hand.
+    UTC Monday(0):    [4,9,10,12,15,16,17,18,19,20,21] -- hours 0,1 dropped: still Sun 8-9pm ET
+    UTC Tue-Fri(1-4):  [0,1,4,9,10,12,15,16,17,18,19,20,21] -- unchanged, fully inside a weekday
+    UTC Saturday(5):  [0,1] -- carried over from ET Friday evening (UTC Sat 00:00-03:59 = ET Fri
+                       8-11:59pm, still a weekday)
+    UTC Sunday(6):    [] -- entirely inside ET Sat 8pm - Sun 8pm, fully blocked
+  Real trading (and a reversal's reopen leg) is blocked the whole ET weekend; an existing
+  position still manages TP/SL/reversal normally regardless of the hour, same as always. Comes
+  back on its own at ET Monday 00:00 (UTC Monday 04:00), no manual re-enable needed once this is
+  deployed -- left state.enabled as the user set it after the first attempt rather than
+  re-flipping it automatically this time.
 """
 from stoch_bot_core import BotConfig, run_bot
 
-# The same weekday hour list this bot ran before RSI-Stoch removed it entirely (see the
-# 2026-09-24/25 history above: fitted from real Worker 2 hourly data, then 07:00 UTC/3am ET
-# trimmed after it turned negative live) -- UTC 0,1,4,9,10,12,15,16,17,18,19,20,21. Saturday(5)/
-# Sunday(6) simply absent -- no open hours those days, per _apply_trading_hours_gate's dict-form
-# lookup (schedule.get(weekday, [])).
-_WEEKDAY_HOURS = [0, 1, 4, 9, 10, 12, 15, 16, 17, 18, 19, 20, 21]
-_WEEKDAY_SCHEDULE = {0: _WEEKDAY_HOURS, 1: _WEEKDAY_HOURS, 2: _WEEKDAY_HOURS, 3: _WEEKDAY_HOURS,
-                     4: _WEEKDAY_HOURS}
+# Same fitted weekday hour list as before (UTC 0,1,4,9,10,12,15,16,17,18,19,20,21), but the
+# {weekday: hours} keys are hand-shifted by the EDT offset (UTC-4) so the weekend BLOCK lines up
+# with ET Saturday/Sunday, not UTC Saturday/Sunday -- see the docstring above for the derivation
+# and why the naive Sat(5)/Sun(6)-blocked version was wrong (opened 4h early, at Sunday 8pm ET).
+_FULL_WEEKDAY_HOURS = [0, 1, 4, 9, 10, 12, 15, 16, 17, 18, 19, 20, 21]
+_WEEKDAY_SCHEDULE = {
+    0: [4, 9, 10, 12, 15, 16, 17, 18, 19, 20, 21],  # UTC Monday, hours 0-1 still Sun 8-9pm ET
+    1: _FULL_WEEKDAY_HOURS,  # UTC Tuesday
+    2: _FULL_WEEKDAY_HOURS,  # UTC Wednesday
+    3: _FULL_WEEKDAY_HOURS,  # UTC Thursday
+    4: _FULL_WEEKDAY_HOURS,  # UTC Friday
+    5: [0, 1],  # UTC Saturday, hours 0-3 still Fri evening ET -- {0,1} is what's in the list there
+    6: [],  # UTC Sunday -- entirely inside the ET Sat 8pm-Sun 8pm block
+}
 
 CONFIG = BotConfig(
     name="PLAIN STOCHASTIC, WEEKEND BLOCKED (worker 1)",
