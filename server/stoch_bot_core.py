@@ -223,6 +223,12 @@ class BotConfig:
     # TP yet -- a long enough streak is its own evidence. None = no fallback, waits for a TP
     # indefinitely (the original 2026-09-28 behavior).
     self_lock_no_tp_fallback_wins: Optional[int] = None
+    # 2026-09-28, same day: direct request -- a losing/breakeven non-SL close (a red STOCH_TURN
+    # or a losing reversal) was previously neutral, invisible to the counter. Now it cancels out
+    # one prior win instead: green, red, green nets to 1, not 2. Only a literal SL still wipes
+    # the whole streak to zero -- "stop loss is the worst." If the decrement brings the counter
+    # to 0, paper_streak_has_tp clears too (equivalent to a fresh start).
+    self_lock_loss_decrements_streak: bool = False
     # Trading-hours schedule (2026-09-24, Worker 1 -- stacked on top of its existing session
     # breaker, not a replacement). Set of UTC hours (0-23) during which NEW entries (and the
     # reopening leg of a reversal) are allowed; every other hour blocks new entries the same
@@ -2234,11 +2240,13 @@ class StochBot:
         # at a loss (a fast move can still beat it to SL), so it must never count as a win
         # blindly the way PROFIT_LOCK can (PROFIT_LOCK is structurally guaranteed non-negative).
         counts_as_tp = reason in ("TP", "PROFIT_LOCK")
+        is_red_non_sl = False
         if not counts_as_tp and (reason == "STOCH_TURN"
                                  or (reason is None and cfg.self_lock_reversal_counts_as_win)):
             pnl_pct = ((check_price - entry) / entry * 100 if closed_side == "long"
                        else (entry - check_price) / entry * 100)
             counts_as_tp = pnl_pct > 0
+            is_red_non_sl = not counts_as_tp
 
         if counts_as_tp:
             self.paper_consecutive_tps += 1
@@ -2268,6 +2276,16 @@ class StochBot:
         elif reason == "SL":
             self.paper_consecutive_tps = 0
             self.paper_streak_has_tp = False
+        elif is_red_non_sl and cfg.self_lock_loss_decrements_streak:
+            # 2026-09-28, direct request: a red (but non-SL) close cancels out one prior win
+            # instead of being invisible -- "green, red, green" nets to 1 win, not 2. Reasoning
+            # in the user's own words: a red in between is telling you the environment isn't as
+            # clean as the streak alone suggests, so it should count against unlocking, not get
+            # ignored. Floors at 0; if it reaches 0, treat it as a fresh start (clears
+            # paper_streak_has_tp too, same as a real reset).
+            self.paper_consecutive_tps = max(0, self.paper_consecutive_tps - 1)
+            if self.paper_consecutive_tps == 0:
+                self.paper_streak_has_tp = False
 
         # Same close+reopen shape as the real position: an opposite signal reopens
         # immediately, regardless of whether this close was TP/SL or a pure reversal.

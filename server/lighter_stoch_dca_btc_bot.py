@@ -236,6 +236,7 @@ CONFIG = BotConfig(
     self_lock_reversal_counts_as_win=True,
     self_lock_require_tp_in_streak=True,  # 2026-09-28: at least 1 of the 2 unlock wins must be a literal TP
     self_lock_no_tp_fallback_wins=3,  # 2026-09-28: 3+ wins of any kind unlocks anyway, TP or not
+    self_lock_loss_decrements_streak=True,  # 2026-09-28: a red (non-SL) close cancels one prior win
     # Retired 2026-09-28: replaced by the unified market-data logger below. Worker 2 stays the
     # old system's primary writer, Worker 1 its backup -- unaffected by Worker 3 stepping out.
     tick_log_defers_to=None,
