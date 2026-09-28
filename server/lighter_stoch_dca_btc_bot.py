@@ -168,6 +168,33 @@ resume for that position until it closes and a fresh one opens, judged not worth
 for. Counts as a self-lock recovery win only if its actual net PnL was positive (it can close
 at a loss -- a fast move can still beat it to SL), same rule a plain reversal already follows;
 never resets the counter even when it does close at a loss (only a literal SL does that).
+
+2026-09-28, same day: external review of the deployed code (not yet a real trade) found and
+this fixed three real defects, independently re-verified against the code before applying:
+1. `_live_stoch_k()` fed the K formula (partial_minute_h + partial_minute_l)/2 -- the midpoint
+   of the observed RANGE, which stays frozen while price genuinely reverses inside an
+   already-established high/low. Now uses the latest actual quote-mid instead. Verified with a
+   constructed scenario: price runs up to set a high, then reverses hard while still inside
+   that high/low band -- the old formula's K reading never moved; the fixed one dropped from
+   100 to 20, correctly reflecting the reversal.
+2. Joint-adaptive's elapsed-time checks (reversal-guard age, both real and paper) used
+   self.now_ms(), which returns a CANDLE timestamp that only advances once a minute --  fine
+   for candle-dedup bookkeeping (its original purpose), wrong for measuring against a blanking
+   window that can be as short as 15-60s at this formula's volatility extremes. New
+   _entry_clock_ms() uses true wall-clock time, scoped to use_joint_adaptive only -- every
+   other worker's clock behavior is completely unchanged.
+3. Stoch-turn's armed/extreme-K state (real) and paper's frozen joint-adaptive TP/SL/blanking
+   were in-process only, explicitly reasoned as "not worth a migration for" earlier that same
+   day -- a real risk in retrospect, given how often this session pushes (Render restarts every
+   service on every deploy). Now checkpointed (position_stoch_checkpoint/paper_joint_checkpoint,
+   both jsonb, bound to an entry-time identity key so a stale checkpoint from an already-closed
+   position can never get misapplied to a different one), restored on boot, logged loudly
+   (position_stoch_checkpoint_missing/paper_joint_checkpoint_missing) on the one case that can't
+   be helped -- a position that was already open before this upgrade shipped.
+
+None of these changes touch the five adaptive coefficients, the 75% TP activation level, or the
+retreat formula -- those are exactly what was live before. Migration:
+lighter_stoch_dca_btc_joint_checkpoint.sql.
 """
 from stoch_bot_core import BotConfig, run_bot
 
@@ -187,9 +214,10 @@ CONFIG = BotConfig(
     reversal_lo=25, reversal_hi=75,
     use_joint_adaptive=True,
     schema_has_joint_adaptive=True,  # requires lighter_stoch_dca_btc_joint_adaptive.sql first
-    # Stochastic-turn protection (2026-09-28), see docstring. No migration needed -- its
-    # armed/extreme-K state is in-process only, not persisted.
+    # Stochastic-turn protection (2026-09-28), see docstring. Bug fixes + restart checkpoint
+    # added same day after external review -- requires lighter_stoch_dca_btc_joint_checkpoint.sql.
     stoch_turn_exit_enabled=True,
+    schema_has_joint_checkpoint=True,
     schema_has_position_bands=True,  # needed for the frozen position_tp_pct/position_sl_pct
     self_lock_enabled=True,
     schema_has_self_lock=True,

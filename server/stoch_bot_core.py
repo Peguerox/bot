@@ -330,7 +330,13 @@ class BotConfig:
     # use_joint_adaptive=True (needs a frozen per-position TP and an entry-time volatility
     # ratio to compute the retreat threshold).
     stoch_turn_exit_enabled: bool = False
-    schema_has_stoch_turn: bool = False  # requires the stoch-turn column migration
+    # Restart-survival checkpoint (2026-09-28, added after external review): the armed/extreme-K
+    # protection state and paper's frozen joint-adaptive TP/SL/blanking were originally
+    # in-process only ("not worth a migration for") -- a real risk given Render restarts every
+    # service on every push, this session's own frequent-deploy pattern. Bound to entry-time
+    # identity so a stale checkpoint from an already-closed position never gets misapplied to a
+    # new one. See position_stoch_checkpoint/paper_joint_checkpoint.
+    schema_has_joint_checkpoint: bool = False  # requires the joint checkpoint column migration
 
 
 # ── Pure helpers ────────────────────────────────────────────────────────────────────────────
@@ -747,6 +753,7 @@ class StochBot:
         self.partial_minute_ts = None
         self.partial_minute_h = None
         self.partial_minute_l = None
+        self.partial_minute_last_mid = None
         self.position_stoch_activation_pct = None
         self.position_stoch_retreat_points = None
         self.position_stoch_armed = False
@@ -756,6 +763,7 @@ class StochBot:
         self.paper_stoch_retreat_points = None
         self.paper_stoch_armed = False
         self.paper_stoch_extreme_k = None
+        self._joint_checkpoint_persist_ts = 0.0
 
     # ── Supabase (aiohttp: async, and actually cancellable) ─────────────────────────────────
     async def sb(self, method, path, body=None, extra_headers=None):
@@ -1093,19 +1101,31 @@ class StochBot:
         else:
             self.partial_minute_h = max(self.partial_minute_h, mid)
             self.partial_minute_l = min(self.partial_minute_l, mid)
+        self.partial_minute_last_mid = mid
 
     def _live_stoch_k(self):
         """Current live stochastic K using the partial-minute buffer + closed candles, at
         whatever window the joint-adaptive formula is reading RIGHT NOW (not frozen at entry --
         per the source report, "window changes can also change K; this behavior is included in
-        the replay"). None if any required input isn't ready yet."""
-        if (self.partial_minute_h is None or self.joint_adaptive_last is None
-                or not self.candles):
+        the replay"). None if any required input isn't ready yet.
+
+        BUG FIX (2026-09-28, caught by external review): the numerator must be the LATEST
+        observed quote-mid (self.partial_minute_last_mid), not (h+l)/2 -- the midpoint of the
+        range stays frozen while price genuinely reverses inside an already-established
+        high/low, which would hide exactly the kind of turn this protection exists to catch.
+        Also guards against the brief window right after a minute boundary where self.candles
+        hasn't caught up yet (REST refresh lags ~1.5s behind the wall clock) -- using a stale
+        `closed` array there would misalign the window by one bar; fails closed (no reading)
+        instead of risking that."""
+        if (self.partial_minute_h is None or self.partial_minute_last_mid is None
+                or self.joint_adaptive_last is None or not self.candles):
+            return None
+        if self.candles[-1]["t"] < self.partial_minute_ts:
             return None
         window = self.joint_adaptive_last["window"]
         closed = self.candles[:-1]
-        live_c = (self.partial_minute_h + self.partial_minute_l) / 2  # current quote-mid
-        return _stoch_k_live(closed, self.partial_minute_h, self.partial_minute_l, live_c, window)
+        return _stoch_k_live(closed, self.partial_minute_h, self.partial_minute_l,
+                             self.partial_minute_last_mid, window)
 
     @staticmethod
     def _stoch_turn_check(side, unrealized_pct, live_k, activation_pct, retreat_points,
@@ -1479,7 +1499,7 @@ class StochBot:
         patch = {
             "side": signal, "legs": [{"price": price, "usd_size": real_usd}],
             "consecutive_entry_failures": 0, "first_entry_price": price,
-            "first_entry_time": self.now_ms(), "dca_level": 0,
+            "first_entry_time": self._entry_clock_ms(), "dca_level": 0,
             "collateral_before_entry": coll if coll is not None else collateral_hint,
             "last_processed_candle_ts": candle_ts,
         }
@@ -1624,6 +1644,21 @@ class StochBot:
 
     def now_ms(self):
         return self.candles[-1]["t"] if self.candles else int(time.time() * 1000)
+
+    def _entry_clock_ms(self):
+        """BUG FIX (2026-09-28, caught by external review, then broadened): now_ms() returns a
+        CANDLE timestamp, which only advances once a minute (self.candles refreshes via REST
+        once a minute) -- fine for candle-dedup bookkeeping (its original purpose), but wrong
+        for measuring elapsed time against a reversal-guard window: age_s would advance in
+        minute-sized jumps instead of continuously. The external review found this specifically
+        for joint-adaptive's blanking window (as short as 15-60s at high volatility) and scoped
+        its own patch narrowly there out of caution. The underlying flaw is structural, not
+        joint-adaptive-specific -- Worker 1/2's fixed 120s guard has the exact same imprecision,
+        just proportionally smaller. entry_time (real and paper) has exactly two uses anywhere
+        in this file: this age comparison, and a display/log timestamp conversion -- neither
+        benefits from candle-alignment, so there's no tradeoff to weigh in using true wall-clock
+        time everywhere instead."""
+        return int(time.time() * 1000)
 
     def _current_session_start(self, now_utc):
         """3 fixed 8h sessions: 11am-7pm ET, 7pm-3am ET, 3am-11am ET -- 15:00-23:00 UTC,
@@ -1899,6 +1934,28 @@ class StochBot:
             self.paper_entry = state.get("paper_entry_price")
             self.paper_entry_ms = state.get("paper_entry_time")
             self.paper_consecutive_tps = state.get("paper_consecutive_tps") or 0
+            if (self.cfg.use_joint_adaptive and self.cfg.schema_has_joint_checkpoint
+                    and self.paper_side is not None):
+                # Restore paper's frozen joint-adaptive TP/SL/blanking and stoch-turn state --
+                # without this, a restarted paper position silently fell back to the bot's base
+                # 0.10%/0.11% with no adaptive reversal guard, which could distort both paper
+                # outcomes and real unlock timing (external review finding, 2026-09-28).
+                cp = state.get("paper_joint_checkpoint")
+                if cp and cp.get("entry_time") == self.paper_entry_ms:
+                    self.paper_joint_tp_pct = cp["tp_pct"]
+                    self.paper_joint_sl_pct = cp["sl_pct"]
+                    self.paper_joint_blank_s = cp["blank_seconds"]
+                    self.paper_stoch_activation_pct = cp["stoch_activation_pct"]
+                    self.paper_stoch_retreat_points = cp["stoch_retreat_points"]
+                    self.paper_stoch_armed = cp["stoch_armed"]
+                    self.paper_stoch_extreme_k = cp["stoch_extreme_k"]
+                else:
+                    # No checkpoint (e.g. a position opened before this upgrade) -- falls back
+                    # to the bot's base TP/SL/no-guard for this one paper position rather than
+                    # silently pretending it was never adaptive. Logged so the degraded state is
+                    # visible, not just inferred after the fact.
+                    await self.log_run("paper_joint_checkpoint_missing",
+                                       {"paper_entry_ms": self.paper_entry_ms})
 
     async def _lock_real_trading(self):
         """A real SL just closed -- lock real order placement immediately. Resets the paper
@@ -2290,6 +2347,45 @@ class StochBot:
                     await self.update_state({"live_k": self.live_k, "live_signal": self.live_signal})
                 except Exception:
                     pass
+        if cfg.use_joint_adaptive and cfg.stoch_turn_exit_enabled and cfg.schema_has_joint_checkpoint:
+            # Restart-survival checkpoint for both the real position's and paper's stoch-turn
+            # state (added after external review flagged the original in-process-only design as
+            # a real risk -- Render restarts every service on every push). Piggybacks on this
+            # same 10s cadence rather than firing on every armed-state update; `entry_time` is
+            # the identity key restore checks against, so a checkpoint from an already-closed
+            # position never gets misapplied to a different one that opens before the next
+            # write. Writing None (nothing open) correctly clears a stale checkpoint too.
+            now_s = time.time()
+            if now_s - self._joint_checkpoint_persist_ts >= 10.0:
+                self._joint_checkpoint_persist_ts = now_s
+                real_entry_time = state.get("first_entry_time")
+                position_checkpoint = None
+                if real_entry_time is not None and self.position_stoch_activation_pct is not None:
+                    position_checkpoint = {
+                        "entry_time": real_entry_time,
+                        "activation_pct": self.position_stoch_activation_pct,
+                        "retreat_points": self.position_stoch_retreat_points,
+                        "armed": self.position_stoch_armed,
+                        "extreme_k": self.position_stoch_extreme_k,
+                    }
+                paper_checkpoint = None
+                if self.paper_entry_ms is not None and self.paper_joint_tp_pct is not None:
+                    paper_checkpoint = {
+                        "entry_time": self.paper_entry_ms,
+                        "tp_pct": self.paper_joint_tp_pct, "sl_pct": self.paper_joint_sl_pct,
+                        "blank_seconds": self.paper_joint_blank_s,
+                        "stoch_activation_pct": self.paper_stoch_activation_pct,
+                        "stoch_retreat_points": self.paper_stoch_retreat_points,
+                        "stoch_armed": self.paper_stoch_armed,
+                        "stoch_extreme_k": self.paper_stoch_extreme_k,
+                    }
+                try:
+                    await self.update_state({
+                        "position_stoch_checkpoint": position_checkpoint,
+                        "paper_joint_checkpoint": paper_checkpoint,
+                    })
+                except Exception:
+                    pass
         now_open = self.candles[-1]["o"] if self.candles else None
         if candle_ts is None or now_open is None:
             return
@@ -2421,7 +2517,7 @@ class StochBot:
             return
 
         if cfg.use_joint_adaptive and cfg.stoch_turn_exit_enabled:
-            self._update_partial_minute(best_bid, best_ask, self.now_ms())
+            self._update_partial_minute(best_bid, best_ask, self._entry_clock_ms())
 
         if cfg.rsi_paper_test_enabled:
             # Isolated on purpose: a failure here (e.g. the migration hasn't run yet) must
@@ -2434,7 +2530,7 @@ class StochBot:
 
         if cfg.self_lock_enabled:
             await self._update_paper_shadow(state, paper_entry_signal, paper_reversal_signal,
-                                            best_bid, best_ask, self.now_ms())
+                                            best_bid, best_ask, self._entry_clock_ms())
             # Same tick the unlock happens: if a signal is already live, real trading fires on
             # it immediately, not on a delay -- only gates when still locked right now.
             if self.real_trading_locked:
@@ -2509,6 +2605,24 @@ class StochBot:
                         except Exception:
                             pass  # best-effort only -- in-memory tracking above is authoritative
 
+            if (cfg.use_joint_adaptive and cfg.stoch_turn_exit_enabled
+                    and cfg.schema_has_joint_checkpoint and not self._position_stoch_restored):
+                self._position_stoch_restored = True
+                cp = state.get("position_stoch_checkpoint")
+                if cp and cp.get("entry_time") == state.get("first_entry_time"):
+                    if self.position_stoch_activation_pct is None:
+                        self.position_stoch_activation_pct = cp["activation_pct"]
+                        self.position_stoch_retreat_points = cp["retreat_points"]
+                        self.position_stoch_armed = cp["armed"]
+                        self.position_stoch_extreme_k = cp["extreme_k"]
+                else:
+                    # A real position is open (this code only runs inside that branch) but no
+                    # matching checkpoint exists -- e.g. it was opened before this upgrade.
+                    # Protection stays off for this one position until it closes and a fresh
+                    # one opens; logged so that's visible, not just inferred after the fact.
+                    await self.log_run("position_stoch_checkpoint_missing",
+                                       {"first_entry_time": state.get("first_entry_time")})
+
             if (gap_hit is None and cfg.use_joint_adaptive and cfg.stoch_turn_exit_enabled
                     and ae and self.position_stoch_activation_pct is not None):
                 # Profit-armed trail on the LIVE stochastic K (external research, 2026-09-28) --
@@ -2542,11 +2656,11 @@ class StochBot:
                 blank_s = self.position_blank_seconds
                 if reversal_ready and blank_s:
                     entry_time = state.get("first_entry_time")
-                    age_s = (self.now_ms() - entry_time) / 1000 if entry_time is not None else None
+                    age_s = (self._entry_clock_ms() - entry_time) / 1000 if entry_time is not None else None
                     reversal_ready = age_s is not None and age_s >= blank_s
             elif reversal_ready and cfg.reversal_guard_seconds:
                 entry_time = state.get("first_entry_time")
-                age_s = (self.now_ms() - entry_time) / 1000 if entry_time is not None else None
+                age_s = (self._entry_clock_ms() - entry_time) / 1000 if entry_time is not None else None
                 reversal_ready = age_s is not None and age_s >= cfg.reversal_guard_seconds
 
             if gap_hit:
@@ -2604,7 +2718,7 @@ class StochBot:
                 price = best_ask if adopted == "long" else best_bid
                 await self.update_state({
                     "side": adopted, "legs": [{"price": price, "usd_size": price * abs(real_pos)}],
-                    "first_entry_price": price, "first_entry_time": self.now_ms(),
+                    "first_entry_price": price, "first_entry_time": self._entry_clock_ms(),
                     "dca_level": 0, "collateral_before_entry": collateral,
                     "last_processed_candle_ts": candle_ts})
                 await self.log_run("adopted_orphan_position", {"side": adopted, "qty": abs(real_pos)})
