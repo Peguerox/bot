@@ -113,57 +113,62 @@ real entry, not failing closed on missing data -- and a normal deny logs nothing
 an exception does), so it was invisible in the runs log the whole time it was happening. Left
 the adaptive window switch running alone for now; the flow-filter code stays in stoch_bot_core
 for later re-tuning, just off.
+
+2026-09-28, replaced entirely: "joint adaptive" (external research, BTC_Joint_Adaptive_25_75.py
+/ BTC_Joint_Adaptive_Results.md) -- unlike Adaptive V2 above (binary window switch only), ALL
+FIVE parameters (window, K thresholds, TP, SL, reversal blanking) move continuously off one
+volatility ratio R = vol_pct/0.0712, as parameter = clip(base * R**coefficient, bounds). See
+JOINT_ADAPTIVE_* constants and compute_joint_adaptive_signal's docstring in stoch_bot_core.py
+for the exact formula; verified this bot's implementation reproduces all three of the source
+report's worked examples exactly (quiet/reference/high-vol anchors) before deploying.
+
+Source report's simulated result on its primary Sep22-27 replay: +$5.13/$100 vs the fixed
+25/75 baseline's +$0.15 (drawdown 1.00% vs 2.71%), both weekend days independently positive
+when started flat/unlocked -- but selected AFTER seeing Sunday data, so per the report's own
+words "Sunday is now fitting data, not an independent success." Simulated, not live.
+
+Dropped for this deploy: profit_lock_enabled and mirror_paper_position. Both were live on
+Worker 3 going into this change, but the source report explicitly says its replay used neither
+("No DCA, flow veto, profit-lock trail or paper-position mirroring in this replay... The
+deployed Worker 3 profit-lock/mirroring behavior was not reproduced by this candidate") --
+stacking them on top of an untested formula would be a new, unvalidated combination, not the
+thing that was actually backtested. Migration: lighter_stoch_dca_btc_joint_adaptive.sql (new
+columns: joint_adaptive_last jsonb for the live dashboard reading, position_blank_seconds for
+the per-position frozen reversal-guard value -- window/K/TP/SL/blank all get frozen at entry,
+same principle as the pre-existing position_tp_pct/position_sl_pct trend-band freeze, so an
+open position's exit rules don't drift just because volatility changed after entry).
+
+trade_flow_log_defers_to reset to None -- nothing on the fleet consults lighter_btc_trade_flow
+anymore now that both entry filters (this bot's and Worker 1's, from its own now-reverted
+experiment) are off; no reason to keep polling for data nobody reads.
 """
 from stoch_bot_core import BotConfig, run_bot
 
 CONFIG = BotConfig(
-    name="ADAPTIVE V2 (worker 3)",  # flow filter disabled 2026-09-27, see below
+    name="JOINT ADAPTIVE (worker 3)",
     worker_id="worker3",
     table_state="lighter_stoch_dca_btc_state",
     table_trades="lighter_stoch_dca_btc_trades",
     table_runs="lighter_stoch_dca_btc_runs",
-    stoch_window=5,  # unused while use_adaptive_window=True -- left as a harmless legacy default
+    # Base signal fields below are all UNUSED while use_joint_adaptive=True -- the formula
+    # computes its own window/K-thresholds/TP/SL every tick (see compute_joint_adaptive_signal).
+    # Left at the reference (R=1) values purely for readability/fallback documentation.
+    stoch_window=5,
     tp_pct=0.10,
     sl_pct=0.11,
-    entry_lo=10, entry_hi=90,  # 2026-09-27: 25/75 -> 10/90, see docstring
-    reversal_lo=10, reversal_hi=90,
-    reversal_guard_seconds=120,
-    use_adaptive_window=True,
-    adaptive_vol_lookback=30,
-    adaptive_vol_switch_pct=0.04,
-    adaptive_quiet_window=15,
-    adaptive_active_window=5,
-    schema_has_adaptive_fields=True,  # requires lighter_stoch_dca_btc_adaptive_v2.sql first
-    flow_entry_filter_enabled=False,  # 2026-09-27: disabled -- 0 real trades for hours while the
-    # paper shadow flipped sides 3 times (paper ignores this filter entirely, by design -- it
-    # reads paper_entry_signal/paper_reversal_signal captured BEFORE any real-trading gate).
-    # Root-caused live: flow data itself was fine (1,250 rows in a random 5-min window), so the
-    # filter was genuinely vetoing nearly every real entry, not failing closed on thin data. A
-    # normal deny is also silent by design (only exceptions get logged as flow_entry_filter_
-    # error), so this was invisible in the runs log the whole time. Code stays in stoch_bot_core
-    # for later re-tuning; just off for now so real trading actually gets a chance to run.
-    flow_max_adverse_move_pct=0.02,
+    entry_lo=25, entry_hi=75,
+    reversal_lo=25, reversal_hi=75,
+    use_joint_adaptive=True,
+    schema_has_joint_adaptive=True,  # requires lighter_stoch_dca_btc_joint_adaptive.sql first
+    schema_has_position_bands=True,  # needed for the frozen position_tp_pct/position_sl_pct
     self_lock_enabled=True,
     schema_has_self_lock=True,
     self_lock_reversal_counts_as_win=True,
-    # Profit-lock trail (2026-09-27): same mechanism as Worker 1/2 -- once unrealized profit
-    # hits 0.02%, tracks the peak; the instant it ticks down at all from that peak, closes
-    # immediately. schema_has_profit_lock stays False (no migration for this table yet) --
-    # peak tracking lives in-process (self.profit_lock_peak_pct) so it still works correctly
-    # this session, just without cross-restart persistence until that migration is added.
-    profit_lock_enabled=True,
-    profit_lock_trigger_pct=0.02,
-    # Mirror-paper fallback (2026-09-27), Worker 3 only per direct request: if real is flat,
-    # unlocked, and enabled but the paper shadow already holds a position with no fresh
-    # entry_signal this tick, real enters to match paper's side directly.
-    mirror_paper_position=True,
-    schema_has_position_bands=True,
     # Price-tick logging: backup writer. Takes over the moment Worker 2 goes quiet.
     tick_log_defers_to=["worker2"],
-    # Trade-flow logging: Worker 3 is now the primary (and only) writer -- it's the one that
-    # actually needs this data for the entry filter above. See docstring for the WAF hardening.
-    trade_flow_log_defers_to=[],
-    trade_flow_log_prune=True,
+    # Nothing on the fleet reads lighter_btc_trade_flow anymore -- both entry filters that used
+    # it are off. No reason to keep polling for data nobody consults.
+    trade_flow_log_defers_to=None,
 )
 
 if __name__ == "__main__":

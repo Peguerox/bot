@@ -313,6 +313,11 @@ class BotConfig:
     # not edge-triggered -- a late/reopened real bot can otherwise miss an entry paper already
     # caught and never catch back up until the next full signal transition).
     mirror_paper_position: bool = False
+    # Joint adaptive formula (2026-09-28): see JOINT_ADAPTIVE_* constants and
+    # compute_joint_adaptive_signal's docstring. False = use whichever other signal mode is
+    # configured (plain / RSI / the binary-window Adaptive V2) as before.
+    use_joint_adaptive: bool = False
+    schema_has_joint_adaptive: bool = False  # requires the joint_adaptive migration
 
 
 # ── Pure helpers ────────────────────────────────────────────────────────────────────────────
@@ -346,6 +351,64 @@ def _sig(k, lo, hi):
     if k > hi:
         return "short"
     return None
+
+
+# Joint adaptive formula (2026-09-28, external research -- BTC_Joint_Adaptive_25_75.py /
+# BTC_Joint_Adaptive_Results.md): all five parameters scale continuously off one volatility
+# ratio R = vol_pct / JOINT_ADAPTIVE_REFERENCE_VOL_PCT, as parameter = clip(base * R**coef,
+# bounds). Order matches PARAMETER_NAMES: window, lower_k, tp_pct, sl_pct, blank_seconds.
+# Simulated result on the source report's primary replay: +$5.13/$100 vs the fixed 25/75
+# baseline's +$0.15 over Sep22-27 (drawdown 1.00% vs 2.71%), both weekend days independently
+# positive when started flat/unlocked -- but selected AFTER seeing Sunday data, so per the
+# report's own words "Sunday is now fitting data, not an independent success." Coefficients are
+# intentionally hardcoded, not config fields -- the source report is explicit that changing any
+# of them needs a fresh replay, so this isn't meant to be casually tuned per-bot.
+JOINT_ADAPTIVE_REFERENCE_VOL_PCT = 0.0712
+JOINT_ADAPTIVE_LOOKBACK = 30
+JOINT_ADAPTIVE_BASE = (5.0, 25.0, 0.10, 0.11, 120.0)
+JOINT_ADAPTIVE_COEFFICIENTS = (-1.0, 0.5, 0.5, 1.0, -1.0)
+JOINT_ADAPTIVE_BOUNDS = ((3.0, 40.0), (15.0, 40.0), (0.025, 0.30), (0.05, 0.30), (15.0, 600.0))
+
+
+def joint_adaptive_parameters(vol_pct):
+    """Returns (window, lower_k, tp_pct, sl_pct, blank_seconds) at this vol_pct, each
+    independently clipped to its own bound. upper_k is always 100-lower_k (not a separate
+    coefficient), computed by the caller."""
+    ratio = max(vol_pct, 1e-9) / JOINT_ADAPTIVE_REFERENCE_VOL_PCT
+    out = []
+    for base, coef, (lo, hi) in zip(JOINT_ADAPTIVE_BASE, JOINT_ADAPTIVE_COEFFICIENTS,
+                                    JOINT_ADAPTIVE_BOUNDS):
+        val = base * (ratio ** coef)
+        out.append(min(max(val, lo), hi))
+    return tuple(out)
+
+
+def _stoch_k_interpolated(closed, window_float):
+    """Interpolated stochastic %K for a possibly-fractional window: (1-f)*K(n) + f*K(n+1)
+    where n=floor(window) clamped to [3,40], f=window-n. At n>=40, uses K(40) exactly (no
+    extrapolation past the bound) -- an oscillator, not a rounded-period stochastic."""
+    n = int(window_float)
+    n = max(3, min(n, 40))
+    f = 0.0 if n >= 40 else window_float - n
+
+    def k_for_n(w):
+        if len(closed) < w:
+            return None
+        win = closed[-w:]
+        hh = max(x["h"] for x in win); ll = min(x["l"] for x in win)
+        if hh == ll:
+            return None
+        return 100 * (closed[-1]["c"] - ll) / (hh - ll)
+
+    k_n = k_for_n(n)
+    if k_n is None:
+        return None
+    if f == 0.0:
+        return k_n
+    k_n2 = k_for_n(min(n + 1, 40))
+    if k_n2 is None:
+        return k_n
+    return (1 - f) * k_n + f * k_n2
 
 
 def avg_entry(legs):
@@ -591,6 +654,19 @@ class StochBot:
         # PROFIT_LOCK while paper (running the identical signal) kept holding, making the two
         # visibly diverge even while real is unlocked and trading the exact same thing paper is.
         self.paper_profit_lock_peak_pct = None
+        # Joint adaptive formula (2026-09-28): all five params (window, K thresholds, TP, SL,
+        # reversal blanking) computed continuously from one volatility ratio -- see
+        # compute_joint_adaptive_signal. joint_adaptive_last is the LIVE reading (updates every
+        # tick, for dashboard display); position_blank_seconds/paper_joint_* are FROZEN at
+        # entry, same idea as position_tp_pct/position_sl_pct -- an open position's exits don't
+        # move just because volatility changed after entry.
+        self.joint_adaptive_last = None
+        self._joint_adaptive_last_persist_ts = 0.0
+        self.position_blank_seconds = None
+        self._position_blank_restored = False
+        self.paper_joint_tp_pct = None
+        self.paper_joint_sl_pct = None
+        self.paper_joint_blank_s = None
 
     # ── Supabase (aiohttp: async, and actually cancellable) ─────────────────────────────────
     async def sb(self, method, path, body=None, extra_headers=None):
@@ -863,6 +939,45 @@ class StochBot:
         k = 100 * (closed[-1]["c"] - ll) / (hh - ll)
         signal = _sig(k, cfg.entry_lo, cfg.entry_hi)
         self.adaptive_last_k = k
+        return signal, signal, ts
+
+    def compute_joint_adaptive_signal(self):
+        """"Joint adaptive" (2026-09-28, external research): unlike compute_adaptive_stoch_
+        signal (a binary window switch only), ALL FIVE parameters -- window, K thresholds,
+        TP, SL, reversal blanking -- move continuously with volatility, via
+        joint_adaptive_parameters(). Same vol_pct measure as the V2 formula (mean 1-min
+        (high-low)/close %, trailing JOINT_ADAPTIVE_LOOKBACK CLOSED candles).
+
+        The window can be fractional (e.g. 12.32 candles) -- _stoch_k_interpolated blends the
+        two nearest integer-window K values rather than rounding.
+
+        TP/SL/blanking computed HERE are just this tick's live reading, stored on
+        self.joint_adaptive_last for the dashboard AND so tick()/try_enter/_update_paper_shadow
+        can freeze them onto a position at the moment it actually opens -- an open position's
+        exit bands don't move just because volatility changed after entry, same principle as
+        the existing position_tp_pct/position_sl_pct trend-band freeze."""
+        c = self.candles
+        closed = c[:-1]
+        if len(closed) < JOINT_ADAPTIVE_LOOKBACK + 1:
+            self.joint_adaptive_last = None
+            return None, None, None
+        vol_window = closed[-JOINT_ADAPTIVE_LOOKBACK:]
+        ranges = [(x["h"] - x["l"]) / x["c"] * 100 for x in vol_window if x["c"] > 0]
+        vol_pct = sum(ranges) / len(ranges) if ranges else None
+        ts = closed[-1]["t"]
+        if vol_pct is None:
+            self.joint_adaptive_last = None
+            return None, None, ts
+        window, lower_k, tp_pct, sl_pct, blank_s = joint_adaptive_parameters(vol_pct)
+        self.joint_adaptive_last = {
+            "vol_pct": vol_pct, "window": window, "lower_k": lower_k,
+            "upper_k": 100 - lower_k, "tp_pct": tp_pct, "sl_pct": sl_pct,
+            "blank_seconds": blank_s,
+        }
+        k = _stoch_k_interpolated(closed, window)
+        if k is None:
+            return None, None, ts
+        signal = _sig(k, lower_k, 100 - lower_k)
         return signal, signal, ts
 
     async def _check_flow_entry_filter(self, side, now_ms):
@@ -1169,6 +1284,12 @@ class StochBot:
                 await self.update_state({"profit_lock_peak_pct": None})
             except Exception:
                 pass
+        self.position_blank_seconds = None
+        if self.cfg.schema_has_joint_adaptive:
+            try:
+                await self.update_state({"position_blank_seconds": None})
+            except Exception:
+                pass
         await self.log_run("emergency_flatten", {"reason": reason, "flat": flat,
                                                  "residual": pos_after})
 
@@ -1211,6 +1332,22 @@ class StochBot:
             # Every entry here only fires when is_trending was true (see tick()), so it's
             # always a faded-trend entry -- never a plain chop fade, never a trend-follow.
             regime = "trend_fade"
+        elif cfg.use_joint_adaptive and self.joint_adaptive_last is not None:
+            # Freeze this position's TP/SL/blanking at whatever the formula read at entry --
+            # they must NOT drift later just because volatility changed while the position is
+            # still open (see compute_joint_adaptive_signal's docstring). position_blank_seconds
+            # is deliberately NOT bundled into `patch` below: that PATCH also carries side/legs/
+            # first_entry_price, i.e. the record of a real order that already filled -- a
+            # missing-column error there would fail the WHOLE write and leave a real position
+            # untracked. self.position_blank_seconds (in-process) is the correctness-critical
+            # copy; the DB column is a separate, best-effort, isolated write further down,
+            # after the critical patch has already succeeded.
+            j = self.joint_adaptive_last
+            self.position_blank_seconds = j["blank_seconds"]
+            if cfg.schema_has_position_bands:
+                patch["position_tp_pct"] = j["tp_pct"]
+                patch["position_sl_pct"] = j["sl_pct"]
+            regime = "joint_adaptive"
         elif cfg.schema_has_position_bands:
             # Only bots whose table actually has these columns write them -- plain
             # fade-only bots without the migration (Worker 2) never touch this field.
@@ -1219,6 +1356,11 @@ class StochBot:
             patch["position_sl_pct"] = cfg.trend_sl_pct if trending_leg else cfg.sl_pct
             regime = "trend" if trending_leg else "fade"
         await self.update_state(patch)
+        if regime == "joint_adaptive" and cfg.schema_has_joint_adaptive:
+            try:
+                await self.update_state({"position_blank_seconds": self.position_blank_seconds})
+            except Exception:
+                pass  # best-effort only -- self.position_blank_seconds above is authoritative
         await self.log_run("entered", {"signal": signal, "price": price, "via": via,
                                        "qty": abs(pos), "regime": regime})
         return True
@@ -1283,6 +1425,12 @@ class StochBot:
         if self.cfg.schema_has_profit_lock:
             try:
                 await self.update_state({"profit_lock_peak_pct": None})
+            except Exception:
+                pass
+        self.position_blank_seconds = None
+        if self.cfg.schema_has_joint_adaptive:
+            try:
+                await self.update_state({"position_blank_seconds": None})
             except Exception:
                 pass
         await self.log_trade(side, ae, exit_price, qty, pnl, reason, len(legs),
@@ -1595,6 +1743,14 @@ class StochBot:
                 self.paper_side = entry_signal
                 self.paper_entry = best_ask if entry_signal == "long" else best_bid
                 self.paper_entry_ms = now_ms
+                if cfg.use_joint_adaptive and self.joint_adaptive_last is not None:
+                    # Freeze paper's own TP/SL/blanking too -- same reason real does (see
+                    # try_enter): must not drift while this simulated position is open, and
+                    # paper must run the identical rules real would, to stay a faithful mirror.
+                    j = self.joint_adaptive_last
+                    self.paper_joint_tp_pct = j["tp_pct"]
+                    self.paper_joint_sl_pct = j["sl_pct"]
+                    self.paper_joint_blank_s = j["blank_seconds"]
                 if cfg.schema_has_self_lock:
                     await self.update_state({
                         "paper_side": self.paper_side, "paper_entry_price": self.paper_entry,
@@ -1605,11 +1761,15 @@ class StochBot:
         side = self.paper_side
         entry = self.paper_entry
         check_price = best_bid if side == "long" else best_ask
+        if cfg.use_joint_adaptive and self.paper_joint_tp_pct is not None:
+            paper_tp_pct, paper_sl_pct = self.paper_joint_tp_pct, self.paper_joint_sl_pct
+        else:
+            paper_tp_pct, paper_sl_pct = cfg.tp_pct, cfg.sl_pct
         if side == "long":
-            tp = entry * (1 + cfg.tp_pct / 100); sl = entry * (1 - cfg.sl_pct / 100)
+            tp = entry * (1 + paper_tp_pct / 100); sl = entry * (1 - paper_sl_pct / 100)
             hit_sl = check_price <= sl; hit_tp = check_price >= tp
         else:
-            tp = entry * (1 - cfg.tp_pct / 100); sl = entry * (1 + cfg.sl_pct / 100)
+            tp = entry * (1 - paper_tp_pct / 100); sl = entry * (1 + paper_sl_pct / 100)
             hit_sl = check_price >= sl; hit_tp = check_price <= tp
         reason = "SL" if hit_sl else ("TP" if hit_tp else None)
 
@@ -1631,7 +1791,12 @@ class StochBot:
                 self.paper_profit_lock_peak_pct = new_peak
 
         reversal_ready = reversal_signal is not None and reversal_signal != side
-        if reversal_ready and cfg.reversal_guard_seconds:
+        if cfg.use_joint_adaptive:
+            blank_s = self.paper_joint_blank_s
+            if reversal_ready and blank_s:
+                age_s = (now_ms - self.paper_entry_ms) / 1000 if self.paper_entry_ms is not None else None
+                reversal_ready = age_s is not None and age_s >= blank_s
+        elif reversal_ready and cfg.reversal_guard_seconds:
             age_s = (now_ms - self.paper_entry_ms) / 1000 if self.paper_entry_ms is not None else None
             reversal_ready = age_s is not None and age_s >= cfg.reversal_guard_seconds
 
@@ -1644,6 +1809,9 @@ class StochBot:
         self.paper_entry = None
         self.paper_entry_ms = None
         self.paper_profit_lock_peak_pct = None
+        self.paper_joint_tp_pct = None
+        self.paper_joint_sl_pct = None
+        self.paper_joint_blank_s = None
 
         confirmation_just_cleared = False
         # A pure reversal close (reason is None here, only reached because reversal_ready was
@@ -1676,6 +1844,11 @@ class StochBot:
             self.paper_side = reversal_signal
             self.paper_entry = best_ask if reversal_signal == "long" else best_bid
             self.paper_entry_ms = now_ms
+            if cfg.use_joint_adaptive and self.joint_adaptive_last is not None:
+                j = self.joint_adaptive_last
+                self.paper_joint_tp_pct = j["tp_pct"]
+                self.paper_joint_sl_pct = j["sl_pct"]
+                self.paper_joint_blank_s = j["blank_seconds"]
 
         if cfg.schema_has_self_lock:
             patch = {
@@ -1823,7 +1996,9 @@ class StochBot:
             # the retry budget and likely makes an IP-level block look more abusive, not less.
             return
 
-        if cfg.use_adaptive_window:
+        if cfg.use_joint_adaptive:
+            entry_signal, reversal_signal, candle_ts = self.compute_joint_adaptive_signal()
+        elif cfg.use_adaptive_window:
             entry_signal, reversal_signal, candle_ts = self.compute_adaptive_stoch_signal()
         elif cfg.use_rsi_stoch_signal:
             entry_signal, candle_ts = compute_rsi_stoch_confirmed_signal(
@@ -1850,6 +2025,17 @@ class StochBot:
                         "adaptive_last_vol_pct": self.adaptive_last_vol_pct,
                         "adaptive_last_window": self.adaptive_last_window,
                     })
+                except Exception:
+                    pass
+        if cfg.use_joint_adaptive and cfg.schema_has_joint_adaptive:
+            # Same "plain 10s cadence" fix as the V2 adaptive display above, from the start
+            # this time -- a change-only write looked frozen on the dashboard for hours before
+            # that was caught and fixed for V2.
+            now_s = time.time()
+            if now_s - self._joint_adaptive_last_persist_ts >= 10.0:
+                self._joint_adaptive_last_persist_ts = now_s
+                try:
+                    await self.update_state({"joint_adaptive_last": self.joint_adaptive_last})
                 except Exception:
                     pass
         now_open = self.candles[-1]["o"] if self.candles else None
@@ -1941,6 +2127,12 @@ class StochBot:
             if cfg.schema_has_profit_lock:
                 try:
                     await self.update_state({"profit_lock_peak_pct": None})
+                except Exception:
+                    pass
+            self.position_blank_seconds = None
+            if cfg.schema_has_joint_adaptive:
+                try:
+                    await self.update_state({"position_blank_seconds": None})
                 except Exception:
                     pass
             await self.log_trade(side, ae, implied_exit, qty, pnl, "EXTERNAL", len(legs),
@@ -2059,7 +2251,21 @@ class StochBot:
                             pass  # best-effort only -- in-memory tracking above is authoritative
 
             reversal_ready = reversal_signal is not None and reversal_signal != side
-            if reversal_ready and cfg.reversal_guard_seconds:
+            if cfg.use_joint_adaptive:
+                # Restore from the DB once per boot -- see the identical profit-lock restore
+                # just above for why this is safe even without the migration (reads never
+                # error on a missing column, only writes do).
+                if not self._position_blank_restored:
+                    self._position_blank_restored = True
+                    if (self.position_blank_seconds is None
+                            and state.get("position_blank_seconds") is not None):
+                        self.position_blank_seconds = state["position_blank_seconds"]
+                blank_s = self.position_blank_seconds
+                if reversal_ready and blank_s:
+                    entry_time = state.get("first_entry_time")
+                    age_s = (self.now_ms() - entry_time) / 1000 if entry_time is not None else None
+                    reversal_ready = age_s is not None and age_s >= blank_s
+            elif reversal_ready and cfg.reversal_guard_seconds:
                 entry_time = state.get("first_entry_time")
                 age_s = (self.now_ms() - entry_time) / 1000 if entry_time is not None else None
                 reversal_ready = age_s is not None and age_s >= cfg.reversal_guard_seconds

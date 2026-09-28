@@ -1706,6 +1706,32 @@ function CompactStochBtcPanel({
           </div>
         );
 
+        const joint = state?.joint_adaptive_last ?? null;
+        const jointAdaptivePill = joint != null && (
+          <div className="bg-gray-800/60 rounded-lg p-2" title="Live output of the joint adaptive formula -- window, K thresholds, TP, SL, and reversal blanking all move together with volatility">
+            <p className="text-gray-500 text-[10px] uppercase">Joint Adaptive</p>
+            <div className="flex items-center gap-1.5 flex-wrap">
+              <span className="text-[9px] font-bold px-1.5 py-0.5 rounded uppercase bg-blue-500/20 text-blue-400">
+                win {joint.window?.toFixed(1)}
+              </span>
+              <span className="text-[10px] text-gray-400 tabular-nums">
+                K {joint.lower_k?.toFixed(0)}/{joint.upper_k?.toFixed(0)}
+              </span>
+              <span className="text-[10px] text-gray-400 tabular-nums">
+                TP {joint.tp_pct?.toFixed(3)}% SL {joint.sl_pct?.toFixed(3)}%
+              </span>
+              <span className="text-[10px] text-gray-400 tabular-nums">
+                blank {joint.blank_seconds?.toFixed(0)}s
+              </span>
+              {joint.vol_pct != null && (
+                <span className="text-[10px] text-gray-500 tabular-nums">
+                  vol {joint.vol_pct.toFixed(4)}%
+                </span>
+              )}
+            </div>
+          </div>
+        );
+
         // Fallback for the schedule/adaptive grid slot when a bot has neither -- otherwise that
         // cell just renders empty (e.g. Worker 2: no trading_hours_utc, no adaptive window).
         const scheduleFallbackPill = (
@@ -1754,7 +1780,7 @@ function CompactStochBtcPanel({
               {equityWinRatePill}
               {selfLockPill}
               {positionPill}
-              {adaptivePill || tradingHoursPill || scheduleFallbackPill}
+              {jointAdaptivePill || adaptivePill || tradingHoursPill || scheduleFallbackPill}
               {rsiPaperPill}
             </div>
           );
@@ -1767,6 +1793,7 @@ function CompactStochBtcPanel({
             {breakerPill}
             {tradingHoursPill}
             {selfLockPill}
+            {jointAdaptivePill}
             {adaptivePill}
             {rsiPaperPill}
           </div>
@@ -2265,8 +2292,8 @@ export default function Dashboard() {
             combineEquityWinRate
           />
           <CompactStochBtcPanel
-            title="Worker 3 · Adaptive V2"
-            subtitle="TP 0.10% / SL 0.11% / K10-90 / adaptive window 5-15 (by trailing vol) / 0.02% profit-lock trail / 120s reversal guard / order-flow entry veto OFF (was vetoing nearly every entry) / real SL locks real orders, 2 consecutive paper wins unlock (winning reversals count too)"
+            title="Worker 3 · Joint Adaptive"
+            subtitle="Window, K thresholds, TP, SL, and reversal blanking all move continuously with volatility (R = vol_pct/0.0712) -- no fixed base values / real SL locks real orders, 2 consecutive paper wins unlock (winning reversals count too)"
             table="lighter_stoch_dca_btc_state"
             state={dcaBtcState}
             trades={dcaBtcTrades.filter((t: any) => t.closed_at >= WORKER3_RESET_AT)}
