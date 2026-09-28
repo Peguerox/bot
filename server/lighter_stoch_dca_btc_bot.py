@@ -223,6 +223,7 @@ CONFIG = BotConfig(
     schema_has_self_lock=True,
     schema_has_live_signal=True,  # requires lighter_stoch_dca_btc_live_signal.sql first
     self_lock_reversal_counts_as_win=True,
+    self_lock_require_tp_in_streak=True,  # 2026-09-28: at least 1 of the 2 unlock wins must be a literal TP
     # Price-tick logging: backup writer. Takes over the moment Worker 2 goes quiet.
     tick_log_defers_to=["worker2"],
     # Nothing on the fleet reads lighter_btc_trade_flow anymore -- both entry filters that used

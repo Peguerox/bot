@@ -208,6 +208,12 @@ class BotConfig:
     # ($1.56 vs $1.44). An earlier test on a smaller ~45h sample had found the opposite
     # (literal-TP-only won then) -- that finding didn't hold up once more data came in.
     self_lock_reversal_counts_as_win: bool = False
+    # 2026-09-28, direct request: 2 winning paper closes aren't enough to unlock on their own if
+    # NEITHER of them was a literal TP -- e.g. two REVERSAL/PROFIT_LOCK/STOCH_TURN wins in a row
+    # don't satisfy this alone. The streak keeps extending past 2 (doesn't reset) until a
+    # literal TP appears somewhere in it; unlocks the moment both "2+ wins" and "a TP happened"
+    # are true together. Only a real loss (SL) resets it.
+    self_lock_require_tp_in_streak: bool = False
     # Trading-hours schedule (2026-09-24, Worker 1 -- stacked on top of its existing session
     # breaker, not a replacement). Set of UTC hours (0-23) during which NEW entries (and the
     # reopening leg of a reversal) are allowed; every other hour blocks new entries the same
@@ -695,6 +701,11 @@ class StochBot:
         self.paper_entry = None
         self.paper_entry_ms = None
         self.paper_consecutive_tps = 0
+        # Tracks whether a literal TP has occurred within the current winning streak -- see
+        # cfg.self_lock_require_tp_in_streak. In-memory only (not persisted): a restart just
+        # means it's forgotten even if a real TP happened before the restart, which only ever
+        # makes unlock MORE conservative (may ask for one extra TP win), never less safe.
+        self.paper_streak_has_tp = False
         self._self_lock_loaded = False
         # Hour-open confirmation (independent of the self-lock counter above -- this one only
         # ever needs a single TP, and re-arms on every restart by design).
@@ -1963,6 +1974,7 @@ class StochBot:
         forward, not carried over from whatever the shadow happened to be doing before."""
         self.real_trading_locked = True
         self.paper_consecutive_tps = 0
+        self.paper_streak_has_tp = False
         if self.cfg.schema_has_self_lock:
             await self.update_state({"real_trading_locked": True, "paper_consecutive_tps": 0})
         await self.log_run("real_trading_locked", {"via": "real_sl"})
@@ -2119,8 +2131,18 @@ class StochBot:
 
         if counts_as_tp:
             self.paper_consecutive_tps += 1
-            if self.paper_consecutive_tps >= 2:
+            if reason == "TP":
+                self.paper_streak_has_tp = True
+            # cfg.self_lock_require_tp_in_streak (2026-09-28, direct request): 2 wins alone
+            # aren't enough to unlock if NEITHER was a literal TP -- e.g. two REVERSAL/
+            # PROFIT_LOCK/STOCH_TURN wins in a row don't count on their own. The streak keeps
+            # extending (counter keeps incrementing past 2, doesn't reset) until a literal TP
+            # shows up somewhere in it; unlocks the moment both conditions are true together,
+            # not necessarily right at the 2nd win. Only a real loss (SL) resets either flag.
+            tp_requirement_met = (not cfg.self_lock_require_tp_in_streak) or self.paper_streak_has_tp
+            if self.paper_consecutive_tps >= 2 and tp_requirement_met:
                 self.paper_consecutive_tps = 0
+                self.paper_streak_has_tp = False
                 if self.real_trading_locked:
                     self.real_trading_locked = False
                     unlocked_now = True
@@ -2129,6 +2151,7 @@ class StochBot:
                 confirmation_just_cleared = True
         elif reason == "SL":
             self.paper_consecutive_tps = 0
+            self.paper_streak_has_tp = False
 
         # Same close+reopen shape as the real position: an opposite signal reopens
         # immediately, regardless of whether this close was TP/SL or a pure reversal.
