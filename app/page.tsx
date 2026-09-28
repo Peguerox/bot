@@ -1706,6 +1706,17 @@ function CompactStochBtcPanel({
           </div>
         );
 
+        // Fallback for the schedule/adaptive grid slot when a bot has neither -- otherwise that
+        // cell just renders empty (e.g. Worker 2: no trading_hours_utc, no adaptive window).
+        const scheduleFallbackPill = (
+          <div className="bg-gray-800/60 rounded-lg p-2">
+            <p className="text-gray-500 text-[10px] uppercase">Trading Hours</p>
+            <span className="text-[9px] font-bold px-1.5 py-0.5 rounded uppercase bg-green-500/20 text-green-400">
+              24/7, no restriction
+            </span>
+          </div>
+        );
+
         const paperTestPill = (
           label: string, sideValue: string | null,
           s: { total: number; wins: number; pnlPct: number } | undefined, tooltip: string
@@ -1743,7 +1754,7 @@ function CompactStochBtcPanel({
               {equityWinRatePill}
               {selfLockPill}
               {positionPill}
-              {adaptivePill || tradingHoursPill}
+              {adaptivePill || tradingHoursPill || scheduleFallbackPill}
               {rsiPaperPill}
             </div>
           );
