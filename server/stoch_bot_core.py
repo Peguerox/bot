@@ -72,6 +72,9 @@ TRADE_FLOW_LOG_EVERY = 10.0  # seconds between recentTrades polls -- raised from
                               # after that rate triggered a WAF block; still frequent enough
                               # for the flow entry filter's 30s/120s lookback windows
 TRADE_FLOW_LOG_RETENTION_DAYS = 14
+MARKET_DATA_BOOK_EVERY = 2.0  # order-book snapshots cost nothing extra (already in memory via
+                              # the websocket) -- can log much faster than the tick logger did
+MARKET_DATA_RETENTION_DAYS = 14
 
 QTY_EPS = 1e-6
 OVERSIZE_FACTOR = 1.5     # real position this much bigger than intended => emergency flatten
@@ -287,6 +290,13 @@ class BotConfig:
     # ever see trades from the moment logging starts forward. None = doesn't participate.
     trade_flow_log_defers_to: Optional[list] = None
     trade_flow_log_prune: bool = False
+    # Unified market-data logger (2026-09-28, direct request): ONE table, ONE loop, replacing
+    # the two loggers above -- full order-book depth (not just best bid/ask) plus executed
+    # trade prints, so a future fast-reacting bot has one simple place to read a complete
+    # market-data stream from. See run_market_data_logger_forever. None = doesn't participate
+    # (the two separate loggers above stay in charge, as before).
+    unified_market_data_table: Optional[str] = None
+    unified_market_data_prune: bool = False
     # Adaptive V2 signal (2026-09-27): see compute_adaptive_stoch_signal's docstring. False =
     # use compute_stoch_signal (the plain, fixed-window signal) as before.
     use_adaptive_window: bool = False
@@ -992,6 +1002,101 @@ class StochBot:
                                         "backoff_s": sleep_s})
                 except Exception:
                     pass  # never let trade-flow logging affect trading
+            await asyncio.sleep(sleep_s)
+
+    async def run_market_data_logger_forever(self):
+        """Single consolidated logger (2026-09-28, direct request): one table, one loop,
+        replacing the two separate loggers above for whichever bot sets
+        cfg.unified_market_data_table. Two row kinds, discriminated by `kind`:
+
+        - "book": FULL order-book depth (every bid/ask price level currently known, each with
+          its own price and size), not just best bid/ask. Costs nothing extra to log -- the
+          book already lives in memory via the websocket subscription (self.live.order_book),
+          updated continuously as diffs stream in, so this is a pure local read, no REST call,
+          no WAF exposure. Logged on MARKET_DATA_BOOK_EVERY, much faster than the old tick
+          logger's cadence, precisely because it's free.
+        - "trade": executed trade prints (price, size, aggressor side via is_maker_ask), from
+          Lighter's public recentTrades REST endpoint. This is the one part that still costs a
+          network call and carries WAF risk (see TRADE_FLOW_LOG_EVERY's own history), so it's
+          polled on its own slower, already-hardened cadence within the same loop, with the
+          same exponential backoff (and a longer forced pause on a WAF-shaped response) this
+          session learned the hard way is necessary.
+
+        No multi-writer failover here (unlike the two loggers this replaces) -- only ever
+        wired up on one bot at a time, so there's nothing to defer to."""
+        cfg = self.cfg
+        table = cfg.unified_market_data_table
+        if table is None:
+            return
+        MAX_BACKOFF_S = 300.0
+        WAF_BACKOFF_S = 600.0
+        last_prune = 0.0
+        last_trade_id = None
+        last_trade_poll = 0.0
+        consecutive_errors = 0
+        while True:
+            sleep_s = MARKET_DATA_BOOK_EVERY
+            try:
+                if self.live.book_fresh():
+                    bids = self.live.order_book.get("bids") or []
+                    asks = self.live.order_book.get("asks") or []
+                    if bids and asks:
+                        best_bid = max(float(b["price"]) for b in bids)
+                        best_ask = min(float(a["price"]) for a in asks)
+                        await self.sb("POST", table, {
+                            "kind": "book",
+                            "bids": [{"price": float(b["price"]), "size": float(b["size"])}
+                                    for b in bids],
+                            "asks": [{"price": float(a["price"]), "size": float(a["size"])}
+                                    for a in asks],
+                            "best_bid": best_bid, "best_ask": best_ask, "source": cfg.worker_id,
+                        })
+                now = time.time()
+                if now - last_trade_poll >= TRADE_FLOW_LOG_EVERY:
+                    last_trade_poll = now
+                    if last_trade_id is None:
+                        rows = await self.sb(
+                            "GET", f"{table}?select=trade_id&kind=eq.trade&order=trade_id.desc&limit=1")
+                        last_trade_id = rows[0]["trade_id"] if rows else 0
+                    url = (f"https://mainnet.zklighter.elliot.ai/api/v1/recentTrades"
+                           f"?market_id={cfg.market_index}&limit=100")
+                    async with self.http.get(url) as resp:
+                        text = await resp.text()
+                        content_type = resp.headers.get("Content-Type", "")
+                        if resp.status >= 400 or "json" not in content_type:
+                            consecutive_errors += 1
+                            sleep_s = WAF_BACKOFF_S
+                            raise RuntimeError(
+                                f"recentTrades {resp.status} ct={content_type}: {text[:150]}")
+                        data = jsonlib.loads(text)
+                    new_trades = sorted(
+                        (t for t in data.get("trades", []) if t["trade_id"] > last_trade_id),
+                        key=lambda t: t["trade_id"])
+                    for t in new_trades:
+                        await self.sb("POST", table, {
+                            "kind": "trade", "trade_id": t["trade_id"],
+                            "ts": ms_to_iso(t["timestamp"]),
+                            "price": float(t["price"]), "size": float(t["size"]),
+                            "usd_amount": float(t["usd_amount"]),
+                            "is_maker_ask": t["is_maker_ask"], "source": cfg.worker_id,
+                        })
+                        last_trade_id = t["trade_id"]
+                if cfg.unified_market_data_prune and time.time() - last_prune > 3600:
+                    last_prune = time.time()
+                    cutoff = (datetime.now(timezone.utc)
+                             - timedelta(days=MARKET_DATA_RETENTION_DAYS)).isoformat().replace("+", "%2B")
+                    await self.sb("DELETE", f"{table}?ts=lt.{cutoff}")
+                consecutive_errors = 0
+            except Exception as e:
+                consecutive_errors += 1
+                if sleep_s == MARKET_DATA_BOOK_EVERY:
+                    sleep_s = min(MARKET_DATA_BOOK_EVERY * (2 ** consecutive_errors), MAX_BACKOFF_S)
+                try:
+                    await self.log_run("market_data_log_error",
+                                       {"error": str(e)[:300], "consecutive": consecutive_errors,
+                                        "backoff_s": sleep_s})
+                except Exception:
+                    pass  # never let market-data logging affect trading
             await asyncio.sleep(sleep_s)
 
     def compute_stoch_signal(self):
@@ -2817,6 +2922,7 @@ class StochBot:
         candle_task = asyncio.create_task(self.run_candle_refresh_forever())
         tick_log_task = asyncio.create_task(self.run_tick_logger_forever())
         trade_flow_log_task = asyncio.create_task(self.run_trade_flow_logger_forever())
+        market_data_log_task = asyncio.create_task(self.run_market_data_logger_forever())
 
         print("Waiting for initial WebSocket data...", flush=True)
         for _ in range(40):

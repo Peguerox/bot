@@ -195,6 +195,17 @@ this fixed three real defects, independently re-verified against the code before
 None of these changes touch the five adaptive coefficients, the 75% TP activation level, or the
 retreat formula -- those are exactly what was live before. Migration:
 lighter_stoch_dca_btc_joint_checkpoint.sql.
+
+2026-09-28, same day: unified_market_data_table set, tick_log_defers_to/trade_flow_log_defers_to
+both retired to None -- direct request for "one simple logger" instead of the two separate
+tick/trade-flow loggers, capturing FULL order-book depth (not just best bid/ask -- the book
+already arrives complete over the websocket, just never logged past the top level before) plus
+executed trade prints in one table, explicitly meant to be a clean data source for a future
+fast-reacting bot. See run_market_data_logger_forever's docstring for the exact design (book
+snapshots are free/fast since no REST call is involved; trade prints still poll recentTrades on
+the existing hardened, WAF-safe cadence). Worker 2/1 remain unaffected -- they're still the old
+system's primary/backup writer, and lose nothing by Worker 3 stepping out of that chain.
+Migration: lighter_stoch_dca_btc_market_data.sql.
 """
 from stoch_bot_core import BotConfig, run_bot
 
@@ -224,11 +235,16 @@ CONFIG = BotConfig(
     schema_has_live_signal=True,  # requires lighter_stoch_dca_btc_live_signal.sql first
     self_lock_reversal_counts_as_win=True,
     self_lock_require_tp_in_streak=True,  # 2026-09-28: at least 1 of the 2 unlock wins must be a literal TP
-    # Price-tick logging: backup writer. Takes over the moment Worker 2 goes quiet.
-    tick_log_defers_to=["worker2"],
-    # Nothing on the fleet reads lighter_btc_trade_flow anymore -- both entry filters that used
-    # it are off. No reason to keep polling for data nobody consults.
+    # Retired 2026-09-28: replaced by the unified market-data logger below. Worker 2 stays the
+    # old system's primary writer, Worker 1 its backup -- unaffected by Worker 3 stepping out.
+    tick_log_defers_to=None,
     trade_flow_log_defers_to=None,
+    # Unified market-data logger (2026-09-28, direct request): one table, full order-book depth
+    # + trade prints, no separate tick/trade-flow tables for this bot anymore. See
+    # run_market_data_logger_forever's docstring. Migration:
+    # lighter_stoch_dca_btc_market_data.sql.
+    unified_market_data_table="lighter_stoch_dca_btc_market_data",
+    unified_market_data_prune=True,
 )
 
 if __name__ == "__main__":
