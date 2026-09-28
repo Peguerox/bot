@@ -1720,7 +1720,7 @@ function CompactStochBtcPanel({
             <p className="text-gray-500 text-[10px] uppercase">Joint Adaptive</p>
             <div className="flex items-center gap-1.5 flex-wrap">
               <span className="text-[9px] font-bold px-1.5 py-0.5 rounded uppercase bg-blue-500/20 text-blue-400">
-                win {joint.window?.toFixed(1)}
+                window {joint.window?.toFixed(1)}
               </span>
               <span className="text-[10px] text-gray-400 tabular-nums">
                 K {joint.lower_k?.toFixed(0)}/{joint.upper_k?.toFixed(0)}
