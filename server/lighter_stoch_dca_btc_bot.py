@@ -206,6 +206,17 @@ snapshots are free/fast since no REST call is involved; trade prints still poll 
 the existing hardened, WAF-safe cadence). Worker 2/1 remain unaffected -- they're still the old
 system's primary/backup writer, and lose nothing by Worker 3 stepping out of that chain.
 Migration: lighter_stoch_dca_btc_market_data.sql.
+
+2026-09-28, same day: require_fresh_signal=True -- direct request, empirically motivated. Pulled
+91 real trades from this same session and recomputed the signal one candle earlier than each
+entry: entries on a genuinely fresh flip (the signal's first candle) won 65% of the time;
+entries where the signal had already been sitting active for 2+ candles won only 43%, net
+losing. Blocks BOTH a fresh entry and a reversal's reopen leg (never an exit) unless the signal
+just appeared this candle -- see _prior_candle_signal's docstring in stoch_bot_core.py for how
+that's checked (reuses the real signal function against candles shifted back by one, not a
+separate reimplementation). Directly covers the self-lock-unlock case the user flagged live too:
+real trading unlocking into whatever direction the paper shadow happened to just win on, even if
+that direction had already been running for several candles by the time the unlock fired.
 """
 from stoch_bot_core import BotConfig, run_bot
 
@@ -236,6 +247,7 @@ CONFIG = BotConfig(
     self_lock_reversal_counts_as_win=True,
     self_lock_require_tp_in_streak=True,  # 2026-09-28: at least 1 of the 2 unlock wins must be a literal TP
     self_lock_no_tp_fallback_wins=3,  # 2026-09-28: 3+ wins of any kind unlocks anyway, TP or not
+    require_fresh_signal=True,  # 2026-09-28: only enter on the exact candle the signal first appears
     self_lock_loss_decrements_streak=True,  # 2026-09-28: a red (non-SL) close cancels one prior win
     # Retired 2026-09-28: replaced by the unified market-data logger below. Worker 2 stays the
     # old system's primary writer, Worker 1 its backup -- unaffected by Worker 3 stepping out.

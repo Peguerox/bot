@@ -163,6 +163,17 @@ the old, separate, looser "just one paper TP" mechanism that used to exist here 
 actually turned on). Also fixed a latent bug found while wiring this up: the hour-open check
 had never been updated for trading_hours_utc's dict form, so it would have silently misread
 weekday keys as hours if it had ever actually run.
+
+2026-09-28, same day: require_fresh_signal=True -- direct request, empirically motivated. Pulled
+91 real Worker 3 trades and recomputed the signal one candle earlier than each entry: entries on
+a genuinely fresh flip (the signal's first candle) won 65% of the time; entries where the signal
+had already been sitting active for 2+ candles won only 43%, net losing. Blocks BOTH a fresh
+entry and a reversal's reopen leg (never an exit) unless the signal just appeared this candle --
+see _prior_candle_signal's docstring for how that's checked (reuses the real signal function
+against candles shifted back by one, not a separate reimplementation). Also directly covers the
+self-lock-unlock case the user flagged live: real trading unlocking into whatever direction the
+paper shadow happened to just win on, even if that direction had already been running for
+several candles by the time the unlock fired.
 """
 from stoch_bot_core import BotConfig, run_bot
 
@@ -203,6 +214,7 @@ CONFIG = BotConfig(
     self_lock_no_tp_fallback_wins=3,
     self_lock_loss_decrements_streak=True,
     hour_open_requires_self_lock=True,  # 2026-09-28: an hour opening re-locks behind this same rule
+    require_fresh_signal=True,  # 2026-09-28: only enter on the exact candle the signal first appears
     schema_has_profit_lock=True,  # harmless leftover column, profit_lock_enabled is off
     # Price-tick logging: last resort. Only writes if both Worker 2 and Worker 3 are quiet.
     tick_log_defers_to=["worker2", "worker3"],

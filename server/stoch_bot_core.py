@@ -229,6 +229,14 @@ class BotConfig:
     # the whole streak to zero -- "stop loss is the worst." If the decrement brings the counter
     # to 0, paper_streak_has_tp clears too (equivalent to a fresh start).
     self_lock_loss_decrements_streak: bool = False
+    # Fresh-signal requirement (2026-09-28, direct request, empirically motivated): real data
+    # showed entries taken when the signal had already been active for 2+ candles won
+    # noticeably less often (43% win, net losing) than entries on a genuinely fresh flip (65%
+    # win). Requires the signal to have JUST appeared -- not already been true one candle
+    # earlier -- for BOTH a fresh entry and a reversal's reopen leg (never blocks an exit,
+    # only a new commitment). See _prior_candle_signal's docstring for how "one candle earlier"
+    # is computed (reuses the real signal function, not a reimplementation).
+    require_fresh_signal: bool = False
     # Trading-hours schedule (2026-09-24, Worker 1 -- stacked on top of its existing session
     # breaker, not a replacement). Set of UTC hours (0-23) during which NEW entries (and the
     # reopening leg of a reversal) are allowed; every other hour blocks new entries the same
@@ -1215,6 +1223,48 @@ class StochBot:
         self.live_k = k
         self.live_signal = signal
         return signal, signal, ts
+
+    def _prior_candle_signal(self):
+        """Fresh-signal check (2026-09-28, direct request): what would the active signal
+        function have returned one candle earlier? Reuses the EXACT same compute_*_signal
+        method currently in use, called against self.candles shifted back by one, instead of a
+        separate reimplementation -- guarantees this can never quietly drift out of sync with
+        whatever the real signal logic actually is. Read-only from the caller's perspective:
+        saves and restores every field these functions set as a side effect (joint_adaptive_last,
+        adaptive_last_window, live_k, etc.) so this check never corrupts the CURRENT tick's real
+        values, which the dashboard and entry-freezing logic both depend on being accurate."""
+        cfg = self.cfg
+        if len(self.candles) < 2:
+            return None
+        saved_candles = self.candles
+        saved_joint = self.joint_adaptive_last
+        saved_adapt_vol = self.adaptive_last_vol_pct
+        saved_adapt_win = self.adaptive_last_window
+        saved_adapt_k = self.adaptive_last_k
+        saved_live_k = self.live_k
+        saved_live_sig = self.live_signal
+        self.candles = saved_candles[:-1]
+        try:
+            if cfg.use_joint_adaptive:
+                sig, _, _ = self.compute_joint_adaptive_signal()
+            elif cfg.use_adaptive_window:
+                sig, _, _ = self.compute_adaptive_stoch_signal()
+            elif cfg.use_rsi_stoch_signal:
+                sig, _ = compute_rsi_stoch_confirmed_signal(
+                    self.candles, stoch_period=cfg.stoch_window,
+                    require_confirmation=cfg.rsi_paper_require_confirmation,
+                    lo=cfg.entry_lo, hi=cfg.entry_hi)
+            else:
+                sig, _, _ = self.compute_stoch_signal()
+        finally:
+            self.candles = saved_candles
+            self.joint_adaptive_last = saved_joint
+            self.adaptive_last_vol_pct = saved_adapt_vol
+            self.adaptive_last_window = saved_adapt_win
+            self.adaptive_last_k = saved_adapt_k
+            self.live_k = saved_live_k
+            self.live_signal = saved_live_sig
+        return sig
 
     def _update_partial_minute(self, best_bid, best_ask, now_ms):
         """Tracks the current, still-forming minute's quote-mid high/low continuously, for the
@@ -2549,6 +2599,17 @@ class StochBot:
         # shadow always sees the plain, ungated signal, regardless of what else is layered on.
         paper_entry_signal, paper_reversal_signal = entry_signal, reversal_signal
 
+        prior_signal = self._prior_candle_signal() if cfg.require_fresh_signal else None
+        if cfg.require_fresh_signal and entry_signal is not None and entry_signal == prior_signal:
+            # Stale -- this direction was ALREADY true one candle ago, not a fresh flip. Empirical
+            # finding (2026-09-28): fresh entries won 65% of the time vs 43% for signals that had
+            # already been sitting active for 2+ candles. Wait for the next genuine flip instead
+            # of committing to a direction that's already been running for a while -- this also
+            # covers the self-lock-unlock case where real trading only gets a chance to act on
+            # whatever the signal happens to be at the moment it unlocks, which can be stale by
+            # then even though the unlock itself was legitimate.
+            entry_signal = None
+
         if cfg.pure_trend_fade:
             # No stochastic entries at all -- ER is the only signal, and it drives entry
             # only. Exit is TP/SL exclusively (reversal_signal stays None permanently).
@@ -2855,10 +2916,11 @@ class StochBot:
                     except Exception as e:
                         await self.log_run("flow_entry_filter_error", {"error": str(e)[:300], "via": "reversal"})
                         reopen_flow_blocked = True
+                reopen_stale = (cfg.require_fresh_signal and reversal_signal == prior_signal)
                 if (self.entry_vol_paused or (cfg.self_lock_enabled and self.real_trading_locked)
                         or (cfg.trading_hours_utc is not None
                             and self._apply_trading_hours_gate(reversal_signal) is None)
-                        or reopen_flow_blocked):
+                        or reopen_flow_blocked or reopen_stale):
                     # Close leg of a reversal always runs (already happened above); only the
                     # reopen leg respects the gate -- left flat until it clears instead of
                     # immediately flipping into the opposite side.
