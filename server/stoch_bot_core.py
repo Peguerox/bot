@@ -247,17 +247,19 @@ class BotConfig:
     # day-boundary crossing when picking values: an ET evening event can land on the NEXT day
     # in UTC (e.g. Sunday 9pm ET is already Monday 01:00 UTC).
     trading_hours_utc: Optional[Union[list, dict]] = None
-    # Hour-open confirmation (2026-09-25, prepared alongside the Worker 2 combined-strategy
-    # draft -- only meaningful with both trading_hours_utc and self_lock_enabled set). "Don't
-    # walk into a bloodbath": the instant a scheduled hour opens (closed->open transition,
-    # including right after a restart if the bot boots mid-open-hour -- a restart has no fresh
-    # evidence either), real entries stay paused until the internal paper shadow posts ONE TP
-    # (not the self-lock's usual two -- deliberately looser here so a real opportunity isn't
-    # missed waiting for a second confirmation). That single TP only needs to happen once per
-    # open-hour session; every real close after that is unaffected, including this window's own
-    # self-lock cycles. In-memory only, on purpose -- it's supposed to re-arm on every restart,
-    # so there is nothing to persist. None/False = disabled (every other bot).
-    hour_open_requires_paper_tp: bool = False
+    # Hour-open confirmation (2026-09-25, redefined 2026-09-28). "Don't assume the hour is good
+    # just because the schedule says so": the instant a scheduled hour opens (closed->open
+    # transition, including right after a restart if the bot boots mid-open-hour -- a restart
+    # has no fresher evidence than a real transition would), real entries re-lock behind the
+    # EXACT SAME self-lock recovery gate a real SL triggers -- same counter, same
+    # self_lock_require_tp_in_streak/self_lock_no_tp_fallback_wins/
+    # self_lock_loss_decrements_streak rules, not a separate looser check. Direct request: "the
+    # criteria to unlock after a self lock should be the same criteria as when you turn on the
+    # bot" -- extended here to also cover an hour reopening, not just a manual toggle. Skips
+    # arming entirely if a real position is already open at the transition (nothing "blind"
+    # about a position that's already being managed). Only meaningful with both
+    # trading_hours_utc and self_lock_enabled set.
+    hour_open_requires_self_lock: bool = False
     # RSI paper test (2026-09-26): a second, fully independent shadow strategy -- "Confirmed
     # Stochastic RSI" (Wilder RSI5, raw Stochastic RSI over the last 14 RSI values, no K/D
     # smoothing, entry/reversal requires S<20 or S>80 PLUS the latest completed candle closing
@@ -729,9 +731,10 @@ class StochBot:
         # makes unlock MORE conservative (may ask for one extra TP win), never less safe.
         self.paper_streak_has_tp = False
         self._self_lock_loaded = False
-        # Hour-open confirmation (independent of the self-lock counter above -- this one only
-        # ever needs a single TP, and re-arms on every restart by design).
-        self.awaiting_open_confirmation = False
+        # Hour-open confirmation (2026-09-28: redefined to reuse the self-lock's own
+        # real_trading_locked/paper_consecutive_tps directly, no separate state of its own
+        # anymore -- see hour_open_requires_self_lock's docstring). Re-arms on every restart by
+        # design (re-checked from cfg.trading_hours_utc directly, nothing to persist).
         self._last_hour_open = None
         # RSI paper test (fully independent shadow -- never reads or writes anything above)
         self.rsi_paper_side = None
@@ -1836,37 +1839,39 @@ class StochBot:
         return None
 
     async def _check_hour_open_confirmation(self, has_open_position=False, now_utc=None):
-        """Detects a closed->open transition on cfg.trading_hours_utc and arms
-        awaiting_open_confirmation -- cleared by the next paper TP in _update_paper_shadow.
-        self._last_hour_open starts None, so the very first tick counts as a transition too if
-        it's already inside an open hour (a restart has no fresher evidence than a real
-        transition would). No-op unless trading_hours_utc, hour_open_requires_paper_tp, AND
-        self_lock_enabled are all set -- self_lock_enabled is required even though this isn't
-        the self-lock's own counter, because _update_paper_shadow (the only place that clears
-        this flag) never runs without it. Arming the flag with no paper shadow running to ever
-        clear it would permanently lock out real entries after the first hour-open transition.
+        """Detects a closed->open transition on cfg.trading_hours_utc and re-locks real trading
+        behind the standard self-lock recovery gate -- see hour_open_requires_self_lock's
+        docstring for why this reuses real_trading_locked/paper_consecutive_tps directly instead
+        of a separate mechanism. self._last_hour_open starts None, so the very first tick counts
+        as a transition too if it's already inside an open hour (a restart has no fresher
+        evidence than a real transition would). No-op unless trading_hours_utc,
+        hour_open_requires_self_lock, AND self_lock_enabled are all set.
 
-        has_open_position skips arming entirely (2026-09-26 fix): the whole point is "don't
-        walk into a NEW real position blind" -- if a real position is already open, real
-        trading was already active, there is nothing blind about it, and arming here would
-        only needlessly gate the NEXT entry after this one closes. Caught live: a restart
-        landed 42s after a real entry (same open hour), which armed the flag despite the open
-        position being managed fine -- the position itself was never at risk, but the bot
-        would have demanded a fresh paper win before its next entry for no real reason.
+        BUG FIX (2026-09-28): the open-hour check now handles trading_hours_utc's dict form
+        (weekday: hours) the same way _apply_trading_hours_gate does -- the original version
+        only ever checked flat-list membership, which would have silently misread a dict's keys
+        (0-6) as if they were hours, matching nothing correctly past hour 6. Never actually
+        exercised before now since this whole feature was off everywhere.
 
-        Writes awaiting_open_confirmation to state on the transition -- display-only (the
-        dashboard has no other way to show why real trading looks idle despite not being
-        self-lock-locked), the in-memory flag stays the actual source of truth so a restart
-        still re-arms per the design, this DB copy is just a mirror of it."""
+        has_open_position skips re-locking entirely (2026-09-26 fix, carried over): the whole
+        point is "don't assume blind" -- if a real position is already open, real trading was
+        already active, there is nothing blind about it, and re-locking here would only
+        needlessly gate the NEXT entry after this one closes."""
         cfg = self.cfg
-        if (not cfg.hour_open_requires_paper_tp or cfg.trading_hours_utc is None
+        if (not cfg.hour_open_requires_self_lock or cfg.trading_hours_utc is None
                 or not cfg.self_lock_enabled):
             return
         now_utc = now_utc or datetime.now(timezone.utc)
-        is_open_now = now_utc.hour in cfg.trading_hours_utc
+        schedule = cfg.trading_hours_utc
+        open_hours = schedule.get(now_utc.weekday(), []) if isinstance(schedule, dict) else schedule
+        is_open_now = now_utc.hour in open_hours
         if is_open_now and self._last_hour_open is not True and not has_open_position:
-            self.awaiting_open_confirmation = True
-            await self.update_state({"awaiting_open_confirmation": True})
+            self.real_trading_locked = True
+            self.paper_consecutive_tps = 0
+            self.paper_streak_has_tp = False
+            if cfg.schema_has_self_lock:
+                await self.update_state({"real_trading_locked": True, "paper_consecutive_tps": 0})
+            await self.log_run("real_trading_locked", {"via": "hour_open"})
         self._last_hour_open = is_open_now
 
     async def _apply_session_breaker(self, state, entry_signal, now_utc=None):
@@ -2230,7 +2235,6 @@ class StochBot:
         self.paper_stoch_activation_pct = None
         self.paper_stoch_retreat_points = None
 
-        confirmation_just_cleared = False
         # A pure reversal close (reason is None here, only reached because reversal_ready was
         # True) counts as a win too when self_lock_reversal_counts_as_win is set -- but only if
         # it actually closed favorably. A losing/breakeven reversal stays neutral (does NOT
@@ -2270,9 +2274,6 @@ class StochBot:
                 if self.real_trading_locked:
                     self.real_trading_locked = False
                     unlocked_now = True
-            if cfg.hour_open_requires_paper_tp and self.awaiting_open_confirmation:
-                self.awaiting_open_confirmation = False
-                confirmation_just_cleared = True
         elif reason == "SL":
             self.paper_consecutive_tps = 0
             self.paper_streak_has_tp = False
@@ -2313,8 +2314,6 @@ class StochBot:
             }
             if unlocked_now:
                 patch["real_trading_locked"] = False
-            if confirmation_just_cleared:
-                patch["awaiting_open_confirmation"] = False
             await self.update_state(patch)
         if unlocked_now:
             await self.log_run("real_trading_unlocked", {"via": "two_consecutive_paper_tps"})
@@ -2331,7 +2330,7 @@ class StochBot:
     async def _update_rsi_paper_shadow(self, state, best_bid, best_ask, now_ms):
         """Fully independent paper-only shadow of "Confirmed Stochastic RSI" (see
         compute_rsi_stoch_confirmed_signal) -- never places a real order, never reads or
-        writes real_trading_locked/awaiting_open_confirmation/any real-trading state. Only
+        writes real_trading_locked or any other real-trading state. Only
         purpose is to log simulated trades to lighter_btc_rsi_paper_trades so weekday vs
         weekend performance can be watched forward, on data the signal was never fit to."""
         cfg = self.cfg
@@ -2582,10 +2581,12 @@ class StochBot:
         if cfg.trading_hours_utc is not None:
             entry_signal = self._apply_trading_hours_gate(entry_signal)
 
-        if cfg.hour_open_requires_paper_tp:
+        if cfg.hour_open_requires_self_lock:
+            # Sets self.real_trading_locked directly on a closed->open transition -- the
+            # generic "if self.real_trading_locked: entry_signal = None" check further below
+            # (after _update_paper_shadow runs) picks this up the same tick, same as a real SL
+            # would. No separate gating needed here.
             await self._check_hour_open_confirmation(has_open_position=state.get("side") is not None)
-            if self.awaiting_open_confirmation:
-                entry_signal = None
 
         if cfg.flow_entry_filter_enabled and entry_signal is not None:
             # Isolated on purpose, same guarantee as the paper-shadow loggers: a failure here
@@ -2857,7 +2858,6 @@ class StochBot:
                 if (self.entry_vol_paused or (cfg.self_lock_enabled and self.real_trading_locked)
                         or (cfg.trading_hours_utc is not None
                             and self._apply_trading_hours_gate(reversal_signal) is None)
-                        or (cfg.hour_open_requires_paper_tp and self.awaiting_open_confirmation)
                         or reopen_flow_blocked):
                     # Close leg of a reversal always runs (already happened above); only the
                     # reopen leg respects the gate -- left flat until it clears instead of

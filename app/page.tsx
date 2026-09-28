@@ -1655,28 +1655,20 @@ function CompactStochBtcPanel({
             </div>
           );
         })();
-        const awaitingOpenConfirm = !state?.real_trading_locked && state?.awaiting_open_confirmation;
         const selfLockPill = showSelfLock && (
           <div className="bg-gray-800/60 rounded-lg p-2">
             <p className="text-gray-500 text-[10px] uppercase">Self-Lock</p>
             <div className="flex items-center gap-1.5 flex-wrap">
               <span className={`text-[9px] font-bold px-1.5 py-0.5 rounded uppercase ${
                 state?.real_trading_locked ? "bg-red-500/20 text-red-400"
-                : awaitingOpenConfirm ? "bg-amber-500/20 text-amber-400"
                 : "bg-green-500/20 text-green-400"
               }`}>
-                real {state?.real_trading_locked ? "locked" : awaitingOpenConfirm ? "awaiting win" : "active"}
+                real {state?.real_trading_locked ? "locked" : "active"}
               </span>
               {state?.real_trading_locked && (
                 <span className="text-[10px] font-bold text-gray-300 tabular-nums"
-                      title="Consecutive paper wins needed to unlock real trading (TP, or a winning reversal if enabled)">
-                  {state?.paper_consecutive_tps ?? 0}/2 paper wins
-                </span>
-              )}
-              {awaitingOpenConfirm && (
-                <span className="text-[10px] font-bold text-gray-300 tabular-nums"
-                      title="1 paper win required before real entries resume this open-hour session (TP, or a winning reversal if enabled)">
-                  0/1 paper win
+                      title="Consecutive paper wins needed to unlock real trading -- 2 with at least 1 literal TP, or 3 of any kind">
+                  {state?.paper_consecutive_tps ?? 0}/2-3 paper wins
                 </span>
               )}
               <span className={`text-[9px] font-bold px-1.5 py-0.5 rounded uppercase ${
@@ -2276,7 +2268,7 @@ export default function Dashboard() {
         <div className="grid grid-cols-1 sm:grid-cols-3 gap-3">
           <CompactStochBtcPanel
             title="Worker 1 · Plain Stochastic, Weekend Blocked"
-            subtitle="TP 0.10% / SL 0.11% / window 5, 25-75 (original) / 120s blanking period / weekday hours only (original fitted schedule), Sat+Sun fully closed ET, resumes Monday 12am ET / self-lock (2 consecutive paper wins unlock, winning reversals count too)"
+            subtitle="TP 0.10% / SL 0.11% / window 5, 25-75 (original) / 120s blanking period / weekday hours only (original fitted schedule), Sat+Sun fully closed ET, resumes Monday 12am ET / self-lock: 2 wins unlock (at least 1 literal TP), OR 3 wins of any kind -- a red non-SL close cancels one win, only a literal SL wipes the streak / an hour opening re-locks behind this same rule"
             table="lighter_btc_initial_state"
             state={initialBtcState}
             trades={initialBtcTrades.filter((t: any) => t.closed_at >= WORKER1_RESET_AT)}

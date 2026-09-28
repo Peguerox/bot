@@ -147,6 +147,22 @@ column is harmless if unused, no need for a second migration to remove it). What
   back on its own at ET Monday 00:00 (UTC Monday 04:00), no manual re-enable needed once this is
   deployed -- left state.enabled as the user set it after the first attempt rather than
   re-flipping it automatically this time.
+
+2026-09-28, same day: self-lock upgraded to match Worker 3's rules exactly -- direct request
+("the criteria to unlock after a self lock should be the same criteria...either you need two
+greens... or three greens non-TP or two greens with one TP"). self_lock_require_tp_in_streak
+(2+ wins need at least 1 literal TP among them), self_lock_no_tp_fallback_wins=3 (3 wins of any
+kind unlocks regardless), self_lock_loss_decrements_streak (a red, non-SL close cancels one
+prior win instead of being invisible -- only a literal SL still wipes the whole streak to 0).
+See lighter_stoch_dca_btc_bot.py's docstring for the full reasoning and worked examples.
+
+hour_open_requires_self_lock=True, same day: this is specifically the bot whose real trading
+opens and closes on a schedule, so extended the request to cover that too -- an hour opening
+no longer just assumes conditions are fine; it re-locks behind the exact same rule above (not
+the old, separate, looser "just one paper TP" mechanism that used to exist here and was never
+actually turned on). Also fixed a latent bug found while wiring this up: the hour-open check
+had never been updated for trading_hours_utc's dict form, so it would have silently misread
+weekday keys as hours if it had ever actually run.
 """
 from stoch_bot_core import BotConfig, run_bot
 
@@ -183,6 +199,10 @@ CONFIG = BotConfig(
     schema_has_self_lock=True,  # requires lighter_btc_initial_self_lock.sql first
     schema_has_live_signal=True,  # requires lighter_btc_initial_live_signal.sql first
     self_lock_reversal_counts_as_win=True,
+    self_lock_require_tp_in_streak=True,  # 2026-09-28: same rule as Worker 3, see that file's docstring
+    self_lock_no_tp_fallback_wins=3,
+    self_lock_loss_decrements_streak=True,
+    hour_open_requires_self_lock=True,  # 2026-09-28: an hour opening re-locks behind this same rule
     schema_has_profit_lock=True,  # harmless leftover column, profit_lock_enabled is off
     # Price-tick logging: last resort. Only writes if both Worker 2 and Worker 3 are quiet.
     tick_log_defers_to=["worker2", "worker3"],
