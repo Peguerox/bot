@@ -2007,6 +2007,29 @@ class StochBot:
         if reason is None and not reversal_ready:
             return
 
+        # Log every paper close (2026-09-28, direct request) -- previously only the CURRENT
+        # paper position was ever visible (via state), with no history once it closed. Reuses
+        # the runs table rather than a new one -- consistent with how lock/unlock events are
+        # already logged there, no migration needed.
+        close_reason = reason or "REVERSAL"
+        pnl_pct = ((check_price - entry) / entry * 100 if side == "long"
+                   else (entry - check_price) / entry * 100)
+        paper_detail = {"side": side, "entry": entry, "exit": check_price,
+                        "reason": close_reason, "pnl_pct": pnl_pct,
+                        "opened_at": ms_to_iso(self.paper_entry_ms)}
+        if cfg.use_joint_adaptive and self.paper_joint_tp_pct is not None:
+            paper_detail["joint_adaptive"] = {
+                "tp_pct": self.paper_joint_tp_pct, "sl_pct": self.paper_joint_sl_pct,
+                "blank_seconds": self.paper_joint_blank_s,
+            }
+            if cfg.stoch_turn_exit_enabled:
+                paper_detail["stoch_turn"] = {
+                    "activation_pct": self.paper_stoch_activation_pct,
+                    "retreat_points": self.paper_stoch_retreat_points,
+                    "armed_at_close": self.paper_stoch_armed,
+                }
+        await self.log_run("paper_closed", paper_detail)
+
         unlocked_now = False
         closed_side = side
         self.paper_side = None
