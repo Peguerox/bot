@@ -92,31 +92,34 @@ win rate over the last 111 real closes (76 REVERSAL avg +$0.011, 14 PROFIT_LOCK 
 TP avg +$0.097) but net -$0.70, because 20 real SLs averaged -$0.098 each -- a 5-10x asymmetry
 against the typical win size. Only SL moves; TP stays 0.10%. Not a repeat of the earlier 0.05%
 experiment (that compressed TP+SL together under a different signal and got reverted same day).
+
+2026-09-28, full reset: same reasoning as Worker 1's reset the same day ("prepare for Monday
+with the strategy that was working for us") -- Worker 2 goes back to the exact same reverted
+baseline (plain stochastic, window=5, 25/75, TP 0.10%/SL 0.11%, 120s blanking, self_lock
+unchanged; profit_lock_enabled off, schema_has_profit_lock left True as a harmless unused
+column). The ONE difference from Worker 1: no trading_hours_utc -- Worker 2 stays 24/7,
+including through the weekend, as the always-on comparison point against Worker 1's now-gated
+schedule. Deployed with enabled left OFF -- direct request, not meant to go live yet.
 """
 from stoch_bot_core import BotConfig, run_bot
 
 CONFIG = BotConfig(
-    name="COMBINED: BLANKING + SELF-LOCK, 24/7 (worker 2)",
+    name="PLAIN STOCHASTIC, 24/7 (worker 2)",
     worker_id="worker2",
     table_state="lighter_btc_optimal_state",
     table_trades="lighter_btc_optimal_trades",
     table_runs="lighter_btc_optimal_runs",
-    stoch_window=20,  # 2026-09-27: 5 -> 20, less sensitive to weekend whipsaw -- see docstring
+    stoch_window=5,  # 2026-09-28: back to the original value -- see docstring
     tp_pct=0.10,
-    sl_pct=0.06,  # 2026-09-27: 0.11 -> 0.06 -- real data: 82% win rate but net -$0.70 over the
-    # last 111 real closes, because wins average $0.01-0.03 (reversal/profit-lock) while every
-    # SL takes the full -0.11%, a 5-10x asymmetry. Not the same as the earlier 0.05% experiment
-    # (that compressed TP+SL together on a different signal); this only tightens SL, holding TP
-    # at 0.10%.
-    entry_lo=10, entry_hi=90,  # 2026-09-27: 25/75 -> 10/90, see docstring
-    reversal_lo=10, reversal_hi=90,
+    sl_pct=0.11,  # 2026-09-28: back to the original value
+    entry_lo=25, entry_hi=75,  # 2026-09-28: back to the original values
+    reversal_lo=25, reversal_hi=75,
     reversal_guard_seconds=120,  # the "blanking period"
     self_lock_enabled=True,
     schema_has_self_lock=True,  # requires the migration above to be run first
     self_lock_reversal_counts_as_win=True,  # a winning reversal satisfies both gates too, not just literal TP
-    profit_lock_enabled=True,
-    profit_lock_trigger_pct=0.02,  # 2026-09-27: 0.05 -> 0.02 -- a real Worker 1 trade peaked at 0.04% and never armed, went to SL
-    schema_has_profit_lock=True,  # requires lighter_btc_optimal_profit_lock.sql first
+    schema_has_profit_lock=True,  # harmless leftover column, profit_lock_enabled is off
+    # No trading_hours_utc -- the one deliberate difference from Worker 1's reset, stays 24/7.
     # Price-tick logging: primary writer (trades most, so it's up most reliably). Worker 3
     # takes over if this one goes quiet, Worker 1 as last resort. See stoch_bot_core.py.
     tick_log_defers_to=[],

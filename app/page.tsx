@@ -2242,8 +2242,8 @@ export default function Dashboard() {
             tradingHoursUtc={WORKER1_TRADING_HOURS}
           />
           <CompactStochBtcPanel
-            title="Worker 2 · Combined, 24/7"
-            subtitle="TP 0.10% / SL 0.06% / 10-90 / window 20 / 0.02% profit-lock trail / 120s blanking period / self-lock (2 consecutive paper wins unlock, winning reversals count too), no hour restriction -- SL tightened 2026-09-27 after real data showed wins averaging $0.01-0.03 against SL losses of $0.098"
+            title="Worker 2 · Plain Stochastic, 24/7"
+            subtitle="TP 0.10% / SL 0.11% / window 5, 25-75 (original) / 120s blanking period / self-lock (2 consecutive paper wins unlock, winning reversals count too) / no hour restriction, same as Worker 1's reset but stays 24/7 including weekends -- currently OFF, not enabled"
             table="lighter_btc_optimal_state"
             state={optimalBtcState}
             trades={optimalBtcTrades.filter((t: any) => t.closed_at >= WORKER2_RESET_AT)}
