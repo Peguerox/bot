@@ -23,7 +23,7 @@ const WORKER1_RESET_AT = "2026-09-28T01:02:25.797802+00:00";
 // reasoning as Worker 1's reset above, a clean baseline for a config that changed twice at once.
 // Reset again 2026-09-27 when stoch_window/thresholds changed, then once more after the SL
 // revert (0.05% -> 0.11%) -- same reasoning as Worker 1's reset above.
-const WORKER2_RESET_AT = "2026-09-27T15:00:49.777450+00:00";
+const WORKER2_RESET_AT = "2026-09-28T01:58:04.707091+00:00";
 // Worker 3 reset 2026-09-27 ahead of testing the volatility-adaptive window formula + the
 // order-flow entry filter -- clean baseline before that config lands.
 const WORKER3_RESET_AT = "2026-09-27T17:31:46.755963+00:00";
