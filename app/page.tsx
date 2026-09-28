@@ -26,7 +26,7 @@ const WORKER1_RESET_AT = "2026-09-28T01:02:25.797802+00:00";
 const WORKER2_RESET_AT = "2026-09-28T01:58:04.707091+00:00";
 // Worker 3 reset 2026-09-27 ahead of testing the volatility-adaptive window formula + the
 // order-flow entry filter -- clean baseline before that config lands.
-const WORKER3_RESET_AT = "2026-09-27T17:31:46.755963+00:00";
+const WORKER3_RESET_AT = "2026-09-28T02:37:37.349304+00:00";
 // Must match lighter_stoch_dca_btc_initial.py's _WEEKDAY_SCHEDULE exactly -- the ET-shifted
 // weekend block (see that file's docstring for the derivation). Kept as a literal duplicate
 // rather than a shared import since the backend is Python and this is the frontend.
