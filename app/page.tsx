@@ -18,7 +18,7 @@ const SURFER_GIVEBACK = 0.15;
 // Reset again 2026-09-27 when stoch_window/thresholds changed (5,25/75 -> 20,10/90), then once
 // more the same day after SL briefly went live at 0.05% before being reverted to 0.11% -- a few
 // trades ran under the wrong SL, so the baseline moved past those too.
-const WORKER1_RESET_AT = "2026-09-27T21:24:23.165269+00:00";
+const WORKER1_RESET_AT = "2026-09-28T01:02:25.797802+00:00";
 // Worker 2's schedule was removed and SL tightened (0.11% -> 0.05%) at this moment -- same
 // reasoning as Worker 1's reset above, a clean baseline for a config that changed twice at once.
 // Reset again 2026-09-27 when stoch_window/thresholds changed, then once more after the SL
