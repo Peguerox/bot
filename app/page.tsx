@@ -2211,8 +2211,8 @@ export default function Dashboard() {
         {/* ── Lighter BTC Stochastic5: 3-worker comparison, real money, $100 each */}
         <div className="grid grid-cols-1 sm:grid-cols-3 gap-3">
           <CompactStochBtcPanel
-            title="Worker 1 · Plain Stochastic + Flow Filter"
-            subtitle="TP 0.10% / SL 0.11% / window 5, 25-75 (original) / 0.02% profit-lock trail / order-flow entry veto ON (moved here from Worker 3) / self-lock (2 consecutive paper wins unlock, winning reversals count too)"
+            title="Worker 1 · Plain Stochastic, Weekend Blocked"
+            subtitle="TP 0.10% / SL 0.11% / window 5, 25-75 (original) / 120s blanking period / weekday hours only (original fitted schedule), Sat+Sun fully closed, resumes Monday 00:00 UTC / self-lock (2 consecutive paper wins unlock, winning reversals count too)"
             table="lighter_btc_initial_state"
             state={initialBtcState}
             trades={initialBtcTrades.filter((t: any) => t.closed_at >= WORKER1_RESET_AT)}

@@ -114,49 +114,61 @@ then you come out." Can only fire EARLIER than or instead of the fixed TP (0.10%
 never blocks them. Migration: lighter_btc_initial_profit_lock.sql. Trigger tightened 0.05->0.02
 same day after a real trade peaked at 0.04% and never armed, went straight to SL instead.
 
-2026-09-27, new experiment: RSI-Stoch removed entirely (use_rsi_stoch_signal gone) -- Worker 1
-goes back to plain stochastic (the same mechanism Worker 2/3 run), and window/thresholds go
-back to the ORIGINAL pre-widening values (window 5, 25/75), not the 20/10-90 combo Worker 2/3
-are running. On top of that original signal: flow_entry_filter_enabled=True, the order-flow
-entry veto (price + aggressive-size confirmation, see _check_flow_entry_filter in
-stoch_bot_core.py) that was just removed from Worker 3 after it vetoed nearly every real entry
-there for hours. Direct request: run the SAME filter here instead, but paired with the
-ORIGINAL plain signal rather than Worker 3's adaptive-window + K10/90 combo, as a cleaner
-one-variable test of whether the filter itself helps once it's not stacked with other
-restrictive changes at the same time. Reads the shared lighter_btc_trade_flow table Worker 3 is
-already actively writing -- trade_flow_log_defers_to stays None here, no need for a second
-writer. self_lock and the profit-lock trail above are unchanged, both still active.
+2026-09-27, new experiment (same day, since reverted below): RSI-Stoch removed entirely, back to
+plain stochastic at the original window=5/25-75, plus the order-flow entry filter moved here
+from Worker 3. Lasted only hours -- user turned the bot off after watching it live, calling it
+"horrible." Superseded by the reset below.
+
+2026-09-28 (Sunday), full reset ahead of Monday: back to the last config that was actually
+working, plus a weekend block. Everything added since is stripped -- flow_entry_filter_enabled,
+profit_lock_enabled, mirror_paper_position, all gone (schema_has_profit_lock left True; the
+column is harmless if unused, no need for a second migration to remove it). What's left:
+- Plain stochastic, window=5, entry/reversal 25/75 (the original pre-widening values)
+- TP 0.10% / SL 0.11%
+- reversal_guard_seconds=120 (the "blanking period")
+- self_lock_enabled=True, self_lock_reversal_counts_as_win=True (unchanged from before)
+- trading_hours_utc, now a {weekday: [hours]} dict: Monday(0) through Friday(4) keep the exact
+  SAME narrowed hour list this bot ran before RSI-Stoch removed it (UTC 0,1,4,9,10,12,15,16,17,
+  18,19,20,21 -- fitted from real data, see the 2026-09-24/25 history above), not a blanket 24h
+  open. Saturday(5)/Sunday(6) both absent from the dict entirely (== no open hours that day, via
+  _apply_trading_hours_gate's dict-form lookup) -- new, per the CME/weekend loss findings from
+  this same session. Real trading (and a reversal's reopen leg) is blocked the whole weekend; an
+  existing position still manages TP/SL/reversal normally regardless of the hour, same as
+  always. Comes back on its own at Monday 00:00 UTC, no manual re-enable needed -- state.enabled
+  is set True as part of this reset specifically so the schedule (not the manual toggle) is
+  what's actually gating it over the weekend.
 """
 from stoch_bot_core import BotConfig, run_bot
 
+# The same weekday hour list this bot ran before RSI-Stoch removed it entirely (see the
+# 2026-09-24/25 history above: fitted from real Worker 2 hourly data, then 07:00 UTC/3am ET
+# trimmed after it turned negative live) -- UTC 0,1,4,9,10,12,15,16,17,18,19,20,21. Saturday(5)/
+# Sunday(6) simply absent -- no open hours those days, per _apply_trading_hours_gate's dict-form
+# lookup (schedule.get(weekday, [])).
+_WEEKDAY_HOURS = [0, 1, 4, 9, 10, 12, 15, 16, 17, 18, 19, 20, 21]
+_WEEKDAY_SCHEDULE = {0: _WEEKDAY_HOURS, 1: _WEEKDAY_HOURS, 2: _WEEKDAY_HOURS, 3: _WEEKDAY_HOURS,
+                     4: _WEEKDAY_HOURS}
+
 CONFIG = BotConfig(
-    name="PLAIN STOCHASTIC + FLOW FILTER (worker 1)",
+    name="PLAIN STOCHASTIC, WEEKEND BLOCKED (worker 1)",
     worker_id="worker1",
     table_state="lighter_btc_initial_state",
     table_trades="lighter_btc_initial_trades",
     table_runs="lighter_btc_initial_runs",
-    stoch_window=5,  # 2026-09-27: back to the original value (was 20) -- new experiment, see docstring
+    stoch_window=5,  # 2026-09-28: back to the original value -- see docstring
     tp_pct=0.10,
     sl_pct=0.11,
-    entry_lo=25, entry_hi=75,  # 2026-09-27: back to the original values (was 10/90)
+    entry_lo=25, entry_hi=75,  # 2026-09-28: back to the original values
     reversal_lo=25, reversal_hi=75,
+    reversal_guard_seconds=120,  # the "blanking period"
+    trading_hours_utc=_WEEKDAY_SCHEDULE,  # 2026-09-28: blocks Saturday+Sunday, see docstring
     schema_has_position_bands=True,
-    flow_entry_filter_enabled=True,  # 2026-09-27: moved here from Worker 3, see docstring
-    flow_max_adverse_move_pct=0.02,
     self_lock_enabled=True,
     schema_has_self_lock=True,  # requires lighter_btc_initial_self_lock.sql first
     self_lock_reversal_counts_as_win=True,
-    profit_lock_enabled=True,
-    profit_lock_trigger_pct=0.02,  # 2026-09-27: 0.05 -> 0.02 -- a real trade peaked at 0.04% and never armed, went to SL
-    # Mirror-paper fallback (2026-09-27), same fix as Worker 3, same symptom here: real went
-    # flat (self-lock unlock or a close) with no live entry_signal this tick while paper --
-    # running the identical signal -- already held a position from an earlier valid entry.
-    mirror_paper_position=True,
-    schema_has_profit_lock=True,  # requires lighter_btc_initial_profit_lock.sql first
+    schema_has_profit_lock=True,  # harmless leftover column, profit_lock_enabled is off
     # Price-tick logging: last resort. Only writes if both Worker 2 and Worker 3 are quiet.
     tick_log_defers_to=["worker2", "worker3"],
-    # Trade-flow logging: not a writer here -- Worker 3 already actively logs the shared table
-    # this bot's flow filter reads from.
     trade_flow_log_defers_to=None,
 )
 
