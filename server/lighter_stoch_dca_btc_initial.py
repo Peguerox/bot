@@ -181,6 +181,7 @@ CONFIG = BotConfig(
     schema_has_position_bands=True,
     self_lock_enabled=True,
     schema_has_self_lock=True,  # requires lighter_btc_initial_self_lock.sql first
+    schema_has_live_signal=True,  # requires lighter_btc_initial_live_signal.sql first
     self_lock_reversal_counts_as_win=True,
     schema_has_profit_lock=True,  # harmless leftover column, profit_lock_enabled is off
     # Price-tick logging: last resort. Only writes if both Worker 2 and Worker 3 are quiet.

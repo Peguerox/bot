@@ -163,6 +163,7 @@ CONFIG = BotConfig(
     schema_has_position_bands=True,  # needed for the frozen position_tp_pct/position_sl_pct
     self_lock_enabled=True,
     schema_has_self_lock=True,
+    schema_has_live_signal=True,  # requires lighter_stoch_dca_btc_live_signal.sql first
     self_lock_reversal_counts_as_win=True,
     # Price-tick logging: backup writer. Takes over the moment Worker 2 goes quiet.
     tick_log_defers_to=["worker2"],

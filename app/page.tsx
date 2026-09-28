@@ -1414,6 +1414,8 @@ function CompactStochBtcPanel({
     return () => clearInterval(id);
   }, []);
   const side = state?.side ?? null;
+  const liveK = state?.live_k ?? null;
+  const liveSignal = state?.live_signal ?? null;
   const legs: any[] = state?.legs ?? [];
   const seedUsd = state?.seed_usd ?? 100;
   const realizedPnl = state?.realized_pnl_usd ?? 0;
@@ -1500,6 +1502,18 @@ function CompactStochBtcPanel({
           <p className="text-gray-500 text-[11px]">{subtitle}</p>
         </div>
         <div className="flex items-center gap-1.5 shrink-0">
+          {liveK != null && (
+            <span
+              className={`text-[10px] font-bold px-2 py-1 rounded-full tabular-nums ${
+                liveSignal === "long" ? "bg-green-500/20 text-green-400"
+                : liveSignal === "short" ? "bg-amber-500/20 text-amber-400"
+                : "bg-gray-700/40 text-gray-500"
+              }`}
+              title="What the paper bot is looking at right now -- live stochastic K value and direction"
+            >
+              K {liveK.toFixed(1)} {liveSignal ? liveSignal.toUpperCase() : "—"}
+            </span>
+          )}
           {side != null && (
             <button
               onClick={handleClosePosition}

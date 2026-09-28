@@ -117,6 +117,7 @@ CONFIG = BotConfig(
     reversal_guard_seconds=120,  # the "blanking period"
     self_lock_enabled=True,
     schema_has_self_lock=True,  # requires the migration above to be run first
+    schema_has_live_signal=True,  # requires lighter_btc_optimal_live_signal.sql first
     self_lock_reversal_counts_as_win=True,  # a winning reversal satisfies both gates too, not just literal TP
     schema_has_profit_lock=True,  # harmless leftover column, profit_lock_enabled is off
     # No trading_hours_utc -- the one deliberate difference from Worker 1's reset, stays 24/7.

@@ -318,6 +318,10 @@ class BotConfig:
     # configured (plain / RSI / the binary-window Adaptive V2) as before.
     use_joint_adaptive: bool = False
     schema_has_joint_adaptive: bool = False  # requires the joint_adaptive migration
+    # Live raw signal readout (2026-09-28): persists the current stochastic K value and its
+    # direction (long/short/neutral) regardless of which signal mode is active -- "what is the
+    # paper bot looking at right now," on all 3 bots. See self.live_k/live_signal.
+    schema_has_live_signal: bool = False  # requires the live_signal/live_k column migration
 
 
 # ── Pure helpers ────────────────────────────────────────────────────────────────────────────
@@ -667,6 +671,14 @@ class StochBot:
         self.paper_joint_tp_pct = None
         self.paper_joint_sl_pct = None
         self.paper_joint_blank_s = None
+        # Live raw signal readout (2026-09-28): what the current stochastic K value actually is
+        # right now and which way it points -- the same thing the paper shadow is looking at,
+        # since paper and real (when unlocked) trade off the identical signal. Set by whichever
+        # compute_*_signal function is actually active this tick; persisted best-effort on a
+        # cadence for the dashboard, same pattern as the adaptive-formula displays.
+        self.live_k = None
+        self.live_signal = None
+        self._live_signal_persist_ts = 0.0
 
     # ── Supabase (aiohttp: async, and actually cancellable) ─────────────────────────────────
     async def sb(self, method, path, body=None, extra_headers=None):
@@ -899,8 +911,10 @@ class StochBot:
         if hh == ll:
             return None, None, ts
         k = 100 * (closed[-1]["c"] - ll) / (hh - ll)
-        return (_sig(k, self.cfg.entry_lo, self.cfg.entry_hi),
-                _sig(k, self.cfg.reversal_lo, self.cfg.reversal_hi), ts)
+        entry_signal = _sig(k, self.cfg.entry_lo, self.cfg.entry_hi)
+        self.live_k = k
+        self.live_signal = entry_signal
+        return entry_signal, _sig(k, self.cfg.reversal_lo, self.cfg.reversal_hi), ts
 
     def compute_adaptive_stoch_signal(self):
         """"Adaptive V2" (2026-09-27): binary window switch instead of a continuous formula --
@@ -939,6 +953,8 @@ class StochBot:
         k = 100 * (closed[-1]["c"] - ll) / (hh - ll)
         signal = _sig(k, cfg.entry_lo, cfg.entry_hi)
         self.adaptive_last_k = k
+        self.live_k = k
+        self.live_signal = signal
         return signal, signal, ts
 
     def compute_joint_adaptive_signal(self):
@@ -976,8 +992,12 @@ class StochBot:
         }
         k = _stoch_k_interpolated(closed, window)
         if k is None:
+            self.live_k = None
+            self.live_signal = None
             return None, None, ts
         signal = _sig(k, lower_k, 100 - lower_k)
+        self.live_k = k
+        self.live_signal = signal
         return signal, signal, ts
 
     async def _check_flow_entry_filter(self, side, now_ms):
@@ -2036,6 +2056,17 @@ class StochBot:
                 self._joint_adaptive_last_persist_ts = now_s
                 try:
                     await self.update_state({"joint_adaptive_last": self.joint_adaptive_last})
+                except Exception:
+                    pass
+        if cfg.schema_has_live_signal:
+            # "What is the paper bot looking at right now" -- live K value and direction,
+            # regardless of which signal mode is active. Same plain-cadence persistence as the
+            # adaptive displays, not change-only (a stuck reading looked frozen before too).
+            now_s = time.time()
+            if now_s - self._live_signal_persist_ts >= 10.0:
+                self._live_signal_persist_ts = now_s
+                try:
+                    await self.update_state({"live_k": self.live_k, "live_signal": self.live_signal})
                 except Exception:
                     pass
         now_open = self.candles[-1]["o"] if self.candles else None
