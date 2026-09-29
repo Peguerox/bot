@@ -23,7 +23,7 @@ const WORKER1_RESET_AT = "2026-09-28T01:02:25.797802+00:00";
 // reasoning as Worker 1's reset above, a clean baseline for a config that changed twice at once.
 // Reset again 2026-09-27 when stoch_window/thresholds changed, then once more after the SL
 // revert (0.05% -> 0.11%) -- same reasoning as Worker 1's reset above.
-const WORKER2_RESET_AT = "2026-09-29T05:06:55.498388+00:00";
+const WORKER2_RESET_AT = "2026-09-29T13:27:53.628100+00:00";
 // Worker 3 reset 2026-09-27 ahead of testing the volatility-adaptive window formula + the
 // order-flow entry filter -- clean baseline before that config lands.
 const WORKER3_RESET_AT = "2026-09-29T00:52:00.000000+00:00";
@@ -1415,7 +1415,7 @@ function CompactStochBtcPanel({
   tradingHoursUtc?: number[] | Record<number, number[]>;
   combineEquityWinRate?: boolean; rsiPaperStats?: { total: number; wins: number; pnlPct: number };
   fixedSettings?: { entryLo: number; entryHi: number; tpPct: number; slPct: number;
-                    minVolPct: number; lookbackCandles: number };
+                    entryConfirmationMaxPct?: number };
 }) {
   const [toggling, setToggling] = useState(false);
   const [nowTick, setNowTick] = useState(() => Date.now());
@@ -1716,9 +1716,8 @@ function CompactStochBtcPanel({
           </div>
         );
 
-        const liveVolPct: number | null = state?.min_vol_pct_last ?? null;
         const fixedSettingsPill = fixedSettings != null && (
-          <div className="bg-gray-800/60 rounded-lg p-2" title="Fixed (non-adaptive) settings plus the minimum-volatility entry gate">
+          <div className="bg-gray-800/60 rounded-lg p-2" title="Fixed (non-adaptive) settings plus the entry-confirmation book filter">
             <p className="text-gray-500 text-[10px] uppercase">Fixed Settings</p>
             <div className="flex items-center gap-1.5 flex-wrap">
               <span className="text-[10px] text-gray-400 tabular-nums">
@@ -1727,19 +1726,12 @@ function CompactStochBtcPanel({
               <span className="text-[10px] text-gray-400 tabular-nums">
                 TP {fixedSettings.tpPct.toFixed(2)}% SL {fixedSettings.slPct.toFixed(2)}%
               </span>
-              <span className={`text-[9px] font-bold px-1.5 py-0.5 rounded uppercase ${
-                liveVolPct == null ? "bg-gray-700/40 text-gray-500"
-                : liveVolPct >= fixedSettings.minVolPct ? "bg-green-500/20 text-green-400"
-                : "bg-red-500/20 text-red-400"
-              }`} title={`Blocks new entries when volatility is below ${fixedSettings.minVolPct}% -- mean 1-min range over the trailing ${fixedSettings.lookbackCandles} closed candles`}>
-                {liveVolPct == null ? "vol —" : liveVolPct >= fixedSettings.minVolPct ? "gate open" : "gate blocked"}
-              </span>
-              <span className="text-[10px] text-gray-400 tabular-nums">
-                vol {liveVolPct != null ? liveVolPct.toFixed(4) : "—"}% / floor {fixedSettings.minVolPct.toFixed(2)}%
-              </span>
-              <span className="text-[10px] text-gray-500 tabular-nums">
-                {fixedSettings.lookbackCandles} candles
-              </span>
+              {fixedSettings.entryConfirmationMaxPct != null && (
+                <span className="text-[9px] font-bold px-1.5 py-0.5 rounded uppercase bg-blue-500/20 text-blue-400"
+                      title="Blocks a new entry (or reversal reopen) when the near-touch book is already this stacked in that direction">
+                  blocks book &gt;{(fixedSettings.entryConfirmationMaxPct * 100).toFixed(0)}%
+                </span>
+              )}
             </div>
           </div>
         );
@@ -2318,8 +2310,8 @@ export default function Dashboard() {
             tradingHoursUtc={WORKER1_TRADING_HOURS}
           />
           <CompactStochBtcPanel
-            title="Worker 2 · Fixed Stochastic, Vol-Gated"
-            subtitle="Fixed settings, no adaptive formula -- window 5, 25/75, TP 0.10%/SL 0.11%, same anchor Worker 1/3 use / minimum-volatility gate: blocks new entries when vol_pct < 0.06% (mean 1-min range over trailing 30 candles) -- built from 844 real Worker 1+3 trades where net PnL flipped from -$3.29 to +$1.67 right at that cutoff, same win rate either side / book-opposition early exit kept, fresh-signal required / no blanking period, no self-lock -- every fresh signal above the vol floor trades immediately"
+            title="Worker 2 · Fixed Stochastic, Entry-Confirmation"
+            subtitle="Fixed settings, no adaptive formula -- window 5, 25/75, TP 0.10%/SL 0.11%, same anchor Worker 1/3 use / entry-confirmation book filter: blocks a new entry or reversal reopen when the near-touch book is already >60% stacked in that direction -- built from 52 real Worker 3 entries where excluding just those 8 trades flipped net PnL from -$0.0153 to +$0.0725 / book-opposition early exit kept, fresh-signal required, red exits burn the signal until it genuinely changes / no blanking period, no self-lock, no volatility floor -- trades any fresh signal the book doesn't already look crowded on"
             table="lighter_btc_optimal_state"
             state={optimalBtcState}
             trades={optimalBtcTrades.filter((t: any) => t.closed_at >= WORKER2_RESET_AT)}
@@ -2328,7 +2320,7 @@ export default function Dashboard() {
             onToggled={load}
             combineEquityWinRate
             fixedSettings={{ entryLo: 25, entryHi: 75, tpPct: 0.10, slPct: 0.11,
-                             minVolPct: 0.06, lookbackCandles: 30 }}
+                             entryConfirmationMaxPct: 0.60 }}
           />
           <CompactStochBtcPanel
             title="Worker 3 · Joint Adaptive"
