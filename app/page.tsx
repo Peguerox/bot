@@ -23,10 +23,10 @@ const WORKER1_RESET_AT = "2026-09-28T01:02:25.797802+00:00";
 // reasoning as Worker 1's reset above, a clean baseline for a config that changed twice at once.
 // Reset again 2026-09-27 when stoch_window/thresholds changed, then once more after the SL
 // revert (0.05% -> 0.11%) -- same reasoning as Worker 1's reset above.
-const WORKER2_RESET_AT = "2026-09-28T01:58:04.707091+00:00";
+const WORKER2_RESET_AT = "2026-09-29T01:59:40.707775+00:00";
 // Worker 3 reset 2026-09-27 ahead of testing the volatility-adaptive window formula + the
 // order-flow entry filter -- clean baseline before that config lands.
-const WORKER3_RESET_AT = "2026-09-28T02:37:37.349304+00:00";
+const WORKER3_RESET_AT = "2026-09-29T00:52:00.000000+00:00";
 // Must match lighter_stoch_dca_btc_initial.py's _WEEKDAY_SCHEDULE exactly -- the ET-shifted
 // weekend block (see that file's docstring for the derivation). Kept as a literal duplicate
 // rather than a shared import since the backend is Python and this is the frontend.
@@ -2280,8 +2280,8 @@ export default function Dashboard() {
             tradingHoursUtc={WORKER1_TRADING_HOURS}
           />
           <CompactStochBtcPanel
-            title="Worker 2 · Plain Stochastic, 24/7"
-            subtitle="TP 0.10% / SL 0.11% / window 5, 25-75 (original) / 120s blanking period / self-lock (2 consecutive paper wins unlock, winning reversals count too) / no hour restriction, same as Worker 1's reset but stays 24/7 including weekends -- currently OFF, not enabled"
+            title="Worker 2 · Joint Adaptive, Own Formula"
+            subtitle="Own joint-adaptive formula (R = vol_pct/0.060, weaker exponents than Worker 3) -- TP/window/K thresholds/blanking all move with volatility, but SL is hard-capped at its own base 0.11% (can only tighten in quiet markets, never widen past base) / stoch-turn protection + book-opposition early exit (10s age, losing >=0.05%, near-touch opposing depth >60% within 0.05% of price) / self-lock unchanged from before (2 consecutive paper wins unlock, winning reversals count too) / no hour restriction -- currently OFF, migration run, awaiting manual enable"
             table="lighter_btc_optimal_state"
             state={optimalBtcState}
             trades={optimalBtcTrades.filter((t: any) => t.closed_at >= WORKER2_RESET_AT)}
@@ -2293,7 +2293,7 @@ export default function Dashboard() {
           />
           <CompactStochBtcPanel
             title="Worker 3 · Joint Adaptive"
-            subtitle="Window, K thresholds, TP, SL, and reversal blanking all move continuously with volatility (R = vol_pct/0.0712) -- no fixed base values / real SL locks real orders, 2 consecutive paper wins unlock (at least 1 must be a literal TP), OR 3 wins of any kind unlocks regardless"
+            subtitle="Window, K thresholds, TP, SL, and reversal blanking all move continuously with volatility (R = vol_pct/0.0712) -- unchanged formula / real SL locks real orders, 2 consecutive paper wins unlock (at least 1 must be a literal TP), OR 3 wins of any kind unlocks regardless / book-opposition early exit added (10s age, losing >=0.05%, near-touch opposing depth >60% within 0.05% of price) -- currently OFF, reset, awaiting manual enable"
             table="lighter_stoch_dca_btc_state"
             state={dcaBtcState}
             trades={dcaBtcTrades.filter((t: any) => t.closed_at >= WORKER3_RESET_AT)}
