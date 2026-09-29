@@ -1707,6 +1707,20 @@ function CompactStochBtcPanel({
           </div>
         );
 
+        // Standalone live-signal pill (K value + direction only, no self-lock/paper shadow
+        // references) -- for bots without self-lock, where that data isn't otherwise shown.
+        // live_k/live_signal are written every tick by compute_joint_adaptive_signal regardless
+        // of self_lock_enabled, so this stays live even with self-lock fully off.
+        const liveSignalPill = !showSelfLock && liveK != null && (
+          <div className="bg-gray-800/60 rounded-lg p-2">
+            <p className="text-gray-500 text-[10px] uppercase">Live Signal</p>
+            <span className="text-[10px] text-gray-300 tabular-nums"
+                  title="Live stochastic K value and direction, this tick">
+              K {liveK.toFixed(1)} {liveSignal ? liveSignal.toUpperCase() : "—"}
+            </span>
+          </div>
+        );
+
         const adaptiveWindow = state?.adaptive_last_window ?? null;
         const adaptiveVolPct = state?.adaptive_last_vol_pct ?? null;
         const adaptivePill = adaptiveWindow != null && (
@@ -1827,7 +1841,7 @@ function CompactStochBtcPanel({
           return (
             <div className="grid grid-cols-2 gap-2 text-xs">
               {equityWinRatePill}
-              {selfLockPill || fixedSettingsPill}
+              {selfLockPill || liveSignalPill || fixedSettingsPill}
               {positionPill}
               {jointAdaptivePill || adaptivePill || tradingHoursPill || scheduleFallbackPill}
               {rsiPaperPill}
@@ -1841,7 +1855,7 @@ function CompactStochBtcPanel({
             {positionPill}
             {breakerPill}
             {tradingHoursPill}
-            {selfLockPill}
+            {selfLockPill || liveSignalPill}
             {jointAdaptivePill}
             {adaptivePill}
             {rsiPaperPill}
