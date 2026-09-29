@@ -24,9 +24,10 @@ const WORKER1_RESET_AT = "2026-09-28T01:02:25.797802+00:00";
 // Reset again 2026-09-27 when stoch_window/thresholds changed, then once more after the SL
 // revert (0.05% -> 0.11%) -- same reasoning as Worker 1's reset above. Reset again 2026-09-29
 // (repeatedly, through several same-day pivots: own joint-adaptive formula, then fixed
-// settings + entry-confirmation, now abandoned that experiment entirely for a Worker 3 clone
-// with a loosened self-lock unlock rule and no book-opposition exit).
-const WORKER2_RESET_AT = "2026-09-29T14:17:14.432493+00:00";
+// settings + entry-confirmation, then a Worker 3 clone with a loosened self-lock rule and no
+// book-opposition exit, now a "hyper trading" profit-lock trail (arm 0.02%/trail 0.01%) on top
+// of that clone, plus SL tightened to 0.10%).
+const WORKER2_RESET_AT = "2026-09-29T17:47:12.524282+00:00";
 // Worker 3 reset 2026-09-27 ahead of testing the volatility-adaptive window formula + the
 // order-flow entry filter -- clean baseline before that config lands.
 const WORKER3_RESET_AT = "2026-09-29T00:52:00.000000+00:00";
@@ -2328,8 +2329,8 @@ export default function Dashboard() {
             tradingHoursUtc={WORKER1_TRADING_HOURS}
           />
           <CompactStochBtcPanel
-            title="Worker 2 · Joint Adaptive, Self-Lock"
-            subtitle="Clone of Worker 3's mechanism set (window/K/TP/SL/blanking all move continuously with volatility, R = vol_pct/0.0712, plus stoch-turn early exit) / real SL locks real orders, 2 consecutive paper wins of ANY kind unlock, OR a single literal TP unlocks instantly / no book-opposition early exit (removed) / fresh-signal required, red exits burn the signal until it genuinely changes"
+            title="Worker 2 · Hyper Trading, Profit-Lock Trail"
+            subtitle="Clone of Worker 3's mechanism set, SL tightened 0.11% -> 0.10% (symmetric with TP) / profit-lock trail: arms at +0.02% unrealized, exits if it gives back 0.01% from the peak -- worst case still +0.01%, never negative / that exit also burns the signal (take the small win, wait for a genuinely new one) / stoch-turn stays on as a backstop / 2 consecutive paper wins of ANY kind unlock real trading, OR a single literal TP unlocks instantly / re-locks on every restart or enable / no book-opposition"
             table="lighter_btc_optimal_state"
             state={optimalBtcState}
             trades={optimalBtcTrades.filter((t: any) => t.closed_at >= WORKER2_RESET_AT)}
