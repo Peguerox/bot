@@ -257,6 +257,13 @@ class BotConfig:
     # self_lock_require_tp_in_streak/self_lock_no_tp_fallback_wins already allow, not a
     # replacement for them.
     self_lock_tp_unlocks_instantly: bool = False
+    # 2026-09-29, direct request: whenever the bot boots (a restart, which happens on every
+    # push -- or the user turning it on) it must go back in locked, requiring the normal unlock
+    # proof all over again (2 wins of any kind, or a single literal TP with
+    # self_lock_tp_unlocks_instantly) -- never resumes real trading on leftover unlock state
+    # from before. Only forces LOCKED, never forces unlocked -- if it was already locked,
+    # nothing changes. See _force_relock's docstring.
+    self_lock_relocks_on_boot: bool = False
     # 2026-09-28, same day: direct request -- a losing/breakeven non-SL close (a red STOCH_TURN
     # or a losing reversal) was previously neutral, invisible to the counter. Now it cancels out
     # one prior win instead: green, red, green nets to 1, not 2. Only a literal SL still wipes
@@ -825,6 +832,7 @@ class StochBot:
         # makes unlock MORE conservative (may ask for one extra TP win), never less safe.
         self.paper_streak_has_tp = False
         self._self_lock_loaded = False
+        self._last_enabled_seen = None  # see self_lock_relocks_on_boot's tick()-level check
         # Hour-open confirmation (2026-09-28: redefined to reuse the self-lock's own
         # real_trading_locked/paper_consecutive_tps directly, no separate state of its own
         # anymore -- see hour_open_requires_self_lock's docstring). Re-arms on every restart by
@@ -2319,17 +2327,28 @@ class StochBot:
                     # visible, not just inferred after the fact.
                     await self.log_run("paper_joint_checkpoint_missing",
                                        {"paper_entry_ms": self.paper_entry_ms})
+            if self.cfg.self_lock_relocks_on_boot:
+                # Covers both a genuine restart (Render redeploys every service on every push)
+                # and the bot's very first tick after being enabled fresh -- either way, never
+                # silently resume real trading on unlock state left over from before. Only ever
+                # forces LOCKED (a no-op via _lock_real_trading's own guard if already locked),
+                # never forces unlocked.
+                await self._lock_real_trading(via="boot")
 
-    async def _lock_real_trading(self):
-        """A real SL just closed -- lock real order placement immediately. Resets the paper
-        TP counter too: the 2-in-a-row count is always measured fresh from this moment
-        forward, not carried over from whatever the shadow happened to be doing before."""
+    async def _lock_real_trading(self, via="real_sl"):
+        """A real SL just closed (or, with self_lock_relocks_on_boot, the bot just booted/got
+        turned on -- see the callers in _load_self_lock_state/tick) -- lock real order placement
+        immediately. Resets the paper TP counter too: the 2-in-a-row count is always measured
+        fresh from this moment forward, not carried over from whatever the shadow happened to be
+        doing before. No-ops if already locked -- never redundantly re-locks or re-logs."""
+        if self.real_trading_locked:
+            return
         self.real_trading_locked = True
         self.paper_consecutive_tps = 0
         self.paper_streak_has_tp = False
         if self.cfg.schema_has_self_lock:
             await self.update_state({"real_trading_locked": True, "paper_consecutive_tps": 0})
-        await self.log_run("real_trading_locked", {"via": "real_sl"})
+        await self.log_run("real_trading_locked", {"via": via})
 
     async def _update_paper_shadow(self, state, entry_signal, reversal_signal, best_bid, best_ask, now_ms):
         """Always-on simulated shadow of the plain (no-guard) strategy -- never places a real
@@ -2646,6 +2665,19 @@ class StochBot:
     async def tick(self):
         cfg = self.cfg
         state = await self.get_state()
+
+        if cfg.self_lock_enabled and cfg.self_lock_relocks_on_boot:
+            # Covers the one gap _load_self_lock_state's own boot-time re-lock can't: the user
+            # disabling then re-enabling within the SAME running process (no restart in
+            # between), where self-lock state was already loaded once and won't load again.
+            # The far more common real case (a restart, which happens on every push) is handled
+            # by _load_self_lock_state itself. Checked here, before the disabled+flat early
+            # return below, so a False->True transition is never missed just because the bot
+            # was idle in between.
+            enabled_now = bool(state.get("enabled", True))
+            if enabled_now and self._last_enabled_seen is False and self._self_lock_loaded:
+                await self._lock_real_trading(via="enabled_toggle")
+            self._last_enabled_seen = enabled_now
 
         if state.get("close_requested"):
             # Dashboard "Close Position" button -- a manual kill switch independent of the

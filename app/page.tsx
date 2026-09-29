@@ -1410,6 +1410,7 @@ function currentSessionStart(nowUtc: Date): Date {
 function CompactStochBtcPanel({
   title, subtitle, table, state, trades, currentPrice, loading, onToggled, runs, cooldownMin,
   showSelfLock, stats, tradingHoursUtc, combineEquityWinRate, rsiPaperStats, fixedSettings,
+  selfLockUnlockRange, selfLockUnlockTitle,
 }: {
   title: string; subtitle: string; table: string; state: any; trades: any[];
   currentPrice: number | null; loading: boolean; onToggled: () => void;
@@ -1419,6 +1420,10 @@ function CompactStochBtcPanel({
   combineEquityWinRate?: boolean; rsiPaperStats?: { total: number; wins: number; pnlPct: number };
   fixedSettings?: { entryLo: number; entryHi: number; tpPct: number; slPct: number;
                     entryConfirmationMaxPct?: number };
+  // Self-lock unlock label -- defaults to Worker 1/3's rule ("2 with at least 1 literal TP, or
+  // 3 of any kind"). Override per-bot when the actual unlock math differs (e.g. Worker 2:
+  // "2 of any kind, or 1 literal TP unlocks instantly" -- milestone range 1-2, not 2-3).
+  selfLockUnlockRange?: string; selfLockUnlockTitle?: string;
 }) {
   const [toggling, setToggling] = useState(false);
   const [nowTick, setNowTick] = useState(() => Date.now());
@@ -1680,8 +1685,8 @@ function CompactStochBtcPanel({
               </span>
               {state?.real_trading_locked && (
                 <span className="text-[10px] font-bold text-gray-300 tabular-nums"
-                      title="Consecutive paper wins needed to unlock real trading -- 2 with at least 1 literal TP, or 3 of any kind">
-                  {state?.paper_consecutive_tps ?? 0}/2-3 paper wins
+                      title={selfLockUnlockTitle ?? "Consecutive paper wins needed to unlock real trading -- 2 with at least 1 literal TP, or 3 of any kind"}>
+                  {state?.paper_consecutive_tps ?? 0}/{selfLockUnlockRange ?? "2-3"} paper wins
                 </span>
               )}
               <span className={`text-[9px] font-bold px-1.5 py-0.5 rounded uppercase ${
@@ -2333,6 +2338,8 @@ export default function Dashboard() {
             onToggled={load}
             showSelfLock
             combineEquityWinRate
+            selfLockUnlockRange="1-2"
+            selfLockUnlockTitle="Consecutive paper wins needed to unlock real trading -- 2 of any kind, or a single literal TP unlocks instantly"
           />
           <CompactStochBtcPanel
             title="Worker 3 · Joint Adaptive"

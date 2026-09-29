@@ -193,6 +193,11 @@ CONFIG = BotConfig(
     self_lock_require_tp_in_streak=False,  # MODIFIED: 2 wins of ANY kind unlock, no TP required
     self_lock_no_tp_fallback_wins=None,  # MODIFIED: moot now that require_tp_in_streak is off
     self_lock_tp_unlocks_instantly=True,  # NEW: a single literal TP unlocks instantly
+    # 2026-09-29, direct request: whenever this bot boots (a restart, or being turned on fresh)
+    # it must go back in locked, requiring the normal unlock proof all over again -- never
+    # resumes real trading on leftover unlock state from before. See BotConfig.
+    # self_lock_relocks_on_boot's docstring.
+    self_lock_relocks_on_boot=True,
     self_lock_loss_decrements_streak=True,
     require_fresh_signal=True,
     red_exit_burns_signal=True,
