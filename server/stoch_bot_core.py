@@ -385,6 +385,22 @@ class BotConfig:
     # checked first and still wins.
     profit_lock_enabled: bool = False
     profit_lock_trigger_pct: float = 0.05
+    # 2026-09-29, direct request: widens the trail from zero-giveback to a real distance --
+    # once armed (peak >= profit_lock_trigger_pct), exits when unrealized profit gives back this
+    # much from the peak, not on any tick down at all. 0.0 (default) preserves the exact
+    # original zero-giveback behavior (Worker 1's still-live config relies on this default).
+    # e.g. trigger=0.02%, trail=0.01% -- arms at +0.02%, exits if it ever pulls back to
+    # (peak - 0.01%), worst case a still-positive +0.01% -- "hyper trading": take a small piece
+    # of a move and get back out, never turning a real winner into a loss.
+    profit_lock_trail_pct: float = 0.0
+    # 2026-09-29, direct request: after a PROFIT_LOCK exit, treat the signal the same way a red
+    # exit does -- blocked from re-entering (new entry or reversal reopen) until it genuinely
+    # changes, even within the same candle. PROFIT_LOCK is always non-negative by construction
+    # (see docstring above), so this isn't about avoiding a loss -- it's "take the small win,
+    # then wait for a genuinely NEW opportunity" instead of immediately re-chasing the same
+    # signal instance that was just harvested. Shares the same self._burned_signal mechanism as
+    # red_exit_burns_signal.
+    profit_lock_burns_signal: bool = False
     schema_has_profit_lock: bool = False  # requires the profit_lock_peak_pct column migration
     # Mirror-paper fallback (2026-09-27): if real is flat, unlocked, and enabled, but has no
     # live entry_signal this tick while the paper shadow already holds a position, real enters
@@ -2414,7 +2430,7 @@ class StochBot:
                     new_peak = unrealized_pct
             elif unrealized_pct > peak:
                 new_peak = unrealized_pct
-            elif unrealized_pct < peak:
+            elif peak - unrealized_pct >= cfg.profit_lock_trail_pct:
                 reason = "PROFIT_LOCK"
             if new_peak is not None:
                 self.paper_profit_lock_peak_pct = new_peak
@@ -3087,7 +3103,7 @@ class StochBot:
                         new_peak = unrealized_pct
                 elif unrealized_pct > peak:
                     new_peak = unrealized_pct
-                elif unrealized_pct < peak:
+                elif peak - unrealized_pct >= cfg.profit_lock_trail_pct:
                     gap_hit = "PROFIT_LOCK"
                 if new_peak is not None:
                     self.profit_lock_peak_pct = new_peak
@@ -3183,6 +3199,11 @@ class StochBot:
                         and ((check_price - ae) / ae if side == "long" else (ae - check_price) / ae) <= 0)
                     if gap_hit_red:
                         self._burned_signal = side
+                if closed_ok and gap_hit == "PROFIT_LOCK" and cfg.profit_lock_burns_signal:
+                    # Always fires (unconditional, unlike red_exit_burns_signal's pnl check) --
+                    # PROFIT_LOCK is structurally guaranteed non-negative, so this isn't about
+                    # loss avoidance, it's "take the small win, wait for a genuinely new signal."
+                    self._burned_signal = side
             elif reversal_ready:
                 closed_ok = await self.close_all("REVERSAL", state, side, legs,
                                                  best_bid, best_ask, candle_ts,

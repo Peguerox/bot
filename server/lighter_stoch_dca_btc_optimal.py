@@ -203,6 +203,24 @@ CONFIG = BotConfig(
     red_exit_burns_signal=True,
     # book_opposition_exit_enabled intentionally omitted (defaults False) -- removed per
     # direct request ("remove the stupid book thing").
+    # 2026-09-29, direct request: "hyper trading" profit trail -- take a small piece of a move
+    # and get back out, rather than holding for the full (much wider, volatility-scaled) TP.
+    # Arms at +0.02% unrealized (0.01% was rejected -- too close to breakeven after costs),
+    # then trails 0.01% behind the peak -- worst case exit is still +0.01%, never negative by
+    # construction. See BotConfig.profit_lock_trail_pct's docstring. Checked ahead of
+    # stoch_turn_exit_enabled above in tick()'s own ordering, and its much lower trigger means
+    # it will usually fire before stoch-turn's own (higher, 0.75x-TP) activation level ever
+    # gets a chance to -- stoch-turn stays on as a backstop for whatever this doesn't catch.
+    profit_lock_enabled=True,
+    profit_lock_trigger_pct=0.02,
+    profit_lock_trail_pct=0.01,
+    profit_lock_burns_signal=True,  # take the small win, then wait for a genuinely new signal
+    schema_has_profit_lock=True,  # lighter_btc_optimal_profit_lock.sql already applied
+    # 2026-09-29, direct request: SL tightened 0.11% -> 0.10% (symmetric with TP's own 0.10%
+    # base) -- overrides just the sl_pct component of joint_adaptive_base, everything else
+    # (window/lower_k/tp_pct/blank_seconds bases, all coefficients, all bounds) stays exactly
+    # Worker 3's formula. Direct request after finding 0.11% "not giving good buys."
+    joint_adaptive_base=(5.0, 25.0, 0.10, 0.10, 120.0),
     # Price-tick logging: primary writer (trades most, so it's up most reliably). Worker 3
     # takes over if this one goes quiet, Worker 1 as last resort. See stoch_bot_core.py.
     tick_log_defers_to=[],
