@@ -166,11 +166,46 @@ needed -- lighter_btc_optimal_joint_adaptive.sql, lighter_btc_optimal_self_lock.
 lighter_btc_optimal_live_signal.sql were all already applied to this table during Worker 2's
 earlier same-session experiments (own joint-adaptive formula, then the combined/self-lock era),
 so every column every schema_has_* flag below needs already exists.
+
+2026-09-29, later same day, "trail-only" refinement -- direct request, on top of the "hyper
+trading" profit-lock trail above (which was already live and working: 8/8 real PROFIT_LOCK
+closes since the last reset, all positive, +0.011% to +0.067% each). Three changes:
+
+1. **SL pinned flat at 0.10%.** joint_adaptive_base already anchored sl_pct's BASE to 0.10, but
+   the BOUND was still the default (0.05%, 0.30%) -- volatility could still pull the live SL
+   away from 0.10% in either direction. joint_adaptive_bounds now overrides just the sl_pct
+   bound to (0.10, 0.10): since joint_adaptive_parameters clips to (lo, hi) independently per
+   parameter, lo==hi forces that output to always equal 0.10 regardless of vol_pct. Window/K-
+   thresholds/blanking keep moving with volatility exactly as before.
+2. **disable_literal_tp=True.** The literal TP hard-exit (still nominally 0.10% via
+   joint_adaptive_base, symmetric with the new fixed SL) is now skipped entirely -- across the
+   8 real trades so far, TP had NEVER actually fired; profit_lock_trail always got there first
+   (max was +0.067%, nowhere near 0.10%). The trail is already the real take-profit mechanism in
+   practice; this just makes that official instead of carrying a dead literal check. STOCH_TURN
+   stays on as the other backstop. self_lock_tp_unlocks_instantly is now moot (reason can never
+   be "TP") -- left in place, harmless, since self_lock_require_tp_in_streak was already False
+   (the >=2-any-kind-wins path was already the one actually unlocking this bot).
+3. **profit_lock_burn_k_gate=True** (new mechanism, see BotConfig.profit_lock_burn_k_gate's
+   docstring in stoch_bot_core.py). profit_lock_burns_signal already blocks re-entering the same
+   direction after a trail-driven win until the raw signal genuinely leaves the entry zone and
+   comes back -- but during a sustained one-directional grind, %K can stay pinned inside the
+   zone the whole time without ever technically resetting, which was blocking legitimate
+   continuation entries. Now the burn also clears early once live %K reclaims (or matches) the
+   %K the burned position originally entered at -- lets the bot pyramid into a genuinely
+   continuing move. Side-specific: a burned short needs %K back to/above its entry %K (still at
+   least as overbought), a burned long needs %K back to/below its entry %K (still at least as
+   oversold). Only applies to profit-lock-sourced burns -- a burn from a real loss (SL/red
+   REVERSAL/red STOCH_TURN) still needs the full ordinary signal reset, no shortcut.
+
+Verified offline (test_core.py, 275 passing): joint_adaptive_parameters pins sl_pct to exactly
+0.10 across vol_pct from 0.001 to 5.0 while other params keep moving; _burn_reclaimed_by_k
+returns True only for a profit-lock-sourced burn once live %K reaches the stored entry %K in the
+position's own direction, never for a red-sourced burn even at an identical %K match.
 """
 from stoch_bot_core import BotConfig, run_bot
 
 CONFIG = BotConfig(
-    name="JOINT ADAPTIVE, SELF-LOCK (worker 2)",
+    name="JOINT ADAPTIVE, HYPER TRADING (worker 2)",
     worker_id="worker2",
     table_state="lighter_btc_optimal_state",
     table_trades="lighter_btc_optimal_trades",
@@ -221,6 +256,15 @@ CONFIG = BotConfig(
     # (window/lower_k/tp_pct/blank_seconds bases, all coefficients, all bounds) stays exactly
     # Worker 3's formula. Direct request after finding 0.11% "not giving good buys."
     joint_adaptive_base=(5.0, 25.0, 0.10, 0.10, 120.0),
+    # 2026-09-29, "trail-only" refinement: pin the sl_pct bound flat at 0.10 (base already
+    # anchors it there; this stops volatility from pulling it away from that anchor).
+    joint_adaptive_bounds=((3.0, 40.0), (15.0, 40.0), (0.025, 0.30), (0.10, 0.10), (15.0, 600.0)),
+    # No literal TP anymore -- profit_lock_trail above is the real take-profit path (it always
+    # fired first in practice anyway), plus stoch_turn_exit_enabled as the backstop.
+    disable_literal_tp=True,
+    # Lets a profit-lock burn clear early once live %K reclaims the entry %K of the position
+    # that got profit-locked -- see BotConfig.profit_lock_burn_k_gate's docstring.
+    profit_lock_burn_k_gate=True,
     # Price-tick logging: primary writer (trades most, so it's up most reliably). Worker 3
     # takes over if this one goes quiet, Worker 1 as last resort. See stoch_bot_core.py.
     tick_log_defers_to=[],

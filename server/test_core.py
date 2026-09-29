@@ -2129,6 +2129,57 @@ async def t_log_trade_upserts_to_prevent_duplicate_rows():
           call["body"])
 
 
+async def t_joint_adaptive_bounds_can_pin_sl_flat():
+    print("\n[joint_adaptive_parameters: a (lo,hi) bound with lo==hi pins that param flat regardless of vol_pct]")
+    base = (5.0, 25.0, 0.10, 0.11, 120.0)
+    coefficients = (-1.0, 0.5, 0.5, 1.0, -1.0)
+    pinned_bounds = ((3.0, 40.0), (15.0, 40.0), (0.025, 0.30), (0.10, 0.10), (15.0, 600.0))
+    for vol_pct in (0.001, 0.0712, 0.30, 5.0):
+        window, lower_k, tp_pct, sl_pct, blank_s = core.joint_adaptive_parameters(
+            vol_pct, 0.0712, base, coefficients, pinned_bounds)
+        check(f"sl_pct pinned to 0.10 at vol_pct={vol_pct}", sl_pct == 0.10, sl_pct)
+        check(f"other params still move with vol_pct={vol_pct}", tp_pct != 0.10 or vol_pct == 0.0712, tp_pct)
+
+
+async def t_burn_reclaimed_by_k_only_for_profit_lock_source():
+    print("\n[profit_lock_burn_k_gate: only a profit-lock-sourced burn can clear via K-reclaim]")
+    ex = FakeExchange()
+    bot = make_bot(ex, profit_lock_burn_k_gate=True)
+
+    bot._burned_signal = "short"; bot._burned_signal_via = "profit_lock"; bot._burned_signal_k = 90.0
+    bot.live_k = 85.0
+    check("short profit-lock burn: K=85 (below entry K=90) does NOT reclaim",
+          bot._burn_reclaimed_by_k() is False)
+    bot.live_k = 90.0
+    check("short profit-lock burn: K=90 (== entry K) DOES reclaim (at-or-above)",
+          bot._burn_reclaimed_by_k() is True)
+    bot.live_k = 95.0
+    check("short profit-lock burn: K=95 (above entry K=90) DOES reclaim",
+          bot._burn_reclaimed_by_k() is True)
+
+    bot._burned_signal = "long"; bot._burned_signal_via = "profit_lock"; bot._burned_signal_k = 10.0
+    bot.live_k = 15.0
+    check("long profit-lock burn: K=15 (above entry K=10) does NOT reclaim",
+          bot._burn_reclaimed_by_k() is False)
+    bot.live_k = 10.0
+    check("long profit-lock burn: K=10 (== entry K) DOES reclaim (at-or-below)",
+          bot._burn_reclaimed_by_k() is True)
+    bot.live_k = 5.0
+    check("long profit-lock burn: K=5 (below entry K=10) DOES reclaim",
+          bot._burn_reclaimed_by_k() is True)
+
+    bot._burned_signal = "short"; bot._burned_signal_via = "red"; bot._burned_signal_k = None
+    bot.live_k = 95.0
+    check("red-sourced burn never reclaims via K (no shortcut for real losses)",
+          bot._burn_reclaimed_by_k() is False)
+
+    bot2 = make_bot(ex, profit_lock_burn_k_gate=False)
+    bot2._burned_signal = "short"; bot2._burned_signal_via = "profit_lock"; bot2._burned_signal_k = 90.0
+    bot2.live_k = 99.0
+    check("profit_lock_burn_k_gate=False: no early reclaim even for a real profit-lock burn",
+          bot2._burn_reclaimed_by_k() is False)
+
+
 async def main():
     for t in (t_normal_entry, t_phantom_double_fill, t_nonce_error_but_filled,
               t_order_error_no_fill, t_circuit_breaker, t_close_uses_real_size,
@@ -2228,7 +2279,9 @@ async def main():
               t_hour_open_confirmation_does_not_rearm_while_staying_open,
               t_hour_open_confirmation_blocks_entry_signal,
               t_hour_open_confirmation_uses_the_standard_unlock_rule,
-              t_timeout_constants):
+              t_timeout_constants,
+              t_joint_adaptive_bounds_can_pin_sl_flat,
+              t_burn_reclaimed_by_k_only_for_profit_lock_source):
         try:
             await t()
         except Exception as e:
