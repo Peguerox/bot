@@ -268,11 +268,13 @@ CONFIG = BotConfig(
     # old system's primary writer, Worker 1 its backup -- unaffected by Worker 3 stepping out.
     tick_log_defers_to=None,
     trade_flow_log_defers_to=None,
-    # Unified market-data logger (2026-09-28, direct request): one table, full order-book depth
-    # + trade prints, no separate tick/trade-flow tables for this bot anymore. See
-    # run_market_data_logger_forever's docstring. Migration:
-    # lighter_stoch_dca_btc_market_data.sql.
-    unified_market_data_table="lighter_stoch_dca_btc_market_data",
+    # 2026-09-29, direct request: disabled -- this was almost certainly the single biggest
+    # contributor to the Supabase overload (full order-book depth snapshots logged on a fast
+    # cadence, 398K+ rows in under 2 days). Postgres itself started canceling queries with
+    # statement timeouts under the write load (confirmed directly in the Postgres logs). See
+    # lighter_stoch_dca_btc_initial.py for the full note. Was
+    # "lighter_stoch_dca_btc_market_data".
+    unified_market_data_table=None,
     unified_market_data_prune=True,
 )
 

@@ -216,8 +216,16 @@ CONFIG = BotConfig(
     hour_open_requires_self_lock=True,  # 2026-09-28: an hour opening re-locks behind this same rule
     require_fresh_signal=True,  # 2026-09-28: only enter on the exact candle the signal first appears
     schema_has_profit_lock=True,  # harmless leftover column, profit_lock_enabled is off
-    # Price-tick logging: last resort. Only writes if both Worker 2 and Worker 3 are quiet.
-    tick_log_defers_to=["worker2", "worker3"],
+    # 2026-09-29, direct request: Supabase itself became unresponsive to queries (rest/v1
+    # completely hanging while auth/v1 stayed fine) -- suspected cause is cumulative write
+    # volume from the fleet's own logging loops, on top of a prior Disk-IO-budget warning
+    # email. All price-tick/trade-flow/market-data logging disabled fleet-wide (this file,
+    # lighter_stoch_dca_btc_optimal.py, lighter_stoch_dca_btc_bot.py) so none of it can pick
+    # up the others' slack while Worker 2/3 are suspended for cleanup. None = the logger
+    # loop returns immediately, no Supabase calls at all (see run_tick_logger_forever's
+    # `if cfg.tick_log_defers_to is None: return`). Was ["worker2", "worker3"] (last-resort
+    # only, per the comment this replaces).
+    tick_log_defers_to=None,
     trade_flow_log_defers_to=None,
 )
 

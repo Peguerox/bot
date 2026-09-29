@@ -263,9 +263,11 @@ CONFIG = BotConfig(
     # Lets a profit-lock burn clear early once live %K reclaims the entry %K of the position
     # that got profit-locked -- see BotConfig.profit_lock_burn_k_gate's docstring.
     profit_lock_burn_k_gate=True,
-    # Price-tick logging: primary writer (trades most, so it's up most reliably). Worker 3
-    # takes over if this one goes quiet, Worker 1 as last resort. See stoch_bot_core.py.
-    tick_log_defers_to=[],
+    # 2026-09-29, direct request: disabled fleet-wide -- Supabase's database itself started
+    # canceling queries with statement timeouts under cumulative write load from these logging
+    # loops (confirmed in Postgres logs). Was `[]` (primary writer). See
+    # lighter_stoch_dca_btc_initial.py for the full note.
+    tick_log_defers_to=None,
     tick_log_prune=True,
     # Trade-flow logging (real executed trades, aggressor side): same ownership chain as tick
     # logging above.
