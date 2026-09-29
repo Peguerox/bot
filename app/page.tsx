@@ -2320,17 +2320,16 @@ export default function Dashboard() {
             tradingHoursUtc={WORKER1_TRADING_HOURS}
           />
           <CompactStochBtcPanel
-            title="Worker 2 · Fixed Stochastic, Entry-Confirmation"
-            subtitle="Fixed settings, no adaptive formula -- window 5, 25/75, TP 0.10%/SL 0.11%, same anchor Worker 1/3 use / entry-confirmation book filter: blocks a new entry or reversal reopen when the near-touch book is already >60% stacked in that direction -- built from 52 real Worker 3 entries where excluding just those 8 trades flipped net PnL from -$0.0153 to +$0.0725 / book-opposition early exit kept, fresh-signal required, red exits burn the signal until it genuinely changes / no blanking period, no self-lock, no volatility floor -- trades any fresh signal the book doesn't already look crowded on"
+            title="Worker 2 · Joint Adaptive, Self-Lock"
+            subtitle="Clone of Worker 3's mechanism set (window/K/TP/SL/blanking all move continuously with volatility, R = vol_pct/0.0712, plus stoch-turn early exit) / real SL locks real orders, 2 consecutive paper wins of ANY kind unlock, OR a single literal TP unlocks instantly / no book-opposition early exit (removed) / fresh-signal required, red exits burn the signal until it genuinely changes"
             table="lighter_btc_optimal_state"
             state={optimalBtcState}
             trades={optimalBtcTrades.filter((t: any) => t.closed_at >= WORKER2_RESET_AT)}
             currentPrice={ocoBtcPrice}
             loading={loading}
             onToggled={load}
+            showSelfLock
             combineEquityWinRate
-            fixedSettings={{ entryLo: 25, entryHi: 75, tpPct: 0.10, slPct: 0.11,
-                             entryConfirmationMaxPct: 0.60 }}
           />
           <CompactStochBtcPanel
             title="Worker 3 · Joint Adaptive"

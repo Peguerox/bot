@@ -250,6 +250,13 @@ class BotConfig:
     # TP yet -- a long enough streak is its own evidence. None = no fallback, waits for a TP
     # indefinitely (the original 2026-09-28 behavior).
     self_lock_no_tp_fallback_wins: Optional[int] = None
+    # 2026-09-29, direct request: a single literal TP unlocks real trading immediately, with
+    # NO streak-count requirement -- bypasses the normal >=2-wins floor entirely. Only a
+    # literal TP close triggers this (reason == "TP" specifically); PROFIT_LOCK/REVERSAL/
+    # STOCH_TURN wins still need the ordinary 2-in-a-row path. An OR on top of whatever
+    # self_lock_require_tp_in_streak/self_lock_no_tp_fallback_wins already allow, not a
+    # replacement for them.
+    self_lock_tp_unlocks_instantly: bool = False
     # 2026-09-28, same day: direct request -- a losing/breakeven non-SL close (a red STOCH_TURN
     # or a losing reversal) was previously neutral, invisible to the counter. Now it cancels out
     # one prior win instead: green, red, green nets to 1, not 2. Only a literal SL still wipes
@@ -2500,7 +2507,12 @@ class StochBot:
             # streak (zero SL) stay locked out the entire time waiting for a TP that never came.
             fallback_met = (cfg.self_lock_no_tp_fallback_wins is not None
                             and self.paper_consecutive_tps >= cfg.self_lock_no_tp_fallback_wins)
-            if self.paper_consecutive_tps >= 2 and (tp_requirement_met or fallback_met):
+            # self_lock_tp_unlocks_instantly (2026-09-29, direct request): a single literal TP
+            # unlocks on its own, no streak-count floor at all -- bypasses the >=2 check below
+            # entirely. Only reason == "TP" qualifies (not PROFIT_LOCK/REVERSAL/STOCH_TURN wins,
+            # which still go through the ordinary >=2-with-requirement-met path above/below).
+            instant_tp_met = cfg.self_lock_tp_unlocks_instantly and reason == "TP"
+            if instant_tp_met or (self.paper_consecutive_tps >= 2 and (tp_requirement_met or fallback_met)):
                 self.paper_consecutive_tps = 0
                 self.paper_streak_has_tp = False
                 if self.real_trading_locked:

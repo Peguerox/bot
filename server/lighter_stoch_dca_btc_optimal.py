@@ -139,61 +139,65 @@ position_sl_pct back in the regime-switch era).
 stoch_window/tp_pct/sl_pct/entry_lo/entry_hi/reversal_lo/reversal_hi/reversal_guard_seconds
 below are now UNUSED while use_joint_adaptive=True (same as Worker 3's file) -- left in place as
 the harmless base values the formula's own R=1 anchor point matches.
+
+2026-09-29, full pivot away from the entry-confirmation experiment above: that config (fixed
+non-adaptive settings, no self-lock, no blanking, entry-confirmation book cap) went live and
+lost 0-for-3 within minutes with nothing to stop it -- no circuit breaker at all, by design of
+that test. Direct request to abandon it entirely and instead run Worker 2 as a close copy of
+Worker 3's current, more mature mechanism set (joint-adaptive formula, self-lock, stoch-turn
+protection), with two changes:
+
+1. Self-lock unlock loosened: self_lock_require_tp_in_streak=False (2 consecutive paper wins of
+   ANY kind unlock now, no literal-TP requirement -- back to the pre-09-28 baseline rule) PLUS a
+   new self_lock_tp_unlocks_instantly=True (a single literal TP alone unlocks immediately, no
+   streak-count floor at all -- see BotConfig.self_lock_tp_unlocks_instantly's docstring in
+   stoch_bot_core.py for the exact mechanism). self_lock_no_tp_fallback_wins is now moot with
+   require_tp_in_streak off, left unset.
+2. book_opposition_exit_enabled removed entirely (defaults False) -- "the stupid book thing,"
+   direct request. red_exit_burns_signal stays on (orthogonal mechanism -- burns the signal
+   after any red close, SL always/REVERSAL+STOCH_TURN only if that close was a loss; with
+   book-opposition off, gap_hit simply never equals "BOOK_OPPOSITION" anymore, nothing dangling).
+
+Everything else matches Worker 3's live config exactly: same joint-adaptive formula (reference
+vol 0.0712%, base/coefficients/bounds all at BotConfig defaults -- Worker 2's own abandoned
+0.060-reference variant is fully gone), stoch_turn_exit_enabled=True, require_fresh_signal=True,
+self_lock_reversal_counts_as_win=True, self_lock_loss_decrements_streak=True. No new migration
+needed -- lighter_btc_optimal_joint_adaptive.sql, lighter_btc_optimal_self_lock.sql, and
+lighter_btc_optimal_live_signal.sql were all already applied to this table during Worker 2's
+earlier same-session experiments (own joint-adaptive formula, then the combined/self-lock era),
+so every column every schema_has_* flag below needs already exists.
 """
 from stoch_bot_core import BotConfig, run_bot
 
 CONFIG = BotConfig(
-    name="FIXED STOCHASTIC, ENTRY-CONFIRMATION (worker 2)",
+    name="JOINT ADAPTIVE, SELF-LOCK (worker 2)",
     worker_id="worker2",
     table_state="lighter_btc_optimal_state",
     table_trades="lighter_btc_optimal_trades",
     table_runs="lighter_btc_optimal_runs",
-    # 2026-09-29, full pivot away from the joint-adaptive formula, direct request: Worker 2's
-    # adaptive formula was underperforming and every filter layered onto it made it trade less
-    # without clearly fixing why. Strips Worker 2 down to fixed, non-adaptive settings -- the
-    # same base values Worker 1/3 anchor to (window=5, 25/75, TP 0.10%/SL 0.11%).
-    #
-    # First isolated variable tested this way: a minimum-volatility gate (min_vol_pct_to_trade,
-    # built from 844 real Worker 1+3 trades where net PnL flipped from -$3.29 to +$1.67 right at
-    # a 0.06% vol_pct cutoff). REMOVED same day, direct request, in favor of the next test below
-    # -- back to trading at any volatility.
-    #
-    # Second isolated variable, current: entry_confirmation_max_pct=0.60 -- blocks a new entry
-    # (or reversal reopen) when the near-touch book is already >60% stacked in that direction.
-    # Built from a retrospective test on 52 real Worker 3 entries: unfiltered baseline was
-    # -$0.0153 net; excluding just the 8 trades where book confirmation was >60% flipped it to
-    # +$0.0725 net (6 of those 8 were losses, including the two biggest losses in the set). See
-    # BotConfig._entry_overconfirmed's docstring. Small sample (8 trades) -- a real direction,
-    # not proven yet.
-    #
-    # Explicitly stripped for this test, direct request: no blanking period
-    # (reversal_guard_seconds unset), no self-lock (self_lock_enabled=False -- every real signal
-    # trades immediately, no paper-shadow gate in front of it). Explicitly KEPT: reversal
-    # handling (always on, not a toggle) and the book-opposition early exit (proven to help on
-    # the retrospective test, see BotConfig.book_opposition_exit_enabled's docstring) and
-    # require_fresh_signal (same empirical basis as Worker 1/3 -- 65% vs 43% win rate by
-    # freshness). The point is to isolate whether the entry-confirmation cap alone explains a
-    # real improvement, without self-lock, blanking, or the volatility gate muddying the read.
+    # Base signal fields below are all UNUSED while use_joint_adaptive=True -- the formula
+    # computes its own window/K-thresholds/TP/SL every tick. Left at the reference (R=1)
+    # values purely for readability/fallback documentation, matching Worker 3's file.
     stoch_window=5, tp_pct=0.10, sl_pct=0.11,
     entry_lo=25, entry_hi=75,
     reversal_lo=25, reversal_hi=75,
-    entry_confirmation_max_pct=0.60,
-    schema_has_entry_confirmation=True,  # requires lighter_btc_optimal_entry_confirmation.sql first
+    use_joint_adaptive=True,
+    schema_has_joint_adaptive=True,  # lighter_btc_optimal_joint_adaptive.sql already applied
+    stoch_turn_exit_enabled=True,
+    schema_has_joint_checkpoint=True,
+    schema_has_position_bands=True,
+    self_lock_enabled=True,
+    schema_has_self_lock=True,
+    schema_has_live_signal=True,
+    self_lock_reversal_counts_as_win=True,
+    self_lock_require_tp_in_streak=False,  # MODIFIED: 2 wins of ANY kind unlock, no TP required
+    self_lock_no_tp_fallback_wins=None,  # MODIFIED: moot now that require_tp_in_streak is off
+    self_lock_tp_unlocks_instantly=True,  # NEW: a single literal TP unlocks instantly
+    self_lock_loss_decrements_streak=True,
     require_fresh_signal=True,
-    book_opposition_exit_enabled=True,  # in-process only, no checkpoint/restart-survival needed
-    # 2026-09-29, direct request after watching a real 4-loss short run (05:50-06:09 UTC, price
-    # climbing the whole time): a book-opposition/SL close left the underlying signal still live
-    # within the same candle, and with no self-lock/blanking left to stop it, a fresh `entered`
-    # fired again 2 SECONDS after the SL, same direction, worse price. Broadened same day from
-    # book-opposition-only to ANY red exit (SL/BOOK_OPPOSITION always, REVERSAL/STOCH_TURN
-    # checked against actual pnl) -- see BotConfig.red_exit_burns_signal's docstring.
     red_exit_burns_signal=True,
-    schema_has_position_bands=True,  # position_tp_pct/position_sl_pct still get written each
-                                     # entry (fixed values now, not adaptive) -- same migration
-    schema_has_live_signal=True,  # requires lighter_btc_optimal_live_signal.sql first
-    self_lock_enabled=False,  # 2026-09-29: stripped for this test, see docstring above
-    schema_has_profit_lock=True,  # harmless leftover column, profit_lock_enabled stays off -- unchanged, see docstring
-    # No trading_hours_utc -- the one deliberate difference from Worker 1's reset, stays 24/7.
+    # book_opposition_exit_enabled intentionally omitted (defaults False) -- removed per
+    # direct request ("remove the stupid book thing").
     # Price-tick logging: primary writer (trades most, so it's up most reliably). Worker 3
     # takes over if this one goes quiet, Worker 1 as last resort. See stoch_bot_core.py.
     tick_log_defers_to=[],
