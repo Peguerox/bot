@@ -40,6 +40,14 @@ const WORKER1_TRADING_HOURS: Record<number, number[]> = {
   6: [],
 };
 
+// Display-only shortening for the recent-trades list -- the underlying reason string (used for
+// self-lock classification, etc.) stays exactly as the backend writes it; this only affects what
+// gets rendered in the compact trade rows, which run out of horizontal space fast.
+function shortReason(reason: string | null | undefined): string {
+  if (reason === "BOOK_OPPOSITION") return "BOOK_OPP";
+  return reason ?? "";
+}
+
 function formatDurationShort(ms: number): string {
   if (ms <= 0) return "0m";
   const mins = Math.floor(ms / 60000);
@@ -1813,7 +1821,7 @@ function CompactStochBtcPanel({
             return (
               <div key={t.id} className="flex items-center justify-between text-[11px] bg-gray-800/50 rounded px-1.5 py-1">
                 {timeLabel && <span className="text-gray-600 tabular-nums">{timeLabel}</span>}
-                <span className={t.side === "long" ? "text-green-400" : "text-amber-400"}>{t.side}·{t.reason}</span>
+                <span className={t.side === "long" ? "text-green-400" : "text-amber-400"}>{t.side}·{shortReason(t.reason)}</span>
                 <span className="text-gray-500">${t.avg_entry_price?.toFixed(0)}→${t.exit_price?.toFixed(0)}</span>
                 <span className={t.pnl_usd >= 0 ? "text-green-400" : "text-red-400"}>
                   {t.pnl_usd >= 0 ? "+" : ""}${t.pnl_usd?.toFixed(3)}{pnlPct != null ? ` (${pnlPct >= 0 ? "+" : ""}${pnlPct.toFixed(2)}%)` : ""}
@@ -1939,7 +1947,7 @@ function LighterStochDcaBtcPanel({
             const pnlPct = notional > 0 ? (t.pnl_usd / notional * 100) : null;
             return (
               <div key={t.id} className="flex items-center justify-between text-xs bg-gray-800/50 rounded px-2 py-1">
-                <span className={t.side === "long" ? "text-green-400" : "text-red-400"}>{t.side} · {t.reason}</span>
+                <span className={t.side === "long" ? "text-green-400" : "text-red-400"}>{t.side} · {shortReason(t.reason)}</span>
                 <span className="text-gray-400">${t.avg_entry_price?.toFixed(1)} → ${t.exit_price?.toFixed(1)}</span>
                 <span className={t.pnl_usd >= 0 ? "text-green-400" : "text-red-400"}>
                   {t.pnl_usd >= 0 ? "+" : ""}${t.pnl_usd?.toFixed(4)}{pnlPct != null ? ` (${pnlPct >= 0 ? "+" : ""}${pnlPct.toFixed(2)}%)` : ""}
