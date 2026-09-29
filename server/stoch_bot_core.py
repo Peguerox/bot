@@ -214,6 +214,11 @@ class BotConfig:
     min_vol_pct_to_trade: Optional[float] = None
     min_vol_pct_lookback: int = 30
     schema_has_min_vol_gate: bool = False  # requires the min_vol_pct_last column migration
+    # Entry-side book confirmation cap (2026-09-29): see _entry_overconfirmed's docstring for
+    # the retrospective test. Blocks a new entry OR a reversal's reopen leg (never an exit) when
+    # the near-touch book is already more than this fraction stacked in the entry's own
+    # direction. None disables this gate entirely.
+    entry_confirmation_max_pct: Optional[float] = None
     # Self-lock (2026-09-24, Worker 3's second replacement -- the TR% gate above is dropped
     # for this one, too many silent no-ops). Same base strategy as Worker 2 (no reversal
     # guard, no session breaker, no volatility gate) plus one mechanism: the instant a REAL
@@ -1475,6 +1480,27 @@ class StochBot:
             return False
         return opposition > cfg.book_opposition_ratio_threshold
 
+    def _entry_overconfirmed(self, side):
+        """Entry-side book filter (2026-09-29, direct request): blocks a candidate entry when
+        the near-touch book is ALREADY too heavily stacked in that direction. Retrospective
+        test on 52 real Worker 3 entries (same 0.05% band as book-opposition, just inverted --
+        confirmation = 1 - opposition): unfiltered baseline was -$0.0153 net; excluding just the
+        8 trades where confirmation was >60% flipped it to +$0.0725 net (6 of those 8 were
+        losses, including the two biggest losses in the set). Read: a mean-reversion signal
+        firing when the book is already heavily one-sided in that direction looks more like
+        arriving late to a crowded move than confirmation of a fresh one -- the OPPOSITE of the
+        original hypothesis (that book support would predict a GOOD entry, which this same test
+        disproved first). Small sample (8 trades) -- treat as a real, not fully proven,
+        direction. Only blocks entries/reopens, never exits."""
+        cfg = self.cfg
+        if cfg.entry_confirmation_max_pct is None or side is None:
+            return False
+        opposition = self._book_opposition_ratio(side)
+        if opposition is None:
+            return False
+        confirmation = 1 - opposition
+        return confirmation > cfg.entry_confirmation_max_pct
+
     async def _check_flow_entry_filter(self, side, now_ms):
         """Order-flow entry veto (2026-09-27): requires BOTH (1) price hasn't already moved
         more than cfg.flow_max_adverse_move_pct against `side` over the trailing 120s, and (2)
@@ -2680,7 +2706,8 @@ class StochBot:
                          and entry_signal == self._burned_signal)
         if cfg.red_exit_burns_signal and entry_signal != self._burned_signal:
             self._burned_signal = None
-        if signal_burned:
+        entry_overconfirmed = self._entry_overconfirmed(entry_signal)
+        if signal_burned or entry_overconfirmed:
             entry_signal = None
         if cfg.use_adaptive_window and cfg.schema_has_adaptive_fields:
             # 2026-09-27: was write-on-change-only, which made the dashboard number look frozen
@@ -3132,10 +3159,12 @@ class StochBot:
                 reopen_stale = (cfg.require_fresh_signal and reversal_signal == prior_signal)
                 reopen_burned = (cfg.red_exit_burns_signal
                                  and reversal_signal == self._burned_signal)
+                reopen_overconfirmed = self._entry_overconfirmed(reversal_signal)
                 if (self.entry_vol_paused or (cfg.self_lock_enabled and self.real_trading_locked)
                         or (cfg.trading_hours_utc is not None
                             and self._apply_trading_hours_gate(reversal_signal) is None)
-                        or reopen_flow_blocked or reopen_stale or low_vol_blocked or reopen_burned):
+                        or reopen_flow_blocked or reopen_stale or low_vol_blocked or reopen_burned
+                        or reopen_overconfirmed):
                     # Close leg of a reversal always runs (already happened above); only the
                     # reopen leg respects the gate -- left flat until it clears instead of
                     # immediately flipping into the opposite side.

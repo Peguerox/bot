@@ -143,24 +143,28 @@ the harmless base values the formula's own R=1 anchor point matches.
 from stoch_bot_core import BotConfig, run_bot
 
 CONFIG = BotConfig(
-    name="FIXED STOCHASTIC, VOL-GATED (worker 2)",
+    name="FIXED STOCHASTIC, ENTRY-CONFIRMATION (worker 2)",
     worker_id="worker2",
     table_state="lighter_btc_optimal_state",
     table_trades="lighter_btc_optimal_trades",
     table_runs="lighter_btc_optimal_runs",
     # 2026-09-29, full pivot away from the joint-adaptive formula, direct request: Worker 2's
     # adaptive formula was underperforming and every filter layered onto it made it trade less
-    # without clearly fixing why. Rather than keep tuning an adaptive formula, this strips Worker
-    # 2 down to fixed, non-adaptive settings -- the same base values Worker 1/3 anchor to
-    # (window=5, 25/75, TP 0.10%/SL 0.11%) -- and isolates ONE new variable to test cleanly: a
-    # minimum-volatility gate. Built from 844 real trades across Worker 1 + Worker 3 (see that
-    # session's analysis): below 0.06% vol_pct, combined net was -$3.29 (597 trades, 61% win);
-    # at or above 0.06%, +$1.67 (247 trades, also 61% win) -- same win rate either side, but the
-    # dollar edge per trade flips sign at that exact cutoff, independently on BOTH bots. Uses
-    # min_vol_pct_to_trade (see stoch_bot_core.py's docstring on that field) -- the same vol_pct
-    # measure (mean (high-low)/close% over the trailing 30 closed candles) joint-adaptive
-    # already used, factored out into _measure_vol_pct so this is a faithful live test of that
-    # exact finding, not an approximation.
+    # without clearly fixing why. Strips Worker 2 down to fixed, non-adaptive settings -- the
+    # same base values Worker 1/3 anchor to (window=5, 25/75, TP 0.10%/SL 0.11%).
+    #
+    # First isolated variable tested this way: a minimum-volatility gate (min_vol_pct_to_trade,
+    # built from 844 real Worker 1+3 trades where net PnL flipped from -$3.29 to +$1.67 right at
+    # a 0.06% vol_pct cutoff). REMOVED same day, direct request, in favor of the next test below
+    # -- back to trading at any volatility.
+    #
+    # Second isolated variable, current: entry_confirmation_max_pct=0.60 -- blocks a new entry
+    # (or reversal reopen) when the near-touch book is already >60% stacked in that direction.
+    # Built from a retrospective test on 52 real Worker 3 entries: unfiltered baseline was
+    # -$0.0153 net; excluding just the 8 trades where book confirmation was >60% flipped it to
+    # +$0.0725 net (6 of those 8 were losses, including the two biggest losses in the set). See
+    # BotConfig._entry_overconfirmed's docstring. Small sample (8 trades) -- a real direction,
+    # not proven yet.
     #
     # Explicitly stripped for this test, direct request: no blanking period
     # (reversal_guard_seconds unset), no self-lock (self_lock_enabled=False -- every real signal
@@ -168,14 +172,12 @@ CONFIG = BotConfig(
     # handling (always on, not a toggle) and the book-opposition early exit (proven to help on
     # the retrospective test, see BotConfig.book_opposition_exit_enabled's docstring) and
     # require_fresh_signal (same empirical basis as Worker 1/3 -- 65% vs 43% win rate by
-    # freshness). The point is to isolate whether the volatility cutoff alone explains a real
-    # improvement, without self-lock or blanking dynamics muddying the read.
+    # freshness). The point is to isolate whether the entry-confirmation cap alone explains a
+    # real improvement, without self-lock, blanking, or the volatility gate muddying the read.
     stoch_window=5, tp_pct=0.10, sl_pct=0.11,
     entry_lo=25, entry_hi=75,
     reversal_lo=25, reversal_hi=75,
-    min_vol_pct_to_trade=0.06,
-    min_vol_pct_lookback=30,
-    schema_has_min_vol_gate=True,  # requires lighter_btc_optimal_min_vol_gate.sql first
+    entry_confirmation_max_pct=0.60,
     require_fresh_signal=True,
     book_opposition_exit_enabled=True,  # in-process only, no checkpoint/restart-survival needed
     # 2026-09-29, direct request after watching a real 4-loss short run (05:50-06:09 UTC, price
