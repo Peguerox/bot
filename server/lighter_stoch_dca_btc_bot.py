@@ -196,60 +196,6 @@ None of these changes touch the five adaptive coefficients, the 75% TP activatio
 retreat formula -- those are exactly what was live before. Migration:
 lighter_stoch_dca_btc_joint_checkpoint.sql.
 
-2026-09-29, "hyper trading" pivot -- direct request, after real trades since the 09-28 joint-
-adaptive rollout (164 trades, 58.5% win rate, only +$0.058/+0.3% total) came in well below the
-2026-09-24/25 self-lock era's validated +1.14%/+1.66%/+2.33% on real tick-replay data. Broken
-down by exit reason, SL alone was -$1.146 across 47 trades -- more than TP+STOCH_TURN+REVERSAL
-combined (+$1.40), and the actual culprit: the joint-adaptive formula's SL isn't fixed at 0.11%
-anymore, it scales with volatility up to a 0.30% bound -- real SL losses since 09-28 ranged
--0.05% to -0.26%, median -0.115%. Stoch-turn was, if anything, net POSITIVE in the same window
-(+$0.41) -- not the problem despite being the original suspicion.
-
-Three changes, isolating the SL fix specifically (not stoch-turn, not book-opposition, neither
-of which this pivot touches):
-
-1. **SL pinned flat at 0.10%** -- `joint_adaptive_bounds`' sl_pct bound changed from (0.05, 0.30)
-   to (0.10, 0.10). Since joint_adaptive_parameters clips to `(lo, hi)` per field independently,
-   a bound with lo==hi forces that output to always equal that value regardless of vol_pct --
-   window/K-thresholds/blanking all keep moving with volatility exactly as before, only SL is
-   pinned. No new field needed, reuses the existing per-parameter bounds mechanism.
-2. **disable_literal_tp=True + profit_lock_enabled** (trigger 0.02%/trail 0.01%, same numbers
-   already live and working on Worker 2's "hyper trading" pivot the same day: 8/8 real
-   PROFIT_LOCK closes, all positive, +0.011% to +0.067% each) -- no more literal TP hard-exit at
-   all; the position only takes profit via the trail (arms at +0.02% unrealized, exits on a
-   0.01% giveback from the peak, worst case still +0.01%) or via STOCH_TURN, same reasoning as
-   Worker 2: with wins this small, a fixed TP target either clips a trail-driven run early (if
-   set tight) or never gets hit at all (if set to Worker 3's old 0.10-0.15%, since the trail
-   almost always fires first) -- either way it wasn't adding anything.
-   **Consequence handled**: self_lock_require_tp_in_streak/self_lock_no_tp_fallback_wins existed
-   specifically to require a literal TP somewhere in the unlock streak -- with TP now impossible
-   (reason can never be "TP"), that requirement would deadlock real trading forever. Both
-   dropped (require_tp_in_streak=False, fallback=None), matching Worker 2's already-live rule:
-   2 consecutive paper wins of ANY kind (TP/PROFIT_LOCK/REVERSAL/STOCH_TURN, reversal/stoch-turn
-   only counting if that particular close was actually profitable) unlock real trading.
-3. **profit_lock_burn_k_gate=True** (new mechanism, BotConfig.profit_lock_burn_k_gate's
-   docstring): after a PROFIT_LOCK close burns the signal (profit_lock_burns_signal, already
-   live), re-entry in the same direction no longer has to wait for the raw signal to fully leave
-   the zone and come back -- it clears early the moment live %K reclaims (or matches) the %K the
-   burned position originally entered at. Lets the bot pyramid into a genuinely continuing move
-   (%K staying pinned in the zone the whole time) instead of sitting out a real trend waiting for
-   a full signal reset that may never come. Side-specific: a burned short needs %K back to/above
-   its entry %K (still at least as overbought); a burned long needs %K back to/below its entry %K
-   (still at least as oversold). Only ever applies to PROFIT_LOCK-sourced burns -- a burn from an
-   actual loss (SL/BOOK_OPPOSITION/red REVERSAL/red STOCH_TURN) still requires the full ordinary
-   reset, no shortcut.
-
-Verified offline (test_core.py, 275 passing): joint_adaptive_parameters pins sl_pct to exactly
-0.10 across vol_pct from 0.001 to 5.0 while other params keep moving; _burn_reclaimed_by_k
-returns True only for a profit-lock-sourced burn once live %K reaches the stored entry %K in the
-position's own direction, and never for a red-sourced burn even at an identical %K match.
-
-book_opposition_exit_enabled is deliberately UNCHANGED by this pivot (left True) -- this round
-targeted the SL fix specifically, which the trade-reason breakdown pointed to directly;
-book-opposition's own recent-window read was mixed (net negative in the last ~48h vs. net
-positive on both its original pre-deploy validation and a same-session mid-audit), not touched
-here, worth a dedicated look on its own later if it keeps trending negative.
-
 2026-09-28, same day: unified_market_data_table set, tick_log_defers_to/trade_flow_log_defers_to
 both retired to None -- direct request for "one simple logger" instead of the two separate
 tick/trade-flow loggers, capturing FULL order-book depth (not just best bid/ask -- the book
@@ -275,7 +221,7 @@ that direction had already been running for several candles by the time the unlo
 from stoch_bot_core import BotConfig, run_bot
 
 CONFIG = BotConfig(
-    name="JOINT ADAPTIVE, HYPER TRADING (worker 3)",
+    name="JOINT ADAPTIVE (worker 3)",
     worker_id="worker3",
     table_state="lighter_stoch_dca_btc_state",
     table_trades="lighter_stoch_dca_btc_trades",
@@ -299,11 +245,8 @@ CONFIG = BotConfig(
     schema_has_self_lock=True,
     schema_has_live_signal=True,  # requires lighter_stoch_dca_btc_live_signal.sql first
     self_lock_reversal_counts_as_win=True,
-    # 2026-09-29: literal TP is now disabled (disable_literal_tp below), so a TP-in-streak
-    # requirement would deadlock real trading forever -- both dropped, matching Worker 2's
-    # already-live rule (2 wins of ANY kind unlock).
-    self_lock_require_tp_in_streak=False,
-    self_lock_no_tp_fallback_wins=None,
+    self_lock_require_tp_in_streak=True,  # 2026-09-28: at least 1 of the 2 unlock wins must be a literal TP
+    self_lock_no_tp_fallback_wins=3,  # 2026-09-28: 3+ wins of any kind unlocks anyway, TP or not
     require_fresh_signal=True,  # 2026-09-28: only enter on the exact candle the signal first appears
     self_lock_loss_decrements_streak=True,  # 2026-09-28: a red (non-SL) close cancels one prior win
     # Book-opposition early exit (2026-09-28, direct request): formula/window/TP/SL all UNCHANGED
@@ -321,22 +264,6 @@ CONFIG = BotConfig(
     # red_exit_burns_signal's docstring. SL/BOOK_OPPOSITION always burn; REVERSAL/STOCH_TURN
     # only burn if that particular close was actually a loss.
     red_exit_burns_signal=True,
-    # 2026-09-29, "hyper trading" pivot, see docstring: SL pinned flat at 0.10% (only the sl_pct
-    # bound changed, lo==hi forces the formula's clip to always output exactly 0.10 regardless
-    # of vol_pct -- window/K-thresholds/blanking keep moving with volatility as before).
-    joint_adaptive_bounds=((3.0, 40.0), (15.0, 40.0), (0.025, 0.30), (0.10, 0.10), (15.0, 600.0)),
-    # No literal TP anymore -- profit_lock_trail is the only take-profit path now (plus
-    # STOCH_TURN as the existing backstop). Same trigger/trail as Worker 2's already-live pivot.
-    disable_literal_tp=True,
-    profit_lock_enabled=True,
-    profit_lock_trigger_pct=0.02,
-    profit_lock_trail_pct=0.01,
-    profit_lock_burns_signal=True,
-    schema_has_profit_lock=True,  # profit_lock_peak_pct already exists on this table
-    # New (2026-09-29, direct request): lets a profit-lock burn clear early once live %K
-    # reclaims the entry %K of the position that got profit-locked -- see
-    # BotConfig.profit_lock_burn_k_gate's docstring.
-    profit_lock_burn_k_gate=True,
     # Retired 2026-09-28: replaced by the unified market-data logger below. Worker 2 stays the
     # old system's primary writer, Worker 1 its backup -- unaffected by Worker 3 stepping out.
     tick_log_defers_to=None,

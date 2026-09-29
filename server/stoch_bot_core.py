@@ -475,29 +475,6 @@ class BotConfig:
     # tradeoff as the gates above that also don't survive a restart, e.g. entry_vol_pause
     # without schema_has_entry_vol_gate).
     red_exit_burns_signal: bool = False
-    # 2026-09-29, direct request: skip the literal TP hard-exit entirely -- the position can
-    # only close via SL, PROFIT_LOCK, STOCH_TURN, BOOK_OPPOSITION, or a signal reversal. Built
-    # alongside profit_lock_enabled/profit_lock_trail_pct for bots meant to run as pure
-    # "hyper trading": take whatever the trail gives back at, never wait for one specific fixed
-    # target price. tp_pct is still computed and frozen per position as before (stoch-turn's
-    # activation threshold is 0.75x it) -- this only skips the literal price check, not the
-    # rest of the formula.
-    disable_literal_tp: bool = False
-    # 2026-09-29, direct request: lets a profit-lock-sourced signal burn (see
-    # profit_lock_burns_signal above) clear EARLY -- before the raw signal fully leaves the
-    # entry zone and comes back -- once live %K reclaims (or exceeds) the %K reading the
-    # burned position originally entered at. Rationale: profit_lock_burns_signal alone treats
-    # "still the same signal" as "nothing new," but during a sustained one-directional grind %K
-    # can stay pinned inside the entry zone the whole time (e.g. 75-95) without ever technically
-    # resetting -- this lets the bot pyramid into a continuing move instead of sitting out until
-    # the signal fully reverses. Side-specific: a burned SHORT (entered on a high %K, overbought)
-    # reclaims once live %K is >= that entry %K again (still at least as overbought); a burned
-    # LONG reclaims once live %K is <= its entry %K (still at least as oversold) -- extremity in
-    # the position's own direction, not raw magnitude. Only ever applies to PROFIT_LOCK-sourced
-    # burns (self._burned_signal_via == "profit_lock") -- a burn from an actual loss (SL/
-    # BOOK_OPPOSITION/red REVERSAL/red STOCH_TURN) always requires the ordinary full signal
-    # reset, never this shortcut. In-process only, same tradeoff as red_exit_burns_signal above.
-    profit_lock_burn_k_gate: bool = False
 
 
 # ── Pure helpers ────────────────────────────────────────────────────────────────────────────
@@ -922,14 +899,6 @@ class StochBot:
         self._min_vol_persist_ts = 0.0
         self._entry_confirmation_persist_ts = 0.0
         self._burned_signal = None  # see BotConfig.red_exit_burns_signal
-        # See BotConfig.profit_lock_burn_k_gate's docstring. _burned_signal_via distinguishes a
-        # profit-lock-sourced burn (eligible for the K-reclaim early-clear) from a loss-sourced
-        # one (always needs the ordinary full signal reset). _position_entry_k is the real
-        # position's own entry-time %K (set in try_enter), copied into _burned_signal_k at the
-        # moment a PROFIT_LOCK close burns the signal.
-        self._burned_signal_via = None
-        self._burned_signal_k = None
-        self._position_entry_k = None
         # Stochastic-turn protection (2026-09-28, external research -- BTC_Stochastic_Turn_
         # Exit.py / BTC_Stochastic_Turn_Exit_Results.md): a profit-armed trail on the LIVE
         # (sub-minute) stochastic K, layered on the joint adaptive formula. See
@@ -1498,25 +1467,6 @@ class StochBot:
             triggered = (live_k - extreme_k) >= retreat_points
         return armed, extreme_k, triggered
 
-    def _burn_reclaimed_by_k(self):
-        """See BotConfig.profit_lock_burn_k_gate's docstring. True if the current burn should
-        clear early because live %K has reclaimed (or exceeded) the entry %K of the position
-        that triggered it -- only ever true for a profit-lock-sourced burn."""
-        cfg = self.cfg
-        if not (cfg.profit_lock_burn_k_gate and self._burned_signal_via == "profit_lock"
-                and self._burned_signal_k is not None and self.live_k is not None):
-            return False
-        if self._burned_signal == "short":
-            return self.live_k >= self._burned_signal_k
-        if self._burned_signal == "long":
-            return self.live_k <= self._burned_signal_k
-        return False
-
-    def _clear_burn(self):
-        self._burned_signal = None
-        self._burned_signal_via = None
-        self._burned_signal_k = None
-
     def _book_opposition_ratio(self, side):
         """Book-opposition early exit (2026-09-28, direct request): fraction of near-touch
         resting size opposing `side`, within cfg.book_opposition_band_pct of the CURRENT best
@@ -1955,9 +1905,6 @@ class StochBot:
             # after the critical patch has already succeeded.
             j = self.joint_adaptive_last
             self.position_blank_seconds = j["blank_seconds"]
-            # See BotConfig.profit_lock_burn_k_gate's docstring -- this position's own entry
-            # %K, copied into _burned_signal_k if it later closes via PROFIT_LOCK.
-            self._position_entry_k = self.live_k
             if cfg.schema_has_position_bands:
                 patch["position_tp_pct"] = j["tp_pct"]
                 patch["position_sl_pct"] = j["sl_pct"]
@@ -2465,12 +2412,10 @@ class StochBot:
             paper_tp_pct, paper_sl_pct = cfg.tp_pct, cfg.sl_pct
         if side == "long":
             tp = entry * (1 + paper_tp_pct / 100); sl = entry * (1 - paper_sl_pct / 100)
-            hit_sl = check_price <= sl
-            hit_tp = (not cfg.disable_literal_tp) and check_price >= tp
+            hit_sl = check_price <= sl; hit_tp = check_price >= tp
         else:
             tp = entry * (1 - paper_tp_pct / 100); sl = entry * (1 + paper_sl_pct / 100)
-            hit_sl = check_price >= sl
-            hit_tp = (not cfg.disable_literal_tp) and check_price <= tp
+            hit_sl = check_price >= sl; hit_tp = check_price <= tp
         reason = "SL" if hit_sl else ("TP" if hit_tp else None)
 
         if reason is None and cfg.profit_lock_enabled:
@@ -2821,11 +2766,8 @@ class StochBot:
         # as "genuinely went away"), then re-burns/blocks below if it's still that direction.
         signal_burned = (cfg.red_exit_burns_signal and self._burned_signal is not None
                          and entry_signal == self._burned_signal)
-        if signal_burned and self._burn_reclaimed_by_k():
-            self._clear_burn()
-            signal_burned = False
         if cfg.red_exit_burns_signal and entry_signal != self._burned_signal:
-            self._clear_burn()
+            self._burned_signal = None
         entry_overconfirmed = self._entry_overconfirmed(entry_signal)
         if signal_burned or entry_overconfirmed:
             entry_signal = None
@@ -3135,12 +3077,12 @@ class StochBot:
             if side == "long":
                 if check_price <= sl:
                     gap_hit = "SL"
-                elif not cfg.disable_literal_tp and check_price >= tp:
+                elif check_price >= tp:
                     gap_hit = "TP"
             else:
                 if check_price >= sl:
                     gap_hit = "SL"
-                elif not cfg.disable_literal_tp and check_price <= tp:
+                elif check_price <= tp:
                     gap_hit = "TP"
 
             if gap_hit is None and cfg.profit_lock_enabled and ae:
@@ -3257,15 +3199,11 @@ class StochBot:
                         and ((check_price - ae) / ae if side == "long" else (ae - check_price) / ae) <= 0)
                     if gap_hit_red:
                         self._burned_signal = side
-                        self._burned_signal_via = "red"
-                        self._burned_signal_k = None
                 if closed_ok and gap_hit == "PROFIT_LOCK" and cfg.profit_lock_burns_signal:
                     # Always fires (unconditional, unlike red_exit_burns_signal's pnl check) --
                     # PROFIT_LOCK is structurally guaranteed non-negative, so this isn't about
                     # loss avoidance, it's "take the small win, wait for a genuinely new signal."
                     self._burned_signal = side
-                    self._burned_signal_via = "profit_lock"
-                    self._burned_signal_k = self._position_entry_k
             elif reversal_ready:
                 closed_ok = await self.close_all("REVERSAL", state, side, legs,
                                                  best_bid, best_ask, candle_ts,
@@ -3275,8 +3213,6 @@ class StochBot:
                                     else (ae - check_price) / ae) <= 0
                     if reversal_red:
                         self._burned_signal = side
-                        self._burned_signal_via = "red"
-                        self._burned_signal_k = None
                 if not closed_ok:
                     return
                 fresh = await self.get_state()
@@ -3305,9 +3241,6 @@ class StochBot:
                 reopen_stale = (cfg.require_fresh_signal and reversal_signal == prior_signal)
                 reopen_burned = (cfg.red_exit_burns_signal
                                  and reversal_signal == self._burned_signal)
-                if reopen_burned and self._burn_reclaimed_by_k():
-                    self._clear_burn()
-                    reopen_burned = False
                 reopen_overconfirmed = self._entry_overconfirmed(reversal_signal)
                 if (self.entry_vol_paused or (cfg.self_lock_enabled and self.real_trading_locked)
                         or (cfg.trading_hours_utc is not None
