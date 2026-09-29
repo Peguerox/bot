@@ -357,6 +357,15 @@ class BotConfig:
     # configured (plain / RSI / the binary-window Adaptive V2) as before.
     use_joint_adaptive: bool = False
     schema_has_joint_adaptive: bool = False  # requires the joint_adaptive migration
+    # Per-bot formula knobs (2026-09-28, split out same day Worker 2 got its own separately-
+    # derived formula): defaults reproduce Worker 3's original, unchanged formula exactly. Order
+    # for base/coefficients/bounds is (window, lower_k, tp_pct, sl_pct, blank_seconds), matching
+    # joint_adaptive_parameters/PARAMETER_NAMES. See that function's docstring for the math.
+    joint_adaptive_reference_vol_pct: float = 0.0712
+    joint_adaptive_lookback: int = 30
+    joint_adaptive_base: tuple = (5.0, 25.0, 0.10, 0.11, 120.0)
+    joint_adaptive_coefficients: tuple = (-1.0, 0.5, 0.5, 1.0, -1.0)
+    joint_adaptive_bounds: tuple = ((3.0, 40.0), (15.0, 40.0), (0.025, 0.30), (0.05, 0.30), (15.0, 600.0))
     # Live raw signal readout (2026-09-28): persists the current stochastic K value and its
     # direction (long/short/neutral) regardless of which signal mode is active -- "what is the
     # paper bot looking at right now," on all 3 bots. See self.live_k/live_signal.
@@ -375,6 +384,26 @@ class BotConfig:
     # identity so a stale checkpoint from an already-closed position never gets misapplied to a
     # new one. See position_stoch_checkpoint/paper_joint_checkpoint.
     schema_has_joint_checkpoint: bool = False  # requires the joint checkpoint column migration
+    # Book-opposition early exit (2026-09-28, direct request, tested first as a retrospective
+    # on Worker 3's real trades before going live): once a position is at least
+    # book_opposition_min_age_seconds old AND losing at least book_opposition_loss_pct, check
+    # the near-touch order book -- if the side opposing this position (asks for a long, bids for
+    # a short) holds more than book_opposition_ratio_threshold of the resting size within
+    # book_opposition_band_pct of the CURRENT best bid/ask (not entry price, all positive-size
+    # levels in that band, not a fixed level count), exit immediately rather than waiting for the
+    # full SL. On the retrospective test (36 real Worker 3 trades since order-book recording
+    # started that day) this fired on 7 trades, all of which were already heading to a real SL,
+    # and cut each one shorter -- net PnL over that window improved from -$0.0838 to -$0.0063,
+    # zero real winners clipped in that sample. Independent of use_joint_adaptive -- works off
+    # live order-book state, not the signal formula, so it's meant to layer onto EITHER Worker 2
+    # or Worker 3's formula (each bot may use different TP/SL/window math but the same book-based
+    # early exit). Treated as an SL-equivalent for self-lock purposes (full lock/reset), since by
+    # construction it only ever fires on a position that is already losing -- never a win.
+    book_opposition_exit_enabled: bool = False
+    book_opposition_min_age_seconds: float = 10.0
+    book_opposition_loss_pct: float = 0.05
+    book_opposition_ratio_threshold: float = 0.60
+    book_opposition_band_pct: float = 0.05
 
 
 # ── Pure helpers ────────────────────────────────────────────────────────────────────────────
@@ -412,14 +441,19 @@ def _sig(k, lo, hi):
 
 # Joint adaptive formula (2026-09-28, external research -- BTC_Joint_Adaptive_25_75.py /
 # BTC_Joint_Adaptive_Results.md): all five parameters scale continuously off one volatility
-# ratio R = vol_pct / JOINT_ADAPTIVE_REFERENCE_VOL_PCT, as parameter = clip(base * R**coef,
-# bounds). Order matches PARAMETER_NAMES: window, lower_k, tp_pct, sl_pct, blank_seconds.
+# ratio R = vol_pct / reference_vol_pct, as parameter = clip(base * R**coef, bounds). Order
+# matches PARAMETER_NAMES: window, lower_k, tp_pct, sl_pct, blank_seconds.
 # Simulated result on the source report's primary replay: +$5.13/$100 vs the fixed 25/75
 # baseline's +$0.15 over Sep22-27 (drawdown 1.00% vs 2.71%), both weekend days independently
 # positive when started flat/unlocked -- but selected AFTER seeing Sunday data, so per the
-# report's own words "Sunday is now fitting data, not an independent success." Coefficients are
-# intentionally hardcoded, not config fields -- the source report is explicit that changing any
-# of them needs a fresh replay, so this isn't meant to be casually tuned per-bot.
+# report's own words "Sunday is now fitting data, not an independent success."
+#
+# 2026-09-28, later same day: moved reference_vol_pct/lookback/base/coefficients/bounds from
+# hardcoded module constants to BotConfig fields (joint_adaptive_* below) -- Worker 2 got its
+# own separately-derived formula (different reference vol, exponents, and an asymmetric SL
+# bound capped at its own base value) the same day, so a single shared global no longer holds
+# for both bots. The constants below are now only the DEFAULT values (== Worker 3's exact
+# existing formula, unchanged) that BotConfig.joint_adaptive_* fall back to.
 JOINT_ADAPTIVE_REFERENCE_VOL_PCT = 0.0712
 JOINT_ADAPTIVE_LOOKBACK = 30
 JOINT_ADAPTIVE_BASE = (5.0, 25.0, 0.10, 0.11, 120.0)
@@ -427,27 +461,31 @@ JOINT_ADAPTIVE_COEFFICIENTS = (-1.0, 0.5, 0.5, 1.0, -1.0)
 JOINT_ADAPTIVE_BOUNDS = ((3.0, 40.0), (15.0, 40.0), (0.025, 0.30), (0.05, 0.30), (15.0, 600.0))
 
 
-def joint_adaptive_parameters(vol_pct):
+def joint_adaptive_parameters(vol_pct, reference_vol_pct=JOINT_ADAPTIVE_REFERENCE_VOL_PCT,
+                              base=JOINT_ADAPTIVE_BASE, coefficients=JOINT_ADAPTIVE_COEFFICIENTS,
+                              bounds=JOINT_ADAPTIVE_BOUNDS):
     """Returns (window, lower_k, tp_pct, sl_pct, blank_seconds) at this vol_pct, each
     independently clipped to its own bound. upper_k is always 100-lower_k (not a separate
-    coefficient), computed by the caller."""
-    ratio = max(vol_pct, 1e-9) / JOINT_ADAPTIVE_REFERENCE_VOL_PCT
+    coefficient), computed by the caller. base/coefficients/bounds/reference_vol_pct default to
+    Worker 3's original formula but are per-bot (BotConfig.joint_adaptive_*) -- see
+    compute_joint_adaptive_signal."""
+    ratio = max(vol_pct, 1e-9) / reference_vol_pct
     out = []
-    for base, coef, (lo, hi) in zip(JOINT_ADAPTIVE_BASE, JOINT_ADAPTIVE_COEFFICIENTS,
-                                    JOINT_ADAPTIVE_BOUNDS):
-        val = base * (ratio ** coef)
+    for b, coef, (lo, hi) in zip(base, coefficients, bounds):
+        val = b * (ratio ** coef)
         out.append(min(max(val, lo), hi))
     return tuple(out)
 
 
-def joint_adaptive_stoch_turn_params(vol_pct, tp_pct):
+def joint_adaptive_stoch_turn_params(vol_pct, tp_pct, reference_vol_pct=JOINT_ADAPTIVE_REFERENCE_VOL_PCT):
     """Stochastic-turn protection's own two frozen-at-entry values (external research,
     2026-09-28): activation_profit_percent = 0.75 * tp_pct (the position's own frozen TP, from
     joint_adaptive_parameters); stochastic_retreat_points = clip(10/sqrt(R), 2, 30), same R as
     the other five parameters. Verified against the source report's worked example: at the
     quiet anchor (vol_pct=0.0289%, tp_pct=0.06371%) this returns activation=0.04778,
-    retreat=15.696 -- exact match."""
-    ratio = max(vol_pct, 1e-9) / JOINT_ADAPTIVE_REFERENCE_VOL_PCT
+    retreat=15.696 -- exact match. reference_vol_pct defaults to Worker 3's original anchor but
+    is per-bot (BotConfig.joint_adaptive_reference_vol_pct)."""
+    ratio = max(vol_pct, 1e-9) / reference_vol_pct
     activation_pct = 0.75 * tp_pct
     retreat_points = min(max(10.0 / math.sqrt(ratio), 2.0), 30.0)
     return activation_pct, retreat_points
@@ -1186,7 +1224,7 @@ class StochBot:
         signal (a binary window switch only), ALL FIVE parameters -- window, K thresholds,
         TP, SL, reversal blanking -- move continuously with volatility, via
         joint_adaptive_parameters(). Same vol_pct measure as the V2 formula (mean 1-min
-        (high-low)/close %, trailing JOINT_ADAPTIVE_LOOKBACK CLOSED candles).
+        (high-low)/close %, trailing cfg.joint_adaptive_lookback CLOSED candles).
 
         The window can be fractional (e.g. 12.32 candles) -- _stoch_k_interpolated blends the
         two nearest integer-window K values rather than rounding.
@@ -1195,20 +1233,27 @@ class StochBot:
         self.joint_adaptive_last for the dashboard AND so tick()/try_enter/_update_paper_shadow
         can freeze them onto a position at the moment it actually opens -- an open position's
         exit bands don't move just because volatility changed after entry, same principle as
-        the existing position_tp_pct/position_sl_pct trend-band freeze."""
+        the existing position_tp_pct/position_sl_pct trend-band freeze.
+
+        reference_vol_pct/lookback/base/coefficients/bounds all come from cfg.joint_adaptive_*
+        (2026-09-28, later same day: split per-bot when Worker 2 got its own distinct formula)
+        -- this method itself is shared, unchanged code."""
+        cfg = self.cfg
         c = self.candles
         closed = c[:-1]
-        if len(closed) < JOINT_ADAPTIVE_LOOKBACK + 1:
+        if len(closed) < cfg.joint_adaptive_lookback + 1:
             self.joint_adaptive_last = None
             return None, None, None
-        vol_window = closed[-JOINT_ADAPTIVE_LOOKBACK:]
+        vol_window = closed[-cfg.joint_adaptive_lookback:]
         ranges = [(x["h"] - x["l"]) / x["c"] * 100 for x in vol_window if x["c"] > 0]
         vol_pct = sum(ranges) / len(ranges) if ranges else None
         ts = closed[-1]["t"]
         if vol_pct is None:
             self.joint_adaptive_last = None
             return None, None, ts
-        window, lower_k, tp_pct, sl_pct, blank_s = joint_adaptive_parameters(vol_pct)
+        window, lower_k, tp_pct, sl_pct, blank_s = joint_adaptive_parameters(
+            vol_pct, cfg.joint_adaptive_reference_vol_pct, cfg.joint_adaptive_base,
+            cfg.joint_adaptive_coefficients, cfg.joint_adaptive_bounds)
         self.joint_adaptive_last = {
             "vol_pct": vol_pct, "window": window, "lower_k": lower_k,
             "upper_k": 100 - lower_k, "tp_pct": tp_pct, "sl_pct": sl_pct,
@@ -1329,6 +1374,52 @@ class StochBot:
             extreme_k = live_k if extreme_k is None else min(extreme_k, live_k)
             triggered = (live_k - extreme_k) >= retreat_points
         return armed, extreme_k, triggered
+
+    def _book_opposition_ratio(self, side):
+        """Book-opposition early exit (2026-09-28, direct request): fraction of near-touch
+        resting size opposing `side`, within cfg.book_opposition_band_pct of the CURRENT best
+        bid/ask (self.live.order_book -- already streaming via the websocket subscription, no
+        REST call). Long: opposition = ask size / (ask+bid) in the band; short: opposition = bid
+        size / (ask+bid). All positive-size levels within the band count, not a fixed level
+        count -- matches the retrospective test this was validated against exactly. Returns None
+        if the book or either side is empty (fails closed -- caller treats None as no signal)."""
+        ob = self.live.order_book
+        bids = ob.get("bids") or []
+        asks = ob.get("asks") or []
+        if not bids or not asks:
+            return None
+        best_bid = max(float(b["price"]) for b in bids)
+        best_ask = min(float(a["price"]) for a in asks)
+        band = self.cfg.book_opposition_band_pct / 100
+        bid_floor = best_bid * (1 - band)
+        ask_ceil = best_ask * (1 + band)
+        bid_size = sum(float(b["size"]) for b in bids
+                       if float(b["price"]) >= bid_floor and float(b["size"]) > 0)
+        ask_size = sum(float(a["size"]) for a in asks
+                       if float(a["price"]) <= ask_ceil and float(a["size"]) > 0)
+        total = bid_size + ask_size
+        if total <= 0:
+            return None
+        return (ask_size / total) if side == "long" else (bid_size / total)
+
+    def _check_book_opposition_exit(self, side, unrealized_pct, age_s):
+        """True if the book-opposition early exit should fire right now. Independent of
+        use_joint_adaptive -- works off live order-book state, not the signal formula, so it
+        layers onto any bot's TP/SL/window math the same way. By construction only ever
+        evaluates true when the position is already losing -- see BotConfig.
+        book_opposition_exit_enabled's docstring for the retrospective test this was validated
+        against."""
+        cfg = self.cfg
+        if not cfg.book_opposition_exit_enabled:
+            return False
+        if age_s is None or age_s < cfg.book_opposition_min_age_seconds:
+            return False
+        if unrealized_pct > -cfg.book_opposition_loss_pct:
+            return False
+        opposition = self._book_opposition_ratio(side)
+        if opposition is None:
+            return False
+        return opposition > cfg.book_opposition_ratio_threshold
 
     async def _check_flow_entry_filter(self, side, now_ms):
         """Order-flow entry veto (2026-09-27): requires BOTH (1) price hasn't already moved
@@ -1707,7 +1798,7 @@ class StochBot:
             if cfg.stoch_turn_exit_enabled:
                 # Same isolated-write reasoning as position_blank_seconds above -- these never
                 # touch the critical patch.
-                act, retreat = joint_adaptive_stoch_turn_params(j["vol_pct"], j["tp_pct"])
+                act, retreat = joint_adaptive_stoch_turn_params(j["vol_pct"], j["tp_pct"], cfg.joint_adaptive_reference_vol_pct)
                 self.position_stoch_activation_pct = act
                 self.position_stoch_retreat_points = retreat
                 self.position_stoch_armed = False
@@ -2176,7 +2267,7 @@ class StochBot:
                     self.paper_joint_sl_pct = j["sl_pct"]
                     self.paper_joint_blank_s = j["blank_seconds"]
                     if cfg.stoch_turn_exit_enabled:
-                        act, retreat = joint_adaptive_stoch_turn_params(j["vol_pct"], j["tp_pct"])
+                        act, retreat = joint_adaptive_stoch_turn_params(j["vol_pct"], j["tp_pct"], cfg.joint_adaptive_reference_vol_pct)
                         self.paper_stoch_activation_pct = act
                         self.paper_stoch_retreat_points = retreat
                         self.paper_stoch_armed = False
@@ -2234,6 +2325,15 @@ class StochBot:
             self.paper_stoch_extreme_k = extreme_k
             if triggered:
                 reason = "STOCH_TURN"
+
+        if reason is None and cfg.book_opposition_exit_enabled:
+            # Same book-opposition early exit as real (see _check_book_opposition_exit's
+            # docstring), paper's own copy so it stays a faithful mirror.
+            age_s = (now_ms - self.paper_entry_ms) / 1000 if self.paper_entry_ms is not None else None
+            unrealized_pct = (100 * (check_price - entry) / entry if side == "long"
+                              else 100 * (entry - check_price) / entry)
+            if self._check_book_opposition_exit(side, unrealized_pct, age_s):
+                reason = "BOOK_OPPOSITION"
 
         reversal_ready = reversal_signal is not None and reversal_signal != side
         if cfg.use_joint_adaptive:
@@ -2324,7 +2424,10 @@ class StochBot:
                 if self.real_trading_locked:
                     self.real_trading_locked = False
                     unlocked_now = True
-        elif reason == "SL":
+        elif reason in ("SL", "BOOK_OPPOSITION"):
+            # BOOK_OPPOSITION treated as an SL-equivalent (2026-09-28) -- by construction it only
+            # ever fires on a position that's already losing, never a win, same real-loss signal
+            # SL represents, just caught earlier/smaller.
             self.paper_consecutive_tps = 0
             self.paper_streak_has_tp = False
         elif is_red_non_sl and cfg.self_lock_loss_decrements_streak:
@@ -2350,7 +2453,7 @@ class StochBot:
                 self.paper_joint_sl_pct = j["sl_pct"]
                 self.paper_joint_blank_s = j["blank_seconds"]
                 if cfg.stoch_turn_exit_enabled:
-                    act, retreat = joint_adaptive_stoch_turn_params(j["vol_pct"], j["tp_pct"])
+                    act, retreat = joint_adaptive_stoch_turn_params(j["vol_pct"], j["tp_pct"], cfg.joint_adaptive_reference_vol_pct)
                     self.paper_stoch_activation_pct = act
                     self.paper_stoch_retreat_points = retreat
                     self.paper_stoch_armed = False
@@ -2862,6 +2965,20 @@ class StochBot:
                 if triggered:
                     gap_hit = "STOCH_TURN"
 
+            if gap_hit is None and cfg.book_opposition_exit_enabled and ae:
+                # Book-opposition early exit (2026-09-28, direct request) -- see
+                # _check_book_opposition_exit's docstring. Independent of use_joint_adaptive,
+                # checked alongside/after the other hard exits above for the same reason
+                # STOCH_TURN is: it's a real exit like TP/SL, not a signal reversal, so it goes
+                # through gap_hit and can fire even during the reversal blanking period.
+                entry_time = state.get("first_entry_time")
+                age_s = ((self._entry_clock_ms() - entry_time) / 1000
+                         if entry_time is not None else None)
+                unrealized_pct = (100 * (check_price - ae) / ae if side == "long"
+                                  else 100 * (ae - check_price) / ae)
+                if self._check_book_opposition_exit(side, unrealized_pct, age_s):
+                    gap_hit = "BOOK_OPPOSITION"
+
             reversal_ready = reversal_signal is not None and reversal_signal != side
             if cfg.use_joint_adaptive:
                 # Restore from the DB once per boot -- see the identical profit-lock restore
@@ -2885,7 +3002,7 @@ class StochBot:
             if gap_hit:
                 closed_ok = await self.close_all(gap_hit, state, side, legs, best_bid, best_ask,
                                                  candle_ts, known_pos=real_pos)
-                if closed_ok and gap_hit == "SL" and cfg.self_lock_enabled:
+                if closed_ok and gap_hit in ("SL", "BOOK_OPPOSITION") and cfg.self_lock_enabled:
                     await self._lock_real_trading()
             elif reversal_ready:
                 closed_ok = await self.close_all("REVERSAL", state, side, legs,

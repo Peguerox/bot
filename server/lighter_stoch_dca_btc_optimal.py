@@ -100,26 +100,79 @@ unchanged; profit_lock_enabled off, schema_has_profit_lock left True as a harmle
 column). The ONE difference from Worker 1: no trading_hours_utc -- Worker 2 stays 24/7,
 including through the weekend, as the always-on comparison point against Worker 1's now-gated
 schedule. Deployed with enabled left OFF -- direct request, not meant to go live yet.
+
+2026-09-28, same day, moved to its own joint-adaptive formula (direct request, separate from
+Worker 3's own joint-adaptive work earlier the same day): all five parameters (window, K
+thresholds, TP, SL, reversal blanking) move continuously with a 30-closed-candle trailing
+volatility reading, same architecture as Worker 3's compute_joint_adaptive_signal, but Worker 2
+gets its OWN reference vol and exponents (stoch_bot_core.py's joint-adaptive machinery was
+generalized from hardcoded module constants into per-bot BotConfig fields the same day, exactly
+for this -- Worker 3's own formula is unchanged, it just now reads its identical values from
+its own config instead of the old globals).
+
+R = vol_pct / 0.060 (this bot's own reference, vs Worker 3's 0.0712). At R=1 (vol_pct=0.060%)
+this reduces to exactly Worker 1's fixed setup -- window=5, K=25/75, TP=0.10%, SL=0.11% -- same
+"the fixed config IS the anchor point" design as Worker 3's formula. Window^-0.5, K^+0.25,
+TP^+0.25, SL^+0.5, blanking^-0.5 (all weaker than Worker 3's -1.0/+0.5/+0.5/+1.0/-1.0 -- this
+formula moves less aggressively per unit of volatility). Bounds: window [3,40], K [15,40], TP
+[0.025%,0.30%], blanking [15s,600s] -- same as Worker 3 -- but SL is bounded [0.05%,0.11%], NOT
+[0.05%,0.30%]: SL can only tighten below its own base in a quiet market, it can never widen past
+0.11% in a busy one. This directly targets the exact problem found in Worker 3's real data the
+same day -- TP's exponent (+0.25 here) weaker than SL's (+0.5) would normally let SL balloon
+past TP as volatility rises, the same inversion measured in Worker 3's live trades (SL scaling
+2-3x faster than TP above its own reference) -- the hard SL ceiling here removes that failure
+mode by construction rather than by re-tuning the exponents.
+
+TP/SL/blanking are frozen at entry (position_tp_pct/position_sl_pct/position_blank_seconds),
+identical mechanism to Worker 3 -- an open position's exit bands don't move just because
+volatility changed after entry. Also added: stoch_turn_exit_enabled=True, Worker 3's stochastic-
+turn early-exit (arms at 0.75x frozen TP, closes on a %K retreat instead of waiting for price to
+round-trip), plus schema_has_joint_checkpoint for restart survival of both that state and the
+paper shadow's frozen bands (Render restarts every service on every push). self_lock and
+profit_lock are UNCHANGED from the settings above -- direct request to keep both exactly as they
+already were, only the signal/TP/SL/blanking formula and the stoch-turn protection are new.
+Migration: lighter_btc_optimal_joint_adaptive.sql (position_tp_pct/position_sl_pct/
+joint_adaptive_last/position_blank_seconds/position_stoch_checkpoint/paper_joint_checkpoint --
+Worker 2 never had any of these columns before, unlike Worker 1/3 which got position_tp_pct/
+position_sl_pct back in the regime-switch era).
+
+stoch_window/tp_pct/sl_pct/entry_lo/entry_hi/reversal_lo/reversal_hi/reversal_guard_seconds
+below are now UNUSED while use_joint_adaptive=True (same as Worker 3's file) -- left in place as
+the harmless base values the formula's own R=1 anchor point matches.
 """
 from stoch_bot_core import BotConfig, run_bot
 
 CONFIG = BotConfig(
-    name="PLAIN STOCHASTIC, 24/7 (worker 2)",
+    name="JOINT ADAPTIVE, OWN FORMULA (worker 2)",
     worker_id="worker2",
     table_state="lighter_btc_optimal_state",
     table_trades="lighter_btc_optimal_trades",
     table_runs="lighter_btc_optimal_runs",
-    stoch_window=5,  # 2026-09-28: back to the original value -- see docstring
-    tp_pct=0.10,
-    sl_pct=0.11,  # 2026-09-28: back to the original value
-    entry_lo=25, entry_hi=75,  # 2026-09-28: back to the original values
+    stoch_window=5, tp_pct=0.10, sl_pct=0.11,  # unused while use_joint_adaptive=True, see docstring
+    entry_lo=25, entry_hi=75,
     reversal_lo=25, reversal_hi=75,
-    reversal_guard_seconds=120,  # the "blanking period"
+    reversal_guard_seconds=120,  # also unused while use_joint_adaptive=True
+    use_joint_adaptive=True,  # 2026-09-28: this bot's own formula, see docstring
+    schema_has_joint_adaptive=True,  # requires lighter_btc_optimal_joint_adaptive.sql first
+    schema_has_position_bands=True,  # same migration -- position_tp_pct/position_sl_pct
+    joint_adaptive_reference_vol_pct=0.060,
+    joint_adaptive_lookback=30,
+    joint_adaptive_base=(5.0, 25.0, 0.10, 0.11, 120.0),
+    joint_adaptive_coefficients=(-0.5, 0.25, 0.25, 0.5, -0.5),
+    joint_adaptive_bounds=((3.0, 40.0), (15.0, 40.0), (0.025, 0.30), (0.05, 0.11), (15.0, 600.0)),
+    stoch_turn_exit_enabled=True,  # 2026-09-28: same mechanism as Worker 3, see docstring
+    schema_has_joint_checkpoint=True,  # same migration -- restart survival for stoch-turn + paper's frozen bands
+    # Book-opposition early exit (2026-09-28, direct request): same mechanism as Worker 3 gets
+    # the same day, layered on top of THIS bot's own (different) formula -- see
+    # BotConfig.book_opposition_exit_enabled's docstring for the retrospective test this was
+    # validated against before going live. Direct request to run both bots with this same
+    # addition, each on their own formula, to compare head-to-head.
+    book_opposition_exit_enabled=True,
     self_lock_enabled=True,
     schema_has_self_lock=True,  # requires the migration above to be run first
     schema_has_live_signal=True,  # requires lighter_btc_optimal_live_signal.sql first
     self_lock_reversal_counts_as_win=True,  # a winning reversal satisfies both gates too, not just literal TP
-    schema_has_profit_lock=True,  # harmless leftover column, profit_lock_enabled is off
+    schema_has_profit_lock=True,  # harmless leftover column, profit_lock_enabled stays off -- unchanged, see docstring
     # No trading_hours_utc -- the one deliberate difference from Worker 1's reset, stays 24/7.
     # Price-tick logging: primary writer (trades most, so it's up most reliably). Worker 3
     # takes over if this one goes quiet, Worker 1 as last resort. See stoch_bot_core.py.

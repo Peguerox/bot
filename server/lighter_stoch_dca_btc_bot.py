@@ -249,6 +249,12 @@ CONFIG = BotConfig(
     self_lock_no_tp_fallback_wins=3,  # 2026-09-28: 3+ wins of any kind unlocks anyway, TP or not
     require_fresh_signal=True,  # 2026-09-28: only enter on the exact candle the signal first appears
     self_lock_loss_decrements_streak=True,  # 2026-09-28: a red (non-SL) close cancels one prior win
+    # Book-opposition early exit (2026-09-28, direct request): formula/window/TP/SL all UNCHANGED
+    # above -- this is an addition, not a formula change, so it can be compared head-to-head
+    # against Worker 2 running the SAME early exit on its own (different) formula. See
+    # BotConfig.book_opposition_exit_enabled's docstring for the retrospective test this was
+    # validated against before going live (36 real trades, -$0.0838 -> -$0.0063, 0 winners clipped).
+    book_opposition_exit_enabled=True,
     # Retired 2026-09-28: replaced by the unified market-data logger below. Worker 2 stays the
     # old system's primary writer, Worker 1 its backup -- unaffected by Worker 3 stepping out.
     tick_log_defers_to=None,
