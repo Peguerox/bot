@@ -255,6 +255,15 @@ CONFIG = BotConfig(
     # BotConfig.book_opposition_exit_enabled's docstring for the retrospective test this was
     # validated against before going live (36 real trades, -$0.0838 -> -$0.0063, 0 winners clipped).
     book_opposition_exit_enabled=True,
+    # Red-exit signal burn (2026-09-29, direct request): same mechanism added to Worker 2 the
+    # same day after watching real repeated same-direction losses (Worker 2's case was seconds
+    # apart; Worker 3's real trades show the same shape slower -- repeated long entries losing
+    # to BOOK_OPPOSITION tens of minutes apart, still the same still-live signal never having
+    # genuinely reset). Blocks re-entering (new entry or a reversal's reopen leg) on whichever
+    # side just closed red until the live signal actually changes -- see BotConfig.
+    # red_exit_burns_signal's docstring. SL/BOOK_OPPOSITION always burn; REVERSAL/STOCH_TURN
+    # only burn if that particular close was actually a loss.
+    red_exit_burns_signal=True,
     # Retired 2026-09-28: replaced by the unified market-data logger below. Worker 2 stays the
     # old system's primary writer, Worker 1 its backup -- unaffected by Worker 3 stepping out.
     tick_log_defers_to=None,
