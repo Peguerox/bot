@@ -200,6 +200,19 @@ class BotConfig:
     # Same persistence rationale as schema_has_session_breaker -- without this, a restart
     # (which happens on every push, to every service) forgets an active pause.
     schema_has_entry_vol_gate: bool = False
+    # Low-volatility entry gate (2026-09-29, direct request): the OPPOSITE direction from the
+    # pair above -- blocks new entries (and a reversal's reopen leg, never TP/SL/exits) when
+    # the market is TOO QUIET rather than too spiky. Built to test a real finding from 844 real
+    # trades across Worker 1 + Worker 3: below 0.06% vol_pct, combined net was -$3.29 (597
+    # trades, 61% win); at or above 0.06%, +$1.67 (247 trades, also 61% win) -- same win rate
+    # either side, but the dollar edge per trade flips sign at this exact cutoff, independently
+    # on both bots. Uses the SAME vol_pct measure as joint-adaptive (_measure_vol_pct, mean
+    # (high-low)/close% over the trailing min_vol_pct_lookback CLOSED candles) so this is a
+    # faithful live test of that exact finding, not an approximation. Stateless (no pause/resume
+    # hysteresis like the high-vol gate above needs) -- just checks live vol_pct every tick, so
+    # no migration or restart-survival concern. None disables this gate entirely.
+    min_vol_pct_to_trade: Optional[float] = None
+    min_vol_pct_lookback: int = 30
     # Self-lock (2026-09-24, Worker 3's second replacement -- the TR% gate above is dropped
     # for this one, too many silent no-ops). Same base strategy as Worker 2 (no reversal
     # guard, no session breaker, no volatility gate) plus one mechanism: the instant a REAL
@@ -1234,6 +1247,18 @@ class StochBot:
         self.live_signal = signal
         return signal, signal, ts
 
+    def _measure_vol_pct(self, lookback):
+        """Mean 1-min (high-low)/close%, trailing `lookback` CLOSED candles -- the same
+        volatility measure joint-adaptive's formula uses, factored out (2026-09-29) so a plain
+        (non-adaptive) bot can gate entries on it too, without depending on use_joint_adaptive.
+        Returns None if there isn't enough candle history yet."""
+        closed = self.candles[:-1]
+        if len(closed) < lookback + 1:  # matches joint-adaptive's original threshold exactly
+            return None
+        window = closed[-lookback:]
+        ranges = [(x["h"] - x["l"]) / x["c"] * 100 for x in window if x["c"] > 0]
+        return sum(ranges) / len(ranges) if ranges else None
+
     def compute_joint_adaptive_signal(self):
         """"Joint adaptive" (2026-09-28, external research): unlike compute_adaptive_stoch_
         signal (a binary window switch only), ALL FIVE parameters -- window, K thresholds,
@@ -1254,15 +1279,12 @@ class StochBot:
         (2026-09-28, later same day: split per-bot when Worker 2 got its own distinct formula)
         -- this method itself is shared, unchanged code."""
         cfg = self.cfg
-        c = self.candles
-        closed = c[:-1]
+        closed = self.candles[:-1]
         if len(closed) < cfg.joint_adaptive_lookback + 1:
             self.joint_adaptive_last = None
             return None, None, None
-        vol_window = closed[-cfg.joint_adaptive_lookback:]
-        ranges = [(x["h"] - x["l"]) / x["c"] * 100 for x in vol_window if x["c"] > 0]
-        vol_pct = sum(ranges) / len(ranges) if ranges else None
         ts = closed[-1]["t"]
+        vol_pct = self._measure_vol_pct(cfg.joint_adaptive_lookback)
         if vol_pct is None:
             self.joint_adaptive_last = None
             return None, None, ts
@@ -2728,6 +2750,13 @@ class StochBot:
             # then even though the unlock itself was legitimate.
             entry_signal = None
 
+        vol_pct_now = (self._measure_vol_pct(cfg.min_vol_pct_lookback)
+                       if cfg.min_vol_pct_to_trade is not None else None)
+        low_vol_blocked = (cfg.min_vol_pct_to_trade is not None
+                           and (vol_pct_now is None or vol_pct_now < cfg.min_vol_pct_to_trade))
+        if low_vol_blocked:
+            entry_signal = None
+
         if cfg.pure_trend_fade:
             # No stochastic entries at all -- ER is the only signal, and it drives entry
             # only. Exit is TP/SL exclusively (reversal_signal stays None permanently).
@@ -3052,7 +3081,7 @@ class StochBot:
                 if (self.entry_vol_paused or (cfg.self_lock_enabled and self.real_trading_locked)
                         or (cfg.trading_hours_utc is not None
                             and self._apply_trading_hours_gate(reversal_signal) is None)
-                        or reopen_flow_blocked or reopen_stale):
+                        or reopen_flow_blocked or reopen_stale or low_vol_blocked):
                     # Close leg of a reversal always runs (already happened above); only the
                     # reopen leg respects the gate -- left flat until it clears instead of
                     # immediately flipping into the opposite side.

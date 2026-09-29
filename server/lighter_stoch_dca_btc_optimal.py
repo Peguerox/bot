@@ -143,44 +143,44 @@ the harmless base values the formula's own R=1 anchor point matches.
 from stoch_bot_core import BotConfig, run_bot
 
 CONFIG = BotConfig(
-    name="JOINT ADAPTIVE, OWN FORMULA (worker 2)",
+    name="FIXED STOCHASTIC, VOL-GATED (worker 2)",
     worker_id="worker2",
     table_state="lighter_btc_optimal_state",
     table_trades="lighter_btc_optimal_trades",
     table_runs="lighter_btc_optimal_runs",
-    stoch_window=5, tp_pct=0.10, sl_pct=0.11,  # unused while use_joint_adaptive=True, see docstring
+    # 2026-09-29, full pivot away from the joint-adaptive formula, direct request: Worker 2's
+    # adaptive formula was underperforming and every filter layered onto it made it trade less
+    # without clearly fixing why. Rather than keep tuning an adaptive formula, this strips Worker
+    # 2 down to fixed, non-adaptive settings -- the same base values Worker 1/3 anchor to
+    # (window=5, 25/75, TP 0.10%/SL 0.11%) -- and isolates ONE new variable to test cleanly: a
+    # minimum-volatility gate. Built from 844 real trades across Worker 1 + Worker 3 (see that
+    # session's analysis): below 0.06% vol_pct, combined net was -$3.29 (597 trades, 61% win);
+    # at or above 0.06%, +$1.67 (247 trades, also 61% win) -- same win rate either side, but the
+    # dollar edge per trade flips sign at that exact cutoff, independently on BOTH bots. Uses
+    # min_vol_pct_to_trade (see stoch_bot_core.py's docstring on that field) -- the same vol_pct
+    # measure (mean (high-low)/close% over the trailing 30 closed candles) joint-adaptive
+    # already used, factored out into _measure_vol_pct so this is a faithful live test of that
+    # exact finding, not an approximation.
+    #
+    # Explicitly stripped for this test, direct request: no blanking period
+    # (reversal_guard_seconds unset), no self-lock (self_lock_enabled=False -- every real signal
+    # trades immediately, no paper-shadow gate in front of it). Explicitly KEPT: reversal
+    # handling (always on, not a toggle) and the book-opposition early exit (proven to help on
+    # the retrospective test, see BotConfig.book_opposition_exit_enabled's docstring) and
+    # require_fresh_signal (same empirical basis as Worker 1/3 -- 65% vs 43% win rate by
+    # freshness). The point is to isolate whether the volatility cutoff alone explains a real
+    # improvement, without self-lock or blanking dynamics muddying the read.
+    stoch_window=5, tp_pct=0.10, sl_pct=0.11,
     entry_lo=25, entry_hi=75,
     reversal_lo=25, reversal_hi=75,
-    reversal_guard_seconds=120,  # also unused while use_joint_adaptive=True
-    use_joint_adaptive=True,  # 2026-09-28: this bot's own formula, see docstring
-    schema_has_joint_adaptive=True,  # requires lighter_btc_optimal_joint_adaptive.sql first
-    schema_has_position_bands=True,  # same migration -- position_tp_pct/position_sl_pct
-    joint_adaptive_reference_vol_pct=0.060,
-    joint_adaptive_lookback=30,
-    joint_adaptive_base=(5.0, 25.0, 0.10, 0.11, 120.0),
-    joint_adaptive_coefficients=(-0.5, 0.25, 0.25, 0.5, -0.5),
-    joint_adaptive_bounds=((3.0, 40.0), (15.0, 40.0), (0.025, 0.30), (0.05, 0.11), (15.0, 600.0)),
-    stoch_turn_exit_enabled=True,  # 2026-09-28: same mechanism as Worker 3, see docstring
-    schema_has_joint_checkpoint=True,  # same migration -- restart survival for stoch-turn + paper's frozen bands
-    # Book-opposition early exit (2026-09-28, direct request): same mechanism as Worker 3 gets
-    # the same day, layered on top of THIS bot's own (different) formula -- see
-    # BotConfig.book_opposition_exit_enabled's docstring for the retrospective test this was
-    # validated against before going live. Direct request to run both bots with this same
-    # addition, each on their own formula, to compare head-to-head.
-    book_opposition_exit_enabled=True,
-    # 2026-09-29, direct request: Worker 2 never got this when it moved to its own formula on
-    # 09-28, unlike Worker 1/3 which got it the same day (see their files' docstrings for the
-    # empirical basis -- fresh entries won 65% vs 43% for 2+-candle-stale ones). Confirmed live
-    # on a real Worker 2 trade the same day: a short entry fired immediately after a self-lock
-    # unlock on a signal whose %K had already been past the threshold for at least one full
-    # prior candle (K=92.1 at 04:02, still 86.0 at the 04:03 entry candle) -- a real instance of
-    # exactly the pattern this gate exists to block. Only gates NEW entries, never exits, so
-    # this is safe to add without touching whatever position is open at deploy time.
+    min_vol_pct_to_trade=0.06,
+    min_vol_pct_lookback=30,
     require_fresh_signal=True,
-    self_lock_enabled=True,
-    schema_has_self_lock=True,  # requires the migration above to be run first
+    book_opposition_exit_enabled=True,  # in-process only, no checkpoint/restart-survival needed
+    schema_has_position_bands=True,  # position_tp_pct/position_sl_pct still get written each
+                                     # entry (fixed values now, not adaptive) -- same migration
     schema_has_live_signal=True,  # requires lighter_btc_optimal_live_signal.sql first
-    self_lock_reversal_counts_as_win=True,  # a winning reversal satisfies both gates too, not just literal TP
+    self_lock_enabled=False,  # 2026-09-29: stripped for this test, see docstring above
     schema_has_profit_lock=True,  # harmless leftover column, profit_lock_enabled stays off -- unchanged, see docstring
     # No trading_hours_utc -- the one deliberate difference from Worker 1's reset, stays 24/7.
     # Price-tick logging: primary writer (trades most, so it's up most reliably). Worker 3
