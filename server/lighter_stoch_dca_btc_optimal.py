@@ -168,6 +168,15 @@ CONFIG = BotConfig(
     # validated against before going live. Direct request to run both bots with this same
     # addition, each on their own formula, to compare head-to-head.
     book_opposition_exit_enabled=True,
+    # 2026-09-29, direct request: Worker 2 never got this when it moved to its own formula on
+    # 09-28, unlike Worker 1/3 which got it the same day (see their files' docstrings for the
+    # empirical basis -- fresh entries won 65% vs 43% for 2+-candle-stale ones). Confirmed live
+    # on a real Worker 2 trade the same day: a short entry fired immediately after a self-lock
+    # unlock on a signal whose %K had already been past the threshold for at least one full
+    # prior candle (K=92.1 at 04:02, still 86.0 at the 04:03 entry candle) -- a real instance of
+    # exactly the pattern this gate exists to block. Only gates NEW entries, never exits, so
+    # this is safe to add without touching whatever position is open at deploy time.
+    require_fresh_signal=True,
     self_lock_enabled=True,
     schema_has_self_lock=True,  # requires the migration above to be run first
     schema_has_live_signal=True,  # requires lighter_btc_optimal_live_signal.sql first
