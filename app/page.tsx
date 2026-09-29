@@ -2289,7 +2289,7 @@ export default function Dashboard() {
           />
           <CompactStochBtcPanel
             title="Worker 2 · Joint Adaptive, Own Formula"
-            subtitle="Own joint-adaptive formula (R = vol_pct/0.060, weaker exponents than Worker 3) -- TP/window/K thresholds/blanking all move with volatility, but SL is hard-capped at its own base 0.11% (can only tighten in quiet markets, never widen past base) / stoch-turn protection + book-opposition early exit (10s age, losing >=0.05%, near-touch opposing depth >60% within 0.05% of price) / self-lock unchanged from before (2 consecutive paper wins unlock, winning reversals count too) / no hour restriction -- currently OFF, migration run, awaiting manual enable"
+            subtitle="Own joint-adaptive formula (R = vol_pct/0.060, weaker exponents than Worker 3) -- TP/window/K thresholds/blanking all move with volatility, but SL is hard-capped at its own base 0.11% (can only tighten in quiet markets, never widen past base) / stoch-turn protection + book-opposition early exit (10s age, losing >=0.05%, near-touch opposing depth >60% within 0.05% of price) / self-lock unchanged from before (2 consecutive paper wins unlock, winning reversals count too) / no hour restriction"
             table="lighter_btc_optimal_state"
             state={optimalBtcState}
             trades={optimalBtcTrades.filter((t: any) => t.closed_at >= WORKER2_RESET_AT)}
@@ -2301,7 +2301,7 @@ export default function Dashboard() {
           />
           <CompactStochBtcPanel
             title="Worker 3 · Joint Adaptive"
-            subtitle="Window, K thresholds, TP, SL, and reversal blanking all move continuously with volatility (R = vol_pct/0.0712) -- unchanged formula / real SL locks real orders, 2 consecutive paper wins unlock (at least 1 must be a literal TP), OR 3 wins of any kind unlocks regardless / book-opposition early exit added (10s age, losing >=0.05%, near-touch opposing depth >60% within 0.05% of price) -- currently OFF, reset, awaiting manual enable"
+            subtitle="Window, K thresholds, TP, SL, and reversal blanking all move continuously with volatility (R = vol_pct/0.0712) -- unchanged formula / real SL locks real orders, 2 consecutive paper wins unlock (at least 1 must be a literal TP), OR 3 wins of any kind unlocks regardless / book-opposition early exit added (10s age, losing >=0.05%, near-touch opposing depth >60% within 0.05% of price)"
             table="lighter_stoch_dca_btc_state"
             state={dcaBtcState}
             trades={dcaBtcTrades.filter((t: any) => t.closed_at >= WORKER3_RESET_AT)}
