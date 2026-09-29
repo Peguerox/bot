@@ -232,8 +232,13 @@ CONFIG = BotConfig(
     # DB state reset alongside this: real_trading_locked=false, paper_consecutive_tps=0,
     # paper_side/entry_price/entry_time/paper_joint_checkpoint all cleared.
     schema_has_live_signal=True,
-    require_fresh_signal=True,
-    red_exit_burns_signal=True,
+    # 2026-09-29, later same day, direct request: both gates removed -- "we don't need that
+    # since we're going for small trades." This bot is built around chasing every small
+    # profit-lock exit repeatedly, not around avoiding stale/repeated same-direction entries
+    # (that was the point of these two gates in the first place, from earlier the same day).
+    # Real trading now runs off the raw live signal with no staleness/burn gating at all.
+    require_fresh_signal=False,
+    red_exit_burns_signal=False,
     # book_opposition_exit_enabled intentionally omitted (defaults False) -- removed per
     # direct request ("remove the stupid book thing").
     # 2026-09-29, direct request: "hyper trading" profit trail -- take a small piece of a move
@@ -247,7 +252,10 @@ CONFIG = BotConfig(
     profit_lock_enabled=True,
     profit_lock_trigger_pct=0.02,
     profit_lock_trail_pct=0.01,
-    profit_lock_burns_signal=True,  # take the small win, then wait for a genuinely new signal
+    # profit_lock_burns_signal removed same time as the two gates above -- with no burn, there's
+    # nothing for profit_lock_burn_k_gate to clear either, so that's dropped too (moot, not
+    # dangerous either way, just no longer meaningful).
+    profit_lock_burns_signal=False,
     schema_has_profit_lock=True,  # lighter_btc_optimal_profit_lock.sql already applied
     # 2026-09-29, direct request: SL tightened 0.11% -> 0.10% (symmetric with TP's own 0.10%
     # base) -- overrides just the sl_pct component of joint_adaptive_base, everything else
@@ -260,9 +268,7 @@ CONFIG = BotConfig(
     # No literal TP anymore -- profit_lock_trail above is the real take-profit path (it always
     # fired first in practice anyway), plus stoch_turn_exit_enabled as the backstop.
     disable_literal_tp=True,
-    # Lets a profit-lock burn clear early once live %K reclaims the entry %K of the position
-    # that got profit-locked -- see BotConfig.profit_lock_burn_k_gate's docstring.
-    profit_lock_burn_k_gate=True,
+    profit_lock_burn_k_gate=False,  # moot now that profit_lock_burns_signal is off
     # 2026-09-29: briefly disabled fleet-wide during the Supabase statement-timeout incident,
     # restored same day -- direct request to keep recording price ticks (lightweight, one
     # best-bid/ask row per cadence), just not full order-book depth anymore (see Worker 3's
