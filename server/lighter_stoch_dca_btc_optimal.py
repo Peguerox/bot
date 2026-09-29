@@ -221,19 +221,17 @@ CONFIG = BotConfig(
     stoch_turn_exit_enabled=True,
     schema_has_joint_checkpoint=True,
     schema_has_position_bands=True,
-    self_lock_enabled=True,
-    schema_has_self_lock=True,
+    # Self-lock REMOVED entirely (2026-09-29, direct request -- "this strategy doesn't need a
+    # self-lock mechanism"). self_lock_enabled defaults to False; every self-lock-gated code
+    # path in stoch_bot_core.py (paper shadow, boot/enable re-lock, the real_trading_locked
+    # entry gate) is nested under `if cfg.self_lock_enabled`, so this is a full, clean removal,
+    # not a partial one -- nothing left half-on. schema_has_self_lock also dropped (no more
+    # writes to those columns; the columns themselves stay on the table, harmless unused).
+    # Real trading now runs directly off the live signal, gated only by SL/PROFIT_LOCK/
+    # STOCH_TURN/red-exit-burn/fresh-signal -- no paper-shadow proof-of-recovery step anymore.
+    # DB state reset alongside this: real_trading_locked=false, paper_consecutive_tps=0,
+    # paper_side/entry_price/entry_time/paper_joint_checkpoint all cleared.
     schema_has_live_signal=True,
-    self_lock_reversal_counts_as_win=True,
-    self_lock_require_tp_in_streak=False,  # MODIFIED: 2 wins of ANY kind unlock, no TP required
-    self_lock_no_tp_fallback_wins=None,  # MODIFIED: moot now that require_tp_in_streak is off
-    self_lock_tp_unlocks_instantly=True,  # NEW: a single literal TP unlocks instantly
-    # 2026-09-29, direct request: whenever this bot boots (a restart, or being turned on fresh)
-    # it must go back in locked, requiring the normal unlock proof all over again -- never
-    # resumes real trading on leftover unlock state from before. See BotConfig.
-    # self_lock_relocks_on_boot's docstring.
-    self_lock_relocks_on_boot=True,
-    self_lock_loss_decrements_streak=True,
     require_fresh_signal=True,
     red_exit_burns_signal=True,
     # book_opposition_exit_enabled intentionally omitted (defaults False) -- removed per

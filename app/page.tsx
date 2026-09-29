@@ -2330,17 +2330,14 @@ export default function Dashboard() {
           />
           <CompactStochBtcPanel
             title="Worker 2 · Hyper Trading, Profit-Lock Trail"
-            subtitle="Clone of Worker 3's mechanism set, SL tightened 0.11% -> 0.10% (symmetric with TP) / profit-lock trail: arms at +0.02% unrealized, exits if it gives back 0.01% from the peak -- worst case still +0.01%, never negative / that exit also burns the signal (take the small win, wait for a genuinely new one) / stoch-turn stays on as a backstop / 2 consecutive paper wins of ANY kind unlock real trading, OR a single literal TP unlocks instantly / re-locks on every restart or enable / no book-opposition"
+            subtitle="Clone of Worker 3's mechanism set, SL pinned flat at 0.10% (no longer volatility-scaled) / no literal TP -- profit-lock trail is the only take-profit path: arms at +0.02% unrealized, exits if it gives back 0.01% from the peak -- worst case still +0.01%, never negative / that exit also burns the signal, but a burn now clears early once live %K reclaims the entry %K of the position that got locked, so it can pyramid into a continuing move / stoch-turn stays on as a backstop / no self-lock -- trades directly off the live signal / no book-opposition"
             table="lighter_btc_optimal_state"
             state={optimalBtcState}
             trades={optimalBtcTrades.filter((t: any) => t.closed_at >= WORKER2_RESET_AT)}
             currentPrice={ocoBtcPrice}
             loading={loading}
             onToggled={load}
-            showSelfLock
             combineEquityWinRate
-            selfLockUnlockRange="1-2"
-            selfLockUnlockTitle="Consecutive paper wins needed to unlock real trading -- 2 of any kind, or a single literal TP unlocks instantly"
           />
           <CompactStochBtcPanel
             title="Worker 3 · Joint Adaptive"
