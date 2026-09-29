@@ -22,8 +22,11 @@ const WORKER1_RESET_AT = "2026-09-28T01:02:25.797802+00:00";
 // Worker 2's schedule was removed and SL tightened (0.11% -> 0.05%) at this moment -- same
 // reasoning as Worker 1's reset above, a clean baseline for a config that changed twice at once.
 // Reset again 2026-09-27 when stoch_window/thresholds changed, then once more after the SL
-// revert (0.05% -> 0.11%) -- same reasoning as Worker 1's reset above.
-const WORKER2_RESET_AT = "2026-09-29T13:42:43.423366+00:00";
+// revert (0.05% -> 0.11%) -- same reasoning as Worker 1's reset above. Reset again 2026-09-29
+// (repeatedly, through several same-day pivots: own joint-adaptive formula, then fixed
+// settings + entry-confirmation, now abandoned that experiment entirely for a Worker 3 clone
+// with a loosened self-lock unlock rule and no book-opposition exit).
+const WORKER2_RESET_AT = "2026-09-29T14:17:14.432493+00:00";
 // Worker 3 reset 2026-09-27 ahead of testing the volatility-adaptive window formula + the
 // order-flow entry filter -- clean baseline before that config lands.
 const WORKER3_RESET_AT = "2026-09-29T00:52:00.000000+00:00";
