@@ -1716,6 +1716,7 @@ function CompactStochBtcPanel({
           </div>
         );
 
+        const liveConfirmation: number | null = state?.entry_confirmation_last ?? null;
         const fixedSettingsPill = fixedSettings != null && (
           <div className="bg-gray-800/60 rounded-lg p-2" title="Fixed (non-adaptive) settings plus the entry-confirmation book filter">
             <p className="text-gray-500 text-[10px] uppercase">Fixed Settings</p>
@@ -1727,10 +1728,19 @@ function CompactStochBtcPanel({
                 TP {fixedSettings.tpPct.toFixed(2)}% SL {fixedSettings.slPct.toFixed(2)}%
               </span>
               {fixedSettings.entryConfirmationMaxPct != null && (
-                <span className="text-[9px] font-bold px-1.5 py-0.5 rounded uppercase bg-blue-500/20 text-blue-400"
-                      title="Blocks a new entry (or reversal reopen) when the near-touch book is already this stacked in that direction">
-                  blocks book &gt;{(fixedSettings.entryConfirmationMaxPct * 100).toFixed(0)}%
-                </span>
+                <>
+                  <span className={`text-[9px] font-bold px-1.5 py-0.5 rounded uppercase ${
+                    liveConfirmation == null ? "bg-gray-700/40 text-gray-500"
+                    : liveConfirmation > fixedSettings.entryConfirmationMaxPct ? "bg-red-500/20 text-red-400"
+                    : "bg-green-500/20 text-green-400"
+                  }`} title="Blocks a new entry (or reversal reopen) when the near-touch book is already this stacked in that direction, for whichever direction the live signal currently reads">
+                    {liveConfirmation == null ? "book —"
+                     : liveConfirmation > fixedSettings.entryConfirmationMaxPct ? "book blocked" : "book clear"}
+                  </span>
+                  <span className="text-[10px] text-gray-400 tabular-nums">
+                    confirm {liveConfirmation != null ? (liveConfirmation * 100).toFixed(0) : "—"}% / cap {(fixedSettings.entryConfirmationMaxPct * 100).toFixed(0)}%
+                  </span>
+                </>
               )}
             </div>
           </div>

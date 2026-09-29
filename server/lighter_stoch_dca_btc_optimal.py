@@ -178,6 +178,7 @@ CONFIG = BotConfig(
     entry_lo=25, entry_hi=75,
     reversal_lo=25, reversal_hi=75,
     entry_confirmation_max_pct=0.60,
+    schema_has_entry_confirmation=True,  # requires lighter_btc_optimal_entry_confirmation.sql first
     require_fresh_signal=True,
     book_opposition_exit_enabled=True,  # in-process only, no checkpoint/restart-survival needed
     # 2026-09-29, direct request after watching a real 4-loss short run (05:50-06:09 UTC, price

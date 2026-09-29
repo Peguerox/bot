@@ -219,6 +219,7 @@ class BotConfig:
     # the near-touch book is already more than this fraction stacked in the entry's own
     # direction. None disables this gate entirely.
     entry_confirmation_max_pct: Optional[float] = None
+    schema_has_entry_confirmation: bool = False  # requires the entry_confirmation_last column migration
     # Self-lock (2026-09-24, Worker 3's second replacement -- the TR% gate above is dropped
     # for this one, too many silent no-ops). Same base strategy as Worker 2 (no reversal
     # guard, no session breaker, no volatility gate) plus one mechanism: the instant a REAL
@@ -865,6 +866,7 @@ class StochBot:
         self.live_signal = None
         self._live_signal_persist_ts = 0.0
         self._min_vol_persist_ts = 0.0
+        self._entry_confirmation_persist_ts = 0.0
         self._burned_signal = None  # see BotConfig.red_exit_burns_signal
         # Stochastic-turn protection (2026-09-28, external research -- BTC_Stochastic_Turn_
         # Exit.py / BTC_Stochastic_Turn_Exit_Results.md): a profit-armed trail on the LIVE
@@ -2749,6 +2751,21 @@ class StochBot:
                 self._live_signal_persist_ts = now_s
                 try:
                     await self.update_state({"live_k": self.live_k, "live_signal": self.live_signal})
+                except Exception:
+                    pass
+        if cfg.entry_confirmation_max_pct is not None and cfg.schema_has_entry_confirmation:
+            # Dashboard readout for the entry-confirmation book filter (2026-09-29), same
+            # cadence as live_k -- "what would the confirmation check say right now" for
+            # whatever direction live_signal currently reads, even when no entry is actually
+            # being attempted this tick.
+            now_s = time.time()
+            if now_s - self._entry_confirmation_persist_ts >= 10.0:
+                self._entry_confirmation_persist_ts = now_s
+                opposition = (self._book_opposition_ratio(self.live_signal)
+                             if self.live_signal is not None else None)
+                confirmation = (1 - opposition) if opposition is not None else None
+                try:
+                    await self.update_state({"entry_confirmation_last": confirmation})
                 except Exception:
                     pass
         if cfg.min_vol_pct_to_trade is not None and cfg.schema_has_min_vol_gate:
