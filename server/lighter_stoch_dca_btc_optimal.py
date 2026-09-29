@@ -253,10 +253,11 @@ CONFIG = BotConfig(
     # base) -- overrides just the sl_pct component of joint_adaptive_base, everything else
     # (window/lower_k/tp_pct/blank_seconds bases, all coefficients, all bounds) stays exactly
     # Worker 3's formula. Direct request after finding 0.11% "not giving good buys."
-    joint_adaptive_base=(5.0, 25.0, 0.10, 0.10, 120.0),
+    # 2026-09-29, later same day, direct request: SL tightened further 0.10% -> 0.03%.
+    joint_adaptive_base=(5.0, 25.0, 0.10, 0.03, 120.0),
     # 2026-09-29, "trail-only" refinement: pin the sl_pct bound flat at 0.10 (base already
     # anchors it there; this stops volatility from pulling it away from that anchor).
-    joint_adaptive_bounds=((3.0, 40.0), (15.0, 40.0), (0.025, 0.30), (0.10, 0.10), (15.0, 600.0)),
+    joint_adaptive_bounds=((3.0, 40.0), (15.0, 40.0), (0.025, 0.30), (0.03, 0.03), (15.0, 600.0)),
     # No literal TP anymore -- profit_lock_trail above is the real take-profit path (it always
     # fired first in practice anyway), plus stoch_turn_exit_enabled as the backstop.
     disable_literal_tp=True,
