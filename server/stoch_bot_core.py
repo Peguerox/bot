@@ -68,9 +68,16 @@ TICK_LOG_EVERY = 2.5      # seconds between price-tick log rows (candle-vs-real-
                           # on 2026-09-22 showed 1-min candles are too coarse to backtest
                           # against; this records the real book for a proper replay later)
 TICK_LOG_RETENTION_DAYS = 14
-TRADE_FLOW_LOG_EVERY = 10.0  # seconds between recentTrades polls -- raised from 3.0 2026-09-27
-                              # after that rate triggered a WAF block; still frequent enough
-                              # for the flow entry filter's 30s/120s lookback windows
+TRADE_FLOW_LOG_EVERY = 30.0  # seconds between recentTrades polls -- raised from 3.0 2026-09-27
+                              # after that rate triggered a WAF block, then from 10.0 to 30.0
+                              # 2026-09-29 after Worker 3 (using this cadence via the unified
+                              # market-data logger) started getting intermittently WAF-blocked
+                              # again on this + position reads + candle fetches, while Worker 1
+                              # (which doesn't poll recentTrades at all) showed zero blocks in
+                              # the same window -- the flow entry filter that used to need a
+                              # tighter cadence here is off on all 3 bots now (flow_entry_filter_
+                              # enabled=False everywhere), so nothing live depends on this being
+                              # fast; it only feeds the market-data table for offline analysis.
 TRADE_FLOW_LOG_RETENTION_DAYS = 14
 MARKET_DATA_BOOK_EVERY = 2.0  # order-book snapshots cost nothing extra (already in memory via
                               # the websocket) -- can log much faster than the tick logger did
@@ -916,7 +923,15 @@ class StochBot:
         url = (f"https://mainnet.zklighter.elliot.ai/api/v1/candles?market_id={self.cfg.market_index}"
                f"&resolution=1m&start_timestamp=0&end_timestamp={end_ms}&count_back={count}")
         async with self.http.get(url) as resp:
-            data = jsonlib.loads(await resp.text())
+            text = await resp.text()
+            content_type = resp.headers.get("Content-Type", "")
+            if resp.status >= 400 or "json" not in content_type:
+                # Same WAF/CAPTCHA tell as recentTrades polling (2026-09-29): a blocked
+                # response is HTML with a 2xx-or-40x status, not reliably >=400 -- content-type
+                # is the more robust check. Previously this just hit jsonlib.loads() on an
+                # empty/HTML body and surfaced as an opaque "Expecting value" JSONDecodeError.
+                raise RuntimeError(f"fetch_candles {resp.status} ct={content_type}: {text[:150]}")
+            data = jsonlib.loads(text)
         return sorted(data.get("c", []), key=lambda c: c["t"])
 
     async def run_candle_refresh_forever(self):
