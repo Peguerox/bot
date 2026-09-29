@@ -175,6 +175,7 @@ CONFIG = BotConfig(
     reversal_lo=25, reversal_hi=75,
     min_vol_pct_to_trade=0.06,
     min_vol_pct_lookback=30,
+    schema_has_min_vol_gate=True,  # requires lighter_btc_optimal_min_vol_gate.sql first
     require_fresh_signal=True,
     book_opposition_exit_enabled=True,  # in-process only, no checkpoint/restart-survival needed
     schema_has_position_bands=True,  # position_tp_pct/position_sl_pct still get written each

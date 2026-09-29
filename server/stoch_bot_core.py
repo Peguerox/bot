@@ -213,6 +213,7 @@ class BotConfig:
     # no migration or restart-survival concern. None disables this gate entirely.
     min_vol_pct_to_trade: Optional[float] = None
     min_vol_pct_lookback: int = 30
+    schema_has_min_vol_gate: bool = False  # requires the min_vol_pct_last column migration
     # Self-lock (2026-09-24, Worker 3's second replacement -- the TR% gate above is dropped
     # for this one, too many silent no-ops). Same base strategy as Worker 2 (no reversal
     # guard, no session breaker, no volatility gate) plus one mechanism: the instant a REAL
@@ -844,6 +845,7 @@ class StochBot:
         self.live_k = None
         self.live_signal = None
         self._live_signal_persist_ts = 0.0
+        self._min_vol_persist_ts = 0.0
         # Stochastic-turn protection (2026-09-28, external research -- BTC_Stochastic_Turn_
         # Exit.py / BTC_Stochastic_Turn_Exit_Results.md): a profit-armed trail on the LIVE
         # (sub-minute) stochastic K, layered on the joint adaptive formula. See
@@ -2651,6 +2653,10 @@ class StochBot:
             reversal_signal = entry_signal
         else:
             entry_signal, reversal_signal, candle_ts = self.compute_stoch_signal()
+        vol_pct_now = (self._measure_vol_pct(cfg.min_vol_pct_lookback)
+                       if cfg.min_vol_pct_to_trade is not None else None)
+        low_vol_blocked = (cfg.min_vol_pct_to_trade is not None
+                           and (vol_pct_now is None or vol_pct_now < cfg.min_vol_pct_to_trade))
         if cfg.use_adaptive_window and cfg.schema_has_adaptive_fields:
             # 2026-09-27: was write-on-change-only, which made the dashboard number look frozen
             # between window flips even though vol_pct is actually recomputed every tick --
@@ -2691,6 +2697,17 @@ class StochBot:
                 self._live_signal_persist_ts = now_s
                 try:
                     await self.update_state({"live_k": self.live_k, "live_signal": self.live_signal})
+                except Exception:
+                    pass
+        if cfg.min_vol_pct_to_trade is not None and cfg.schema_has_min_vol_gate:
+            # Dashboard readout for the low-volatility entry gate (2026-09-29) -- same plain-
+            # cadence persistence as live_k above, direct request ("put the settings there with
+            # the K and the TP and SL and everything, volume is the most important").
+            now_s = time.time()
+            if now_s - self._min_vol_persist_ts >= 10.0:
+                self._min_vol_persist_ts = now_s
+                try:
+                    await self.update_state({"min_vol_pct_last": vol_pct_now})
                 except Exception:
                     pass
         if cfg.use_joint_adaptive and cfg.stoch_turn_exit_enabled and cfg.schema_has_joint_checkpoint:
@@ -2750,10 +2767,6 @@ class StochBot:
             # then even though the unlock itself was legitimate.
             entry_signal = None
 
-        vol_pct_now = (self._measure_vol_pct(cfg.min_vol_pct_lookback)
-                       if cfg.min_vol_pct_to_trade is not None else None)
-        low_vol_blocked = (cfg.min_vol_pct_to_trade is not None
-                           and (vol_pct_now is None or vol_pct_now < cfg.min_vol_pct_to_trade))
         if low_vol_blocked:
             entry_signal = None
 

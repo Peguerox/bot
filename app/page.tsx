@@ -1406,7 +1406,7 @@ function currentSessionStart(nowUtc: Date): Date {
 
 function CompactStochBtcPanel({
   title, subtitle, table, state, trades, currentPrice, loading, onToggled, runs, cooldownMin,
-  showSelfLock, stats, tradingHoursUtc, combineEquityWinRate, rsiPaperStats,
+  showSelfLock, stats, tradingHoursUtc, combineEquityWinRate, rsiPaperStats, fixedSettings,
 }: {
   title: string; subtitle: string; table: string; state: any; trades: any[];
   currentPrice: number | null; loading: boolean; onToggled: () => void;
@@ -1414,6 +1414,8 @@ function CompactStochBtcPanel({
   stats?: { total: number; wins: number };
   tradingHoursUtc?: number[] | Record<number, number[]>;
   combineEquityWinRate?: boolean; rsiPaperStats?: { total: number; wins: number; pnlPct: number };
+  fixedSettings?: { entryLo: number; entryHi: number; tpPct: number; slPct: number;
+                    minVolPct: number; lookbackCandles: number };
 }) {
   const [toggling, setToggling] = useState(false);
   const [nowTick, setNowTick] = useState(() => Date.now());
@@ -1714,6 +1716,34 @@ function CompactStochBtcPanel({
           </div>
         );
 
+        const liveVolPct: number | null = state?.min_vol_pct_last ?? null;
+        const fixedSettingsPill = fixedSettings != null && (
+          <div className="bg-gray-800/60 rounded-lg p-2" title="Fixed (non-adaptive) settings plus the minimum-volatility entry gate">
+            <p className="text-gray-500 text-[10px] uppercase">Fixed Settings</p>
+            <div className="flex items-center gap-1.5 flex-wrap">
+              <span className="text-[10px] text-gray-400 tabular-nums">
+                K {fixedSettings.entryLo}/{fixedSettings.entryHi}
+              </span>
+              <span className="text-[10px] text-gray-400 tabular-nums">
+                TP {fixedSettings.tpPct.toFixed(2)}% SL {fixedSettings.slPct.toFixed(2)}%
+              </span>
+              <span className={`text-[9px] font-bold px-1.5 py-0.5 rounded uppercase ${
+                liveVolPct == null ? "bg-gray-700/40 text-gray-500"
+                : liveVolPct >= fixedSettings.minVolPct ? "bg-green-500/20 text-green-400"
+                : "bg-red-500/20 text-red-400"
+              }`} title={`Blocks new entries when volatility is below ${fixedSettings.minVolPct}% -- mean 1-min range over the trailing ${fixedSettings.lookbackCandles} closed candles`}>
+                {liveVolPct == null ? "vol —" : liveVolPct >= fixedSettings.minVolPct ? "gate open" : "gate blocked"}
+              </span>
+              <span className="text-[10px] text-gray-400 tabular-nums">
+                vol {liveVolPct != null ? liveVolPct.toFixed(4) : "—"}% / floor {fixedSettings.minVolPct.toFixed(2)}%
+              </span>
+              <span className="text-[10px] text-gray-500 tabular-nums">
+                {fixedSettings.lookbackCandles} candles
+              </span>
+            </div>
+          </div>
+        );
+
         const joint = state?.joint_adaptive_last ?? null;
         const jointAdaptivePill = joint != null && (
           <div className="bg-gray-800/60 rounded-lg p-2" title="Live output of the joint adaptive formula -- window, K thresholds, TP, SL, and reversal blanking all move together with volatility">
@@ -1786,7 +1816,7 @@ function CompactStochBtcPanel({
           return (
             <div className="grid grid-cols-2 gap-2 text-xs">
               {equityWinRatePill}
-              {selfLockPill}
+              {selfLockPill || fixedSettingsPill}
               {positionPill}
               {jointAdaptivePill || adaptivePill || tradingHoursPill || scheduleFallbackPill}
               {rsiPaperPill}
@@ -2297,6 +2327,8 @@ export default function Dashboard() {
             loading={loading}
             onToggled={load}
             combineEquityWinRate
+            fixedSettings={{ entryLo: 25, entryHi: 75, tpPct: 0.10, slPct: 0.11,
+                             minVolPct: 0.06, lookbackCandles: 30 }}
           />
           <CompactStochBtcPanel
             title="Worker 3 · Joint Adaptive"
