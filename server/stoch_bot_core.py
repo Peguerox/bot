@@ -425,16 +425,20 @@ class BotConfig:
     book_opposition_loss_pct: float = 0.05
     book_opposition_ratio_threshold: float = 0.60
     book_opposition_band_pct: float = 0.05
-    # 2026-09-29, direct request: after a book-opposition exit, the signal/direction that led to
-    # that trade is "trashed" -- blocked from re-entering (new entry OR a reversal's reopen leg)
-    # until it genuinely goes away and comes back, even within the same candle. Different from
-    # require_fresh_signal (which only compares against the PRIOR CLOSED candle) -- this is
-    # event-driven off the live signal itself, catching the specific case require_fresh_signal
-    # can't: an SL/BOOK_OPPOSITION closes, and the exact same still-active intra-candle signal
-    # immediately re-fires a real entry seconds later, sometimes several times in a row.
-    # In-process only, not persisted -- a restart clears it (same tradeoff as the gates above
-    # that also don't survive a restart, e.g. entry_vol_pause without schema_has_entry_vol_gate).
-    book_opposition_burns_signal: bool = False
+    # 2026-09-29, direct request, broadened same day from book-opposition-only to ANY red real
+    # exit: the signal/direction that just closed at a loss is "trashed" -- blocked from
+    # re-entering (new entry OR a reversal's reopen leg) until it genuinely goes away and comes
+    # back, even within the same candle. Different from require_fresh_signal (which only
+    # compares against the PRIOR CLOSED candle) -- this is event-driven off the live signal
+    # itself, catching the case require_fresh_signal can't: a red close happens, and the exact
+    # same still-active intra-candle signal immediately re-fires a real entry seconds later,
+    # sometimes several times in a row. SL and BOOK_OPPOSITION are always red by construction
+    # (their trigger conditions require it); REVERSAL and STOCH_TURN can go either way, so those
+    # are checked against actual realized pnl at close time. TP and PROFIT_LOCK never burn --
+    # structurally can't be red. In-process only, not persisted -- a restart clears it (same
+    # tradeoff as the gates above that also don't survive a restart, e.g. entry_vol_pause
+    # without schema_has_entry_vol_gate).
+    red_exit_burns_signal: bool = False
 
 
 # ── Pure helpers ────────────────────────────────────────────────────────────────────────────
@@ -856,7 +860,7 @@ class StochBot:
         self.live_signal = None
         self._live_signal_persist_ts = 0.0
         self._min_vol_persist_ts = 0.0
-        self._burned_signal = None  # see BotConfig.book_opposition_burns_signal
+        self._burned_signal = None  # see BotConfig.red_exit_burns_signal
         # Stochastic-turn protection (2026-09-28, external research -- BTC_Stochastic_Turn_
         # Exit.py / BTC_Stochastic_Turn_Exit_Results.md): a profit-armed trail on the LIVE
         # (sub-minute) stochastic K, layered on the joint adaptive formula. See
@@ -2672,9 +2676,9 @@ class StochBot:
         # other gate below touches entry_signal -- clears the burn the instant the live signal
         # is no longer the burned direction (even a flicker to None or the opposite side counts
         # as "genuinely went away"), then re-burns/blocks below if it's still that direction.
-        signal_burned = (cfg.book_opposition_burns_signal and self._burned_signal is not None
+        signal_burned = (cfg.red_exit_burns_signal and self._burned_signal is not None
                          and entry_signal == self._burned_signal)
-        if cfg.book_opposition_burns_signal and entry_signal != self._burned_signal:
+        if cfg.red_exit_burns_signal and entry_signal != self._burned_signal:
             self._burned_signal = None
         if signal_burned:
             entry_signal = None
@@ -3082,12 +3086,24 @@ class StochBot:
                                                  candle_ts, known_pos=real_pos)
                 if closed_ok and gap_hit in ("SL", "BOOK_OPPOSITION") and cfg.self_lock_enabled:
                     await self._lock_real_trading()
-                if closed_ok and gap_hit == "BOOK_OPPOSITION" and cfg.book_opposition_burns_signal:
-                    self._burned_signal = side
+                if closed_ok and cfg.red_exit_burns_signal:
+                    # SL/BOOK_OPPOSITION are always red by construction; STOCH_TURN can go
+                    # either way (a fast move can beat it to SL), so check actual pnl for that
+                    # one. TP/PROFIT_LOCK never burn -- structurally can't be red.
+                    gap_hit_red = gap_hit in ("SL", "BOOK_OPPOSITION") or (
+                        gap_hit == "STOCH_TURN" and ae
+                        and ((check_price - ae) / ae if side == "long" else (ae - check_price) / ae) <= 0)
+                    if gap_hit_red:
+                        self._burned_signal = side
             elif reversal_ready:
                 closed_ok = await self.close_all("REVERSAL", state, side, legs,
                                                  best_bid, best_ask, candle_ts,
                                                  known_pos=real_pos)
+                if closed_ok and cfg.red_exit_burns_signal and ae:
+                    reversal_red = ((check_price - ae) / ae if side == "long"
+                                    else (ae - check_price) / ae) <= 0
+                    if reversal_red:
+                        self._burned_signal = side
                 if not closed_ok:
                     return
                 fresh = await self.get_state()
@@ -3114,7 +3130,7 @@ class StochBot:
                         await self.log_run("flow_entry_filter_error", {"error": str(e)[:300], "via": "reversal"})
                         reopen_flow_blocked = True
                 reopen_stale = (cfg.require_fresh_signal and reversal_signal == prior_signal)
-                reopen_burned = (cfg.book_opposition_burns_signal
+                reopen_burned = (cfg.red_exit_burns_signal
                                  and reversal_signal == self._burned_signal)
                 if (self.entry_vol_paused or (cfg.self_lock_enabled and self.real_trading_locked)
                         or (cfg.trading_hours_utc is not None

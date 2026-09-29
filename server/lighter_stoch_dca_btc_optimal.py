@@ -179,12 +179,12 @@ CONFIG = BotConfig(
     require_fresh_signal=True,
     book_opposition_exit_enabled=True,  # in-process only, no checkpoint/restart-survival needed
     # 2026-09-29, direct request after watching a real 4-loss short run (05:50-06:09 UTC, price
-    # climbing the whole time): a book-opposition close (or SL) left the underlying signal still
-    # live within the same candle, and with no self-lock/blanking left to stop it, a fresh
-    # `entered` fired again 2 SECONDS after the SL, same direction, worse price. This treats the
-    # signal that led to a book-opposition exit as burned until it genuinely changes -- see
-    # BotConfig.book_opposition_burns_signal's docstring.
-    book_opposition_burns_signal=True,
+    # climbing the whole time): a book-opposition/SL close left the underlying signal still live
+    # within the same candle, and with no self-lock/blanking left to stop it, a fresh `entered`
+    # fired again 2 SECONDS after the SL, same direction, worse price. Broadened same day from
+    # book-opposition-only to ANY red exit (SL/BOOK_OPPOSITION always, REVERSAL/STOCH_TURN
+    # checked against actual pnl) -- see BotConfig.red_exit_burns_signal's docstring.
+    red_exit_burns_signal=True,
     schema_has_position_bands=True,  # position_tp_pct/position_sl_pct still get written each
                                      # entry (fixed values now, not adaptive) -- same migration
     schema_has_live_signal=True,  # requires lighter_btc_optimal_live_signal.sql first
