@@ -23,7 +23,7 @@ const WORKER1_RESET_AT = "2026-09-28T01:02:25.797802+00:00";
 // reasoning as Worker 1's reset above, a clean baseline for a config that changed twice at once.
 // Reset again 2026-09-27 when stoch_window/thresholds changed, then once more after the SL
 // revert (0.05% -> 0.11%) -- same reasoning as Worker 1's reset above.
-const WORKER2_RESET_AT = "2026-09-29T01:59:40.707775+00:00";
+const WORKER2_RESET_AT = "2026-09-29T05:06:55.498388+00:00";
 // Worker 3 reset 2026-09-27 ahead of testing the volatility-adaptive window formula + the
 // order-flow entry filter -- clean baseline before that config lands.
 const WORKER3_RESET_AT = "2026-09-29T00:52:00.000000+00:00";
@@ -2288,15 +2288,14 @@ export default function Dashboard() {
             tradingHoursUtc={WORKER1_TRADING_HOURS}
           />
           <CompactStochBtcPanel
-            title="Worker 2 · Joint Adaptive, Own Formula"
-            subtitle="Own joint-adaptive formula (R = vol_pct/0.060, weaker exponents than Worker 3) -- TP/window/K thresholds/blanking all move with volatility, but SL is hard-capped at its own base 0.11% (can only tighten in quiet markets, never widen past base) / stoch-turn protection + book-opposition early exit (10s age, losing >=0.05%, near-touch opposing depth >60% within 0.05% of price) / self-lock unchanged from before (2 consecutive paper wins unlock, winning reversals count too) / no hour restriction"
+            title="Worker 2 · Fixed Stochastic, Vol-Gated"
+            subtitle="Fixed settings, no adaptive formula -- window 5, 25/75, TP 0.10%/SL 0.11%, same anchor Worker 1/3 use / minimum-volatility gate: blocks new entries when vol_pct < 0.06% (mean 1-min range over trailing 30 candles) -- built from 844 real Worker 1+3 trades where net PnL flipped from -$3.29 to +$1.67 right at that cutoff, same win rate either side / book-opposition early exit kept, fresh-signal required / no blanking period, no self-lock -- every fresh signal above the vol floor trades immediately"
             table="lighter_btc_optimal_state"
             state={optimalBtcState}
             trades={optimalBtcTrades.filter((t: any) => t.closed_at >= WORKER2_RESET_AT)}
             currentPrice={ocoBtcPrice}
             loading={loading}
             onToggled={load}
-            showSelfLock
             combineEquityWinRate
           />
           <CompactStochBtcPanel
