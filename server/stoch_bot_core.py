@@ -1060,6 +1060,15 @@ class StochBot:
         self._lock_refreshed_at = 0.0   # last SUCCESSFUL claim/refresh
         self._lock_checked_at = 0.0     # last attempt of any kind (throttle)
         self._lock_blocked_logged = False
+        # Set when an entry order was placed but the exchange could not be read afterwards, so
+        # whether it filled is genuinely UNKNOWN. Blocks any further entry until a position read
+        # succeeds again. Proven necessary 2026-09-30 with real money: Lighter's CloudFront WAF
+        # returned CAPTCHA (HTTP 405) to Render's IP, every confirm_fill read failed, and each
+        # failure was counted as "no fill" -- so the bot re-entered twice more, all three orders
+        # actually filled, and 3x the intended size sat unmanaged on both sub-accounts for hours.
+        # Never guess at a fill: if we cannot see the position, we do not send another order.
+        self._entry_outcome_unknown = False
+        self._confirm_read_ok = True
         # Paper shadow's own copy of the same trail -- without this, real could exit early via
         # PROFIT_LOCK while paper (running the identical signal) kept holding, making the two
         # visibly diverge even while real is unlocked and trading the exact same thing paper is.
@@ -2178,6 +2187,9 @@ class StochBot:
             raise
         self._pos_read_consecutive_failures = 0
         self._pos_read_next_attempt_at = 0.0
+        # The exchange is visible again, so a previously-unknown entry outcome is resolved: the
+        # reconcile/adopt path in tick() now deals with whatever is actually there.
+        self._entry_outcome_unknown = False
         a = acct.accounts[0]
         pos = 0.0
         for p in a.positions:
@@ -2252,12 +2264,17 @@ class StochBot:
         tries) while keeping a real safety margin (~40s) under the watchdog.
         """
         pos, coll = 0.0, None
+        # Distinguishes "read fine, nothing there" from "could not read at all" -- see
+        # self._entry_outcome_unknown. A caller that has just placed an order MUST NOT treat the
+        # second as a no-fill, because retrying then puts a second real order on the book.
+        self._confirm_read_ok = True
         for attempt in range(tries):
             try:
                 pos, coll = await self.get_position_rest()
             except Exception as e:
                 if attempt == tries - 1:
                     await self.log_run("confirm_fill_read_failed", {"error": str(e)[:200]})
+                    self._confirm_read_ok = False
                     return pos, coll, False
                 await asyncio.sleep(delay)
                 continue
@@ -2383,6 +2400,22 @@ class StochBot:
         pos, coll, confirmed = await self.confirm_fill(want_nonzero=True, expect_qty=intended_qty)
         if cfg.debug_verbose_tick:
             print(f"[{cfg.worker_id}] try_enter: confirm_fill returned pos={pos} confirmed={confirmed}", flush=True)
+        if not confirmed and not self._confirm_read_ok:
+            # We placed a real order and then LOST SIGHT of the exchange, so we do not know
+            # whether it filled. This is emphatically NOT a no-fill: treating it as one is what
+            # sent two more orders into a WAF blackout on 2026-09-30 and left 3x the intended size
+            # unmanaged on both legs. Stop entering until a position read succeeds again -- at
+            # which point tick()'s ordinary reconcile either adopts whatever really filled or
+            # finds us genuinely flat and free to try again. The failure counter is deliberately
+            # NOT incremented: this is not evidence the entry is failing, only that we are blind,
+            # and burning the circuit breaker on blindness is what disabled both legs that day.
+            self._entry_outcome_unknown = True
+            await self.log_run("enter_outcome_unknown", {
+                "signal": signal, "via": via, "intended_qty": intended_qty,
+                "error": str(err)[:200] if err else None,
+                "note": "order placed but exchange unreadable -- no retry until it can be read"})
+            await self.update_state({"last_processed_candle_ts": candle_ts})
+            return False
         if not confirmed:
             await self.log_run("enter_no_fill", {"signal": signal, "via": via,
                                                  "error": str(err)[:200] if err else None,
@@ -3271,6 +3304,32 @@ class StochBot:
             # same failure mode the general tick-error backoff already exists to prevent,
             # just missing here because this path returns before reaching that code.
             if state.get("side") is None:
+                # Do NOT trust "side is null" to mean flat. 2026-09-30: after a WAF blackout both
+                # legs held a real 3x position while their rows still said flat, and the Close
+                # button did nothing at all because of this early return -- the one moment it was
+                # most needed. Ask the exchange instead; adopt anything that is really there so
+                # the close below can act on it.
+                real_pos, real_coll = None, None
+                try:
+                    real_pos, real_coll = await self.get_position_rest()
+                except Exception as e:
+                    await self.log_run("close_requested_read_failed", {"error": str(e)[:200]})
+                    now = time.time()
+                    self._close_retry_failures += 1
+                    self._close_retry_next_at = now + tick_error_backoff_seconds(self._close_retry_failures)
+                    return  # keep close_requested set -- retry rather than falsely report done
+                if real_pos is not None and abs(real_pos) > QTY_EPS:
+                    adopted = "long" if real_pos > 0 else "short"
+                    bb, ba = self.live.best_bid_ask()
+                    px = (ba if adopted == "long" else bb) or state.get("first_entry_price")
+                    await self.update_state({
+                        "side": adopted,
+                        "legs": [{"price": px, "usd_size": px * abs(real_pos)}],
+                        "first_entry_price": px, "first_entry_time": self._entry_clock_ms(),
+                        "dca_level": 0, "collateral_before_entry": real_coll})
+                    await self.log_run("adopted_orphan_position", {
+                        "side": adopted, "qty": abs(real_pos), "via": "close_requested"})
+                    return  # next tick closes it through the ordinary path below
                 await self.update_state({"close_requested": False, "enabled": False})
                 self._close_retry_failures = 0
                 self._close_retry_next_at = 0.0
@@ -3977,7 +4036,9 @@ class StochBot:
                 # barrier, so a leg never declares itself ready for a cycle it then declines to
                 # join -- that would hold its partner up for nothing.
                 wants_in = (effective_signal is not None and state.get("enabled") and holds_lock
-                            and self._has_entry_pressure())
+                            and self._has_entry_pressure()
+                            # Never send a second entry while a previous one's fate is unknown.
+                            and not self._entry_outcome_unknown)
                 partner_flat = True
                 if wants_in and cfg.cycle_partner_table is not None:
                     # In-process barrier when one is wired (the hedge); it supersedes the DB poll

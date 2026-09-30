@@ -141,9 +141,11 @@ def make_bot(ex, state=None, candles_kind="mid", candles=None, **cfg_overrides):
 
     async def get_position_rest():
         bot.get_position_rest_calls = getattr(bot, "get_position_rest_calls", 0) + 1
-        # Match the real method's side effect: every authoritative read refreshes the cache.
+        # Match the real method's side effects: every authoritative read refreshes the cache and
+        # resolves any unknown entry outcome (we can see the exchange again).
         bot._pos_cache = (ex.position, ex.collateral)
         bot._pos_cache_at = time.time()
+        bot._entry_outcome_unknown = False
         return bot._pos_cache
 
     bot.get_state = get_state
@@ -3112,6 +3114,107 @@ async def t_k_readout_still_works_with_the_size_tilt_off():
           9.0 < notional < 11.0, notional)
 
 
+async def t_waf_blackout_does_not_stack_a_second_order():
+    print("\n[WAF blackout: an unreadable exchange must NEVER produce a second entry order]")
+    # Reproduces 2026-09-30 06:51 with real money: Lighter's WAF returned CAPTCHA (405) to
+    # Render's IP, every confirm_fill read failed, each failure was booked as "no fill", and the
+    # bot re-entered twice more. All three orders filled -> 3x size, unmanaged, on both legs.
+    ex = FakeExchange()
+    bot = make_bot(ex, candles_kind="long")
+    orders = {"n": 0}
+    real_place = bot.place_order
+    async def counting_place(**kw):
+        orders["n"] += 1
+        return await real_place(**kw)
+    bot.place_order = counting_place
+    # The real bot had been running, so read_position had a warm cache to fall back on -- that is
+    # why the tick got as far as placing an order at all. Mirror that, then go dark.
+    bot._pos_cache = (0.0, 20.0); bot._pos_cache_at = time.time()
+    async def blind(*a, **k):
+        raise RuntimeError("(405) Not Allowed -- x-amzn-waf-action: captcha")
+    bot.get_position_rest = blind
+
+    await bot.tick()
+    check("exactly one order placed", orders["n"] == 1, orders["n"])
+    check("outcome recorded as UNKNOWN, not as a no-fill",
+          bot._entry_outcome_unknown is True, bot._entry_outcome_unknown)
+    check("logged enter_outcome_unknown",
+          any(a == "enter_outcome_unknown" for a, _ in bot.runs), [a for a, _ in bot.runs])
+    check("circuit breaker NOT burned on blindness",
+          (bot.state_row.get("consecutive_entry_failures") or 0) == 0,
+          bot.state_row.get("consecutive_entry_failures"))
+
+    # Still blind on the next ticks: must stay put rather than fire more orders.
+    for _ in range(4):
+        await bot.tick()
+    check("no further orders while blind", orders["n"] == 1, orders["n"])
+    check("still enabled -- blindness is not an entry failure",
+          bot.state_row.get("enabled") is not False, bot.state_row.get("enabled"))
+
+
+async def t_after_blackout_the_real_fill_is_adopted():
+    print("\n[WAF blackout: once the exchange is readable again, whatever filled gets adopted]")
+    ex = FakeExchange()
+    bot = make_bot(ex, candles_kind="long")
+    real_read = bot.get_position_rest
+    bot._pos_cache = (0.0, 20.0); bot._pos_cache_at = time.time()
+    async def blind(*a, **k):
+        raise RuntimeError("(405) captcha")
+    bot.get_position_rest = blind
+    await bot.tick()
+    check("blind -> unknown", bot._entry_outcome_unknown is True)
+    check("row still shows flat", bot.state_row["side"] is None)
+    # Reads recover; the order had in fact filled (FakeExchange holds the real position).
+    bot.get_position_rest = real_read
+    bot._pos_cache_at = 0.0          # force a fresh authoritative read
+    await bot.tick()
+    check("unknown flag cleared by a good read", bot._entry_outcome_unknown is False)
+    check("real position adopted instead of being left unmanaged",
+          bot.state_row["side"] == "long", bot.state_row["side"])
+
+
+async def t_close_button_works_on_an_orphan_the_row_does_not_know_about():
+    print("\n[Close: flattens a real position even when the row wrongly says flat]")
+    # The exact hole found on 2026-09-30: both legs held a real 3x position while their rows said
+    # side=null, so the Close button returned immediately and did nothing.
+    entry = 86000.0
+    ex = FakeExchange(position=round(30.0 / entry, 5), collateral=20.0)
+    state = {
+        "id": 1, "side": None, "legs": [], "first_entry_price": None, "first_entry_time": None,
+        "dca_level": 0, "seed_usd": 20.0, "realized_pnl_usd": 0.0,
+        "collateral_before_entry": None, "enabled": False,      # disabled, as after a breaker trip
+        "consecutive_entry_failures": 3, "last_processed_candle_ts": 0,
+        "close_requested": True,
+    }
+    bot = make_bot(ex, state=state, candles_kind="mid")
+    await bot.tick()
+    check("orphan adopted rather than the close silently no-op'ing",
+          bot.state_row["side"] == "long", bot.state_row["side"])
+    check("close_requested still set so the close actually happens",
+          bot.state_row.get("close_requested") is True, bot.state_row.get("close_requested"))
+    await bot.tick()
+    check("position really flattened on the exchange", abs(ex.position) < 1e-6, ex.position)
+    check("close_requested cleared once genuinely flat",
+          bot.state_row.get("close_requested") is False, bot.state_row.get("close_requested"))
+
+
+async def t_close_on_a_genuinely_flat_bot_still_just_clears():
+    print("\n[Close: a genuinely flat bot still just clears the flag, no orders]")
+    ex = FakeExchange(position=0.0, collateral=20.0)
+    state = {
+        "id": 1, "side": None, "legs": [], "first_entry_price": None, "first_entry_time": None,
+        "dca_level": 0, "seed_usd": 20.0, "realized_pnl_usd": 0.0,
+        "collateral_before_entry": None, "enabled": True,
+        "consecutive_entry_failures": 0, "last_processed_candle_ts": 0,
+        "close_requested": True,
+    }
+    bot = make_bot(ex, state=state, candles_kind="mid")
+    await bot.tick()
+    check("flag cleared", bot.state_row.get("close_requested") is False)
+    check("left disabled", bot.state_row.get("enabled") is False)
+    check("no position opened", bot.state_row["side"] is None)
+
+
 async def t_live_configs_match_their_stated_rules():
     print("\n[live configs: the real worker files still encode the rules they are supposed to]")
     # These assert the actual shipped CONFIG objects, not a hand-built test config. Both of these
@@ -3297,6 +3400,10 @@ async def main():
               t_pressure_gate_off_by_default_for_other_bots,
               t_pressure_gate_waits_rather_than_guessing_with_no_reading,
               t_k_readout_still_works_with_the_size_tilt_off,
+              t_waf_blackout_does_not_stack_a_second_order,
+              t_after_blackout_the_real_fill_is_adopted,
+              t_close_button_works_on_an_orphan_the_row_does_not_know_about,
+              t_close_on_a_genuinely_flat_bot_still_just_clears,
               t_live_configs_match_their_stated_rules,
               t_stale_position_bands_ignored_without_schema_flag,
               t_position_bands_still_honored_with_schema_flag):
