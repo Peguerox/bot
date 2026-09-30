@@ -12,23 +12,32 @@ Handoff doc. Written at the end of a long session that fixed several real money 
 | Worker 3 | — | — | Render service **suspended**; its sub-account is driven by Worker 2 |
 
 `server/stoch_bot_core.py` (~3.8k lines) holds all shared logic. Each `lighter_*.py` is settings
-only. Tests: `cd server && python3 test_core.py` (needs the Supabase env vars) — **443 passing**.
+only. Tests: `cd server && python3 test_core.py` (needs the Supabase env vars) — **445 passing**.
 
 ---
 
 ## Worker 2 — current strategy
 
-Both legs enter **together**, $10 each, equal. Loser cut at SL 0.03%. Winner has no literal TP —
-profit-lock trail (arms +0.05%, trails 0.01% behind peak) with a breakeven floor beneath it. Both
-re-enter only once **both** are flat. A cycle opens only while the 25/75 stochastic shows pressure.
+Both legs enter **together**, $10 each, equal. Loser cut at the stop. Winner has no literal TP —
+profit-lock trail with a breakeven floor beneath it. Both re-enter only once **both** are flat. A
+cycle opens only while the 25/75 stochastic shows pressure.
+
+> **Exits are DB-driven and were retuned late in the session.** Live values now come from
+> `override_sl_pct` / `override_profit_lock_trigger` / `override_profit_lock_trail` on the state
+> rows, editable from the dashboard. **As of 15:00: SL 0.06 / trigger 0.10 / trail 0.02** — widened
+> after the US-open volatility spike. See `WORKER2_HEDGE_SPEC.md` §8 for the tuning evidence and
+> the "under 24% double-losses" rule. The values described below are the *original* ones and the
+> reasoning behind them; they are no longer what is running.
 
 ### Why each number is what it is
 
-- **SL 0.03%** — backtested (~29h, 124 cycles, 90.3% win) as the best cut threshold.
-- **profit-lock trigger 0.05% / trail 0.01%** — the validated pair. It was briefly lowered to a
-  0.03 trigger, which **inverted the edge**: the winner armed at +0.03% and the 0.01% trail (~$8.30
-  of BTC) stopped it on the next wiggle for ~+0.02%, while the loser still got the full −0.03%.
-  ≈ −0.01%/cycle, negative regardless of win rate. **Do not lower the trigger again.**
+- **SL 0.03% (original)** — backtested (~29h, 124 cycles, 90.3% win) as the best cut threshold.
+  Later shown to be a **5.98σ loser** over 4880 cycles and widened to 0.06.
+- **profit-lock trigger 0.05% / trail 0.01% (original)** — the validated pair. It was briefly
+  lowered to a 0.03 trigger, which **inverted the edge**: the winner armed at +0.03% and the 0.01%
+  trail (~$8.30 of BTC) stopped it on the next wiggle for ~+0.02%, while the loser still got the
+  full −0.03%. ≈ −0.01%/cycle, negative regardless of win rate. **Do not lower the trigger to meet
+  the trail.**
 - **`breakeven_floor_arm_margin_pct = 0.01`** — load-bearing. A symmetric hedge puts the winner at
   ≈+X% at the instant the loser is cut at −X%, so a floor armed with zero margin fires immediately
   on noise and pins **every** cycle to exactly zero (observed live: long +0.00286 / short −0.00298).
