@@ -25,8 +25,12 @@ const WORKER1_RESET_AT = "2026-09-28T01:02:25.797802+00:00";
 // revert (0.05% -> 0.11%) -- same reasoning as Worker 1's reset above. Reset again 2026-09-29
 // (repeatedly, through several same-day pivots -- most recently the hedge dual-leg pivot:
 // Worker 2's account is now the long leg, Worker 3's account the short leg, both driven by
-// one process. This cutoff also gates the short leg's trade list in HedgeDualLegPanel).
-const WORKER2_RESET_AT = "2026-09-30T02:00:28.000Z";
+// one process. This cutoff also gates the short leg's trade list in HedgeDualLegPanel). Reset
+// again 2026-09-30 after a Render zombie-process double-entry (two process instances briefly
+// live post-redeploy, both entered "long" -- unrelated to strategy logic, see that day's
+// incident) forced an emergency_flatten; both legs manually closed/reset, left disabled for
+// the user to re-enable once the redeploy overlap issue is addressed.
+const WORKER2_RESET_AT = "2026-09-30T03:35:43.000Z";
 // Worker 3 reset 2026-09-27 ahead of testing the volatility-adaptive window formula + the
 // order-flow entry filter -- clean baseline before that config lands.
 const WORKER3_RESET_AT = "2026-09-29T00:52:00.000000+00:00";
