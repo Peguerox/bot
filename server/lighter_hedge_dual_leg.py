@@ -67,6 +67,7 @@ LONG_CONFIG = BotConfig(
     fixed_direction="long",
     tp_pct=0.10, sl_pct=0.03,  # sl_pct is the real, live value here (use_joint_adaptive off)
     fixed_leg_usd=10.0,  # direct request: same $ per leg, not the account's full balance
+    debug_verbose_tick=True,  # temporary -- diagnosing the boot-time freeze, remove once found
     disable_literal_tp=True,
     profit_lock_enabled=True,
     profit_lock_trigger_pct=0.05,
@@ -94,6 +95,7 @@ SHORT_CONFIG = BotConfig(
     fixed_direction="short",
     tp_pct=0.10, sl_pct=0.03,
     fixed_leg_usd=10.0,  # direct request: same $ per leg, not the account's full balance
+    debug_verbose_tick=True,  # temporary -- diagnosing the boot-time freeze, remove once found
     disable_literal_tp=True,
     profit_lock_enabled=True,
     profit_lock_trigger_pct=0.05,

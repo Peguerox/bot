@@ -422,6 +422,13 @@ class BotConfig:
     # leg per entry, not the whole balance every time. None (default) preserves every other
     # bot's existing behavior (full seed_usd + realized_pnl_usd each entry).
     fixed_leg_usd: Optional[float] = None
+    # 2026-09-29/30, temporary diagnostic: prints a checkpoint at each major step of tick()/
+    # try_enter()/confirm_fill(), gated so it never fires for any other bot. Added specifically
+    # to pinpoint where the hedge dual-leg process hangs (every individual piece -- reads,
+    # local signing, WS, real concurrent orders -- tested clean in isolation, yet the full bot
+    # freezes immediately after "started" every time; this narrows down which exact line).
+    # Remove once the hang is found and fixed.
+    debug_verbose_tick: bool = False
     # Joint adaptive formula (2026-09-28): see JOINT_ADAPTIVE_* constants and
     # compute_joint_adaptive_signal's docstring. False = use whichever other signal mode is
     # configured (plain / RSI / the binary-window Adaptive V2) as before.
@@ -1859,6 +1866,8 @@ class StochBot:
         base_amount_int = int(round(base_amount * (10 ** self.cfg.size_decimals)))
         co_idx = int(time.time() * 1000) % 500_000_000
         self.last_order_ts = time.time()
+        if self.cfg.debug_verbose_tick:
+            print(f"[{self.cfg.worker_id}] place_order: about to call create_market_order co_idx={co_idx}", flush=True)
         try:
             order, resp, err = await asyncio.wait_for(
                 self.client.create_market_order(
@@ -1868,6 +1877,8 @@ class StochBot:
                 ),
                 timeout=ORDER_TIMEOUT,
             )
+            if self.cfg.debug_verbose_tick:
+                print(f"[{self.cfg.worker_id}] place_order: create_market_order returned", flush=True)
             return err
         except asyncio.TimeoutError:
             return "TIMEOUT: order request exceeded ORDER_TIMEOUT (may still have filled)"
@@ -1940,11 +1951,19 @@ class StochBot:
         cfg = self.cfg
         fail_count = state.get("consecutive_entry_failures", 0) or 0
         intended_qty = leg_usd / price
+        if cfg.debug_verbose_tick:
+            print(f"[{cfg.worker_id}] try_enter: about to call place_order qty={intended_qty}", flush=True)
         err = await self.place_order(is_ask=(signal == "short"), base_amount=intended_qty,
                                      reduce_only=False, ref_price=price)
+        if cfg.debug_verbose_tick:
+            print(f"[{cfg.worker_id}] try_enter: place_order returned err={err}", flush=True)
         # `err` is deliberately not treated as failure. A timed-out or nonce-rejected request
         # can still have filled; only the exchange knows.
+        if cfg.debug_verbose_tick:
+            print(f"[{cfg.worker_id}] try_enter: about to call confirm_fill", flush=True)
         pos, coll, confirmed = await self.confirm_fill(want_nonzero=True, expect_qty=intended_qty)
+        if cfg.debug_verbose_tick:
+            print(f"[{cfg.worker_id}] try_enter: confirm_fill returned pos={pos} confirmed={confirmed}", flush=True)
         if not confirmed:
             await self.log_run("enter_no_fill", {"signal": signal, "via": via,
                                                  "error": str(err)[:200] if err else None,
@@ -2765,7 +2784,11 @@ class StochBot:
     # ── One decision cycle ──────────────────────────────────────────────────────────────────
     async def tick(self):
         cfg = self.cfg
+        if cfg.debug_verbose_tick:
+            print(f"[{cfg.worker_id}] tick: entered", flush=True)
         state = await self.get_state()
+        if cfg.debug_verbose_tick:
+            print(f"[{cfg.worker_id}] tick: got_state side={state.get('side')} enabled={state.get('enabled')}", flush=True)
 
         if cfg.self_lock_enabled and cfg.self_lock_relocks_on_boot:
             # Covers the one gap _load_self_lock_state's own boot-time re-lock can't: the user
@@ -2830,9 +2853,13 @@ class StochBot:
             # the retry budget and likely makes an IP-level block look more abusive, not less.
             return
 
+        if cfg.debug_verbose_tick:
+            print(f"[{cfg.worker_id}] tick: about to compute signal, candles={len(self.candles)}", flush=True)
         if cfg.fixed_direction is not None:
             entry_signal, reversal_signal, candle_ts = compute_fixed_direction_signal(
                 self.candles, cfg.fixed_direction)
+            if cfg.debug_verbose_tick:
+                print(f"[{cfg.worker_id}] tick: signal computed entry={entry_signal} candle_ts={candle_ts}", flush=True)
         elif cfg.use_joint_adaptive:
             entry_signal, reversal_signal, candle_ts = self.compute_joint_adaptive_signal()
         elif cfg.use_adaptive_window:
@@ -3383,6 +3410,8 @@ class StochBot:
                         and not self.real_trading_locked and self.paper_side is not None):
                     mirror_signal = self.paper_side
                 effective_signal = entry_signal if entry_signal is not None else mirror_signal
+                if cfg.debug_verbose_tick:
+                    print(f"[{cfg.worker_id}] tick: effective_signal={effective_signal} enabled={state.get('enabled')}", flush=True)
                 if effective_signal is not None and state.get("enabled"):
                     fail_count = state.get("consecutive_entry_failures", 0) or 0
                     if fail_count >= 3:
@@ -3402,8 +3431,12 @@ class StochBot:
                         return
                     via = "entry" if entry_signal is not None else "mirror_paper"
                     price = best_ask if effective_signal == "long" else best_bid
+                    if cfg.debug_verbose_tick:
+                        print(f"[{cfg.worker_id}] tick: about to call try_enter, price={price} eq={eq}", flush=True)
                     await self.try_enter(effective_signal, price, eq, via, candle_ts,
                                          state, collateral, is_trending=is_trending)
+                    if cfg.debug_verbose_tick:
+                        print(f"[{cfg.worker_id}] tick: try_enter returned", flush=True)
                 else:
                     await self.update_state({"last_processed_candle_ts": candle_ts})
 
