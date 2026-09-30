@@ -12,7 +12,7 @@ Handoff doc. Written at the end of a long session that fixed several real money 
 | Worker 3 | — | — | Render service **suspended**; its sub-account is driven by Worker 2 |
 
 `server/stoch_bot_core.py` (~3.8k lines) holds all shared logic. Each `lighter_*.py` is settings
-only. Tests: `cd server && python3 test_core.py` (needs the Supabase env vars) — **432 passing**.
+only. Tests: `cd server && python3 test_core.py` (needs the Supabase env vars) — **443 passing**.
 
 ---
 
@@ -65,6 +65,18 @@ re-enter only once **both** are flat. A cycle opens only while the 25/75 stochas
    so it no-op'd in exactly the orphan case. It now checks the exchange, adopts, and closes.
 7. **No single-instance lock.** Render runs two containers for ~30–60s on every deploy and nothing
    stopped both entering. `lock_owner`/`lock_heartbeat` now gate **entries only, never exits**.
+8. **One bad read condemned a live position.** `confirm_fill(want_nonzero=False)` returned True on
+   the **first** read showing flat — `tries` meant "chances to SEE flat", never "times it must
+   AGREE". Both legs booked a close that had not happened, re-entered on top of the live position
+   and reached 2× size. The tell was two external closes reporting **+0.00323 then −0.00323**,
+   exactly equal and opposite — collateral noise, not two real closes. Now `require_consecutive=3`
+   on the reconcile path.
+9. **A transient oversize halted the strategy, asymmetrically.** `emergency_flatten` set
+   `enabled=False` permanently, and only on the leg that tripped — so the hedge sat half-on, its
+   partner waiting for a leg that could never come. A first occurrence now flattens and pauses 60s
+   (both legs resume together); 3 within an hour still hard-disable, keeping the 20× guard.
+10. **`emergency_flatten` wrote no trade row**, so a flattened leg vanished from history — which is
+    how a properly hedged cycle displayed as UNHEDGED. It now logs `EMERGENCY_FLATTEN`.
 
 ---
 
@@ -172,6 +184,23 @@ loser at a fixed SL; re-enter a cut leg rather than waiting; or enter only the s
 
 **And:** do not deploy while it is trading. Render redeploys every service on every push and forces a
 lock handover mid-cycle. Six deploys during a live session made one noisy window unreadable.
+
+## Planned, not built: compounding
+
+Agreed in principle, **not implemented**. Two separate figures must be reported, because they never
+converge — each sub-account needs a cushion beyond what it trades, precisely because one leg runs
+ahead of the other:
+
+- **Total equity** — what is actually in both accounts. Its % is the honest account return.
+- **Exposed capital** — what is on the table in a cycle ($20 today). This is what compounds, and
+  its % is what the strategy is really earning.
+
+Sizing rule: `leg_usd = exposed / 2`, both legs **always equal** — unequal legs break the breakeven
+floor (a $5 winner cannot offset a $15 loser before the trail exits it). Compounds **down** as well
+as up. Buffer should be a **fixed ratio**, not fixed dollars: the stop is bot-side, not
+exchange-side, so the real exposure is the full notional, and the cushion must not thin as size
+grows. Note the two sub-account balances drift apart over time even with equal sizing — periodic
+manual rebalancing between them will eventually be needed.
 
 ## Operating notes
 
