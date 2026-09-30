@@ -2989,6 +2989,36 @@ async def t_cycle_barrier_prevents_the_naked_leg_pingpong():
           short_bot._cycle_gate_clear_to_enter() is True)
 
 
+async def t_cycle_barrier_clearance_survives_pressure_vanishing():
+    print("\n[cycle barrier: a granted clearance is honoured even if pressure disappears (naked-leg bug)]")
+    # Reproduces 2026-09-30 11:08:29 with real money. Both legs went flat, the barrier released
+    # them, the LONG entered -- then 0.3s later the SHORT re-checked the shared pressure reading,
+    # found K had drifted back inside 25-75, and threw away the clearance it already held. The
+    # long ran unhedged for 96 seconds. A clearance is the authorisation; it is not re-litigated.
+    hub = core.StochBot.new_cycle_hub(["worker2", "worker3"])
+    long_bot = make_bot(FakeExchange(), candles_kind="mid", worker_id="worker2")
+    short_bot = make_bot(FakeExchange(), candles_kind="mid", worker_id="worker3")
+    long_bot.cycle_hub = hub; short_bot.cycle_hub = hub
+    # Both want in: barrier releases both.
+    check("long not cleared alone", long_bot._cycle_gate_clear_to_enter(want=True) is False)
+    check("short completes the barrier", short_bot._cycle_gate_clear_to_enter(want=True) is True)
+    # Pressure now vanishes before the long consumes its clearance.
+    check("long STILL enters on its held clearance despite want=False",
+          long_bot._cycle_gate_clear_to_enter(want=False) is True)
+
+
+async def t_cycle_barrier_no_pressure_means_no_declaration():
+    print("\n[cycle barrier: without pressure a leg does not declare, so no cycle opens]")
+    hub = core.StochBot.new_cycle_hub(["worker2", "worker3"])
+    a = make_bot(FakeExchange(), candles_kind="mid", worker_id="worker2")
+    b = make_bot(FakeExchange(), candles_kind="mid", worker_id="worker3")
+    a.cycle_hub = hub; b.cycle_hub = hub
+    check("no pressure -> not cleared", a._cycle_gate_clear_to_enter(want=False) is False)
+    check("and nothing declared", "worker2" not in hub["ready"], hub["ready"])
+    check("partner alone still cannot open a cycle",
+          b._cycle_gate_clear_to_enter(want=True) is False)
+
+
 async def t_cycle_barrier_readiness_expires():
     print("\n[cycle barrier: a leg that stops wanting in releases its partner instead of stalling it]")
     hub = core.StochBot.new_cycle_hub(["worker2", "worker3"])
@@ -3392,6 +3422,8 @@ async def main():
               t_no_lock_configured_is_unchanged,
               t_cycle_barrier_releases_both_legs_together,
               t_cycle_barrier_prevents_the_naked_leg_pingpong,
+              t_cycle_barrier_clearance_survives_pressure_vanishing,
+              t_cycle_barrier_no_pressure_means_no_declaration,
               t_cycle_barrier_readiness_expires,
               t_cycle_barrier_withdraw_frees_the_partner,
               t_no_cycle_hub_falls_back_to_the_db_poll,

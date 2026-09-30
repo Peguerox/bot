@@ -2027,6 +2027,23 @@ function HedgeDualLegPanel({
   // Both legs of a real cycle are opened in the same tick, so a small tolerance is all that is
   // needed. Anything that fails to find a partner is a SOLO leg and is now shown as such rather
   // than hidden -- an unhedged leg is the single most important thing this panel can surface.
+  // Direct request: show % alongside $, because the live position pills are read in % and a
+  // cycle's $ figures are fractions of a cent on $10 legs. Per LEG this is the move against its
+  // own entry; for the cycle it is the net $ over the capital actually at risk that cycle, so the
+  // two legs' percentages stay comparable to what the open-position pills show.
+  const legPct = (t: any) =>
+    t == null || !t.avg_entry_price
+      ? null
+      : (t.side === "long"
+          ? (t.exit_price - t.avg_entry_price) / t.avg_entry_price
+          : (t.avg_entry_price - t.exit_price) / t.avg_entry_price) * 100;
+  const legNotional = (t: any) =>
+    t == null || !t.avg_entry_price ? 0 : t.avg_entry_price * (t.base_amount_btc ?? 0);
+  const cyclePct = (c: any) => {
+    const cap = legNotional(c.long) + legNotional(c.short);
+    return cap > 0 ? (c.netPnl / cap) * 100 : null;
+  };
+
   const PAIR_TOLERANCE_MS = 5000;
   const ms = (t: any) => new Date(t.opened_at).getTime();
   const byEntry = (a: any, b: any) => ms(a) - ms(b);
@@ -2179,9 +2196,15 @@ function HedgeDualLegPanel({
                     <span className="text-gray-400 truncate">
                       {c.long && c.short ? (
                         <>
-                          <span className="text-green-400">L·{shortReason(c.long.reason)}</span>
+                          <span className="text-green-400">
+                            L·{shortReason(c.long.reason)}
+                            <span className="text-gray-500"> {legPct(c.long)!.toFixed(3)}%</span>
+                          </span>
                           {" / "}
-                          <span className="text-amber-400">S·{shortReason(c.short.reason)}</span>
+                          <span className="text-amber-400">
+                            S·{shortReason(c.short.reason)}
+                            <span className="text-gray-500"> {legPct(c.short)!.toFixed(3)}%</span>
+                          </span>
                         </>
                       ) : (
                         // A leg with no partner means the hedge was not actually hedged for that
@@ -2196,8 +2219,13 @@ function HedgeDualLegPanel({
                         </>
                       )}
                     </span>
-                    <span className={`font-semibold shrink-0 ${c.netPnl >= 0 ? "text-green-400" : "text-red-400"}`}>
-                      {c.netPnl >= 0 ? "+" : ""}${c.netPnl.toFixed(3)}
+                    <span className={`font-semibold shrink-0 tabular-nums ${c.netPnl >= 0 ? "text-green-400" : "text-red-400"}`}>
+                      {cyclePct(c) != null && (
+                        <span className="mr-1.5">{cyclePct(c)! >= 0 ? "+" : ""}{cyclePct(c)!.toFixed(3)}%</span>
+                      )}
+                      <span className="text-[10px] opacity-70">
+                        {c.netPnl >= 0 ? "+" : ""}${c.netPnl.toFixed(3)}
+                      </span>
                     </span>
                   </div>
                 );

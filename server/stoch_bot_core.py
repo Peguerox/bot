@@ -1723,7 +1723,7 @@ class StochBot:
         and handed to every leg -- see _cycle_gate_clear_to_enter."""
         return {"members": set(worker_ids), "ready": {}, "cleared": {}}
 
-    def _cycle_gate_clear_to_enter(self, now=None):
+    def _cycle_gate_clear_to_enter(self, want=True, now=None):
         """True if this leg may open a position RIGHT NOW as part of a synchronised cycle.
 
         Replaces the old cycle_partner_table DB poll for any bot wired into a shared hub, and this
@@ -1751,7 +1751,17 @@ class StochBot:
         Deliberately has no "give up and enter alone" timeout: for a hedge, a lone leg is not a
         degraded cycle, it is a different (directional) strategy. Waiting forever is the safe
         failure, and it cannot strand anything permanently in practice, because both legs live or
-        die with the same process."""
+        die with the same process.
+
+        `want` is whether this leg wants a NEW cycle right now (i.e. its own
+        preconditions, such as the pressure gate, currently hold). It only affects
+        whether readiness is DECLARED. A clearance already granted is honoured
+        regardless -- proven necessary 2026-09-30 with real money: the barrier released
+        both legs, the long entered, and 0.3s later the short re-evaluated the shared
+        pressure reading, found K had drifted back inside the band, and discarded a
+        clearance it had ALREADY been given. The long then ran alone for 96 seconds.
+        Once the barrier says a cycle is go, both legs go; re-litigating the entry
+        condition per-leg after the fact is exactly how one leg ends up naked."""
         hub = self.cycle_hub
         if hub is None:
             return None  # no barrier wired -- caller falls back to the DB partner check
@@ -1765,6 +1775,11 @@ class StochBot:
         if wid in hub["cleared"]:
             del hub["cleared"][wid]
             return True
+        if not want:
+            # Not asking for a cycle this tick -- drop any stale readiness so the partner is not
+            # left waiting on a declaration we no longer mean.
+            hub["ready"].pop(wid, None)
+            return False
         hub["ready"][wid] = now
         if hub["members"].issubset(hub["ready"].keys()):
             # Everyone is ready at the same instant: release them all together, then consume our
@@ -4035,8 +4050,11 @@ class StochBot:
                 # Everything that could still stop this entry is resolved BEFORE asking the cycle
                 # barrier, so a leg never declares itself ready for a cycle it then declines to
                 # join -- that would hold its partner up for nothing.
+                # Split deliberately. `wants_in` is the set of conditions that must hold to place
+                # an order AT ALL (they are about this process's own safety). The pressure gate is
+                # different: it decides whether to ASK for a new cycle, and must NOT be re-checked
+                # once the barrier has already cleared this leg -- see _cycle_gate_clear_to_enter.
                 wants_in = (effective_signal is not None and state.get("enabled") and holds_lock
-                            and self._has_entry_pressure()
                             # Never send a second entry while a previous one's fate is unknown.
                             and not self._entry_outcome_unknown)
                 partner_flat = True
@@ -4044,8 +4062,11 @@ class StochBot:
                     # In-process barrier when one is wired (the hedge); it supersedes the DB poll
                     # entirely rather than layering on top -- see _cycle_gate_clear_to_enter for
                     # why the poll alone let the legs desync into naked single-leg trades.
-                    gate = self._cycle_gate_clear_to_enter()
-                    partner_flat = await self._partner_is_flat() if gate is None else gate
+                    gate = self._cycle_gate_clear_to_enter(want=self._has_entry_pressure())
+                    partner_flat = (await self._partner_is_flat() if gate is None else gate)
+                elif wants_in:
+                    # No cycle partner: the pressure gate is simply this leg's own entry condition.
+                    wants_in = self._has_entry_pressure()
                 if not wants_in:
                     self._cycle_gate_withdraw()
                 if cfg.debug_verbose_tick:
