@@ -163,6 +163,14 @@ SHORT_CONFIG = BotConfig(
 async def main():
     long_bot = StochBot(LONG_CONFIG)
     short_bot = StochBot(SHORT_CONFIG)
+    # 2026-09-29, real concern raised ("you don't need two signals for each leg... they're
+    # gonna go different ways"): each leg fetches its own candles independently, so two
+    # isolated pressure-bias reads could disagree. Sharing this one dict between both bots'
+    # _pressure_signal_hub makes them merge toward whichever candle is actually newer and both
+    # act on that single agreed value -- see _pressure_biased_leg_usd's docstring.
+    shared_pressure_hub = {"signal": None, "ts": None}
+    long_bot.pressure_signal_hub = shared_pressure_hub
+    short_bot.pressure_signal_hub = shared_pressure_hub
     await asyncio.gather(
         long_bot.run(),  # default credentials: this service's own LIGHTER_* env vars
         short_bot.run(

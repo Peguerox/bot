@@ -981,6 +981,11 @@ class StochBot:
         self._live_signal_persist_ts = 0.0
         self._min_vol_persist_ts = 0.0
         self._entry_confirmation_persist_ts = 0.0
+        # Optional shared dict, set externally (never by this class itself) when this bot is
+        # one leg of a multi-leg hedge -- see _pressure_biased_leg_usd's docstring and
+        # lighter_hedge_dual_leg.py's main(). None (default): pressure bias, if enabled, uses
+        # this bot's own compute_stoch_signal() reading in isolation, same as any standalone bot.
+        self.pressure_signal_hub = None
         self._burned_signal = None  # see BotConfig.red_exit_burns_signal
         # See BotConfig.profit_lock_burn_k_gate's docstring. _burned_signal_via distinguishes a
         # profit-lock-sourced burn (eligible for the K-reclaim early-clear) from a loss-sourced
@@ -1600,11 +1605,31 @@ class StochBot:
         candle history for compute_stoch_signal to return a K at all (None, None, None) --
         fails toward the flat baseline size, never toward a guess. pressure_bias_min_usd is a
         floor, not a target -- it only ever prevents the DOWN tilt from reaching zero/negative;
-        it never limits the UP tilt."""
+        it never limits the UP tilt.
+
+        2026-09-29 correction (real concern raised: "you don't need two signals for each leg...
+        they're gonna go different ways"): each leg is its own StochBot instance with its own
+        independently-fetched candle stream, so two isolated compute_stoch_signal() reads could
+        disagree at the exact moment either leg enters (candle-fetch timing jitter between two
+        separate REST polls of the same market) -- both legs could then size UP together, or
+        both DOWN together, instead of the intended one-up/one-down complementary tilt. When
+        pressure_signal_hub is set (both legs of a hedge share ONE dict, wired in
+        lighter_hedge_dual_leg.py's main()), this still computes its OWN reading -- needed to
+        even have a candidate -- but merges it into the shared hub keyed by whichever candle
+        timestamp is actually newer, then uses THAT merged value, not its own local one. Both
+        legs therefore always agree on which single reading currently governs, even though each
+        still polls candles independently; the only degradation is at worst one leg using the
+        other's slightly newer read for that one entry, never a disagreement."""
         cfg = self.cfg
         if not cfg.pressure_bias_enabled or cfg.fixed_direction is None:
             return base_usd
-        entry_signal, _, _ = self.compute_stoch_signal()
+        entry_signal, _, ts = self.compute_stoch_signal()
+        hub = self.pressure_signal_hub
+        if hub is not None:
+            if ts is not None and (hub.get("ts") is None or ts >= hub["ts"]):
+                hub["signal"] = entry_signal
+                hub["ts"] = ts
+            entry_signal = hub.get("signal")
         if entry_signal == cfg.fixed_direction:
             return base_usd + cfg.pressure_bias_usd
         if entry_signal is not None:

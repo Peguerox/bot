@@ -2392,6 +2392,31 @@ async def t_pressure_bias_noop_when_signal_neutral():
           8.0 < notional < 12.0, notional)
 
 
+async def t_pressure_bias_shared_hub_overrides_disagreeing_local_reading():
+    print("\n[pressure_bias: pressure_signal_hub forces agreement even if this leg's own candles disagree]")
+    entry = 86000.0
+    ex = FakeExchange(collateral=1000.0)
+    state = {
+        "id": 1, "side": None, "legs": [], "first_entry_price": None, "first_entry_time": None,
+        "dca_level": 0, "seed_usd": 1000.0, "realized_pnl_usd": 0.0,
+        "collateral_before_entry": None, "enabled": True,
+        "consecutive_entry_failures": 0, "last_processed_candle_ts": 0,
+    }
+    # This leg's OWN candles read "long" (K near 0) -- in isolation it would bias UP (matches
+    # its own fixed_direction="long"). But the shared hub already holds a NEWER "short" reading
+    # (as if the other leg's candle stream saw fresher data) -- the hub must win.
+    bot = make_bot(ex, state=state, candles_kind="long", fixed_direction="long",
+                   fixed_leg_usd=10.0, sl_pct=0.03, tp_pct=0.10, disable_literal_tp=True,
+                   require_fresh_signal=False, self_lock_enabled=False, use_joint_adaptive=False,
+                   pressure_bias_enabled=True, pressure_bias_usd=5.0, pressure_bias_min_usd=1.0)
+    bot.pressure_signal_hub = {"signal": "short", "ts": 9_999_999_999_999}  # far in the future (ms epoch)
+    await bot.tick()
+    check("entered long", bot.state_row["side"] == "long", bot.state_row["side"])
+    notional = entry * core.total_qty(bot.state_row["legs"])
+    check(f"order sized DOWN to ~$5 per the hub's 'short' reading, not UP per its own candles (actual ${notional:.2f})",
+          3.0 < notional < 7.0, notional)
+
+
 async def main():
     for t in (t_normal_entry, t_phantom_double_fill, t_nonce_error_but_filled,
               t_order_error_no_fill, t_circuit_breaker, t_close_uses_real_size,
@@ -2502,7 +2527,8 @@ async def main():
               t_pressure_bias_decreases_leg_usd_when_signal_favors_other_direction,
               t_pressure_bias_floor_prevents_negative_or_zero_sizing,
               t_pressure_bias_noop_when_disabled,
-              t_pressure_bias_noop_when_signal_neutral):
+              t_pressure_bias_noop_when_signal_neutral,
+              t_pressure_bias_shared_hub_overrides_disagreeing_local_reading):
         try:
             await t()
         except Exception as e:
