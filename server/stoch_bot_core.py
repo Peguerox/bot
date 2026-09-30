@@ -41,6 +41,7 @@ import math
 import os
 import sys
 import time
+import uuid
 import json as jsonlib
 from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
@@ -60,6 +61,19 @@ SB_TIMEOUT = 10.0         # per Supabase call
 TICK_WATCHDOG = 180.0     # hard ceiling on one tick before it is cancelled
 WS_RECONNECT_AFTER = 45.0 # order book silence that forces a WS reconnect
 HEARTBEAT_EVERY = 300.0   # liveness row, so "is it stuck?" is a single query
+# Single-instance lock (2026-09-30). Render does NOT stop the old container before starting the
+# new one, so on every deploy two copies of a worker are alive together for ~30-60s and both can
+# independently decide to place a real entry -- the "zombie double-entry" incident. A process only
+# takes real entries while it holds the lock on its own state row.
+#
+# LOCK_REFRESH_EVERY is deliberately its OWN timer and not HEARTBEAT_EVERY (300s): a stale
+# threshold has to sit above the refresh interval, and hanging the lock off the 5-minute heartbeat
+# would mean a dead instance kept the lock for over 5 minutes -- long enough for a deploy to be
+# fully unable to trade. CLAUDE.md records a real crash-loop from setting these too CLOSE together
+# (every fresh instance saw the just-killed one's heartbeat as still fresh and refused to start),
+# so the ratio here is deliberately wide: refresh 4x more often than the staleness limit.
+LOCK_REFRESH_EVERY = 5.0
+LOCK_STALE_AFTER = 20.0
 POSITION_TTL = 3.0        # cache the REST position read this long (~0.33 req/s, vs the
                           # 6 req/s polling that caused the original rate-limit storm)
 AUTH_TOKEN_LIFETIME_S = 10 * 60  # SDK's create_auth_token_with_expiry default validity
@@ -402,6 +416,37 @@ class BotConfig:
     # red_exit_burns_signal.
     profit_lock_burns_signal: bool = False
     schema_has_profit_lock: bool = False  # requires the profit_lock_peak_pct column migration
+    # Breakeven floor (2026-09-30, direct request): for a HEDGE leg only -- once this leg's
+    # cycle partner (cycle_partner_table) has closed its own position at a LOSS, this leg's
+    # profit must never be allowed to slide back below the level that makes the cycle as a whole
+    # break even. Exits with reason "BREAKEVEN_LOCK".
+    #
+    # Why it exists: the hedge enters both directions at once and cuts the loser at sl_pct, so
+    # the cycle's result is (winner's gain - loser's fixed loss). With only profit_lock_trail_pct
+    # protecting the winner, a winner that peaked just under profit_lock_trigger_pct had NO
+    # protection at all until its own SL -- so a cycle could end with the loser stopped out and
+    # the winner also stopped out, two losses from one cycle. The floor closes that gap from the
+    # other direction: the moment the loser is banked, the winner has a hard "at least even"
+    # exit level.
+    #
+    # Derived from realized DOLLARS, never a hardcoded percentage: pressure_bias_enabled can size
+    # the two legs unequally ($15 vs $5), and +0.03% on a $5 winner does NOT offset -0.03% on a
+    # $15 loser (that needs +0.09%). floor_pct = 100 * (-partner_cycle_pnl) / own_notional_usd.
+    # With equal $10 legs this lands on ~= sl_pct, which is the intuitive version of the rule.
+    #
+    # Only arms after this leg has actually traded AT or above the floor -- otherwise a leg that
+    # is already below breakeven when the partner closes would be exited instantly, booking a
+    # worse result than just letting its own SL run. Fails safe in every other direction too: no
+    # partner configured, partner never opened, or partner closed green => no floor, and the leg
+    # runs on profit_lock/SL exactly as before. Requires cycle_partner_table.
+    breakeven_floor_enabled: bool = False
+    # requires the cycle_partner_pnl_baseline column migration -- persistence only, the
+    # in-process copy is authoritative (same arrangement as profit_lock_peak_pct)
+    schema_has_breakeven_floor: bool = False
+    # Single-instance lock (2026-09-30) -- see LOCK_REFRESH_EVERY/LOCK_STALE_AFTER and
+    # _acquire_instance_lock. Requires the lock_owner/lock_heartbeat column migration. False
+    # (default) leaves every bot that hasn't had that migration run behaving exactly as before.
+    single_instance_lock: bool = False
     # Mirror-paper fallback (2026-09-27): if real is flat, unlocked, and enabled, but has no
     # live entry_signal this tick while the paper shadow already holds a position, real enters
     # to match paper's side directly instead of waiting for its own fresh signal. See the
@@ -958,6 +1003,33 @@ class StochBot:
         # a requirement for correctness within one continuous run.
         self.profit_lock_peak_pct = None
         self._profit_lock_restored = False
+        # Breakeven floor (see BotConfig.breakeven_floor_enabled). Same arrangement as the
+        # profit-lock trail: in-process state is authoritative, the DB column only exists so a
+        # Render restart mid-position doesn't lose the baseline.
+        #   _breakeven_baseline      partner's CUMULATIVE realized pnl as of our own entry, so
+        #                            (partner_realized_now - baseline) is its pnl for THIS cycle
+        #   _breakeven_partner_seen  the partner was observed holding a position at some point
+        #                            during our position's life -- stops a partner that simply
+        #                            hasn't entered yet from reading as "already closed flat"
+        #   _breakeven_floor_pct     the computed floor, cached once the partner is flat (its
+        #                            realized pnl is final at that point, so this cannot move)
+        #   _breakeven_reached       we have actually traded at or above the floor, so exiting at
+        #                            it is genuinely locking in breakeven rather than forcing a
+        #                            worse-than-SL exit on a leg that was never that far ahead
+        self._breakeven_baseline = None
+        self._breakeven_partner_seen = False
+        self._breakeven_floor_pct = None
+        self._breakeven_reached = False
+        self._breakeven_restored = False
+        self._breakeven_partner_read_at = 0.0
+        # Single-instance lock. The id is per-LEG, not per-process: the hedge bot runs two legs in
+        # one process and they lock two DIFFERENT rows, so sharing one id would make "who holds
+        # this?" ambiguous in the logs for no benefit.
+        self._lock_id = f"{uuid.uuid4().hex[:12]}:{cfg.worker_id}"
+        self._lock_held = False
+        self._lock_refreshed_at = 0.0   # last SUCCESSFUL claim/refresh
+        self._lock_checked_at = 0.0     # last attempt of any kind (throttle)
+        self._lock_blocked_logged = False
         # Paper shadow's own copy of the same trail -- without this, real could exit early via
         # PROFIT_LOCK while paper (running the identical signal) kept holding, making the two
         # visibly diverge even while real is unlocked and trading the exact same thing paper is.
@@ -1603,6 +1675,143 @@ class StochBot:
         except Exception:
             return False
 
+    async def _acquire_instance_lock(self):
+        """Take (or renew) this leg's single-instance lock. Returns True if we hold it.
+
+        The lock is won only when the row shows one of: no owner, us already, or an owner whose
+        heartbeat is older than LOCK_STALE_AFTER. Otherwise another live instance is trading this
+        sub-account and we must not.
+
+        Fails CLOSED (returns False) on a read/write error. This gates only new ENTRIES -- see the
+        call site -- so a bad Supabase read costs at most a missed entry, never an unmanaged
+        position. Erring the other way would reintroduce exactly the double-entry this prevents.
+
+        Not a true atomic compare-and-swap: PostgREST can express the guard as part of the PATCH
+        filter, which is what the `or=` below does -- the UPDATE only matches the row if it is
+        still claimable at write time, and `return=representation` tells us whether it matched.
+        Two instances racing therefore cannot both succeed, because only one PATCH can find the
+        row in a claimable state."""
+        cfg = self.cfg
+        if not cfg.single_instance_lock:
+            return True
+        now = time.time()
+        # Throttle EVERY attempt, not just successful refreshes. Gating this on _lock_held would
+        # leave the not-holding path retrying on every 0.5s tick -- 2 writes/s per leg, both while
+        # locked out by a live zombie and (worse) forever if the lock_heartbeat migration hasn't
+        # been run yet. Returning the last known answer costs at most LOCK_REFRESH_EVERY of delay
+        # before this instance picks the lock up.
+        if now - self._lock_checked_at < LOCK_REFRESH_EVERY:
+            return self._lock_held
+        self._lock_checked_at = now
+        stale_before = datetime.now(timezone.utc) - timedelta(seconds=LOCK_STALE_AFTER)
+        # `Z` rather than isoformat()'s "+00:00": this goes into a URL QUERY STRING, where a literal
+        # `+` decodes to a space and would corrupt the timestamp PostgREST parses.
+        stale_iso = stale_before.isoformat().replace("+00:00", "Z")
+        # Claimable if: unowned, already ours, or the current owner has gone quiet. The
+        # heartbeat.is.null arm matters -- `lt` never matches NULL, so an owner row with no
+        # heartbeat (a partially-applied release, or a hand edit) would otherwise be unclaimable
+        # forever and permanently stop this leg from trading.
+        guard = (f"or=(lock_owner.is.null,"
+                 f"lock_heartbeat.is.null,"
+                 f"lock_owner.eq.{self._lock_id},"
+                 f"lock_heartbeat.lt.{stale_iso})")
+        try:
+            rows = await self.sb(
+                "PATCH", f"{cfg.table_state}?id=eq.1&{guard}",
+                {"lock_owner": self._lock_id,
+                 "lock_heartbeat": datetime.now(timezone.utc).isoformat()})  # body: JSON, + is fine
+        except Exception as e:
+            was_held = self._lock_held
+            self._lock_held = False
+            if was_held:
+                await self.log_run("instance_lock_refresh_failed", {"error": str(e)[:200]})
+            return False
+        if rows:
+            if not self._lock_held:
+                await self.log_run("instance_lock_acquired", {"lock_id": self._lock_id})
+            self._lock_held = True
+            self._lock_refreshed_at = now
+            self._lock_blocked_logged = False
+            return True
+        # No row matched -- somebody else holds a fresh lock.
+        self._lock_held = False
+        if not self._lock_blocked_logged:
+            self._lock_blocked_logged = True
+            try:
+                cur = await self.sb("GET", f"{cfg.table_state}?select=lock_owner&id=eq.1")
+                holder = cur[0].get("lock_owner") if cur else None
+            except Exception:
+                holder = None
+            await self.log_run("instance_lock_busy",
+                               {"lock_id": self._lock_id, "held_by": holder})
+        return False
+
+    async def _release_instance_lock(self):
+        """Best-effort release on a clean shutdown, so a redeploy's new instance can start trading
+        immediately instead of waiting out LOCK_STALE_AFTER. Never raises: if this fails the lock
+        just goes stale on its own, which is the whole point of having a staleness timeout."""
+        if not self.cfg.single_instance_lock or not self._lock_held:
+            return
+        self._lock_held = False
+        with contextlib.suppress(BaseException):
+            await self.sb(
+                "PATCH", f"{self.cfg.table_state}?id=eq.1&lock_owner=eq.{self._lock_id}",
+                {"lock_owner": None, "lock_heartbeat": None})
+
+    async def _read_partner_cycle_pnl(self):
+        """(partner_side, partner_cycle_pnl) for the breakeven floor, or (None, None) on any
+        failure. partner_cycle_pnl is the partner's realized pnl for THIS cycle only -- its
+        cumulative realized_pnl_usd now, minus the baseline snapshotted at our own entry.
+
+        Fails SOFT (returns Nones), the opposite of _partner_is_flat's fail-closed: this only ever
+        ADDS an exit, so not knowing the partner's state must leave the position running on its
+        ordinary profit-lock/SL protection rather than forcing a close on a bad read.
+
+        Throttled to at most one read per second. The caller polls this from inside an open
+        position, i.e. potentially every 0.5s tick -- unthrottled that would double this leg's
+        Supabase read rate for the whole life of every position."""
+        cfg = self.cfg
+        if cfg.cycle_partner_table is None or self._breakeven_baseline is None:
+            return None, None
+        now = time.time()
+        if now - self._breakeven_partner_read_at < 1.0:
+            return None, None
+        self._breakeven_partner_read_at = now
+        try:
+            rows = await self.sb(
+                "GET", f"{cfg.cycle_partner_table}?select=side,realized_pnl_usd&id=eq.1")
+            if not rows:
+                return None, None
+            side = rows[0].get("side")
+            realized = rows[0].get("realized_pnl_usd")
+            if realized is None:
+                return side, None
+            return side, float(realized) - self._breakeven_baseline
+        except Exception:
+            return None, None
+
+    def _reset_breakeven_floor(self):
+        """Clear all per-cycle breakeven state. Called everywhere a position goes flat -- the
+        baseline, the floor and the 'partner was seen open' observation are all meaningful only
+        for the position that was open when they were recorded."""
+        self._breakeven_baseline = None
+        self._breakeven_partner_seen = False
+        self._breakeven_floor_pct = None
+        self._breakeven_reached = False
+        self._breakeven_partner_read_at = 0.0
+
+    @staticmethod
+    def breakeven_floor_pct(partner_cycle_pnl, own_notional_usd):
+        """The unrealized % at which this leg exactly cancels the partner's realized loss for the
+        cycle. None when there is nothing to offset (partner flat/green) or no notional to divide
+        by. Pure function, so the unequal-sizing arithmetic is directly testable:
+        a $5 leg offsetting a $15 leg's -0.03% ($0.0045) needs +0.09%."""
+        if partner_cycle_pnl is None or partner_cycle_pnl >= 0:
+            return None
+        if not own_notional_usd or own_notional_usd <= 0:
+            return None
+        return 100.0 * (-partner_cycle_pnl) / own_notional_usd
+
     def _pressure_biased_leg_usd(self, base_usd):
         """See BotConfig.pressure_bias_enabled's docstring. No-op (returns base_usd unchanged)
         unless both pressure_bias_enabled and fixed_direction are set, or there isn't yet enough
@@ -1624,12 +1833,16 @@ class StochBot:
         if not cfg.pressure_bias_enabled or cfg.fixed_direction is None:
             return base_usd
         hub = self.pressure_signal_hub
-        if hub is not None and not cfg.pressure_signal_owner:
+        if hub is not None:
+            # Pure read for BOTH legs now. The owner leg publishes into the hub every tick from
+            # tick() itself (see the pressure_signal_owner block there), so by the time either leg
+            # reaches an entry the hub already holds the current reading -- no leg needs to compute
+            # anything here, and there is no ordering dependency between the two legs left.
             entry_signal = hub.get("signal")
         else:
+            # No hub wired: a standalone bot with pressure_bias_enabled sizes off its own reading,
+            # exactly as before.
             entry_signal, _, _ = self.compute_stoch_signal()
-            if hub is not None:
-                hub["signal"] = entry_signal
         if entry_signal == cfg.fixed_direction:
             return base_usd + cfg.pressure_bias_usd
         if entry_signal is not None:
@@ -2011,6 +2224,12 @@ class StochBot:
                 await self.update_state({"profit_lock_peak_pct": None})
             except Exception:
                 pass
+        self._reset_breakeven_floor()
+        if self.cfg.schema_has_breakeven_floor:
+            try:
+                await self.update_state({"cycle_partner_pnl_baseline": None})
+            except Exception:
+                pass
         self.position_blank_seconds = None
         if self.cfg.schema_has_joint_adaptive:
             try:
@@ -2111,6 +2330,28 @@ class StochBot:
         await self.update_state(patch)
         entry_detail = {"signal": signal, "price": price, "via": via,
                         "qty": abs(pos), "regime": regime}
+        if cfg.breakeven_floor_enabled and cfg.cycle_partner_table is not None:
+            # Snapshot the partner's CUMULATIVE realized pnl now, so its pnl for this cycle can be
+            # isolated later as (realized_now - baseline). Taken after the critical patch, and
+            # isolated the same way position_blank_seconds is: a failure here must never leave a
+            # real filled position untracked. Read ordering against the partner's own entry does
+            # not matter -- realized_pnl_usd only moves when a position CLOSES, so it is identical
+            # whether the partner has already entered this cycle or is about to.
+            self._reset_breakeven_floor()
+            try:
+                rows = await self.sb(
+                    "GET", f"{cfg.cycle_partner_table}?select=realized_pnl_usd&id=eq.1")
+                if rows and rows[0].get("realized_pnl_usd") is not None:
+                    self._breakeven_baseline = float(rows[0]["realized_pnl_usd"])
+                    entry_detail["partner_pnl_baseline"] = self._breakeven_baseline
+            except Exception as e:
+                await self.log_run("breakeven_baseline_read_failed", {"error": str(e)[:200]})
+            if cfg.schema_has_breakeven_floor:
+                try:
+                    await self.update_state(
+                        {"cycle_partner_pnl_baseline": self._breakeven_baseline})
+                except Exception:
+                    pass  # best-effort only -- the in-process copy above is authoritative
         if regime == "joint_adaptive" and cfg.schema_has_joint_adaptive:
             try:
                 await self.update_state({"position_blank_seconds": self.position_blank_seconds})
@@ -2190,6 +2431,12 @@ class StochBot:
         if self.cfg.schema_has_profit_lock:
             try:
                 await self.update_state({"profit_lock_peak_pct": None})
+            except Exception:
+                pass
+        self._reset_breakeven_floor()
+        if self.cfg.schema_has_breakeven_floor:
+            try:
+                await self.update_state({"cycle_partner_pnl_baseline": None})
             except Exception:
                 pass
         self.position_blank_seconds = None
@@ -2871,6 +3118,12 @@ class StochBot:
         state = await self.get_state()
         if cfg.debug_verbose_tick:
             print(f"[{cfg.worker_id}] tick: got_state side={state.get('side')} enabled={state.get('enabled')}", flush=True)
+        # Renew/claim the single-instance lock once per tick (self-throttled to LOCK_REFRESH_EVERY,
+        # so this is ~0.2 writes/s, not one per tick). Done up here, before the close_requested and
+        # disabled-and-flat branches below, so a paused-but-alive instance keeps OWNING its row --
+        # otherwise its lock would go stale and a zombie from an earlier deploy could claim it.
+        # The result only ever gates new entries; every exit path below runs regardless.
+        holds_lock = await self._acquire_instance_lock()
 
         if cfg.self_lock_enabled and cfg.self_lock_relocks_on_boot:
             # Covers the one gap _load_self_lock_state's own boot-time re-lock can't: the user
@@ -2950,7 +3203,16 @@ class StochBot:
             # computes its own, same as the sizing decision, so the dashboard only ever shows
             # the one signal actually governing both legs.
             if cfg.pressure_bias_enabled and cfg.pressure_signal_owner:
-                self.compute_stoch_signal()
+                owner_signal, _, _ = self.compute_stoch_signal()
+                # 2026-09-30, fixing a real race: publish EVERY tick, not only at this leg's own
+                # entry moment. The two legs are independent asyncio tasks on their own 0.5s tick
+                # loops, and the hub used to be written solely inside _pressure_biased_leg_usd --
+                # i.e. only when the owner was itself about to enter. Whichever leg reached its
+                # entry code first therefore won a race, and when the follower got there first it
+                # sized off the PREVIOUS cycle's signal (or None, right after boot). Publishing
+                # here means the follower always reads a reading at most one tick old.
+                if self.pressure_signal_hub is not None:
+                    self.pressure_signal_hub["signal"] = owner_signal
         elif cfg.use_joint_adaptive:
             entry_signal, reversal_signal, candle_ts = self.compute_joint_adaptive_signal()
         elif cfg.use_adaptive_window:
@@ -3194,6 +3456,12 @@ class StochBot:
                     await self.update_state({"profit_lock_peak_pct": None})
                 except Exception:
                     pass
+            self._reset_breakeven_floor()
+            if cfg.schema_has_breakeven_floor:
+                try:
+                    await self.update_state({"cycle_partner_pnl_baseline": None})
+                except Exception:
+                    pass
             self.position_blank_seconds = None
             if cfg.schema_has_joint_adaptive:
                 try:
@@ -3272,8 +3540,20 @@ class StochBot:
             # Each position keeps the TP/SL it was actually entered with (fade vs trend
             # can differ) -- falls back to the bot's default when nothing was recorded
             # (plain fade-only bots, or a position adopted from an unknown origin).
-            pos_tp = state.get("position_tp_pct")
-            pos_sl = state.get("position_sl_pct")
+            #
+            # Gated on schema_has_position_bands exactly like every WRITE to these two columns
+            # is (see the patches in try_enter/close_all/the external-resolve path). Proven
+            # necessary 2026-09-30, real money: the hedge legs leave that flag False, so they
+            # never write these columns -- but this read had no such guard, so the SHORT leg kept
+            # honouring position_sl_pct=0.0909 left behind in lighter_stoch_dca_btc_state by the
+            # retired Worker 3 joint-adaptive strategy that owned the table before the hedge
+            # pivot. Its real stop was 3x wider than the configured 0.03%, which is exactly the
+            # reported "the winning leg closes and we stay with the bad leg": price up meant the
+            # long trailed out for ~+0.02% while the short bled to -0.0909%. A bot that never
+            # writes these columns must never read them.
+            bands = cfg.schema_has_position_bands
+            pos_tp = state.get("position_tp_pct") if bands else None
+            pos_sl = state.get("position_sl_pct") if bands else None
             pos_tp = pos_tp if pos_tp is not None else cfg.tp_pct
             pos_sl = pos_sl if pos_sl is not None else cfg.sl_pct
             tp = round_trigger(ae * (1 + pos_tp / 100 if side == "long" else 1 - pos_tp / 100),
@@ -3321,6 +3601,56 @@ class StochBot:
                             await self.update_state({"profit_lock_peak_pct": new_peak})
                         except Exception:
                             pass  # best-effort only -- in-memory tracking above is authoritative
+
+            if gap_hit is None and cfg.breakeven_floor_enabled and ae:
+                # Breakeven floor -- see BotConfig.breakeven_floor_enabled. Checked AFTER the
+                # profit-lock trail so that whichever protects more fires first: above
+                # profit_lock_trigger_pct the trail normally stops a slide well before it ever
+                # reaches the floor, and between the floor and the trigger this is the only
+                # protection there is.
+                if not self._breakeven_restored:
+                    self._breakeven_restored = True
+                    if self._breakeven_baseline is None:
+                        persisted = state.get("cycle_partner_pnl_baseline")
+                        if persisted is not None:
+                            # Restart mid-position: recover the baseline so the floor survives the
+                            # deploy that killed us. Safe to read even without the migration.
+                            self._breakeven_baseline = float(persisted)
+                unrealized_pct = (100 * (check_price - ae) / ae if side == "long"
+                                  else 100 * (ae - check_price) / ae)
+                if self._breakeven_floor_pct is None:
+                    partner_side, partner_cycle_pnl = await self._read_partner_cycle_pnl()
+                    if partner_side is not None:
+                        self._breakeven_partner_seen = True
+                    elif partner_cycle_pnl:
+                        # Partner is flat AND its realized pnl has moved since our entry, so it
+                        # closed a position during our position's life and its contribution to
+                        # this cycle is final -- the floor can be fixed for good.
+                        #
+                        # Deliberately keyed on the pnl DELTA rather than on having caught the
+                        # partner mid-position in _breakeven_partner_seen: the partner read is
+                        # throttled to 1/s, so a partner that opens and hits its own 0.03% SL
+                        # between two of our polls would never be observed open at all, and a
+                        # seen-gate would silently skip the floor on exactly the fast cycles it is
+                        # most needed for. A moved baseline is strictly better evidence anyway --
+                        # realized_pnl_usd only changes when a position closes.
+                        floor = self.breakeven_floor_pct(
+                            partner_cycle_pnl, total_qty(legs) * ae if legs else None)
+                        if floor is not None:
+                            self._breakeven_floor_pct = floor
+                            await self.log_run("breakeven_floor_armed", {
+                                "floor_pct": round(floor, 5),
+                                "partner_cycle_pnl": partner_cycle_pnl,
+                                "own_notional_usd": round(total_qty(legs) * ae, 4),
+                            })
+                floor_pct = self._breakeven_floor_pct
+                if floor_pct is not None:
+                    if unrealized_pct >= floor_pct:
+                        # Only once we have genuinely been at or above the floor does exiting AT
+                        # it lock in breakeven rather than force a premature loss.
+                        self._breakeven_reached = True
+                    elif self._breakeven_reached:
+                        gap_hit = "BREAKEVEN_LOCK"
 
             if (cfg.use_joint_adaptive and cfg.stoch_turn_exit_enabled
                     and cfg.schema_has_joint_checkpoint and not self._position_stoch_restored):
@@ -3437,6 +3767,11 @@ class StochBot:
                 eq = self._pressure_biased_leg_usd(eq)
                 if not fresh.get("enabled"):
                     return
+                if not holds_lock:
+                    # Another live instance owns this row. The close leg of the reversal already
+                    # ran above (exits are never gated on the lock); only the REOPEN is blocked.
+                    await self.update_state({"last_processed_candle_ts": candle_ts})
+                    return
                 if fail_count >= 3:
                     await self.log_run("entry_circuit_breaker",
                                        {"signal": reversal_signal, "fail_count": fail_count,
@@ -3507,7 +3842,8 @@ class StochBot:
                     partner_flat = await self._partner_is_flat()
                 if cfg.debug_verbose_tick:
                     print(f"[{cfg.worker_id}] tick: effective_signal={effective_signal} enabled={state.get('enabled')} partner_flat={partner_flat}", flush=True)
-                if effective_signal is not None and state.get("enabled") and partner_flat:
+                if (effective_signal is not None and state.get("enabled") and partner_flat
+                        and holds_lock):
                     fail_count = state.get("consecutive_entry_failures", 0) or 0
                     if fail_count >= 3:
                         # Hard stop rather than another retry -- unbounded retries are what
@@ -3591,6 +3927,13 @@ class StochBot:
                                        "window": cfg.stoch_window, "tp": cfg.tp_pct,
                                        "sl": cfg.sl_pct, "er": cfg.er_period})
         self.last_heartbeat = time.time()
+        if cfg.single_instance_lock:
+            # Try once up front purely so the log says which instance owns this row from the very
+            # first line. Not fatal if it fails -- tick() re-checks before every entry anyway, and
+            # a fresh instance during a redeploy is EXPECTED to be locked out until the dying one's
+            # heartbeat goes stale. Refusing to boot here instead would turn every deploy into a
+            # crash-loop, which is the failure CLAUDE.md already records from a too-tight lock.
+            await self._acquire_instance_lock()
 
         consecutive_errors = 0
         try:
@@ -3622,6 +3965,7 @@ class StochBot:
                     backoff = tick_error_backoff_seconds(consecutive_errors)
                     await asyncio.sleep(backoff)
         finally:
+            await self._release_instance_lock()
             ws_task.cancel()
             candle_task.cancel()
             tick_log_task.cancel()

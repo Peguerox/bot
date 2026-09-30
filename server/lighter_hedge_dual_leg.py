@@ -21,6 +21,23 @@ unless its partner's own `side` is also currently null. Verified with dedicated 
 (t_cycle_partner_gate_blocks_entry_until_partner_also_flat,
 t_cycle_partner_gate_fails_closed_on_read_error in test_core.py) before trusting it live.
 
+2026-09-30, audit of this file after "worker 2 is the main issue": two independent bugs were
+each making a cycle net-negative no matter the win rate, and both are fixed.
+  1. The SHORT leg's real stop was 0.0909%, not the configured 0.03%. stoch_bot_core.py read
+     position_sl_pct off the state row unguarded, while every WRITE to that column is gated behind
+     schema_has_position_bands (False here) -- so the leg honoured a value left in
+     lighter_stoch_dca_btc_state by the retired Worker 3 joint-adaptive strategy that owned the
+     table before this pivot. Price up therefore meant the long trailed out for a small win while
+     the short bled ~3x further than designed. Fixed by guarding the read; the stale values are
+     also nulled by lighter_hedge_worker2_audit_fixes.sql and cleared by the Reset button.
+  2. The profit-lock trigger had been lowered to 0.03 with a 0.01 trail, which scalped the winner
+     out at ~+0.02% while the loser kept the full -0.03%. Reverted to 0.05 and the real gap it was
+     trying to close is now handled by breakeven_floor_enabled. See the exit stack below.
+Also: single_instance_lock added (Render runs two copies of this process during every deploy, and
+nothing previously stopped both from entering -- the zombie double-entry), and the shared pressure
+signal is now published every tick instead of only at the owner leg's own entry, which used to let
+the follower leg size off the previous cycle's reading.
+
 Architecture: this single process runs TWO independent StochBot instances concurrently
 (asyncio.gather), each managing its own real sub-account -- Worker 2's account trades the LONG
 leg, Worker 3's account trades the SHORT leg. Worker 3's own Render service is suspended once
@@ -38,17 +55,26 @@ here since there's no directional read to begin with, just "always try to be in"
 Exit stack, both legs identical:
 - SL 0.03% (the backtested cut threshold).
 - No literal TP (disable_literal_tp=True) -- profit_lock_trail is the only take-profit path.
-- profit_lock_trigger_pct=0.03 / profit_lock_trail_pct=0.01 (2026-09-30, direct request, real
-  gap found and fixed same day): originally 0.05, but with SL at 0.03, a leg that peaked below
-  0.05% and reversed had ZERO protection until it hit its own -0.03% SL -- meaning a cycle
-  could end with BOTH legs losing instead of the intended one-wins/one-loses-small. Arming at
-  the SAME level the other leg gets cut means the winning leg locks in protection the moment
-  it's ahead of where the loser would be stopped out, then keeps trailing up naturally as
-  price improves (peak-tracking already ratchets up on its own, no new mechanism needed for
-  that part). This is a NEW, not-yet-backtested combination relative to the validated 0.05/0.01
-  numbers -- noted so that isn't forgotten either. True partial position scaling (the
-  backtest's "lock half, trail the remaining half") is still NOT built; this remains a
-  full-exit-only approximation of that.
+- profit_lock_trigger_pct=0.05 / profit_lock_trail_pct=0.01 (the backtested pair).
+  Briefly lowered to a 0.03 trigger earlier on 2026-09-30 to close a real protection gap (a leg
+  that peaked below 0.05% and reversed had nothing under it but its own -0.03% SL, so a cycle
+  could end with BOTH legs losing). REVERTED the same day after an audit: at a 0.03 trigger the
+  winner armed at +0.03% and was then stopped by the 0.01% trail on the very next wiggle -- 0.01%
+  of BTC at $83k is ~$8.30, inside ordinary tick noise -- so it booked ~+0.02% while the loser was
+  still allowed the full -0.03%. That is roughly -0.01% per cycle, i.e. structurally negative
+  REGARDLESS of win rate, and it matches the reported symptom exactly ("the important leg every
+  time will close and we stay with the bad leg"). The trigger change fixed the gap by destroying
+  the edge.
+- breakeven_floor_enabled=True (2026-09-30, direct request) -- the correct fix for that same gap,
+  from the other direction: once the OTHER leg has been cut, this leg's profit is never allowed to
+  slide back below the level that makes the cycle break even (reason "BREAKEVEN_LOCK"). Between
+  breakeven and +0.05% it is the only protection; above +0.05% the trail normally fires first. The
+  level is computed from the partner's realized DOLLARS over this leg's own notional, not
+  hardcoded, because pressure_bias can size the legs $15/$5 and +0.03% on a $5 winner does not
+  offset -0.03% on a $15 loser. See BotConfig.breakeven_floor_enabled's docstring.
+  NEW and not yet backtested on top of the validated 0.05/0.01 + 0.03 numbers -- noted so that
+  isn't forgotten. True partial position scaling (the backtest's "lock half, trail the remaining
+  half") is still NOT built; this remains a full-exit-only approximation of that.
 - No self-lock, no book-opposition, no stoch-turn (all need use_joint_adaptive, which these
   legs don't use -- no volatility-adaptive formula, just the fixed SL/trail above).
 
@@ -59,7 +85,9 @@ good enough"): pressure_bias_enabled tilts each leg's size using ONE shared stoc
 (entry_lo=25/entry_hi=75) -- fixed_direction's own entry/exit logic never looks at it, this is
 purely a sizing tilt on top. ONE signal only, computed by exactly one leg: LONG_CONFIG has
 pressure_signal_owner=True, so the long leg alone calls compute_stoch_signal() and publishes it
-into main()'s shared_pressure_hub; the short leg has no such flag and only ever reads that hub
+into main()'s shared_pressure_hub EVERY TICK (corrected 2026-09-30: it used to publish only at its
+own entry moment, so whichever leg reached its entry code first won a race and the follower could
+size off the previous cycle's reading, or None right after boot); the short leg only ever reads
 (direct correction, 2026-09-29 -- an earlier version had each leg computing and merging its own
 independent reading, needless complexity for what's one strategy with one signal). Whichever
 direction that one signal favors, both legs still always enter together as always
@@ -115,9 +143,28 @@ LONG_CONFIG = BotConfig(
     cycle_partner_table="lighter_stoch_dca_btc_state",
     disable_literal_tp=True,
     profit_lock_enabled=True,
-    profit_lock_trigger_pct=0.03,
+    # 2026-09-30, reverted from 0.03 back to the backtested 0.05 after an audit: at 0.03 the
+    # winner armed at +0.03% and was stopped by the 0.01% trail on the next wiggle (~$8 on BTC,
+    # pure noise), booking ~+0.02% while the loser was allowed the full -0.03% -- roughly
+    # -0.01% per cycle, negative regardless of win rate. The "protection gap" the 0.03 change
+    # was meant to close (a leg peaking under the trigger with nothing but its own SL beneath
+    # it) is now closed properly by breakeven_floor_enabled below instead.
+    profit_lock_trigger_pct=0.05,
     profit_lock_trail_pct=0.01,
     schema_has_profit_lock=True,
+    # 2026-09-30, direct request: once the OTHER leg has been cut, never let this leg's profit
+    # slide back below the level that makes the cycle even. Between breakeven and +0.05% this is
+    # the only protection; above +0.05% the trail above normally fires first. Derived from the
+    # partner's realized dollars, so it stays correct when pressure_bias_usd sizes the legs
+    # unequally -- see BotConfig.breakeven_floor_enabled's docstring.
+    breakeven_floor_enabled=True,
+    schema_has_breakeven_floor=True,
+    # 2026-09-30: Render does not stop the old container before starting the new one, so every
+    # deploy briefly runs two copies of this process -- and with nothing stopping them, both could
+    # see "flat, partner flat, enter" and each place a real order (the zombie double-entry
+    # incident). Only the instance holding the lock on this leg's own state row takes new entries;
+    # exits are never gated on it. See BotConfig.single_instance_lock.
+    single_instance_lock=True,
     require_fresh_signal=False,
     red_exit_burns_signal=False,
     profit_lock_burns_signal=False,
@@ -151,9 +198,28 @@ SHORT_CONFIG = BotConfig(
     cycle_partner_table="lighter_btc_optimal_state",
     disable_literal_tp=True,
     profit_lock_enabled=True,
-    profit_lock_trigger_pct=0.03,
+    # 2026-09-30, reverted from 0.03 back to the backtested 0.05 after an audit: at 0.03 the
+    # winner armed at +0.03% and was stopped by the 0.01% trail on the next wiggle (~$8 on BTC,
+    # pure noise), booking ~+0.02% while the loser was allowed the full -0.03% -- roughly
+    # -0.01% per cycle, negative regardless of win rate. The "protection gap" the 0.03 change
+    # was meant to close (a leg peaking under the trigger with nothing but its own SL beneath
+    # it) is now closed properly by breakeven_floor_enabled below instead.
+    profit_lock_trigger_pct=0.05,
     profit_lock_trail_pct=0.01,
     schema_has_profit_lock=True,
+    # 2026-09-30, direct request: once the OTHER leg has been cut, never let this leg's profit
+    # slide back below the level that makes the cycle even. Between breakeven and +0.05% this is
+    # the only protection; above +0.05% the trail above normally fires first. Derived from the
+    # partner's realized dollars, so it stays correct when pressure_bias_usd sizes the legs
+    # unequally -- see BotConfig.breakeven_floor_enabled's docstring.
+    breakeven_floor_enabled=True,
+    schema_has_breakeven_floor=True,
+    # 2026-09-30: Render does not stop the old container before starting the new one, so every
+    # deploy briefly runs two copies of this process -- and with nothing stopping them, both could
+    # see "flat, partner flat, enter" and each place a real order (the zombie double-entry
+    # incident). Only the instance holding the lock on this leg's own state row takes new entries;
+    # exits are never gated on it. See BotConfig.single_instance_lock.
+    single_instance_lock=True,
     require_fresh_signal=False,
     red_exit_burns_signal=False,
     profit_lock_burns_signal=False,

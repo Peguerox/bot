@@ -773,6 +773,78 @@ async def t_self_lock_two_consecutive_paper_tps_unlocks():
     check("counter reset to 0", bot.paper_consecutive_tps == 0, bot.paper_consecutive_tps)
 
 
+def _w1_lock_bot(ex):
+    """Worker 1's live self-lock rule, as configured in lighter_stoch_dca_btc_initial.py:
+    2 wins of ANY kind unlock, OR a single literal TP unlocks on its own."""
+    bot = make_bot(ex, candles_kind="mid", self_lock_enabled=True, schema_has_self_lock=True,
+                   self_lock_reversal_counts_as_win=True,
+                   self_lock_require_tp_in_streak=False,
+                   self_lock_tp_unlocks_instantly=True,
+                   self_lock_loss_decrements_streak=True)
+    bot.real_trading_locked = True
+    bot._self_lock_loaded = True
+    return bot
+
+
+async def _paper_win_via_reversal(bot, state, entry=86000.0, t0=1700000000000):
+    """Drive one WINNING non-TP paper close: open the shadow long, then hand it an opposing
+    reversal signal at a profitable-but-below-TP price. reason is None -> counts as a win only
+    through self_lock_reversal_counts_as_win, i.e. a 'green' that is NOT a literal TP."""
+    bot.paper_side = "long"
+    bot.paper_entry = entry
+    bot.paper_entry_ms = t0
+    price = entry * 1.0004  # +0.04%: green, but short of the 0.10% TP
+    await bot._update_paper_shadow(state, None, "short", price, price + 1, t0 + 60000)
+
+
+async def t_w1_self_lock_two_non_tp_greens_unlock():
+    print("\n[Worker 1 self-lock: 2 greens with NO literal TP unlock (the 4-greens-stuck bug)]")
+    ex = FakeExchange()
+    bot = _w1_lock_bot(ex)
+    state = dict(bot.state_row)
+    await _paper_win_via_reversal(bot, state, t0=1700000000000)
+    check("1 green counted", bot.paper_consecutive_tps == 1, bot.paper_consecutive_tps)
+    check("still locked after 1 green", bot.real_trading_locked is True)
+    await _paper_win_via_reversal(bot, state, t0=1700000120000)
+    check("UNLOCKED on the 2nd green, with no literal TP anywhere in the streak",
+          bot.real_trading_locked is False, bot.real_trading_locked)
+    check("counter reset", bot.paper_consecutive_tps == 0, bot.paper_consecutive_tps)
+
+
+async def t_w1_self_lock_single_tp_unlocks_instantly():
+    print("\n[Worker 1 self-lock: a single literal TP unlocks on its own, no streak needed]")
+    ex = FakeExchange()
+    bot = _w1_lock_bot(ex)
+    state = dict(bot.state_row)
+    bot.paper_side = "long"
+    bot.paper_entry = 86000.0
+    bot.paper_entry_ms = 1700000000000
+    tp_price = 86000.0 * 1.0011  # through the 0.10% TP
+    await bot._update_paper_shadow(state, None, None, tp_price, tp_price + 1, 1700000060000)
+    check("UNLOCKED on one literal TP", bot.real_trading_locked is False, bot.real_trading_locked)
+
+
+async def t_w1_self_lock_a_real_sl_still_wipes_the_streak():
+    print("\n[Worker 1 self-lock: 2 wins means 2 NET wins -- a paper SL still resets the count]")
+    ex = FakeExchange()
+    bot = _w1_lock_bot(ex)
+    state = dict(bot.state_row)
+    await _paper_win_via_reversal(bot, state, t0=1700000000000)
+    check("1 green counted", bot.paper_consecutive_tps == 1)
+    # Paper SL: opens long, price hits the 0.11% stop.
+    bot.paper_side = "long"
+    bot.paper_entry = 86000.0
+    bot.paper_entry_ms = 1700000120000
+    sl_price = 86000.0 * (1 - 0.0012)
+    await bot._update_paper_shadow(state, None, None, sl_price, sl_price + 1, 1700000180000)
+    check("streak wiped by the SL", bot.paper_consecutive_tps == 0, bot.paper_consecutive_tps)
+    check("still locked", bot.real_trading_locked is True)
+    # And one green alone after that is still not enough.
+    await _paper_win_via_reversal(bot, state, t0=1700000240000)
+    check("one green after the SL is still not an unlock",
+          bot.real_trading_locked is True, bot.real_trading_locked)
+
+
 async def t_self_lock_paper_sl_resets_counter():
     print("\n[self-lock: a paper SL resets the consecutive-TP counter back to zero]")
     ex = FakeExchange()
@@ -1742,6 +1814,252 @@ async def t_close_does_not_touch_bands_without_schema_flag():
           "position_sl_pct" not in bot.state_row)
 
 
+def _breakeven_state(entry, usd, side="long"):
+    return {
+        "id": 1, "side": side, "legs": [{"price": entry, "usd_size": usd}],
+        "first_entry_price": entry, "first_entry_time": 1700000000000, "dca_level": 0,
+        "seed_usd": usd, "realized_pnl_usd": 0.0, "collateral_before_entry": usd,
+        "enabled": True, "consecutive_entry_failures": 0, "last_processed_candle_ts": 0,
+        "cycle_partner_pnl_baseline": 0.0,
+    }
+
+
+def _breakeven_bot(ex, state, partner, **over):
+    """A hedge leg with the breakeven floor on, and a fake partner row it reads through sb().
+    `partner` is a mutable dict: {"side": ..., "realized_pnl_usd": ...}."""
+    kwargs = dict(candles_kind="mid", fixed_direction="long", fixed_leg_usd=10.0,
+                  sl_pct=0.03, tp_pct=0.10, disable_literal_tp=True,
+                  profit_lock_enabled=True, profit_lock_trigger_pct=0.05,
+                  profit_lock_trail_pct=0.01, require_fresh_signal=False,
+                  self_lock_enabled=False, use_joint_adaptive=False,
+                  cycle_partner_table="partner_state", breakeven_floor_enabled=True)
+    kwargs.update(over)
+    bot = make_bot(ex, state=state, **kwargs)
+    async def fake_sb(method, path, body=None, extra_headers=None):
+        if path.startswith("partner_state"):
+            return [dict(partner)]
+        raise AssertionError(f"unexpected sb call: {method} {path}")
+    bot.sb = fake_sb
+    return bot
+
+
+async def _tick_at(bot, price):
+    bot.live.order_book = {"bids": [{"price": str(price)}], "asks": [{"price": str(price + 0.5)}]}
+    # The partner read is throttled to 1/s so a test sweeping several prices in a row would
+    # otherwise only ever get one reading.
+    bot._breakeven_partner_read_at = 0.0
+    await bot.tick()
+
+
+async def t_breakeven_floor_pct_arithmetic():
+    print("\n[breakeven floor: the level is derived from DOLLARS, so unequal leg sizes stay correct]")
+    f = core.StochBot.breakeven_floor_pct
+    # Equal $10 legs, loser cut at 0.03% => -$0.003. Winner needs +0.03% of its own $10.
+    check("equal $10/$10 legs -> ~0.03%", abs(f(-0.003, 10.0) - 0.03) < 1e-9, f(-0.003, 10.0))
+    # Pressure bias made the winner the SMALL leg: $5 winner must offset a $15 loser's -$0.0045.
+    check("$5 winner vs $15 loser -> ~0.09% (NOT 0.03%)",
+          abs(f(-0.0045, 5.0) - 0.09) < 1e-9, f(-0.0045, 5.0))
+    # And the reverse: a $15 winner only needs a third of the move.
+    check("$15 winner vs $5 loser -> ~0.01%", abs(f(-0.0015, 15.0) - 0.01) < 1e-9, f(-0.0015, 15.0))
+    check("partner closed GREEN -> no floor", f(0.002, 10.0) is None, f(0.002, 10.0))
+    check("partner exactly flat -> no floor", f(0.0, 10.0) is None, f(0.0, 10.0))
+    check("unknown partner pnl -> no floor", f(None, 10.0) is None, f(None, 10.0))
+    check("no notional -> no floor", f(-0.003, 0.0) is None, f(-0.003, 0.0))
+
+
+async def t_breakeven_floor_holds_the_cycle_even():
+    print("\n[breakeven floor: winner exits AT breakeven instead of sliding back toward its own SL]")
+    entry = 86000.0
+    ex = FakeExchange(position=round(10.0 / entry, 5), collateral=10.0)
+    partner = {"side": "short", "realized_pnl_usd": 0.0}
+    bot = _breakeven_bot(ex, _breakeven_state(entry, 10.0), partner)
+
+    # Winner runs up to +0.04% -- above the eventual 0.03% floor, but below the 0.05% trail
+    # trigger, so the trail never arms. This is exactly the window that previously had no
+    # protection at all.
+    await _tick_at(bot, entry * (1 + 0.04 / 100))
+    check("still open at +0.04% (trail not armed, partner still holding)",
+          bot.state_row["side"] == "long", bot.state_row["side"])
+    check("profit-lock trail did NOT arm below its 0.05% trigger",
+          bot.profit_lock_peak_pct is None, bot.profit_lock_peak_pct)
+
+    # Partner's leg gets cut at its 0.03% SL: -$0.003 realized, and it goes flat.
+    partner["side"] = None
+    partner["realized_pnl_usd"] = -0.003
+    await _tick_at(bot, entry * (1 + 0.04 / 100))
+    check("floor armed once the partner banked its loss",
+          bot._breakeven_floor_pct is not None, bot._breakeven_floor_pct)
+    check("floor is ~0.03% for equal $10 legs",
+          abs(bot._breakeven_floor_pct - 0.03) < 0.002, bot._breakeven_floor_pct)
+    check("still open -- +0.04% is above the floor", bot.state_row["side"] == "long")
+
+    # Now it gives back to +0.02%, below breakeven. Previously it would have kept running all the
+    # way to -0.03%, making the cycle a double loss.
+    await _tick_at(bot, entry * (1 + 0.02 / 100))
+    check("closed at the floor", bot.state_row["side"] is None, bot.state_row["side"])
+    check("closed with reason BREAKEVEN_LOCK",
+          any(a == "closed" and d.get("reason") == "BREAKEVEN_LOCK" for a, d in bot.runs),
+          [(a, d.get("reason")) for a, d in bot.runs if a == "closed"])
+
+
+async def t_breakeven_floor_arms_when_partner_cycle_was_never_observed_open():
+    print("\n[breakeven floor: arms off the pnl DELTA, so a partner that opened+SL'd between polls still counts]")
+    entry = 86000.0
+    ex = FakeExchange(position=round(10.0 / entry, 5), collateral=10.0)
+    # The partner read is throttled to 1/s. Here the partner is never once seen holding a
+    # position -- it entered and hit its own 0.03% SL between our polls -- yet its realized pnl
+    # has clearly moved since our entry baseline, which is proof enough that it traded and lost.
+    partner = {"side": None, "realized_pnl_usd": -0.003}
+    bot = _breakeven_bot(ex, _breakeven_state(entry, 10.0), partner)
+    check("partner never observed open", bot._breakeven_partner_seen is False)
+    await _tick_at(bot, entry * (1 + 0.04 / 100))
+    check("floor still armed from the pnl delta alone",
+          bot._breakeven_floor_pct is not None, bot._breakeven_floor_pct)
+    check("floor is ~0.03%", abs(bot._breakeven_floor_pct - 0.03) < 0.002, bot._breakeven_floor_pct)
+    await _tick_at(bot, entry * (1 + 0.02 / 100))
+    check("exited at breakeven rather than running to its own SL",
+          bot.state_row["side"] is None, bot.state_row["side"])
+
+
+async def t_breakeven_floor_ignores_a_green_partner():
+    print("\n[breakeven floor: never arms when the partner closed in profit -- nothing to offset]")
+    entry = 86000.0
+    ex = FakeExchange(position=round(10.0 / entry, 5), collateral=10.0)
+    partner = {"side": "short", "realized_pnl_usd": 0.0}
+    bot = _breakeven_bot(ex, _breakeven_state(entry, 10.0), partner)
+    await _tick_at(bot, entry * (1 + 0.04 / 100))
+    partner["side"] = None
+    partner["realized_pnl_usd"] = 0.004  # partner closed GREEN
+    await _tick_at(bot, entry * (1 + 0.04 / 100))
+    await _tick_at(bot, entry * (1 + 0.01 / 100))  # slides well down
+    check("no floor armed", bot._breakeven_floor_pct is None, bot._breakeven_floor_pct)
+    check("position still open, running on its own trail/SL as before",
+          bot.state_row["side"] == "long", bot.state_row["side"])
+
+
+async def t_breakeven_floor_requires_partner_to_have_opened():
+    print("\n[breakeven floor: a partner that never opened must not read as 'already closed flat']")
+    entry = 86000.0
+    ex = FakeExchange(position=round(10.0 / entry, 5), collateral=10.0)
+    # Partner is flat from the very start and has an OLD realized loss already on its books --
+    # without the 'seen open' requirement, baseline arithmetic on a stale number could arm a
+    # bogus floor on a cycle the partner never even participated in.
+    partner = {"side": None, "realized_pnl_usd": -0.05}
+    state = _breakeven_state(entry, 10.0)
+    state["cycle_partner_pnl_baseline"] = -0.05  # snapshot taken at our entry: no cycle pnl yet
+    bot = _breakeven_bot(ex, state, partner)
+    await _tick_at(bot, entry * (1 + 0.04 / 100))
+    await _tick_at(bot, entry * (1 + 0.01 / 100))
+    check("no floor armed -- partner was never observed holding a position",
+          bot._breakeven_floor_pct is None, bot._breakeven_floor_pct)
+    check("position still open", bot.state_row["side"] == "long", bot.state_row["side"])
+
+
+async def t_breakeven_floor_never_forces_a_worse_exit():
+    print("\n[breakeven floor: a leg that was never above breakeven is NOT exited at the floor]")
+    entry = 86000.0
+    ex = FakeExchange(position=round(10.0 / entry, 5), collateral=10.0)
+    partner = {"side": "short", "realized_pnl_usd": 0.0}
+    bot = _breakeven_bot(ex, _breakeven_state(entry, 10.0), partner)
+    # This leg only ever reaches +0.01%, never the 0.03% floor.
+    await _tick_at(bot, entry * (1 + 0.01 / 100))
+    partner["side"] = None
+    partner["realized_pnl_usd"] = -0.003
+    await _tick_at(bot, entry * (1 + 0.01 / 100))
+    check("floor is armed (partner banked a loss)", bot._breakeven_floor_pct is not None)
+    check("but NOT exited -- it was never at or above the floor, so its own SL still governs",
+          bot.state_row["side"] == "long", bot.state_row["side"])
+
+
+async def t_breakeven_floor_soft_fails_on_partner_read_error():
+    print("\n[breakeven floor: a failed partner read leaves the position running (fails SOFT)]")
+    entry = 86000.0
+    ex = FakeExchange(position=round(10.0 / entry, 5), collateral=10.0)
+    bot = _breakeven_bot(ex, _breakeven_state(entry, 10.0), {"side": "short"})
+    async def failing_sb(method, path, body=None, extra_headers=None):
+        raise RuntimeError("simulated network failure")
+    bot.sb = failing_sb
+    await _tick_at(bot, entry * (1 + 0.04 / 100))
+    check("no floor armed on a bad read", bot._breakeven_floor_pct is None)
+    check("position still open -- an exit is never forced on missing partner data",
+          bot.state_row["side"] == "long", bot.state_row["side"])
+
+
+async def t_profit_lock_trail_still_wins_above_the_trigger():
+    print("\n[breakeven floor: above the 0.05% trigger the 0.01% trail still fires first]")
+    entry = 86000.0
+    ex = FakeExchange(position=round(10.0 / entry, 5), collateral=10.0)
+    partner = {"side": None, "realized_pnl_usd": -0.003}
+    state = _breakeven_state(entry, 10.0)
+    bot = _breakeven_bot(ex, state, partner)
+    bot._breakeven_partner_seen = True  # partner already observed open earlier in the cycle
+    await _tick_at(bot, entry * (1 + 0.08 / 100))   # arms the trail at +0.08%
+    check("trail armed at the peak", bot.profit_lock_peak_pct is not None, bot.profit_lock_peak_pct)
+    await _tick_at(bot, entry * (1 + 0.06 / 100))   # gives back 0.02% -- past the 0.01% trail
+    check("closed", bot.state_row["side"] is None, bot.state_row["side"])
+    check("closed via PROFIT_LOCK (well above breakeven), not BREAKEVEN_LOCK",
+          any(a == "closed" and d.get("reason") == "PROFIT_LOCK" for a, d in bot.runs),
+          [(a, d.get("reason")) for a, d in bot.runs if a == "closed"])
+
+
+async def t_stale_position_bands_ignored_without_schema_flag():
+    print("\n[stale position_sl_pct in the row is IGNORED when schema_has_position_bands=False (hedge leg)]")
+    # Real 2026-09-30 incident, real money: the hedge SHORT leg runs on
+    # lighter_stoch_dca_btc_state, a table the retired Worker 3 joint-adaptive strategy used to
+    # own. It left position_sl_pct=0.0909 behind. The hedge legs set sl_pct=0.03 and never write
+    # that column (schema_has_position_bands=False), but the READ was unguarded, so the leg
+    # honoured 0.0909 -- a stop 3x wider than configured. Price here sits past the configured
+    # 0.03% stop but NOT past the stale 0.0909% one, so this only passes if cfg.sl_pct wins.
+    entry = 86000.0
+    configured_sl_price = entry * (1 - 0.03 / 100)   # 85974.2 -- should stop out here
+    stale_sl_price = entry * (1 - 0.0909 / 100)      # 85921.8 -- must NOT be what's used
+    price = (configured_sl_price + stale_sl_price) / 2  # between the two
+    ex = FakeExchange(position=round(10.0 / entry, 5), collateral=10.0 - 0.003)
+    state = {
+        "id": 1, "side": "long", "legs": [{"price": entry, "usd_size": 10.0}],
+        "first_entry_price": entry, "first_entry_time": 1700000000000, "dca_level": 0,
+        "seed_usd": 10.0, "realized_pnl_usd": 0.0, "collateral_before_entry": 10.0,
+        "enabled": True, "consecutive_entry_failures": 0, "last_processed_candle_ts": 0,
+        "position_tp_pct": 0.0909, "position_sl_pct": 0.0909,  # stale, from the retired strategy
+    }
+    # schema_has_position_bands defaults False, exactly like both hedge legs
+    bot = make_bot(ex, state=state, candles_kind="mid", sl_pct=0.03, tp_pct=0.10,
+                   fixed_direction="long", disable_literal_tp=True)
+    bot.live.order_book = {"bids": [{"price": str(price)}], "asks": [{"price": str(price + 1)}]}
+    await bot.tick()
+    check("stopped out on the CONFIGURED 0.03% SL, not the stale 0.0909% one",
+          bot.state_row["side"] is None, bot.state_row["side"])
+    check("closed with reason SL",
+          any(a == "closed" and d.get("reason") == "SL" for a, d in bot.runs),
+          bot.runs)
+
+
+async def t_position_bands_still_honored_with_schema_flag():
+    print("\n[the same row value IS still honored when schema_has_position_bands=True (Worker 1 unaffected)]")
+    # Complement of the test above: the guard must not break the bots that legitimately do write
+    # and read these columns (Worker 1, lighter_stoch_dca_btc_initial.py). Same price, same row --
+    # only the flag differs, and here the wider recorded band must keep the position open.
+    entry = 86000.0
+    configured_sl_price = entry * (1 - 0.03 / 100)
+    stale_sl_price = entry * (1 - 0.0909 / 100)
+    price = (configured_sl_price + stale_sl_price) / 2
+    ex = FakeExchange(position=round(10.0 / entry, 5), collateral=10.0)
+    state = {
+        "id": 1, "side": "long", "legs": [{"price": entry, "usd_size": 10.0}],
+        "first_entry_price": entry, "first_entry_time": 1700000000000, "dca_level": 0,
+        "seed_usd": 10.0, "realized_pnl_usd": 0.0, "collateral_before_entry": 10.0,
+        "enabled": True, "consecutive_entry_failures": 0, "last_processed_candle_ts": 0,
+        "position_tp_pct": 0.0909, "position_sl_pct": 0.0909,
+    }
+    bot = make_bot(ex, state=state, candles_kind="mid", sl_pct=0.03, tp_pct=0.10,
+                   fixed_direction="long", disable_literal_tp=True,
+                   schema_has_position_bands=True)
+    bot.live.order_book = {"bids": [{"price": str(price)}], "asks": [{"price": str(price + 1)}]}
+    await bot.tick()
+    check("position still OPEN -- the recorded 0.0909% band is respected for this bot",
+          bot.state_row["side"] == "long", bot.state_row["side"])
+
+
 async def t_trend_leg_sl_is_wider_than_fade_sl():
     print("\n[an open TREND-regime position uses its own wider SL, not the bot's default fade SL]")
     entry = 86000.0
@@ -2443,6 +2761,178 @@ async def t_pressure_bias_owner_computes_and_publishes_to_hub():
           3.0 < notional < 7.0, notional)
 
 
+async def t_pressure_hub_published_even_when_owner_does_not_enter():
+    print("\n[pressure_bias: the owner publishes the signal every tick, even while holding (race fix)]")
+    # The race this fixes: the hub used to be written ONLY inside _pressure_biased_leg_usd, i.e.
+    # only at the owner's own entry. The two legs run as independent asyncio tasks, so whenever the
+    # follower reached its entry first it sized off a stale reading. Here the owner is already
+    # holding a position and will not enter at all this tick -- the hub must still be refreshed.
+    entry = 86000.0
+    ex = FakeExchange(position=round(10.0 / entry, 5), collateral=10.0)
+    state = {
+        "id": 1, "side": "long", "legs": [{"price": entry, "usd_size": 10.0}],
+        "first_entry_price": entry, "first_entry_time": 1700000000000, "dca_level": 0,
+        "seed_usd": 10.0, "realized_pnl_usd": 0.0, "collateral_before_entry": 10.0,
+        "enabled": True, "consecutive_entry_failures": 0, "last_processed_candle_ts": 0,
+    }
+    bot = make_bot(ex, state=state, candles_kind="short", fixed_direction="long",
+                   fixed_leg_usd=10.0, sl_pct=0.03, tp_pct=0.10, disable_literal_tp=True,
+                   require_fresh_signal=False, self_lock_enabled=False, use_joint_adaptive=False,
+                   pressure_bias_enabled=True, pressure_bias_usd=5.0, pressure_bias_min_usd=1.0,
+                   pressure_signal_owner=True)
+    hub = {"signal": None}
+    bot.pressure_signal_hub = hub
+    await bot.tick()
+    check("owner is still holding (did not enter this tick)", bot.state_row["side"] == "long")
+    check("hub refreshed anyway, so a follower entering now reads a current signal",
+          hub["signal"] == "short", hub["signal"])
+
+
+async def t_pressure_follower_never_computes_its_own_signal():
+    print("\n[pressure_bias: the follower leg reads the hub only -- it never calls compute_stoch_signal]")
+    entry = 86000.0
+    ex = FakeExchange(collateral=1000.0)
+    state = {
+        "id": 1, "side": None, "legs": [], "first_entry_price": None, "first_entry_time": None,
+        "dca_level": 0, "seed_usd": 1000.0, "realized_pnl_usd": 0.0,
+        "collateral_before_entry": None, "enabled": True,
+        "consecutive_entry_failures": 0, "last_processed_candle_ts": 0,
+    }
+    # candles_kind="short" would make its OWN reading 'short' (agreeing with its fixed_direction
+    # and sizing UP); the hub says 'long', which opposes it and must size DOWN instead.
+    bot = make_bot(ex, state=state, candles_kind="short", fixed_direction="short",
+                   fixed_leg_usd=10.0, sl_pct=0.03, tp_pct=0.10, disable_literal_tp=True,
+                   require_fresh_signal=False, self_lock_enabled=False, use_joint_adaptive=False,
+                   pressure_bias_enabled=True, pressure_bias_usd=5.0, pressure_bias_min_usd=1.0)
+    bot.pressure_signal_hub = {"signal": "long"}
+    calls = {"n": 0}
+    real = bot.compute_stoch_signal
+    def counting():
+        calls["n"] += 1
+        return real()
+    bot.compute_stoch_signal = counting
+    await bot.tick()
+    check("entered short", bot.state_row["side"] == "short", bot.state_row["side"])
+    check("never computed its own stochastic signal", calls["n"] == 0, calls["n"])
+    notional = entry * core.total_qty(bot.state_row["legs"])
+    check(f"sized DOWN to ~$5 off the hub's opposing 'long' (actual ${notional:.2f})",
+          3.0 < notional < 7.0, notional)
+
+
+async def t_instance_lock_blocks_entry_when_another_instance_holds_it():
+    print("\n[instance lock: a second live instance cannot enter while the first holds a fresh lock]")
+    ex = FakeExchange()
+    bot = make_bot(ex, candles_kind="long", single_instance_lock=True)
+    # PostgREST returns [] when the guarded PATCH matches no row -- i.e. somebody else owns it and
+    # their heartbeat is still fresh.
+    async def busy_sb(method, path, body=None, extra_headers=None):
+        if method == "PATCH":
+            return []
+        return [{"lock_owner": "someone-else:worker9"}]
+    bot.sb = busy_sb
+    await bot.tick()
+    check("did NOT enter -- lock held elsewhere", bot.state_row["side"] is None, bot.state_row["side"])
+    check("logged why", any(a == "instance_lock_busy" for a, _ in bot.runs),
+          [a for a, _ in bot.runs])
+
+
+async def t_instance_lock_allows_entry_once_acquired():
+    print("\n[instance lock: the holder trades normally]")
+    ex = FakeExchange()
+    bot = make_bot(ex, candles_kind="long", single_instance_lock=True)
+    async def ours_sb(method, path, body=None, extra_headers=None):
+        if method == "PATCH":
+            return [{"lock_owner": bot._lock_id}]  # our guarded PATCH matched
+        return [{"lock_owner": bot._lock_id}]
+    bot.sb = ours_sb
+    await bot.tick()
+    check("entered normally while holding the lock", bot.state_row["side"] == "long",
+          bot.state_row["side"])
+    check("acquisition logged once", any(a == "instance_lock_acquired" for a, _ in bot.runs))
+
+
+async def t_instance_lock_never_blocks_an_exit():
+    print("\n[instance lock: losing the lock must NEVER strand an open position -- exits ignore it]")
+    entry = 86000.0
+    sl_price = entry * (1 - 0.11 / 100) - 1  # through the 0.11% stop
+    ex = FakeExchange(position=round(20.0 / entry, 5), collateral=20.0 - 0.02)
+    state = {
+        "id": 1, "side": "long", "legs": [{"price": entry, "usd_size": 20.0}],
+        "first_entry_price": entry, "first_entry_time": 1700000000000, "dca_level": 0,
+        "seed_usd": 20.0, "realized_pnl_usd": 0.0, "collateral_before_entry": 20.0,
+        "enabled": True, "consecutive_entry_failures": 0, "last_processed_candle_ts": 0,
+    }
+    bot = make_bot(ex, state=state, candles_kind="mid", single_instance_lock=True)
+    async def busy_sb(method, path, body=None, extra_headers=None):
+        if method == "PATCH":
+            return []          # we do NOT hold the lock
+        return [{"lock_owner": "someone-else:worker9"}]
+    bot.sb = busy_sb
+    bot.live.order_book = {"bids": [{"price": str(sl_price)}], "asks": [{"price": str(sl_price + 1)}]}
+    await bot.tick()
+    check("position still got stopped out despite not holding the lock",
+          bot.state_row["side"] is None, bot.state_row["side"])
+    check("closed via SL", any(a == "closed" and d.get("reason") == "SL" for a, d in bot.runs),
+          [(a, d.get("reason")) for a, d in bot.runs if a == "closed"])
+
+
+async def t_instance_lock_fails_closed_on_read_error():
+    print("\n[instance lock: an unreadable lock row blocks entry rather than risking a double-entry]")
+    ex = FakeExchange()
+    bot = make_bot(ex, candles_kind="long", single_instance_lock=True)
+    async def failing_sb(method, path, body=None, extra_headers=None):
+        raise RuntimeError("simulated network failure")
+    bot.sb = failing_sb
+    await bot.tick()
+    check("did NOT enter", bot.state_row["side"] is None, bot.state_row["side"])
+
+
+async def t_no_lock_configured_is_unchanged():
+    print("\n[instance lock: bots without the migration are completely unaffected]")
+    ex = FakeExchange()
+    bot = make_bot(ex, candles_kind="long")  # single_instance_lock defaults False
+    async def no_sb(method, path, body=None, extra_headers=None):
+        raise AssertionError("must not touch the lock row when the feature is off")
+    bot.sb = no_sb
+    await bot.tick()
+    check("entered normally, no lock traffic at all", bot.state_row["side"] == "long",
+          bot.state_row["side"])
+
+
+async def t_live_configs_match_their_stated_rules():
+    print("\n[live configs: the real worker files still encode the rules they are supposed to]")
+    # These assert the actual shipped CONFIG objects, not a hand-built test config. Both of these
+    # rules have now been broken by a code change more than once while the behavioural tests above
+    # kept passing (they build their own configs), so the config itself is pinned here.
+    import importlib
+    w1 = importlib.import_module("lighter_stoch_dca_btc_initial").CONFIG
+    check("Worker 1: 2 wins of ANY kind unlock (no mandatory literal TP)",
+          w1.self_lock_require_tp_in_streak is False, w1.self_lock_require_tp_in_streak)
+    check("Worker 1: a single literal TP unlocks on its own",
+          w1.self_lock_tp_unlocks_instantly is True, w1.self_lock_tp_unlocks_instantly)
+
+    hedge = importlib.import_module("lighter_hedge_dual_leg")
+    for name, leg in (("long", hedge.LONG_CONFIG), ("short", hedge.SHORT_CONFIG)):
+        check(f"hedge {name} leg: SL is the backtested 0.03% cut",
+              leg.sl_pct == 0.03, leg.sl_pct)
+        check(f"hedge {name} leg: profit-lock trigger back at the backtested 0.05%",
+              leg.profit_lock_trigger_pct == 0.05, leg.profit_lock_trigger_pct)
+        check(f"hedge {name} leg: breakeven floor on",
+              leg.breakeven_floor_enabled is True, leg.breakeven_floor_enabled)
+        check(f"hedge {name} leg: never reads stale per-position bands",
+              leg.schema_has_position_bands is False, leg.schema_has_position_bands)
+        check(f"hedge {name} leg: single-instance lock on (zombie double-entry)",
+              leg.single_instance_lock is True, leg.single_instance_lock)
+        check(f"hedge {name} leg: has a cycle partner to synchronise with",
+              leg.cycle_partner_table is not None, leg.cycle_partner_table)
+    check("hedge legs point at each other, not themselves",
+          hedge.LONG_CONFIG.cycle_partner_table == hedge.SHORT_CONFIG.table_state
+          and hedge.SHORT_CONFIG.cycle_partner_table == hedge.LONG_CONFIG.table_state)
+    check("exactly one hedge leg owns the shared pressure signal",
+          [hedge.LONG_CONFIG.pressure_signal_owner,
+           hedge.SHORT_CONFIG.pressure_signal_owner].count(True) == 1)
+
+
 async def main():
     for t in (t_normal_entry, t_phantom_double_fill, t_nonce_error_but_filled,
               t_order_error_no_fill, t_circuit_breaker, t_close_uses_real_size,
@@ -2473,6 +2963,9 @@ async def main():
               t_self_lock_paper_shadow_opens_when_flat,
               t_self_lock_single_paper_tp_does_not_unlock,
               t_self_lock_two_consecutive_paper_tps_unlocks,
+              t_w1_self_lock_two_non_tp_greens_unlock,
+              t_w1_self_lock_single_tp_unlocks_instantly,
+              t_w1_self_lock_a_real_sl_still_wipes_the_streak,
               t_self_lock_paper_sl_resets_counter,
               t_self_lock_real_sl_locks_and_resets_paper_counter,
               t_self_lock_blocks_real_entry_while_locked,
@@ -2555,7 +3048,25 @@ async def main():
               t_pressure_bias_noop_when_disabled,
               t_pressure_bias_noop_when_signal_neutral,
               t_pressure_bias_owner_publishes_follower_reads_only,
-              t_pressure_bias_owner_computes_and_publishes_to_hub):
+              t_pressure_bias_owner_computes_and_publishes_to_hub,
+              t_pressure_hub_published_even_when_owner_does_not_enter,
+              t_pressure_follower_never_computes_its_own_signal,
+              t_breakeven_floor_pct_arithmetic,
+              t_breakeven_floor_holds_the_cycle_even,
+              t_breakeven_floor_arms_when_partner_cycle_was_never_observed_open,
+              t_breakeven_floor_ignores_a_green_partner,
+              t_breakeven_floor_requires_partner_to_have_opened,
+              t_breakeven_floor_never_forces_a_worse_exit,
+              t_breakeven_floor_soft_fails_on_partner_read_error,
+              t_profit_lock_trail_still_wins_above_the_trigger,
+              t_instance_lock_blocks_entry_when_another_instance_holds_it,
+              t_instance_lock_allows_entry_once_acquired,
+              t_instance_lock_never_blocks_an_exit,
+              t_instance_lock_fails_closed_on_read_error,
+              t_no_lock_configured_is_unchanged,
+              t_live_configs_match_their_stated_rules,
+              t_stale_position_bands_ignored_without_schema_flag,
+              t_position_bands_still_honored_with_schema_flag):
         try:
             await t()
         except Exception as e:
