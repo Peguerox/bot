@@ -156,6 +156,12 @@ kind unlocks regardless), self_lock_loss_decrements_streak (a red, non-SL close 
 prior win instead of being invisible -- only a literal SL still wipes the whole streak to 0).
 See lighter_stoch_dca_btc_bot.py's docstring for the full reasoning and worked examples.
 
+2026-09-30, direct request: drop the 3-wins-no-TP fallback entirely ("two greens and only one
+TP, you're back in the game") -- self_lock_no_tp_fallback_wins=None. The ONLY unlock path left
+is self_lock_require_tp_in_streak's original rule: 2+ consecutive paper wins where at least one
+is a literal TP. A 3+ win streak with no TP anywhere in it now stays locked indefinitely (no
+more escape hatch); only a literal SL still resets the streak to zero.
+
 hour_open_requires_self_lock=True, same day: this is specifically the bot whose real trading
 opens and closes on a schedule, so extended the request to cover that too -- an hour opening
 no longer just assumes conditions are fine; it re-locks behind the exact same rule above (not
@@ -211,7 +217,7 @@ CONFIG = BotConfig(
     schema_has_live_signal=True,  # requires lighter_btc_initial_live_signal.sql first
     self_lock_reversal_counts_as_win=True,
     self_lock_require_tp_in_streak=True,  # 2026-09-28: same rule as Worker 3, see that file's docstring
-    self_lock_no_tp_fallback_wins=3,
+    self_lock_no_tp_fallback_wins=None,  # 2026-09-30: 3-win-no-TP fallback removed, direct request
     self_lock_loss_decrements_streak=True,
     hour_open_requires_self_lock=True,  # 2026-09-28: an hour opening re-locks behind this same rule
     require_fresh_signal=True,  # 2026-09-28: only enter on the exact candle the signal first appears
