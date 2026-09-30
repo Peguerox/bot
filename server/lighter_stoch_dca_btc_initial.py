@@ -156,11 +156,22 @@ kind unlocks regardless), self_lock_loss_decrements_streak (a red, non-SL close 
 prior win instead of being invisible -- only a literal SL still wipes the whole streak to 0).
 See lighter_stoch_dca_btc_bot.py's docstring for the full reasoning and worked examples.
 
-2026-09-30, direct request: drop the 3-wins-no-TP fallback entirely ("two greens and only one
-TP, you're back in the game") -- self_lock_no_tp_fallback_wins=None. The ONLY unlock path left
-is self_lock_require_tp_in_streak's original rule: 2+ consecutive paper wins where at least one
-is a literal TP. A 3+ win streak with no TP anywhere in it now stays locked indefinitely (no
-more escape hatch); only a literal SL still resets the streak to zero.
+2026-09-30: the 3-wins-no-TP fallback was dropped (self_lock_no_tp_fallback_wins=None) while
+self_lock_require_tp_in_streak was left True, which together made a literal TP MANDATORY to
+unlock -- so a streak of non-TP greens (winning REVERSAL/PROFIT_LOCK closes) stayed locked out
+no matter how long it ran. Confirmed live: the bot sat locked on 4 consecutive greens, unable to
+trade.
+
+2026-09-30, direct correction -- the rule is exactly: **2 wins OR 1 TP unlocks.** Two flags,
+nothing else:
+  - self_lock_require_tp_in_streak=False -> 2 consecutive wins of ANY kind unlock (a winning
+    REVERSAL or PROFIT_LOCK counts the same as a literal TP; no TP needs to be present).
+  - self_lock_tp_unlocks_instantly=True  -> a single literal TP unlocks on its own, immediately,
+    with no streak-count floor at all.
+The streak is still not a free ride: a red non-SL close cancels one prior win
+(self_lock_loss_decrements_streak) and a real SL wipes it to zero, so "2 wins" means 2 NET wins.
+self_lock_no_tp_fallback_wins stays None because it is now redundant -- 2 wins of any kind
+already unlock, so there is no longer-streak escape hatch left to need.
 
 hour_open_requires_self_lock=True, same day: this is specifically the bot whose real trading
 opens and closes on a schedule, so extended the request to cover that too -- an hour opening
@@ -216,8 +227,15 @@ CONFIG = BotConfig(
     schema_has_self_lock=True,  # requires lighter_btc_initial_self_lock.sql first
     schema_has_live_signal=True,  # requires lighter_btc_initial_live_signal.sql first
     self_lock_reversal_counts_as_win=True,
-    self_lock_require_tp_in_streak=True,  # 2026-09-28: same rule as Worker 3, see that file's docstring
-    self_lock_no_tp_fallback_wins=None,  # 2026-09-30: 3-win-no-TP fallback removed, direct request
+    # 2026-09-30, direct correction: ANY 2 wins unlock -- "2 wins = unlock", "1 win + 1 TP =
+    # unlock" are the same rule, since a TP is itself a win. require_tp_in_streak=True combined
+    # with no fallback had made a literal TP MANDATORY, so a streak of non-TP greens (REVERSAL /
+    # PROFIT_LOCK wins) could never unlock at all -- observed live sitting locked on 4 straight
+    # greens. The streak counter still resets on a real SL and is decremented by a red non-SL
+    # close (self_lock_loss_decrements_streak below), so "2 wins" means 2 net wins, not 2 ever.
+    self_lock_require_tp_in_streak=False,
+    self_lock_no_tp_fallback_wins=None,  # not needed: 2 wins of any kind already unlock
+    self_lock_tp_unlocks_instantly=True,  # ...and a single literal TP unlocks on its own
     self_lock_loss_decrements_streak=True,
     hour_open_requires_self_lock=True,  # 2026-09-28: an hour opening re-locks behind this same rule
     require_fresh_signal=True,  # 2026-09-28: only enter on the exact candle the signal first appears
