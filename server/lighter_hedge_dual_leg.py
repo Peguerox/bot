@@ -38,11 +38,17 @@ here since there's no directional read to begin with, just "always try to be in"
 Exit stack, both legs identical:
 - SL 0.03% (the backtested cut threshold).
 - No literal TP (disable_literal_tp=True) -- profit_lock_trail is the only take-profit path.
-- profit_lock_trigger_pct=0.05 / profit_lock_trail_pct=0.01: arms at +0.05% unrealized, exits
-  on a 0.01% giveback from the peak. This approximates the backtest's "lock half at +0.05%,
-  trail the remaining half at 0.01%" using the existing full-exit trail mechanism -- true
-  partial position scaling (closing half, continuing to manage the remainder) is NOT built;
-  that's a real simplification versus what was backtested, noted so it isn't forgotten.
+- profit_lock_trigger_pct=0.03 / profit_lock_trail_pct=0.01 (2026-09-30, direct request, real
+  gap found and fixed same day): originally 0.05, but with SL at 0.03, a leg that peaked below
+  0.05% and reversed had ZERO protection until it hit its own -0.03% SL -- meaning a cycle
+  could end with BOTH legs losing instead of the intended one-wins/one-loses-small. Arming at
+  the SAME level the other leg gets cut means the winning leg locks in protection the moment
+  it's ahead of where the loser would be stopped out, then keeps trailing up naturally as
+  price improves (peak-tracking already ratchets up on its own, no new mechanism needed for
+  that part). This is a NEW, not-yet-backtested combination relative to the validated 0.05/0.01
+  numbers -- noted so that isn't forgotten either. True partial position scaling (the
+  backtest's "lock half, trail the remaining half") is still NOT built; this remains a
+  full-exit-only approximation of that.
 - No self-lock, no book-opposition, no stoch-turn (all need use_joint_adaptive, which these
   legs don't use -- no volatility-adaptive formula, just the fixed SL/trail above).
 
@@ -86,7 +92,7 @@ LONG_CONFIG = BotConfig(
     cycle_partner_table="lighter_stoch_dca_btc_state",
     disable_literal_tp=True,
     profit_lock_enabled=True,
-    profit_lock_trigger_pct=0.05,
+    profit_lock_trigger_pct=0.03,
     profit_lock_trail_pct=0.01,
     schema_has_profit_lock=True,
     require_fresh_signal=False,
@@ -117,7 +123,7 @@ SHORT_CONFIG = BotConfig(
     cycle_partner_table="lighter_btc_optimal_state",
     disable_literal_tp=True,
     profit_lock_enabled=True,
-    profit_lock_trigger_pct=0.05,
+    profit_lock_trigger_pct=0.03,
     profit_lock_trail_pct=0.01,
     schema_has_profit_lock=True,
     require_fresh_signal=False,
