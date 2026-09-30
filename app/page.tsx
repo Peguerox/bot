@@ -2045,6 +2045,17 @@ function HedgeDualLegPanel({
   };
 
   const PAIR_TOLERANCE_MS = 5000;
+  // A closed leg whose partner is STILL OPEN is not unhedged -- the cycle simply isn't finished.
+  // The old index-based pairing hid such a row entirely until both legs closed, which read
+  // correctly ("one row, waiting for the other leg"); flagging it UNHEDGED instead was wrong and
+  // made the warning fire on nearly every cycle. The partner's open position lives in its state
+  // row, not the trades table, so that is what gets checked here. UNHEDGED is now reserved for
+  // the real thing: no partner leg ever ENTERED alongside this one.
+  const stillRunning = (partnerState: any, t: any) => {
+    const fet = partnerState?.first_entry_time;
+    if (partnerState?.side == null || fet == null) return false;
+    return Math.abs(Number(fet) - new Date(t.opened_at).getTime()) <= PAIR_TOLERANCE_MS;
+  };
   const ms = (t: any) => new Date(t.opened_at).getTime();
   const byEntry = (a: any, b: any) => ms(a) - ms(b);
   const longClosed = longTrades.filter((t) => t.pnl_usd != null).sort(byEntry);
@@ -2069,12 +2080,14 @@ function HedgeDualLegPanel({
         netPnl: L.pnl_usd + best.pnl_usd,
       });
     } else {
-      cycles.push({ key: `L${L.id}`, closedAt: L.closed_at, long: L, short: null, netPnl: L.pnl_usd });
+      cycles.push({ key: `L${L.id}`, closedAt: L.closed_at, long: L, short: null,
+                    netPnl: L.pnl_usd, running: stillRunning(shortState, L) });
     }
   }
   for (const S of shortClosed) {
     if (usedShort.has(S.id)) continue;
-    cycles.push({ key: `S${S.id}`, closedAt: S.closed_at, long: null, short: S, netPnl: S.pnl_usd });
+    cycles.push({ key: `S${S.id}`, closedAt: S.closed_at, long: null, short: S,
+                  netPnl: S.pnl_usd, running: stillRunning(longState, S) });
   }
   cycles.sort((a, b) => new Date(b.closedAt).getTime() - new Date(a.closedAt).getTime());
   const wins = cycles.filter((c) => c.netPnl > 0).length;
@@ -2206,16 +2219,23 @@ function HedgeDualLegPanel({
                             <span className="text-gray-500"> {legPct(c.short)!.toFixed(3)}%</span>
                           </span>
                         </>
+                      ) : c.running ? (
+                        // Partner is still open: the cycle is in flight, not unhedged.
+                        <>
+                          <span className="text-gray-500">⏳ </span>
+                          {c.long
+                            ? <><span className="text-green-400">L·{shortReason(c.long.reason)}<span className="text-gray-500"> {legPct(c.long)!.toFixed(3)}%</span></span><span className="text-gray-500"> / short still running</span></>
+                            : <><span className="text-amber-400">S·{shortReason(c.short.reason)}<span className="text-gray-500"> {legPct(c.short)!.toFixed(3)}%</span></span><span className="text-gray-500"> / long still running</span></>}
+                        </>
                       ) : (
-                        // A leg with no partner means the hedge was not actually hedged for that
-                        // trade -- a naked directional bet. Called out loudly rather than shown as
-                        // if it were an ordinary cycle.
+                        // No partner leg ever entered alongside this one -- a genuinely naked
+                        // directional bet. Called out loudly; this is the real warning.
                         <>
                           <span className="text-red-400 font-bold">UNHEDGED</span>
                           {" "}
                           {c.long
-                            ? <span className="text-green-400">L·{shortReason(c.long.reason)} (no short leg)</span>
-                            : <span className="text-amber-400">S·{shortReason(c.short.reason)} (no long leg)</span>}
+                            ? <span className="text-green-400">L·{shortReason(c.long.reason)}<span className="text-gray-500"> {legPct(c.long)!.toFixed(3)}%</span> (no short leg)</span>
+                            : <span className="text-amber-400">S·{shortReason(c.short.reason)}<span className="text-gray-500"> {legPct(c.short)!.toFixed(3)}%</span> (no long leg)</span>}
                         </>
                       )}
                     </span>
