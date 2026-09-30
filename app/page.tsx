@@ -2087,7 +2087,7 @@ function HedgeDualLegPanel({
         <div>
           <h3 className="text-white font-bold text-sm">Worker 2 · Hedge Strategy (2 legs)</h3>
           <p className="text-gray-500 text-[11px]">
-            One process, two real sub-accounts, moving in CYCLES -- both legs enter together (Worker 2's account LONG, Worker 3's account SHORT), no stochastic signal, $10 fixed per leg. SL 0.03% cuts a losing leg, which then WAITS -- no literal TP, profit-lock trail only (arms +0.05%, trails 0.01% behind peak) -- both re-enter together only once BOTH are flat again. One switch controls both legs together.
+            One process, two real sub-accounts, moving in CYCLES -- both legs enter together (Worker 2's account LONG, Worker 3's account SHORT), $10 fixed per leg, equal on both sides. A cycle only OPENS while the 25/75 stochastic shows real pressure (no entries in flat chop); the signal gates WHEN, never which way. SL 0.03% cuts a losing leg, which then WAITS -- no literal TP, profit-lock trail only (arms +0.05%, trails 0.01% behind peak), with a breakeven floor under the winner once the loser is cut. Both re-enter together only once BOTH are flat again. One switch controls both legs together.
           </p>
         </div>
         <div className="flex items-center gap-1.5 shrink-0">
@@ -2149,9 +2149,11 @@ function HedgeDualLegPanel({
                   {liveK != null ? liveK.toFixed(1) : "—"}
                 </span>
                 <span className="text-[10px] font-normal text-gray-500 ml-1.5">
-                  {liveSignal === "long" ? "favors LONG ($15 long / $5 short next cycle)"
-                    : liveSignal === "short" ? "favors SHORT ($5 long / $15 short next cycle)"
-                    : "neutral (no tilt, $10 / $10 next cycle)"}
+                  {/* Readout only. The legs are always $10/$10 -- pressure_bias_enabled is off
+                      (2026-09-30), so this signal does NOT change either leg's size. */}
+                  {liveSignal === "long" ? "leaning LONG — readout only, legs stay $10 / $10"
+                    : liveSignal === "short" ? "leaning SHORT — readout only, legs stay $10 / $10"
+                    : "neutral — readout only, legs stay $10 / $10"}
                 </span>
               </p>
             </div>

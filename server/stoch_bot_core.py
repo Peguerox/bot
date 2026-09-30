@@ -446,6 +446,22 @@ class BotConfig:
     # worse result than just letting its own SL run. Fails safe in every other direction too: no
     # partner configured, partner never opened, or partner closed green => no floor, and the leg
     # runs on profit_lock/SL exactly as before. Requires cycle_partner_table.
+    # 2026-09-30, direct request, clarifying what the 25/75 stochastic was always for: "if you
+    # enter a trade and there is no pressure, how is it going to move? the 25/75 was to enter with
+    # pressure." A fixed_direction leg otherwise opens a cycle EVERY time it is flat, including in
+    # dead chop where neither side can travel far enough to reach the profit-lock trail and both
+    # legs just grind against the spread. With this on, a cycle only opens while the shared
+    # stochastic K is actually at an extreme (outside entry_lo/entry_hi) -- i.e. only when there is
+    # real pressure behind the move.
+    #
+    # It gates WHEN, never WHICH WAY: both legs still enter together on both sides, exactly as
+    # before. The signal says "there is pressure right now", not "go this way" -- so it is read
+    # from the same shared hub both legs already share, which keeps them agreeing on the same
+    # reading and keeps the cycle barrier's two legs in step.
+    #
+    # NOT a size control. An earlier reading of the same request turned it into a $15/$5 leg tilt,
+    # which was never asked for -- see lighter_hedge_dual_leg.py's Sizing section.
+    require_pressure_to_enter: bool = False
     breakeven_floor_enabled: bool = False
     # How far ABOVE the computed floor this leg must trade before the floor goes live. Must be
     # > 0: in a symmetric hedge the winner is already sitting at the floor the instant the loser is
@@ -1899,6 +1915,21 @@ class StochBot:
             return None
         return 100.0 * (-partner_cycle_pnl) / own_notional_usd
 
+    def _has_entry_pressure(self):
+        """True if there is enough pressure right now to justify opening a cycle -- see
+        BotConfig.require_pressure_to_enter. Reads the ONE shared reading both legs already use
+        (published every tick by the owner leg) so the two legs can never disagree about whether
+        this moment qualifies; falls back to its own reading for a standalone bot with no hub.
+        No hub and no candles yet -> no pressure, so a freshly-booted bot waits for a real reading
+        rather than entering on nothing."""
+        cfg = self.cfg
+        if not cfg.require_pressure_to_enter:
+            return True
+        hub = self.pressure_signal_hub
+        if hub is not None:
+            return hub.get("signal") is not None
+        return self.compute_stoch_signal()[0] is not None
+
     def _pressure_biased_leg_usd(self, base_usd):
         """See BotConfig.pressure_bias_enabled's docstring. No-op (returns base_usd unchanged)
         unless both pressure_bias_enabled and fixed_direction are set, or there isn't yet enough
@@ -3289,7 +3320,10 @@ class StochBot:
             # doesn't touch entry_signal/reversal_signal above); the follower leg still never
             # computes its own, same as the sizing decision, so the dashboard only ever shows
             # the one signal actually governing both legs.
-            if cfg.pressure_bias_enabled and cfg.pressure_signal_owner:
+            # Gated on pressure_signal_owner ALONE, not on pressure_bias_enabled: the K readout is
+            # a display/hub concern and must keep working now that the sizing tilt is off (2026-09-30,
+            # legs back to equal $10/$10). Still never touches entry_signal/reversal_signal above.
+            if cfg.pressure_signal_owner:
                 owner_signal, _, _ = self.compute_stoch_signal()
                 # 2026-09-30, fixing a real race: publish EVERY tick, not only at this leg's own
                 # entry moment. The two legs are independent asyncio tasks on their own 0.5s tick
@@ -3942,7 +3976,8 @@ class StochBot:
                 # Everything that could still stop this entry is resolved BEFORE asking the cycle
                 # barrier, so a leg never declares itself ready for a cycle it then declines to
                 # join -- that would hold its partner up for nothing.
-                wants_in = (effective_signal is not None and state.get("enabled") and holds_lock)
+                wants_in = (effective_signal is not None and state.get("enabled") and holds_lock
+                            and self._has_entry_pressure())
                 partner_flat = True
                 if wants_in and cfg.cycle_partner_table is not None:
                     # In-process barrier when one is wired (the hedge); it supersedes the DB poll

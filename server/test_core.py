@@ -3033,6 +3033,85 @@ async def t_no_cycle_hub_falls_back_to_the_db_poll():
     check("entered", bot.state_row["side"] == "long", bot.state_row["side"])
 
 
+async def t_pressure_gate_blocks_entry_in_flat_chop():
+    print("\n[pressure gate: no cycle opens while K sits in the neutral 25-75 band]")
+    ex = FakeExchange()
+    # candles_kind="mid" -> K lands inside the band, i.e. no pressure.
+    bot = make_bot(ex, candles_kind="mid", fixed_direction="long", fixed_leg_usd=10.0,
+                   sl_pct=0.03, tp_pct=0.10, disable_literal_tp=True, require_fresh_signal=False,
+                   self_lock_enabled=False, use_joint_adaptive=False,
+                   require_pressure_to_enter=True)
+    bot.pressure_signal_hub = {"signal": None}   # owner saw no extreme this tick
+    await bot.tick()
+    check("did NOT enter -- nothing to push the price anywhere",
+          bot.state_row["side"] is None, bot.state_row["side"])
+
+
+async def t_pressure_gate_allows_entry_at_an_extreme():
+    print("\n[pressure gate: a cycle opens once K reaches an extreme, whichever way it points]")
+    for reading in ("short", "long"):
+        ex = FakeExchange()
+        bot = make_bot(ex, candles_kind="mid", fixed_direction="long", fixed_leg_usd=10.0,
+                       sl_pct=0.03, tp_pct=0.10, disable_literal_tp=True,
+                       require_fresh_signal=False, self_lock_enabled=False,
+                       use_joint_adaptive=False, require_pressure_to_enter=True)
+        bot.pressure_signal_hub = {"signal": reading}
+        await bot.tick()
+        # The gate is about WHEN, not which way: this LONG leg enters on a 'short' reading too,
+        # because both legs of the hedge always go in together on both sides.
+        check(f"entered on a '{reading}' pressure reading", bot.state_row["side"] == "long",
+              bot.state_row["side"])
+
+
+async def t_pressure_gate_off_by_default_for_other_bots():
+    print("\n[pressure gate: defaults off -- every other bot is untouched]")
+    ex = FakeExchange()
+    bot = make_bot(ex, candles_kind="long")  # require_pressure_to_enter defaults False
+    check("helper is a no-op when the flag is off", bot._has_entry_pressure() is True)
+    await bot.tick()
+    check("enters exactly as before", bot.state_row["side"] == "long", bot.state_row["side"])
+
+
+async def t_pressure_gate_waits_rather_than_guessing_with_no_reading():
+    print("\n[pressure gate: a bot with no reading yet waits instead of entering blind]")
+    ex = FakeExchange()
+    bot = make_bot(ex, candles_kind="mid", fixed_direction="long", fixed_leg_usd=10.0,
+                   sl_pct=0.03, tp_pct=0.10, disable_literal_tp=True, require_fresh_signal=False,
+                   self_lock_enabled=False, use_joint_adaptive=False,
+                   require_pressure_to_enter=True)
+    bot.pressure_signal_hub = {"signal": None}
+    bot.candles = []          # freshly booted, nothing computed yet
+    check("no pressure known -> no entry", bot._has_entry_pressure() is False)
+
+
+async def t_k_readout_still_works_with_the_size_tilt_off():
+    print("\n[pressure signal: 25/75 K is a READOUT -- still published with sizing tilt disabled]")
+    # The 25/75 stochastic was asked for as a pressure indicator to look at, never as a size
+    # control. With pressure_bias_enabled=False the legs must stay equal, but live_k/live_signal
+    # must keep updating -- the display gate is pressure_signal_owner alone, not the sizing flag.
+    entry = 86000.0
+    ex = FakeExchange(collateral=1000.0)
+    state = {
+        "id": 1, "side": None, "legs": [], "first_entry_price": None, "first_entry_time": None,
+        "dca_level": 0, "seed_usd": 1000.0, "realized_pnl_usd": 0.0,
+        "collateral_before_entry": None, "enabled": True,
+        "consecutive_entry_failures": 0, "last_processed_candle_ts": 0,
+    }
+    bot = make_bot(ex, state=state, candles_kind="short", fixed_direction="long",
+                   fixed_leg_usd=10.0, sl_pct=0.03, tp_pct=0.10, disable_literal_tp=True,
+                   require_fresh_signal=False, self_lock_enabled=False, use_joint_adaptive=False,
+                   pressure_bias_enabled=False,      # tilt OFF
+                   pressure_signal_owner=True)       # but still the readout owner
+    hub = {"signal": None}
+    bot.pressure_signal_hub = hub
+    await bot.tick()
+    check("K still computed for the dashboard", bot.live_k is not None, bot.live_k)
+    check("direction still published", hub["signal"] == "short", hub["signal"])
+    notional = entry * core.total_qty(bot.state_row["legs"])
+    check(f"size UNCHANGED at $10 despite an opposing signal (actual ${notional:.2f})",
+          9.0 < notional < 11.0, notional)
+
+
 async def t_live_configs_match_their_stated_rules():
     print("\n[live configs: the real worker files still encode the rules they are supposed to]")
     # These assert the actual shipped CONFIG objects, not a hand-built test config. Both of these
@@ -3059,6 +3138,14 @@ async def t_live_configs_match_their_stated_rules():
               leg.single_instance_lock is True, leg.single_instance_lock)
         check(f"hedge {name} leg: has a cycle partner to synchronise with",
               leg.cycle_partner_table is not None, leg.cycle_partner_table)
+        # Both legs must stay EQUAL at $10. A size tilt was added once without being asked for
+        # and it silently broke the breakeven floor (a $5 winner cannot offset a $15 loser before
+        # the trail exits it). Pinned so it cannot come back unnoticed.
+        check(f"hedge {name} leg: $10 flat", leg.fixed_leg_usd == 10.0, leg.fixed_leg_usd)
+        check(f"hedge {name} leg: NO size tilt -- legs are 10/10",
+              leg.pressure_bias_enabled is False, leg.pressure_bias_enabled)
+        check(f"hedge {name} leg: only enters WITH pressure (25/75 gate)",
+              leg.require_pressure_to_enter is True, leg.require_pressure_to_enter)
     check("hedge legs point at each other, not themselves",
           hedge.LONG_CONFIG.cycle_partner_table == hedge.SHORT_CONFIG.table_state
           and hedge.SHORT_CONFIG.cycle_partner_table == hedge.LONG_CONFIG.table_state)
@@ -3205,6 +3292,11 @@ async def main():
               t_cycle_barrier_readiness_expires,
               t_cycle_barrier_withdraw_frees_the_partner,
               t_no_cycle_hub_falls_back_to_the_db_poll,
+              t_pressure_gate_blocks_entry_in_flat_chop,
+              t_pressure_gate_allows_entry_at_an_extreme,
+              t_pressure_gate_off_by_default_for_other_bots,
+              t_pressure_gate_waits_rather_than_guessing_with_no_reading,
+              t_k_readout_still_works_with_the_size_tilt_off,
               t_live_configs_match_their_stated_rules,
               t_stale_position_bands_ignored_without_schema_flag,
               t_position_bands_still_honored_with_schema_flag):

@@ -99,10 +99,23 @@ Exit stack, both legs identical:
 - No self-lock, no book-opposition, no stoch-turn (all need use_joint_adaptive, which these
   legs don't use -- no volatility-adaptive formula, just the fixed SL/trail above).
 
-Sizing: base case is a fixed $10/leg (fixed_leg_usd), not each account's full equity -- direct
-request, same $ per leg regardless of either sub-account's balance. On top of that, 2026-09-29
-direct request ("we need some signal so there is pressure some where, the stochastic 25/75 is
-good enough"): pressure_bias_enabled tilts each leg's size using ONE shared stochastic K
+Sizing: a fixed $10 per leg (fixed_leg_usd), EQUAL on both sides -- direct request, same $ per leg
+regardless of either sub-account's balance.
+
+2026-09-30, direct correction: the legs are $10/$10 and pressure_bias_enabled is OFF on both.
+7cfe5ef had read the 2026-09-29 request ("we need some signal so there is pressure some where, the
+stochastic 25/75 is good enough") as licence to make the leg SIZES unequal -- $15 for whichever
+side K favoured, $5 for the other. That was never asked for: the request was for a signal to see,
+not for a 3:1 directional tilt. It also silently disabled the breakeven floor in one direction, as
+a $5 winner needs +0.09% to offset a $15 loser's -0.03% while the profit-lock trail exits at
+~0.05%, so a cycle whose winner was the small leg could never be brought back to even.
+
+The K value is still computed by the owner leg and shown on the dashboard -- it is a readout, and
+no longer changes anything. The machinery below is left in place (disabled) rather than deleted so
+a deliberate, requested version of it can be switched back on without rebuilding it.
+
+HISTORICAL, describing the now-disabled tilt: pressure_bias_enabled tilts each leg's size using ONE
+shared stochastic K
 (entry_lo=25/entry_hi=75) -- fixed_direction's own entry/exit logic never looks at it, this is
 purely a sizing tilt on top. ONE signal only, computed by exactly one leg: LONG_CONFIG has
 pressure_signal_owner=True, so the long leg alone calls compute_stoch_signal() and publishes it
@@ -149,9 +162,22 @@ LONG_CONFIG = BotConfig(
     fixed_leg_usd=10.0,  # direct request: same $ per leg, not the account's full balance
     # 2026-09-29, direct request: bias size off the raw stochastic K -- see the module
     # docstring's "Sizing" section and BotConfig.pressure_bias_enabled's docstring.
-    pressure_bias_enabled=True,
-    pressure_bias_usd=5.0,
-    pressure_bias_min_usd=2.0,
+    # 2026-09-30, direct correction: BACK TO $10/$10. 7cfe5ef turned the requested 25/75 signal
+    # into a 3:1 SIZE tilt ($15 favoured leg / $5 other) that was never asked for -- the request
+    # was for a signal to look at, not for unequal legs. The tilt also quietly broke the breakeven
+    # floor: a $5 winner must make +0.09% to offset a $15 loser's -0.03%, but the profit-lock trail
+    # exits at ~0.05%, so whenever the small leg was the winner the cycle could not be brought back
+    # to even and the floor never got the chance to fire. Equal legs keep the hedge delta-neutral
+    # and keep breakeven reachable from either side.
+    # The K value is still computed and shown on the dashboard (schema_has_live_signal +
+    # pressure_signal_owner below) -- it is a readout now, and changes nothing about size.
+    pressure_bias_enabled=False,
+    # 2026-09-30, direct request -- what the 25/75 was for all along: only OPEN a cycle when the
+    # stochastic is at an extreme, i.e. when there is real pressure behind the move. Without this
+    # a fixed_direction leg enters every single time it is flat, including in flat chop where
+    # neither side travels far enough to reach the 0.05% trail and both legs just grind. Gates
+    # WHEN a cycle opens, never which way -- both legs still enter together, both sides.
+    require_pressure_to_enter=True,
     pressure_signal_owner=True,  # this leg computes the ONE shared signal; short just reads it
     # 2026-09-30, direct request: show the live K value on the dashboard. Column already exists
     # on lighter_btc_optimal_state from an earlier experiment -- no migration needed.
@@ -210,9 +236,22 @@ SHORT_CONFIG = BotConfig(
     fixed_leg_usd=10.0,  # direct request: same $ per leg, not the account's full balance
     # 2026-09-29, direct request: bias size off the raw stochastic K -- see the module
     # docstring's "Sizing" section and BotConfig.pressure_bias_enabled's docstring.
-    pressure_bias_enabled=True,
-    pressure_bias_usd=5.0,
-    pressure_bias_min_usd=2.0,
+    # 2026-09-30, direct correction: BACK TO $10/$10. 7cfe5ef turned the requested 25/75 signal
+    # into a 3:1 SIZE tilt ($15 favoured leg / $5 other) that was never asked for -- the request
+    # was for a signal to look at, not for unequal legs. The tilt also quietly broke the breakeven
+    # floor: a $5 winner must make +0.09% to offset a $15 loser's -0.03%, but the profit-lock trail
+    # exits at ~0.05%, so whenever the small leg was the winner the cycle could not be brought back
+    # to even and the floor never got the chance to fire. Equal legs keep the hedge delta-neutral
+    # and keep breakeven reachable from either side.
+    # The K value is still computed and shown on the dashboard (schema_has_live_signal +
+    # pressure_signal_owner below) -- it is a readout now, and changes nothing about size.
+    pressure_bias_enabled=False,
+    # 2026-09-30, direct request -- what the 25/75 was for all along: only OPEN a cycle when the
+    # stochastic is at an extreme, i.e. when there is real pressure behind the move. Without this
+    # a fixed_direction leg enters every single time it is flat, including in flat chop where
+    # neither side travels far enough to reach the 0.05% trail and both legs just grind. Gates
+    # WHEN a cycle opens, never which way -- both legs still enter together, both sides.
+    require_pressure_to_enter=True,
     debug_verbose_tick=False,  # off -- faulthandler below only fires if actually stuck
     # Reciprocal of the long leg's gate above -- waits for lighter_btc_optimal_state (the
     # LONG leg) to also be flat before re-entering.
