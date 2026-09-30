@@ -52,6 +52,7 @@ have every column this config touches (position bands not needed since use_joint
 off; profit_lock_peak_pct already exists on both from earlier work tonight).
 """
 import asyncio
+import faulthandler
 import os
 from stoch_bot_core import BotConfig, StochBot
 
@@ -128,4 +129,14 @@ async def main():
 
 
 if __name__ == "__main__":
-    asyncio.run(main())
+    # Temporary diagnostic (2026-09-30, from external review): dumps every thread's real
+    # Python stack trace every 30s from a separate watchdog thread, independent of the asyncio
+    # event loop -- catches a genuine synchronous block even in cases where tick_watchdog_timeout
+    # (which relies on asyncio.wait_for, itself not a hard deadline against a truly blocking
+    # call) never fires. Doesn't change any trading logic. Remove once the freeze is found.
+    faulthandler.enable()
+    faulthandler.dump_traceback_later(30, repeat=True)
+    try:
+        asyncio.run(main())
+    finally:
+        faulthandler.cancel_dump_traceback_later()
