@@ -485,6 +485,14 @@ class BotConfig:
     # _acquire_instance_lock. Requires the lock_owner/lock_heartbeat column migration. False
     # (default) leaves every bot that hasn't had that migration run behaving exactly as before.
     single_instance_lock: bool = False
+    # Manual exit levers (2026-09-30). When set, override_sl_pct / override_profit_lock_trigger /
+    # override_profit_lock_trail on the state row replace the compiled-in sl_pct /
+    # profit_lock_trigger_pct / profit_lock_trail_pct, so the exits can be retuned from the
+    # dashboard without a deploy. Volatility ranged 0.0195%-0.1945% in a single week, a 10x
+    # spread, and no one fixed stop is right across that -- this exists to find the right value
+    # per regime by observation before any adaptive rule is committed to.
+    # Requires the lighter_hedge_manual_exit_levers migration. NULL columns mean "use the config".
+    schema_has_exit_overrides: bool = False
     # Mirror-paper fallback (2026-09-27): if real is flat, unlocked, and enabled, but has no
     # live entry_signal this tick while the paper shadow already holds a position, real enters
     # to match paper's side directly instead of waiting for its own fresh signal. See the
@@ -1526,6 +1534,28 @@ class StochBot:
         self.live_k = k
         self.live_signal = signal
         return signal, signal, ts
+
+    def _exit_params(self, state):
+        """(sl_pct, profit_lock_trigger, profit_lock_trail) for this tick.
+
+        A non-NULL override on the state row wins over the compiled-in value; NULL means "use the
+        config". Read live every tick rather than frozen at entry, so a change takes effect at
+        once -- the intended workflow is stop, retune, restart, but reading live also means a
+        value nudged mid-cycle is honoured immediately instead of silently waiting a cycle.
+
+        Both legs MUST carry identical values. Unequal exits between the legs break the breakeven
+        floor (a leg cut at a different level cannot be offset by its partner), which is why the
+        API route always writes both rows together and never one alone."""
+        cfg = self.cfg
+        sl, trig, trail = cfg.sl_pct, cfg.profit_lock_trigger_pct, cfg.profit_lock_trail_pct
+        if cfg.schema_has_exit_overrides:
+            o = state.get("override_sl_pct")
+            if o is not None: sl = float(o)
+            o = state.get("override_profit_lock_trigger")
+            if o is not None: trig = float(o)
+            o = state.get("override_profit_lock_trail")
+            if o is not None: trail = float(o)
+        return sl, trig, trail
 
     def _measure_vol_pct(self, lookback):
         """Mean 1-min (high-low)/close%, trailing `lookback` CLOSED candles -- the same
@@ -3546,8 +3576,18 @@ class StochBot:
             now_s = time.time()
             if now_s - self._live_signal_persist_ts >= 10.0:
                 self._live_signal_persist_ts = now_s
+                patch = {"live_k": self.live_k, "live_signal": self.live_signal}
+                if cfg.schema_has_exit_overrides:
+                    # Live volatility for the dashboard, on the same cadence. This is the exact
+                    # measure the exits have to cope with -- mean 1-min (high-low)/close% over the
+                    # last 30 closed candles -- so the number on screen is the one to tune the
+                    # levers against. Observed range in a single week: 0.0195% (calm) to 0.1945%
+                    # (US open), a 10x spread.
+                    v = self._measure_vol_pct(30)
+                    if v is not None:
+                        patch["live_vol_pct"] = v
                 try:
-                    await self.update_state({"live_k": self.live_k, "live_signal": self.live_signal})
+                    await self.update_state(patch)
                 except Exception:
                     pass
         if cfg.entry_confirmation_max_pct is not None and cfg.schema_has_entry_confirmation:
@@ -3826,8 +3866,12 @@ class StochBot:
             bands = cfg.schema_has_position_bands
             pos_tp = state.get("position_tp_pct") if bands else None
             pos_sl = state.get("position_sl_pct") if bands else None
+            # Manual exit levers win over both the recorded band and the compiled-in default.
+            ov_sl, ov_trig, ov_trail = self._exit_params(state)
             pos_tp = pos_tp if pos_tp is not None else cfg.tp_pct
-            pos_sl = pos_sl if pos_sl is not None else cfg.sl_pct
+            pos_sl = pos_sl if pos_sl is not None else ov_sl
+            if cfg.schema_has_exit_overrides and state.get("override_sl_pct") is not None:
+                pos_sl = ov_sl
             tp = round_trigger(ae * (1 + pos_tp / 100 if side == "long" else 1 - pos_tp / 100),
                                up=(side == "long"))
             sl = round_trigger(state["first_entry_price"] * (1 - pos_sl / 100 if side == "long"
@@ -3860,11 +3904,11 @@ class StochBot:
                 peak = self.profit_lock_peak_pct
                 new_peak = None
                 if peak is None:
-                    if unrealized_pct >= cfg.profit_lock_trigger_pct:
+                    if unrealized_pct >= ov_trig:
                         new_peak = unrealized_pct
                 elif unrealized_pct > peak:
                     new_peak = unrealized_pct
-                elif peak - unrealized_pct >= cfg.profit_lock_trail_pct:
+                elif peak - unrealized_pct >= ov_trail:
                     gap_hit = "PROFIT_LOCK"
                 if new_peak is not None:
                     self.profit_lock_peak_pct = new_peak

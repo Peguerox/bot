@@ -228,6 +228,12 @@ LONG_CONFIG = BotConfig(
     # incident). Only the instance holding the lock on this leg's own state row takes new entries;
     # exits are never gated on it. See BotConfig.single_instance_lock.
     single_instance_lock=True,
+    # 2026-09-30, direct request: retune the exits from the dashboard without a deploy, and show
+    # the live volatility they have to cope with. Volatility ran 0.048% through the quiet hours
+    # and 0.117% at the US open the same day -- 2.4x -- and no single stop is right across that.
+    # Manual levers first, so the best value per regime is found by observation before any
+    # adaptive rule is committed to. NULL columns simply fall back to the values above.
+    schema_has_exit_overrides=True,
     require_fresh_signal=False,
     red_exit_burns_signal=False,
     profit_lock_burns_signal=False,
@@ -296,6 +302,12 @@ SHORT_CONFIG = BotConfig(
     # incident). Only the instance holding the lock on this leg's own state row takes new entries;
     # exits are never gated on it. See BotConfig.single_instance_lock.
     single_instance_lock=True,
+    # 2026-09-30, direct request: retune the exits from the dashboard without a deploy, and show
+    # the live volatility they have to cope with. Volatility ran 0.048% through the quiet hours
+    # and 0.117% at the US open the same day -- 2.4x -- and no single stop is right across that.
+    # Manual levers first, so the best value per regime is found by observation before any
+    # adaptive rule is committed to. NULL columns simply fall back to the values above.
+    schema_has_exit_overrides=True,
     require_fresh_signal=False,
     red_exit_burns_signal=False,
     profit_lock_burns_signal=False,

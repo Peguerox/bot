@@ -1942,6 +1942,44 @@ function HedgeDualLegPanel({
   // The worker keeps close_requested set while it is still retrying the close, so this is a live
   // "close in flight" indicator rather than just optimistic local state.
   const closePending = (longState?.close_requested ?? false) || (shortState?.close_requested ?? false);
+  // Manual exit levers. Free-text so an exact value can be typed rather than nudged -- these exist
+  // to find the right exits per volatility regime by observation, before an adaptive formula is
+  // committed to. Volatility ran 0.048% in the quiet hours and 0.117% at the US open the same day.
+  const [slIn, setSlIn] = useState("");
+  const [trigIn, setTrigIn] = useState("");
+  const [trailIn, setTrailIn] = useState("");
+  const [savingSettings, setSavingSettings] = useState(false);
+  const liveVol: number | null = longState?.live_vol_pct ?? null;
+  const curSl = longState?.override_sl_pct ?? null;
+  const curTrig = longState?.override_profit_lock_trigger ?? null;
+  const curTrail = longState?.override_profit_lock_trail ?? null;
+
+  async function handleApplySettings() {
+    const payload: Record<string, string> = {};
+    if (slIn.trim()) payload.sl = slIn.trim();
+    if (trigIn.trim()) payload.trigger = trigIn.trim();
+    if (trailIn.trim()) payload.trail = trailIn.trim();
+    if (Object.keys(payload).length === 0) return;
+    // The route writes BOTH legs together -- unequal exits would break the breakeven floor.
+    if (!confirm(
+      `Apply to BOTH legs?\n\n`
+      + `SL      ${payload.sl ?? "(unchanged)"}%\n`
+      + `Trigger ${payload.trigger ?? "(unchanged)"}%\n`
+      + `Trail   ${payload.trail ?? "(unchanged)"}%\n\n`
+      + `Takes effect immediately, including on an open position.`
+    )) return;
+    setSavingSettings(true);
+    const res = await fetch("/api/lighter-hedge-settings", {
+      method: "POST", headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(payload),
+    });
+    if (!res.ok) {
+      const b = await res.json().catch(() => ({}));
+      alert(b.error || "Could not apply settings.");
+    } else { setSlIn(""); setTrigIn(""); setTrailIn(""); }
+    await onToggled();
+    setSavingSettings(false);
+  }
 
   async function handleToggle() {
     const question = enabled
@@ -2197,6 +2235,55 @@ function HedgeDualLegPanel({
                 </span>
               </p>
             </div>
+          </div>
+          {/* Live volatility + manual exit levers. The volatility shown is exactly what the exits
+              have to cope with (mean 1-min high-low/close %, 30-min lookback), so it is the number
+              to tune against. Both legs are always written together. */}
+          <div className="bg-gray-800/60 rounded-lg p-2 space-y-2">
+            <div className="flex items-baseline justify-between">
+              <p className="text-gray-500 text-[10px] uppercase">Volatility (1-min range, 30m)</p>
+              <p className="font-bold text-sm tabular-nums">
+                <span className={liveVol == null ? "text-gray-500"
+                  : liveVol >= 0.10 ? "text-red-400"
+                  : liveVol >= 0.06 ? "text-amber-400" : "text-green-400"}>
+                  {liveVol != null ? liveVol.toFixed(4) + "%" : "—"}
+                </span>
+                <span className="text-[10px] font-normal text-gray-500 ml-1.5">
+                  {liveVol == null ? "" : liveVol >= 0.10 ? "HIGH — widen exits"
+                    : liveVol >= 0.06 ? "elevated" : "calm"}
+                </span>
+              </p>
+            </div>
+            <div className="grid grid-cols-3 gap-1.5">
+              {([["SL", slIn, setSlIn, curSl],
+                 ["Trigger", trigIn, setTrigIn, curTrig],
+                 ["Trail", trailIn, setTrailIn, curTrail]] as const).map(([label, val, set, cur]) => (
+                <div key={label}>
+                  <p className="text-gray-500 text-[9px] uppercase">
+                    {label} <span className="text-gray-600">now {cur != null ? cur + "%" : "—"}</span>
+                  </p>
+                  <input
+                    value={val}
+                    onChange={(e) => set(e.target.value)}
+                    placeholder={cur != null ? String(cur) : ""}
+                    inputMode="decimal"
+                    className="w-full bg-gray-900 border border-gray-700 rounded px-1.5 py-1 text-xs text-white tabular-nums focus:outline-none focus:border-blue-500"
+                  />
+                </div>
+              ))}
+            </div>
+            <button
+              onClick={handleApplySettings}
+              disabled={savingSettings || loading || (!slIn.trim() && !trigIn.trim() && !trailIn.trim())}
+              className="w-full text-xs font-bold px-2.5 py-1 rounded bg-blue-500/20 text-blue-400 hover:bg-blue-500/30 disabled:opacity-30"
+            >
+              {savingSettings ? "Applying…" : "Apply to both legs"}
+            </button>
+            <p className="text-gray-600 text-[9px] leading-snug">
+              Leave a box blank to keep it. Applies to BOTH legs at once and takes effect
+              immediately, including on an open position — stop the bot first if you'd rather it
+              only affect the next cycle.
+            </p>
           </div>
           <div className="space-y-1">
             <p className="text-gray-500 text-[10px] uppercase">Recent cycles (net of both legs)</p>
