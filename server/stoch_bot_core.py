@@ -432,6 +432,19 @@ class BotConfig:
     # is also currently null (flat) -- see _partner_is_flat's docstring. None (default): no
     # effect on any other bot.
     cycle_partner_table: Optional[str] = None
+    # 2026-09-29, direct request: "we need some signal so there is pressure some where, the
+    # stochastic 25/75 is good enough" -- a fixed_direction leg otherwise sizes every entry at a
+    # flat fixed_leg_usd regardless of market conditions, a pure coin flip between the two legs.
+    # This computes the ordinary stochastic K (same entry_lo/entry_hi bands every other bot
+    # uses -- fixed_direction's own entry logic ignores it, but self.candles is populated the
+    # same way regardless) at entry time and tilts THIS leg's own size: bigger when the raw
+    # signal agrees with this leg's fixed_direction, smaller when it favors the other leg,
+    # unchanged when K is in the neutral 25-75 zone. Sizing tilt only -- entry/exit timing and
+    # cycle_partner_table's synchronization are both untouched. No effect unless fixed_direction
+    # is also set. See _pressure_biased_leg_usd's docstring.
+    pressure_bias_enabled: bool = False
+    pressure_bias_usd: float = 0.0
+    pressure_bias_min_usd: float = 1.0
     # 2026-09-29/30, temporary diagnostic: prints a checkpoint at each major step of tick()/
     # try_enter()/confirm_fill(), gated so it never fires for any other bot. Added specifically
     # to pinpoint where the hedge dual-leg process hangs (every individual piece -- reads,
@@ -1580,6 +1593,23 @@ class StochBot:
             return rows[0].get("side") is None
         except Exception:
             return False
+
+    def _pressure_biased_leg_usd(self, base_usd):
+        """See BotConfig.pressure_bias_enabled's docstring. No-op (returns base_usd unchanged)
+        unless both pressure_bias_enabled and fixed_direction are set, or there isn't yet enough
+        candle history for compute_stoch_signal to return a K at all (None, None, None) --
+        fails toward the flat baseline size, never toward a guess. pressure_bias_min_usd is a
+        floor, not a target -- it only ever prevents the DOWN tilt from reaching zero/negative;
+        it never limits the UP tilt."""
+        cfg = self.cfg
+        if not cfg.pressure_bias_enabled or cfg.fixed_direction is None:
+            return base_usd
+        entry_signal, _, _ = self.compute_stoch_signal()
+        if entry_signal == cfg.fixed_direction:
+            return base_usd + cfg.pressure_bias_usd
+        if entry_signal is not None:
+            return max(cfg.pressure_bias_min_usd, base_usd - cfg.pressure_bias_usd)
+        return base_usd
 
     def _book_opposition_ratio(self, side):
         """Book-opposition early exit (2026-09-28, direct request): fraction of near-touch
@@ -3370,6 +3400,7 @@ class StochBot:
                 fail_count = fresh.get("consecutive_entry_failures", 0) or 0
                 eq = (cfg.fixed_leg_usd if cfg.fixed_leg_usd is not None
                       else fresh["seed_usd"] + fresh["realized_pnl_usd"])
+                eq = self._pressure_biased_leg_usd(eq)
                 if not fresh.get("enabled"):
                     return
                 if fail_count >= 3:
@@ -3454,6 +3485,7 @@ class StochBot:
                         return
                     eq = (cfg.fixed_leg_usd if cfg.fixed_leg_usd is not None
                           else state["seed_usd"] + state["realized_pnl_usd"])
+                    eq = self._pressure_biased_leg_usd(eq)
                     if eq <= 0:
                         await self.log_run("equity_non_positive", {"eq": eq})
                         await self.update_state({"enabled": False,

@@ -52,9 +52,20 @@ Exit stack, both legs identical:
 - No self-lock, no book-opposition, no stoch-turn (all need use_joint_adaptive, which these
   legs don't use -- no volatility-adaptive formula, just the fixed SL/trail above).
 
-Sizing: each leg trades its own account's full equity per entry, same convention every other
-bot in this fleet already uses (leg_usd = seed_usd + realized_pnl_usd, see try_enter's caller
-in stoch_bot_core.py) -- nothing hedge-specific needed there.
+Sizing: base case is a fixed $10/leg (fixed_leg_usd), not each account's full equity -- direct
+request, same $ per leg regardless of either sub-account's balance. On top of that, 2026-09-29
+direct request ("we need some signal so there is pressure some where, the stochastic 25/75 is
+good enough"): pressure_bias_enabled tilts EACH leg's own size at entry time using the ordinary
+stochastic K (entry_lo=25/entry_hi=75, computed off self.candles same as every other bot --
+fixed_direction's own entry/exit logic never looks at it, this is a second, independent read of
+the same market data purely for sizing). Bigger ($10+$5=$15) when the raw signal agrees with
+that leg's own fixed_direction, smaller ($10-$5=$5, floored at pressure_bias_min_usd=$2) when it
+favors the other leg, unchanged when K sits in the neutral 25-75 zone. Both legs still always
+enter together (cycle_partner_table untouched) -- this only changes how much each leg risks on
+that cycle, giving the leg the market currently favors more weight without ever fully starving
+the other side. New, not-yet-backtested on top of the validated 0.03%-cut numbers -- noted so
+that isn't forgotten either. See BotConfig.pressure_bias_enabled's docstring in
+stoch_bot_core.py and _pressure_biased_leg_usd for the exact mechanics.
 
 Credentials: Worker 2's leg reads the standard LIGHTER_ACCOUNT_INDEX/LIGHTER_API_KEY_INDEX/
 LIGHTER_API_PRIVATE_KEY env vars already set on this Render service (unchanged). Worker 3's
@@ -84,6 +95,11 @@ LONG_CONFIG = BotConfig(
     fixed_direction="long",
     tp_pct=0.10, sl_pct=0.03,  # sl_pct is the real, live value here (use_joint_adaptive off)
     fixed_leg_usd=10.0,  # direct request: same $ per leg, not the account's full balance
+    # 2026-09-29, direct request: bias size off the raw stochastic K -- see the module
+    # docstring's "Sizing" section and BotConfig.pressure_bias_enabled's docstring.
+    pressure_bias_enabled=True,
+    pressure_bias_usd=5.0,
+    pressure_bias_min_usd=2.0,
     debug_verbose_tick=False,  # off -- faulthandler below only fires if actually stuck
     # 2026-09-30, direct request, correcting a real bug: this leg will NOT re-enter on its
     # own just because it went flat -- it waits until the SHORT leg (lighter_stoch_dca_btc_
@@ -117,6 +133,11 @@ SHORT_CONFIG = BotConfig(
     fixed_direction="short",
     tp_pct=0.10, sl_pct=0.03,
     fixed_leg_usd=10.0,  # direct request: same $ per leg, not the account's full balance
+    # 2026-09-29, direct request: bias size off the raw stochastic K -- see the module
+    # docstring's "Sizing" section and BotConfig.pressure_bias_enabled's docstring.
+    pressure_bias_enabled=True,
+    pressure_bias_usd=5.0,
+    pressure_bias_min_usd=2.0,
     debug_verbose_tick=False,  # off -- faulthandler below only fires if actually stuck
     # Reciprocal of the long leg's gate above -- waits for lighter_btc_optimal_state (the
     # LONG leg) to also be flat before re-entering.

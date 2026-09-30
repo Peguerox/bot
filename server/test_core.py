@@ -2284,6 +2284,114 @@ async def t_cycle_partner_gate_fails_closed_on_read_error():
           bot.state_row["side"] is None, bot.state_row["side"])
 
 
+async def t_pressure_bias_increases_leg_usd_when_signal_favors_own_direction():
+    print("\n[pressure_bias: sizes UP when the raw stochastic signal agrees with this leg's fixed_direction]")
+    entry = 86000.0
+    ex = FakeExchange(collateral=1000.0)
+    state = {
+        "id": 1, "side": None, "legs": [], "first_entry_price": None, "first_entry_time": None,
+        "dca_level": 0, "seed_usd": 1000.0, "realized_pnl_usd": 0.0,
+        "collateral_before_entry": None, "enabled": True,
+        "consecutive_entry_failures": 0, "last_processed_candle_ts": 0,
+    }
+    # candles_kind="long" -> raw stochastic K near 0 -> compute_stoch_signal reads "long",
+    # matching this leg's own fixed_direction="long".
+    bot = make_bot(ex, state=state, candles_kind="long", fixed_direction="long",
+                   fixed_leg_usd=10.0, sl_pct=0.03, tp_pct=0.10, disable_literal_tp=True,
+                   require_fresh_signal=False, self_lock_enabled=False, use_joint_adaptive=False,
+                   pressure_bias_enabled=True, pressure_bias_usd=5.0, pressure_bias_min_usd=1.0)
+    await bot.tick()
+    check("entered long", bot.state_row["side"] == "long", bot.state_row["side"])
+    notional = entry * core.total_qty(bot.state_row["legs"])
+    check(f"order sized up to ~$15 (base $10 + $5 bias), not $10 (actual ${notional:.2f})",
+          13.0 < notional < 17.0, notional)
+
+
+async def t_pressure_bias_decreases_leg_usd_when_signal_favors_other_direction():
+    print("\n[pressure_bias: sizes DOWN when the raw stochastic signal favors the OTHER leg]")
+    entry = 86000.0
+    ex = FakeExchange(collateral=1000.0)
+    state = {
+        "id": 1, "side": None, "legs": [], "first_entry_price": None, "first_entry_time": None,
+        "dca_level": 0, "seed_usd": 1000.0, "realized_pnl_usd": 0.0,
+        "collateral_before_entry": None, "enabled": True,
+        "consecutive_entry_failures": 0, "last_processed_candle_ts": 0,
+    }
+    # candles_kind="short" -> raw stochastic K near 100 -> compute_stoch_signal reads "short",
+    # opposing this leg's own fixed_direction="long".
+    bot = make_bot(ex, state=state, candles_kind="short", fixed_direction="long",
+                   fixed_leg_usd=10.0, sl_pct=0.03, tp_pct=0.10, disable_literal_tp=True,
+                   require_fresh_signal=False, self_lock_enabled=False, use_joint_adaptive=False,
+                   pressure_bias_enabled=True, pressure_bias_usd=5.0, pressure_bias_min_usd=1.0)
+    await bot.tick()
+    check("entered long", bot.state_row["side"] == "long", bot.state_row["side"])
+    notional = entry * core.total_qty(bot.state_row["legs"])
+    check(f"order sized down to ~$5 (base $10 - $5 bias), not $10 (actual ${notional:.2f})",
+          3.0 < notional < 7.0, notional)
+
+
+async def t_pressure_bias_floor_prevents_negative_or_zero_sizing():
+    print("\n[pressure_bias: a bias bigger than the base size floors at pressure_bias_min_usd, never zero/negative]")
+    entry = 86000.0
+    ex = FakeExchange(collateral=1000.0)
+    state = {
+        "id": 1, "side": None, "legs": [], "first_entry_price": None, "first_entry_time": None,
+        "dca_level": 0, "seed_usd": 1000.0, "realized_pnl_usd": 0.0,
+        "collateral_before_entry": None, "enabled": True,
+        "consecutive_entry_failures": 0, "last_processed_candle_ts": 0,
+    }
+    bot = make_bot(ex, state=state, candles_kind="short", fixed_direction="long",
+                   fixed_leg_usd=10.0, sl_pct=0.03, tp_pct=0.10, disable_literal_tp=True,
+                   require_fresh_signal=False, self_lock_enabled=False, use_joint_adaptive=False,
+                   pressure_bias_enabled=True, pressure_bias_usd=50.0, pressure_bias_min_usd=2.0)
+    await bot.tick()
+    check("entered long", bot.state_row["side"] == "long", bot.state_row["side"])
+    notional = entry * core.total_qty(bot.state_row["legs"])
+    check(f"order floored to ~$2 (pressure_bias_min_usd), not zero/negative (actual ${notional:.2f})",
+          1.0 < notional < 3.0, notional)
+
+
+async def t_pressure_bias_noop_when_disabled():
+    print("\n[pressure_bias: disabled (default) -- opposing signal has zero effect on sizing]")
+    entry = 86000.0
+    ex = FakeExchange(collateral=1000.0)
+    state = {
+        "id": 1, "side": None, "legs": [], "first_entry_price": None, "first_entry_time": None,
+        "dca_level": 0, "seed_usd": 1000.0, "realized_pnl_usd": 0.0,
+        "collateral_before_entry": None, "enabled": True,
+        "consecutive_entry_failures": 0, "last_processed_candle_ts": 0,
+    }
+    bot = make_bot(ex, state=state, candles_kind="short", fixed_direction="long",
+                   fixed_leg_usd=10.0, sl_pct=0.03, tp_pct=0.10, disable_literal_tp=True,
+                   require_fresh_signal=False, self_lock_enabled=False, use_joint_adaptive=False)
+    await bot.tick()
+    check("entered long", bot.state_row["side"] == "long", bot.state_row["side"])
+    notional = entry * core.total_qty(bot.state_row["legs"])
+    check(f"order stays at ~$10 (base, untouched) (actual ${notional:.2f})",
+          8.0 < notional < 12.0, notional)
+
+
+async def t_pressure_bias_noop_when_signal_neutral():
+    print("\n[pressure_bias: enabled but K is in the neutral 25-75 zone -- no tilt either way]")
+    entry = 86000.0
+    ex = FakeExchange(collateral=1000.0)
+    state = {
+        "id": 1, "side": None, "legs": [], "first_entry_price": None, "first_entry_time": None,
+        "dca_level": 0, "seed_usd": 1000.0, "realized_pnl_usd": 0.0,
+        "collateral_before_entry": None, "enabled": True,
+        "consecutive_entry_failures": 0, "last_processed_candle_ts": 0,
+    }
+    bot = make_bot(ex, state=state, candles_kind="mid", fixed_direction="long",
+                   fixed_leg_usd=10.0, sl_pct=0.03, tp_pct=0.10, disable_literal_tp=True,
+                   require_fresh_signal=False, self_lock_enabled=False, use_joint_adaptive=False,
+                   pressure_bias_enabled=True, pressure_bias_usd=5.0, pressure_bias_min_usd=1.0)
+    await bot.tick()
+    check("entered long", bot.state_row["side"] == "long", bot.state_row["side"])
+    notional = entry * core.total_qty(bot.state_row["legs"])
+    check(f"order stays at ~$10 (neutral K, no bias applied) (actual ${notional:.2f})",
+          8.0 < notional < 12.0, notional)
+
+
 async def main():
     for t in (t_normal_entry, t_phantom_double_fill, t_nonce_error_but_filled,
               t_order_error_no_fill, t_circuit_breaker, t_close_uses_real_size,
@@ -2389,7 +2497,12 @@ async def main():
               t_fixed_direction_enters_never_reverses_and_re_enters_after_sl,
               t_fixed_leg_usd_overrides_full_equity_sizing,
               t_cycle_partner_gate_blocks_entry_until_partner_also_flat,
-              t_cycle_partner_gate_fails_closed_on_read_error):
+              t_cycle_partner_gate_fails_closed_on_read_error,
+              t_pressure_bias_increases_leg_usd_when_signal_favors_own_direction,
+              t_pressure_bias_decreases_leg_usd_when_signal_favors_other_direction,
+              t_pressure_bias_floor_prevents_negative_or_zero_sizing,
+              t_pressure_bias_noop_when_disabled,
+              t_pressure_bias_noop_when_signal_neutral):
         try:
             await t()
         except Exception as e:
