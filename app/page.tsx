@@ -2016,20 +2016,48 @@ function HedgeDualLegPanel({
   // by matching timestamps, is what makes that reliable -- direct request: "each line has to
   // be the result of both legs... they are working together for a common goal," not shown as
   // two disconnected strategies.
-  const longClosed = longTrades.filter((t) => t.pnl_usd != null)
-    .sort((a, b) => new Date(a.opened_at).getTime() - new Date(b.opened_at).getTime());
-  const shortClosed = shortTrades.filter((t) => t.pnl_usd != null)
-    .sort((a, b) => new Date(a.opened_at).getTime() - new Date(b.opened_at).getTime());
-  const cycleCount = Math.min(longClosed.length, shortClosed.length);
+  // Paired by ENTRY TIME, not by position in the list. Pairing by index (longClosed[i] with
+  // shortClosed[i], truncated to the shorter list) silently dropped every unmatched leg and,
+  // worse, mis-attributed PnL the moment the two legs fell out of step -- it would happily pair a
+  // long from 05:05 with a short from 05:08 and print their sum as one "cycle". That is exactly
+  // what happened live on 2026-09-30 (see _cycle_gate_clear_to_enter): the legs desynced, the
+  // short's solo trade vanished from this list entirely, and the panel looked like trades were
+  // not being recorded at all when in fact both tables were perfectly correct.
+  //
+  // Both legs of a real cycle are opened in the same tick, so a small tolerance is all that is
+  // needed. Anything that fails to find a partner is a SOLO leg and is now shown as such rather
+  // than hidden -- an unhedged leg is the single most important thing this panel can surface.
+  const PAIR_TOLERANCE_MS = 5000;
+  const ms = (t: any) => new Date(t.opened_at).getTime();
+  const byEntry = (a: any, b: any) => ms(a) - ms(b);
+  const longClosed = longTrades.filter((t) => t.pnl_usd != null).sort(byEntry);
+  const shortClosed = shortTrades.filter((t) => t.pnl_usd != null).sort(byEntry);
+
   const cycles = [];
-  for (let i = 0; i < cycleCount; i++) {
-    const L = longClosed[i], S = shortClosed[i];
-    cycles.push({
-      key: `${L.id}-${S.id}`,
-      closedAt: L.closed_at > S.closed_at ? L.closed_at : S.closed_at, // whichever leg finished the cycle
-      long: L, short: S,
-      netPnl: L.pnl_usd + S.pnl_usd,
-    });
+  const usedShort = new Set<number>();
+  for (const L of longClosed) {
+    let best: any = null;
+    for (const S of shortClosed) {
+      if (usedShort.has(S.id)) continue;
+      const gap = Math.abs(ms(S) - ms(L));
+      if (gap > PAIR_TOLERANCE_MS) continue;
+      if (best === null || gap < Math.abs(ms(best) - ms(L))) best = S;
+    }
+    if (best) {
+      usedShort.add(best.id);
+      cycles.push({
+        key: `${L.id}-${best.id}`,
+        closedAt: L.closed_at > best.closed_at ? L.closed_at : best.closed_at, // whichever leg finished it
+        long: L, short: best,
+        netPnl: L.pnl_usd + best.pnl_usd,
+      });
+    } else {
+      cycles.push({ key: `L${L.id}`, closedAt: L.closed_at, long: L, short: null, netPnl: L.pnl_usd });
+    }
+  }
+  for (const S of shortClosed) {
+    if (usedShort.has(S.id)) continue;
+    cycles.push({ key: `S${S.id}`, closedAt: S.closed_at, long: null, short: S, netPnl: S.pnl_usd });
   }
   cycles.sort((a, b) => new Date(b.closedAt).getTime() - new Date(a.closedAt).getTime());
   const wins = cycles.filter((c) => c.netPnl > 0).length;
@@ -2141,9 +2169,24 @@ function HedgeDualLegPanel({
                   <div key={c.key} className="flex items-center justify-between text-[11px] bg-gray-800/50 rounded px-1.5 py-1">
                     {timeLabel && <span className="text-gray-600 tabular-nums shrink-0">{timeLabel}</span>}
                     <span className="text-gray-400 truncate">
-                      <span className="text-green-400">L·{shortReason(c.long.reason)}</span>
-                      {" / "}
-                      <span className="text-amber-400">S·{shortReason(c.short.reason)}</span>
+                      {c.long && c.short ? (
+                        <>
+                          <span className="text-green-400">L·{shortReason(c.long.reason)}</span>
+                          {" / "}
+                          <span className="text-amber-400">S·{shortReason(c.short.reason)}</span>
+                        </>
+                      ) : (
+                        // A leg with no partner means the hedge was not actually hedged for that
+                        // trade -- a naked directional bet. Called out loudly rather than shown as
+                        // if it were an ordinary cycle.
+                        <>
+                          <span className="text-red-400 font-bold">UNHEDGED</span>
+                          {" "}
+                          {c.long
+                            ? <span className="text-green-400">L·{shortReason(c.long.reason)} (no short leg)</span>
+                            : <span className="text-amber-400">S·{shortReason(c.short.reason)} (no long leg)</span>}
+                        </>
+                      )}
                     </span>
                     <span className={`font-semibold shrink-0 ${c.netPnl >= 0 ? "text-green-400" : "text-red-400"}`}>
                       {c.netPnl >= 0 ? "+" : ""}${c.netPnl.toFixed(3)}
