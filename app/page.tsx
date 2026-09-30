@@ -1932,7 +1932,12 @@ function HedgeDualLegPanel({
 }) {
   const [toggling, setToggling] = useState(false);
   const [resetting, setResetting] = useState(false);
+  const [closing, setClosing] = useState(false);
   const enabled = longState?.enabled ?? false;
+  const anyLegOpen = (longState?.side ?? null) !== null || (shortState?.side ?? null) !== null;
+  // The worker keeps close_requested set while it is still retrying the close, so this is a live
+  // "close in flight" indicator rather than just optimistic local state.
+  const closePending = (longState?.close_requested ?? false) || (shortState?.close_requested ?? false);
 
   async function handleToggle() {
     const question = enabled
@@ -1960,6 +1965,25 @@ function HedgeDualLegPanel({
     setResetting(false);
   }
 
+  // 2026-09-30: the missing escape hatch. The hedge pivot removed both legs' individual "Close
+  // Position" buttons, and Reset refuses to run with a position open -- so an open cycle could
+  // neither be closed nor reset from the dashboard. Sets close_requested on both legs; the worker
+  // does the actual closing with its own credentials and clears the flag once confirmed flat.
+  async function handleCloseBoth() {
+    if (!confirm(
+      "Close BOTH legs now? This places real market orders on both sub-accounts to flatten every "
+      + "open position, and leaves the strategy disabled afterwards."
+    )) return;
+    setClosing(true);
+    const res = await fetch("/api/lighter-hedge-close", { method: "POST" });
+    if (!res.ok) {
+      const body = await res.json().catch(() => ({}));
+      alert(body.error || "Close failed.");
+    }
+    await onToggled();
+    setClosing(false);
+  }
+
   function legStats(state: any, trades: any[]) {
     const side = state?.side ?? null;
     const legs: any[] = state?.legs ?? [];
@@ -1975,6 +1999,11 @@ function HedgeDualLegPanel({
   }
   const longLeg = legStats(longState, longTrades);
   const shortLeg = legStats(shortState, shortTrades);
+  // Long leg is the pressure-bias signal owner (pressure_signal_owner=True) -- its live_k/
+  // live_signal is the ONE reading both legs' sizing actually uses, see
+  // _pressure_biased_leg_usd's docstring in stoch_bot_core.py.
+  const liveK: number | null = longState?.live_k ?? null;
+  const liveSignal: string | null = longState?.live_signal ?? null;
 
   const combinedSeed = longLeg.seedUsd + shortLeg.seedUsd;
   const combinedRealized = longLeg.realizedPnl + shortLeg.realizedPnl;
@@ -2034,11 +2063,23 @@ function HedgeDualLegPanel({
           </p>
         </div>
         <div className="flex items-center gap-1.5 shrink-0">
+          {(anyLegOpen || closePending) && (
+            <button
+              onClick={handleCloseBoth}
+              disabled={closing || toggling || loading}
+              title="Flatten every open position on BOTH sub-accounts with real market orders, then leave the strategy disabled"
+              className="text-xs font-bold px-2.5 py-1 rounded-full bg-red-500/20 text-red-400 hover:bg-red-500/30"
+            >
+              {closing || closePending ? "Closing…" : "Close Both"}
+            </button>
+          )}
           <button
             onClick={handleReset}
-            disabled={resetting || toggling || loading}
-            title="Wipe trade history and zero PnL into equity -- only while both legs are flat"
-            className="text-xs font-bold px-2.5 py-1 rounded-full bg-gray-700/40 text-gray-400 hover:bg-gray-700/70"
+            disabled={resetting || toggling || loading || anyLegOpen}
+            title={anyLegOpen
+              ? "Close both legs first -- a reset only runs from a flat slate"
+              : "Wipe trade history and zero PnL into equity -- only while both legs are flat"}
+            className="text-xs font-bold px-2.5 py-1 rounded-full bg-gray-700/40 text-gray-400 hover:bg-gray-700/70 disabled:opacity-40"
           >
             {resetting ? "…" : "Reset"}
           </button>
@@ -2073,6 +2114,19 @@ function HedgeDualLegPanel({
             </div>
             <LegBadge label="Long leg (Worker 2 acct)" leg={longLeg} />
             <LegBadge label="Short leg (Worker 3 acct)" leg={shortLeg} />
+            <div className="bg-gray-800/60 rounded-lg p-2 col-span-2">
+              <p className="text-gray-500 text-[10px] uppercase">Pressure Signal (stoch K, 25/75)</p>
+              <p className="font-bold text-sm">
+                <span className={liveSignal === "long" ? "text-green-400" : liveSignal === "short" ? "text-amber-400" : "text-gray-400"}>
+                  {liveK != null ? liveK.toFixed(1) : "—"}
+                </span>
+                <span className="text-[10px] font-normal text-gray-500 ml-1.5">
+                  {liveSignal === "long" ? "favors LONG ($15 long / $5 short next cycle)"
+                    : liveSignal === "short" ? "favors SHORT ($5 long / $15 short next cycle)"
+                    : "neutral (no tilt, $10 / $10 next cycle)"}
+                </span>
+              </p>
+            </div>
           </div>
           <div className="space-y-1">
             <p className="text-gray-500 text-[10px] uppercase">Recent cycles (net of both legs)</p>

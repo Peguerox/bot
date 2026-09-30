@@ -30,6 +30,14 @@ export async function POST() {
     close_requested: false,
     consecutive_entry_failures: 0,
     profit_lock_peak_pct: null,
+    // Stale per-position bands left behind by the retired Worker 3 joint-adaptive strategy gave
+    // the hedge SHORT leg a 0.0909% stop instead of its configured 0.03% (2026-09-30 audit). The
+    // worker no longer reads these columns at all, but a reset should still leave the row honest.
+    position_tp_pct: null,
+    position_sl_pct: null,
+    // Breakeven-floor baseline is per-cycle -- a reset always leaves both legs flat, so it must
+    // not survive into the next cycle.
+    cycle_partner_pnl_baseline: null,
     position_stoch_checkpoint: null,
     paper_joint_checkpoint: null,
     real_trading_locked: false,
