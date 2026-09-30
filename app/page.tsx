@@ -2083,14 +2083,17 @@ function HedgeDualLegPanel({
 
   return (
     <div className="bg-gray-900 rounded-xl p-4 space-y-3">
-      <div className="flex items-center justify-between">
+      {/* Title + description get the FULL panel width, controls sit on their own row beneath.
+          Side-by-side squeezed this (long) description into a narrow column many lines tall with
+          the buttons floating in the middle of it. */}
+      <div className="space-y-2.5">
         <div>
           <h3 className="text-white font-bold text-sm">Worker 2 · Hedge Strategy (2 legs)</h3>
-          <p className="text-gray-500 text-[11px]">
+          <p className="text-gray-500 text-[11px] leading-relaxed">
             One process, two real sub-accounts, moving in CYCLES -- both legs enter together (Worker 2's account LONG, Worker 3's account SHORT), $10 fixed per leg, equal on both sides. A cycle only OPENS while the 25/75 stochastic shows real pressure (no entries in flat chop); the signal gates WHEN, never which way. SL 0.03% cuts a losing leg, which then WAITS -- no literal TP, profit-lock trail only (arms +0.05%, trails 0.01% behind peak), with a breakeven floor under the winner once the loser is cut. Both re-enter together only once BOTH are flat again. One switch controls both legs together.
           </p>
         </div>
-        <div className="flex items-center gap-1.5 shrink-0">
+        <div className="flex items-center gap-1.5 flex-wrap">
           {(anyLegOpen || closePending) && (
             <button
               onClick={handleCloseBoth}
