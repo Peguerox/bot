@@ -257,15 +257,14 @@ CONFIG = BotConfig(
     # dangerous either way, just no longer meaningful).
     profit_lock_burns_signal=False,
     schema_has_profit_lock=True,  # lighter_btc_optimal_profit_lock.sql already applied
-    # 2026-09-29, direct request, second attempt: SL tightened to 0.03% -- with wins this small
-    # (0.01-0.06% typical), a single 0.10% SL loss erases several winning trades' worth of
-    # gains. First attempt at this exact value (same night) was immediately followed by two
-    # process freezes; reverted, root cause never conclusively pinned to this value specifically
-    # (mechanically, sl_pct isn't touched at all while flat/pre-entry, and the freezes coincided
-    # with heavy WAF/Supabase instability elsewhere the same stretch). Retrying now that both of
-    # those have been stable for a while, verified tick-by-tick after deploy before trusting it.
-    joint_adaptive_base=(5.0, 25.0, 0.10, 0.03, 120.0),
-    joint_adaptive_bounds=((3.0, 40.0), (15.0, 40.0), (0.025, 0.30), (0.03, 0.03), (15.0, 600.0)),
+    # 2026-09-29, direct request, reverted back: SL=0.03% was live-tested and, per direct
+    # feedback, "destroyed the strategy" -- too many quick stop-outs relative to the small wins
+    # it was meant to protect. Back to 0.10%. (Note for history: the process-freeze question
+    # from earlier the same night was separately resolved -- SL=0.03% itself ran cleanly once
+    # WAF/Supabase were stable; this revert is purely a strategy-performance call, not a
+    # stability one.)
+    joint_adaptive_base=(5.0, 25.0, 0.10, 0.10, 120.0),
+    joint_adaptive_bounds=((3.0, 40.0), (15.0, 40.0), (0.025, 0.30), (0.10, 0.10), (15.0, 600.0)),
     # No literal TP anymore -- profit_lock_trail above is the real take-profit path (it always
     # fired first in practice anyway), plus stoch_turn_exit_enabled as the backstop.
     disable_literal_tp=True,
