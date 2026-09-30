@@ -21,12 +21,11 @@ export async function POST() {
     sb.from("lighter_stoch_dca_btc_state").select("side").eq("id", 1).single(),
   ]);
 
-  if (longState?.side == null && shortState?.side == null) {
-    return NextResponse.json(
-      { error: "Nothing to close -- both legs are already flat." },
-      { status: 409 }
-    );
-  }
+  // Deliberately NO "both legs already flat -> 409" guard. That check trusted the bot's own rows,
+  // which is exactly what failed on 2026-09-30: both rows said side=null while the exchange held
+  // 3x positions, so a refusal here would have blocked the only control able to clear them. The
+  // worker verifies against the real exchange before acting and clears the flag by itself if it
+  // genuinely is flat, so setting it unconditionally is safe and strictly more useful.
 
   // Set on BOTH legs regardless of which one currently shows a position: the flag is a no-op on an
   // already-flat leg (the worker just clears it and disables that leg), and reading "flat" here is

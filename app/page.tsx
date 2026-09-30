@@ -2094,16 +2094,19 @@ function HedgeDualLegPanel({
           </p>
         </div>
         <div className="flex items-center gap-1.5 flex-wrap">
-          {(anyLegOpen || closePending) && (
-            <button
-              onClick={handleCloseBoth}
-              disabled={closing || toggling || loading}
-              title="Flatten every open position on BOTH sub-accounts with real market orders, then leave the strategy disabled"
-              className="text-xs font-bold px-2.5 py-1 rounded-full bg-red-500/20 text-red-400 hover:bg-red-500/30"
-            >
-              {closing || closePending ? "Closing…" : "Close Both"}
-            </button>
-          )}
+          {/* ALWAYS rendered. It used to be hidden unless a leg's row showed a position, which
+              made it disappear in precisely the case it exists for: on 2026-09-30 both rows said
+              side=null while the exchange actually held 3x positions, so the one control that
+              could have flattened them was not on screen. The button must reflect "flatten
+              whatever is really out there", never "flatten what the bot believes it has". */}
+          <button
+            onClick={handleCloseBoth}
+            disabled={closing || toggling || loading}
+            title="Flatten every open position on BOTH sub-accounts with real market orders, then leave the strategy disabled. Checks the exchange, not the bot's own state."
+            className="text-xs font-bold px-2.5 py-1 rounded-full bg-red-500/20 text-red-400 hover:bg-red-500/30"
+          >
+            {closing || closePending ? "Closing…" : "Close Both"}
+          </button>
           <button
             onClick={handleReset}
             disabled={resetting || toggling || loading || anyLegOpen}
