@@ -1931,6 +1931,7 @@ function HedgeDualLegPanel({
   currentPrice: number | null; loading: boolean; onToggled: () => void;
 }) {
   const [toggling, setToggling] = useState(false);
+  const [resetting, setResetting] = useState(false);
   const enabled = longState?.enabled ?? false;
 
   async function handleToggle() {
@@ -1942,6 +1943,21 @@ function HedgeDualLegPanel({
     await fetch("/api/lighter-hedge-toggle", { method: "POST" });
     await onToggled();
     setToggling(false);
+  }
+
+  // Direct request 2026-09-30: a one-click reset -- wipes both legs' trade history, rolls any
+  // residual PnL into seed_usd, leaves both disabled. Server refuses (409) if either leg still
+  // has an open position; that response is surfaced here rather than silently doing nothing.
+  async function handleReset() {
+    if (!confirm("Reset the hedge? This wipes BOTH legs' trade history and zeroes PnL into equity. Only works while both legs are flat.")) return;
+    setResetting(true);
+    const res = await fetch("/api/lighter-hedge-reset", { method: "POST" });
+    if (!res.ok) {
+      const body = await res.json().catch(() => ({}));
+      alert(body.error || "Reset failed.");
+    }
+    await onToggled();
+    setResetting(false);
   }
 
   function legStats(state: any, trades: any[]) {
@@ -2017,13 +2033,23 @@ function HedgeDualLegPanel({
             One process, two real sub-accounts, moving in CYCLES -- both legs enter together (Worker 2's account LONG, Worker 3's account SHORT), no stochastic signal, $10 fixed per leg. SL 0.03% cuts a losing leg, which then WAITS -- no literal TP, profit-lock trail only (arms +0.05%, trails 0.01% behind peak) -- both re-enter together only once BOTH are flat again. One switch controls both legs together.
           </p>
         </div>
-        <button
-          onClick={handleToggle}
-          disabled={toggling || loading}
-          className={`text-xs font-bold px-2.5 py-1 rounded-full shrink-0 ${enabled ? "bg-green-500/20 text-green-400" : "bg-gray-700/40 text-gray-500"}`}
-        >
-          {toggling ? "…" : enabled ? "ON" : "OFF"}
-        </button>
+        <div className="flex items-center gap-1.5 shrink-0">
+          <button
+            onClick={handleReset}
+            disabled={resetting || toggling || loading}
+            title="Wipe trade history and zero PnL into equity -- only while both legs are flat"
+            className="text-xs font-bold px-2.5 py-1 rounded-full bg-gray-700/40 text-gray-400 hover:bg-gray-700/70"
+          >
+            {resetting ? "…" : "Reset"}
+          </button>
+          <button
+            onClick={handleToggle}
+            disabled={toggling || loading}
+            className={`text-xs font-bold px-2.5 py-1 rounded-full ${enabled ? "bg-green-500/20 text-green-400" : "bg-gray-700/40 text-gray-500"}`}
+          >
+            {toggling ? "…" : enabled ? "ON" : "OFF"}
+          </button>
+        </div>
       </div>
       {loading ? (
         <div className="h-16 bg-gray-800 rounded-lg animate-pulse" />
