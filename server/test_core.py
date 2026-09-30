@@ -3346,6 +3346,68 @@ async def t_cooldown_blocks_entry_then_expires():
           bot.state_row["side"] == "long", bot.state_row["side"])
 
 
+async def t_cycle_gap_blocks_instant_reentry():
+    print("\n[cycle gap: with pressure off, an SL close still waits min_cycle_gap_seconds before re-entering]")
+    entry = 86000.0
+    sl_price = entry * (1 - 0.06/100) - 1
+    ex = FakeExchange(position=round(10.0/entry,5), collateral=10.0)
+    state = {
+        "id": 1, "side": "long", "legs": [{"price": entry, "usd_size": 10.0}],
+        "first_entry_price": entry, "first_entry_time": 1700000000000, "dca_level": 0,
+        "seed_usd": 10.0, "realized_pnl_usd": 0.0, "collateral_before_entry": 10.0,
+        "enabled": True, "consecutive_entry_failures": 0, "last_processed_candle_ts": 0,
+    }
+    bot = make_bot(ex, state=state, candles_kind="mid", fixed_direction="long", fixed_leg_usd=10.0,
+                   sl_pct=0.06, tp_pct=0.10, disable_literal_tp=True, require_fresh_signal=False,
+                   self_lock_enabled=False, use_joint_adaptive=False,
+                   require_pressure_to_enter=False, min_cycle_gap_seconds=10.0)
+    bot.live.order_book = {"bids": [{"price": str(sl_price)}], "asks": [{"price": str(sl_price+1)}]}
+    await bot.tick()
+    check("stopped out", bot.state_row["side"] is None, bot.state_row["side"])
+    ex.position = 0.0
+    bot.live.order_book = {"bids": [{"price": str(entry)}], "asks": [{"price": str(entry+1)}]}
+    # The transition is detected on the tick that OBSERVES side=None for the first time -- the
+    # closing tick itself only writes side=None to the row, it doesn't re-branch into the flat
+    # path in the same call. So the timestamp lands on this second tick, not the one before it.
+    await bot.tick()
+    check("flat-transition timestamp recorded", bot._went_flat_at > 0, bot._went_flat_at)
+    check("did NOT re-enter immediately despite pressure gate being off",
+          bot.state_row["side"] is None, bot.state_row["side"])
+    bot._went_flat_at = time.time() - 11
+    await bot.tick()
+    check("re-entered once the gap elapsed", bot.state_row["side"] == "long", bot.state_row["side"])
+
+
+async def t_cycle_gap_zero_is_instant_like_before():
+    print("\n[cycle gap: 0.0 (default) is instant re-entry, unchanged for every other bot]")
+    ex = FakeExchange(candles_kind="long") if False else FakeExchange()
+    bot = make_bot(ex, candles_kind="long")  # min_cycle_gap_seconds defaults 0.0
+    check("gap check is a no-op at 0.0", bot._cycle_gap_elapsed() is True)
+    await bot.tick()
+    check("entered normally", bot.state_row["side"] == "long", bot.state_row["side"])
+
+
+async def t_cycle_gap_never_blocks_an_exit():
+    print("\n[cycle gap: only ever delays entries -- never blocks protecting an open position]")
+    entry = 86000.0
+    sl_price = entry * (1 - 0.06/100) - 1
+    ex = FakeExchange(position=round(10.0/entry,5), collateral=10.0)
+    state = {
+        "id": 1, "side": "long", "legs": [{"price": entry, "usd_size": 10.0}],
+        "first_entry_price": entry, "first_entry_time": 1700000000000, "dca_level": 0,
+        "seed_usd": 10.0, "realized_pnl_usd": 0.0, "collateral_before_entry": 10.0,
+        "enabled": True, "consecutive_entry_failures": 0, "last_processed_candle_ts": 0,
+    }
+    bot = make_bot(ex, state=state, candles_kind="mid", fixed_direction="long", fixed_leg_usd=10.0,
+                   sl_pct=0.06, tp_pct=0.10, disable_literal_tp=True, require_fresh_signal=False,
+                   self_lock_enabled=False, use_joint_adaptive=False,
+                   require_pressure_to_enter=False, min_cycle_gap_seconds=999.0)
+    bot.live.order_book = {"bids": [{"price": str(sl_price)}], "asks": [{"price": str(sl_price+1)}]}
+    await bot.tick()
+    check("the exit itself was never gated by min_cycle_gap_seconds",
+          bot.state_row["side"] is None, bot.state_row["side"])
+
+
 async def t_live_configs_match_their_stated_rules():
     print("\n[live configs: the real worker files still encode the rules they are supposed to]")
     # These assert the actual shipped CONFIG objects, not a hand-built test config. Both of these
@@ -3385,8 +3447,12 @@ async def t_live_configs_match_their_stated_rules():
               leg.fixed_leg_usd >= 11.0, leg.fixed_leg_usd)
         check(f"hedge {name} leg: NO size tilt -- legs are equal",
               leg.pressure_bias_enabled is False, leg.pressure_bias_enabled)
-        check(f"hedge {name} leg: only enters WITH pressure (25/75 gate)",
-              leg.require_pressure_to_enter is True, leg.require_pressure_to_enter)
+        # 2026-09-30, direct request: pressure gate turned OFF for a hypertrading test ("enter
+        # at any moment"), paired with a 10s min_cycle_gap_seconds so cycles still aren't
+        # zero-delay -- see the cross-leg check below for why BOTH must hold together.
+        check(f"hedge {name} leg: gate off implies a real min_cycle_gap in its place",
+              leg.require_pressure_to_enter or leg.min_cycle_gap_seconds > 0,
+              (leg.require_pressure_to_enter, leg.min_cycle_gap_seconds))
     # Both legs must always trade the SAME market with the SAME rounding. A mismatch here is the
     # same class of bug as unequal fixed_leg_usd -- it breaks the breakeven floor's math (which
     # assumes both legs' notional is directly comparable) and, worse, a size_decimals mismatch
@@ -3405,6 +3471,11 @@ async def t_live_configs_match_their_stated_rules():
     check("hedge legs: SAME fixed_leg_usd",
           hedge.LONG_CONFIG.fixed_leg_usd == hedge.SHORT_CONFIG.fixed_leg_usd,
           (hedge.LONG_CONFIG.fixed_leg_usd, hedge.SHORT_CONFIG.fixed_leg_usd))
+    check("hedge legs: SAME require_pressure_to_enter (an entry-timing mismatch desyncs the barrier)",
+          hedge.LONG_CONFIG.require_pressure_to_enter == hedge.SHORT_CONFIG.require_pressure_to_enter)
+    check("hedge legs: SAME min_cycle_gap_seconds",
+          hedge.LONG_CONFIG.min_cycle_gap_seconds == hedge.SHORT_CONFIG.min_cycle_gap_seconds,
+          (hedge.LONG_CONFIG.min_cycle_gap_seconds, hedge.SHORT_CONFIG.min_cycle_gap_seconds))
     check("hedge legs point at each other, not themselves",
           hedge.LONG_CONFIG.cycle_partner_table == hedge.SHORT_CONFIG.table_state
           and hedge.SHORT_CONFIG.cycle_partner_table == hedge.LONG_CONFIG.table_state)
@@ -3567,6 +3638,9 @@ async def main():
               t_emergency_flatten_records_the_trade,
               t_repeated_emergency_flattens_do_hard_disable,
               t_cooldown_blocks_entry_then_expires,
+              t_cycle_gap_blocks_instant_reentry,
+              t_cycle_gap_zero_is_instant_like_before,
+              t_cycle_gap_never_blocks_an_exit,
               t_live_configs_match_their_stated_rules,
               t_stale_position_bands_ignored_without_schema_flag,
               t_position_bands_still_honored_with_schema_flag):

@@ -493,6 +493,15 @@ class BotConfig:
     # per regime by observation before any adaptive rule is committed to.
     # Requires the lighter_hedge_manual_exit_levers migration. NULL columns mean "use the config".
     schema_has_exit_overrides: bool = False
+    # 2026-09-30, direct request: a fixed pause after THIS leg goes flat, before it will declare
+    # itself ready for the next cycle -- "once you finish a trade, wait N seconds, then another
+    # trade." Built to test hypertrading with require_pressure_to_enter off: with nothing else
+    # gating entry, a `fixed_direction` leg would otherwise re-enter on the very next 0.5s tick
+    # after going flat. 0.0 (default) preserves that instant-re-entry behaviour for every other
+    # bot. Purely a delay on DECLARING readiness (see _cycle_gate_clear_to_enter's `want`
+    # parameter and the standalone min_cycle_gap check in tick()) -- never touches an exit, so it
+    # cannot strand a position.
+    min_cycle_gap_seconds: float = 0.0
     # Mirror-paper fallback (2026-09-27): if real is flat, unlocked, and enabled, but has no
     # live entry_signal this tick while the paper shadow already holds a position, real enters
     # to match paper's side directly instead of waiting for its own fresh signal. See the
@@ -1088,6 +1097,11 @@ class StochBot:
         # Emergency-flatten bookkeeping -- see emergency_flatten / EMERGENCY_COOLDOWN.
         self._emergency_flattens = []
         self._entry_cooldown_until = 0.0
+        # min_cycle_gap_seconds bookkeeping. _was_in_position lets tick() detect the exact tick
+        # this leg transitions to flat (side: not-None -> None) without needing a separate
+        # "closed just now" signal -- side is already read fresh every tick regardless.
+        self._was_in_position = False
+        self._went_flat_at = 0.0
         # Paper shadow's own copy of the same trail -- without this, real could exit early via
         # PROFIT_LOCK while paper (running the identical signal) kept holding, making the two
         # visibly diverge even while real is unlocked and trading the exact same thing paper is.
@@ -1994,6 +2008,14 @@ class StochBot:
         if hub is not None:
             return hub.get("signal") is not None
         return self.compute_stoch_signal()[0] is not None
+
+    def _cycle_gap_elapsed(self):
+        """True if enough time has passed since THIS leg went flat -- see
+        BotConfig.min_cycle_gap_seconds. 0.0 (default) always returns True, i.e. no gap, the
+        original instant-re-entry behaviour. _went_flat_at starts at 0.0, which is always
+        "long enough ago" -- a bot that has never held a position is never gated by this."""
+        gap = self.cfg.min_cycle_gap_seconds
+        return gap <= 0 or (time.time() - self._went_flat_at) >= gap
 
     def _pressure_biased_leg_usd(self, base_usd):
         """See BotConfig.pressure_bias_enabled's docstring. No-op (returns base_usd unchanged)
@@ -3833,6 +3855,7 @@ class StochBot:
                 entry_signal = None
 
         if side is not None:
+            self._was_in_position = True
             # Holding: not a candidate for a fresh cycle entry, so make sure no stale readiness is
             # left sitting in the barrier from before this position opened.
             self._cycle_gate_withdraw()
@@ -4153,6 +4176,9 @@ class StochBot:
                     "last_processed_candle_ts": candle_ts})
                 await self.log_run("adopted_orphan_position", {"side": adopted, "qty": abs(real_pos)})
             else:
+                if self._was_in_position:
+                    self._was_in_position = False
+                    self._went_flat_at = time.time()
                 # Mirror fallback (2026-09-27, Worker 3 only): real just went flat (e.g. a
                 # manual close) while the paper shadow -- running the identical signal -- is
                 # already holding a position from an earlier valid entry that's since gone
@@ -4184,11 +4210,12 @@ class StochBot:
                     # In-process barrier when one is wired (the hedge); it supersedes the DB poll
                     # entirely rather than layering on top -- see _cycle_gate_clear_to_enter for
                     # why the poll alone let the legs desync into naked single-leg trades.
-                    gate = self._cycle_gate_clear_to_enter(want=self._has_entry_pressure())
+                    gate = self._cycle_gate_clear_to_enter(
+                        want=self._has_entry_pressure() and self._cycle_gap_elapsed())
                     partner_flat = (await self._partner_is_flat() if gate is None else gate)
                 elif wants_in:
-                    # No cycle partner: the pressure gate is simply this leg's own entry condition.
-                    wants_in = self._has_entry_pressure()
+                    # No cycle partner: this leg's own entry condition is pressure AND the gap.
+                    wants_in = self._has_entry_pressure() and self._cycle_gap_elapsed()
                 if not wants_in:
                     self._cycle_gate_withdraw()
                 if cfg.debug_verbose_tick:

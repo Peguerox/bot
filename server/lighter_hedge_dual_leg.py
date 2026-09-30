@@ -205,7 +205,17 @@ LONG_CONFIG = BotConfig(
     # a fixed_direction leg enters every single time it is flat, including in flat chop where
     # neither side travels far enough to reach the 0.05% trail and both legs just grind. Gates
     # WHEN a cycle opens, never which way -- both legs still enter together, both sides.
-    require_pressure_to_enter=True,
+    # 2026-09-30, direct request: OFF for a hypertrading test -- "turn off the stochastic
+    # entry gate, don't delete it, enter at any moment." require_pressure_to_enter stays in
+    # BotConfig and the K/vol readouts keep computing and publishing (nothing about the
+    # signal itself is touched) -- this only stops it gating WHEN a cycle may open. Paired
+    # with min_cycle_gap_seconds below so it still isn't fully unthrottled.
+    require_pressure_to_enter=False,
+    # 10s pause after THIS leg goes flat before it may enter the next cycle -- direct
+    # request, "once you finish a trade wait 10 seconds then another trade," specifically to
+    # get faster cycle throughput for testing with the pressure gate off, not zero-delay
+    # machine-gun entries.
+    min_cycle_gap_seconds=10.0,
     pressure_signal_owner=True,  # this leg computes the ONE shared signal; short just reads it
     # 2026-09-30, direct request: show the live K value on the dashboard. Column already exists
     # on lighter_btc_optimal_state from an earlier experiment -- no migration needed.
@@ -288,7 +298,17 @@ SHORT_CONFIG = BotConfig(
     # a fixed_direction leg enters every single time it is flat, including in flat chop where
     # neither side travels far enough to reach the 0.05% trail and both legs just grind. Gates
     # WHEN a cycle opens, never which way -- both legs still enter together, both sides.
-    require_pressure_to_enter=True,
+    # 2026-09-30, direct request: OFF for a hypertrading test -- "turn off the stochastic
+    # entry gate, don't delete it, enter at any moment." require_pressure_to_enter stays in
+    # BotConfig and the K/vol readouts keep computing and publishing (nothing about the
+    # signal itself is touched) -- this only stops it gating WHEN a cycle may open. Paired
+    # with min_cycle_gap_seconds below so it still isn't fully unthrottled.
+    require_pressure_to_enter=False,
+    # 10s pause after THIS leg goes flat before it may enter the next cycle -- direct
+    # request, "once you finish a trade wait 10 seconds then another trade," specifically to
+    # get faster cycle throughput for testing with the pressure gate off, not zero-delay
+    # machine-gun entries.
+    min_cycle_gap_seconds=10.0,
     debug_verbose_tick=False,  # off -- faulthandler below only fires if actually stuck
     # Reciprocal of the long leg's gate above -- waits for lighter_btc_optimal_state (the
     # LONG leg) to also be flat before re-entering.
