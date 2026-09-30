@@ -69,7 +69,23 @@ here since there's no directional read to begin with, just "always try to be in"
 Exit stack, both legs identical:
 - SL 0.03% (the backtested cut threshold).
 - No literal TP (disable_literal_tp=True) -- profit_lock_trail is the only take-profit path.
-- profit_lock_trigger_pct=0.05 / profit_lock_trail_pct=0.01 (the backtested pair).
+- WIDENED 2026-09-30 to sl 0.06 / trigger 0.10 / trail 0.03, from 0.03 / 0.05 / 0.01.
+  Direct request during the US-market open, when volatility spiked and the double-loss rate hit 30%
+  live ("both legs are losing every time... the whiplash is hitting the stop at -0.03 and then
+  whiplashing and hitting the other one too"). Confirmed against real ticks before deploying, on
+  BOTH the full 8 days and today's volatile window: the old 0.03/0.05/0.01 is a statistically
+  significant LOSER (-$2.02 over 4880 cycles, 5.98 sigma -- not noise), and widening the stop cuts
+  whipsaw double-kills roughly in half (23.1% -> 14.7% over 8 days; 30.1% -> 14.7% today). At these
+  values the 8-day result is -$0.38 at 1.15 sigma, i.e. no longer distinguishable from breakeven,
+  and today's window is positive (+$0.00012/cycle vs -$0.00084 on the old settings).
+
+  The mechanism is causal rather than curve-fit: a wider stop survives a reversal that would
+  otherwise stop out BOTH legs, and the improvement is monotonic in stop width across every
+  combination tested. The cost is frequency -- roughly half the cycles, since each one lasts longer.
+  Wider still (0.10/0.14/0.04) tested flatter yet, but trades too rarely to learn from quickly.
+
+  The previously-frozen pair below is kept for reference and is what tag hedge-v1-working restores.
+- HISTORICAL: profit_lock_trigger_pct=0.05 / profit_lock_trail_pct=0.01 (the backtested pair).
   Briefly lowered to a 0.03 trigger earlier on 2026-09-30 to close a real protection gap (a leg
   that peaked below 0.05% and reversed had nothing under it but its own -0.03% SL, so a cycle
   could end with BOTH legs losing). REVERTED the same day after an audit: at a 0.03 trigger the
@@ -158,7 +174,7 @@ LONG_CONFIG = BotConfig(
     # harmless reference values, required fields with no default.
     stoch_window=5, entry_lo=25, entry_hi=75, reversal_lo=25, reversal_hi=75,
     fixed_direction="long",
-    tp_pct=0.10, sl_pct=0.03,  # sl_pct is the real, live value here (use_joint_adaptive off)
+    tp_pct=0.10, sl_pct=0.06,  # sl_pct is the real, live value here (use_joint_adaptive off)
     fixed_leg_usd=10.0,  # direct request: same $ per leg, not the account's full balance
     # 2026-09-29, direct request: bias size off the raw stochastic K -- see the module
     # docstring's "Sizing" section and BotConfig.pressure_bias_enabled's docstring.
@@ -196,8 +212,8 @@ LONG_CONFIG = BotConfig(
     # -0.01% per cycle, negative regardless of win rate. The "protection gap" the 0.03 change
     # was meant to close (a leg peaking under the trigger with nothing but its own SL beneath
     # it) is now closed properly by breakeven_floor_enabled below instead.
-    profit_lock_trigger_pct=0.05,
-    profit_lock_trail_pct=0.01,
+    profit_lock_trigger_pct=0.10,
+    profit_lock_trail_pct=0.03,
     schema_has_profit_lock=True,
     # 2026-09-30, direct request: once the OTHER leg has been cut, never let this leg's profit
     # slide back below the level that makes the cycle even. Between breakeven and +0.05% this is
@@ -232,7 +248,7 @@ SHORT_CONFIG = BotConfig(
     table_runs="lighter_stoch_dca_btc_runs",
     stoch_window=5, entry_lo=25, entry_hi=75, reversal_lo=25, reversal_hi=75,
     fixed_direction="short",
-    tp_pct=0.10, sl_pct=0.03,
+    tp_pct=0.10, sl_pct=0.06,
     fixed_leg_usd=10.0,  # direct request: same $ per leg, not the account's full balance
     # 2026-09-29, direct request: bias size off the raw stochastic K -- see the module
     # docstring's "Sizing" section and BotConfig.pressure_bias_enabled's docstring.
@@ -264,8 +280,8 @@ SHORT_CONFIG = BotConfig(
     # -0.01% per cycle, negative regardless of win rate. The "protection gap" the 0.03 change
     # was meant to close (a leg peaking under the trigger with nothing but its own SL beneath
     # it) is now closed properly by breakeven_floor_enabled below instead.
-    profit_lock_trigger_pct=0.05,
-    profit_lock_trail_pct=0.01,
+    profit_lock_trigger_pct=0.10,
+    profit_lock_trail_pct=0.03,
     schema_has_profit_lock=True,
     # 2026-09-30, direct request: once the OTHER leg has been cut, never let this leg's profit
     # slide back below the level that makes the cycle even. Between breakeven and +0.05% this is

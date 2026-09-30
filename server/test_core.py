@@ -3360,10 +3360,15 @@ async def t_live_configs_match_their_stated_rules():
 
     hedge = importlib.import_module("lighter_hedge_dual_leg")
     for name, leg in (("long", hedge.LONG_CONFIG), ("short", hedge.SHORT_CONFIG)):
-        check(f"hedge {name} leg: SL is the backtested 0.03% cut",
-              leg.sl_pct == 0.03, leg.sl_pct)
-        check(f"hedge {name} leg: profit-lock trigger back at the backtested 0.05%",
-              leg.profit_lock_trigger_pct == 0.05, leg.profit_lock_trigger_pct)
+        # Widened 2026-09-30 after the US-open volatility spike -- verified against real ticks
+        # first: the old 0.03/0.05/0.01 was a 5.98-sigma loser over 4880 cycles, and widening
+        # halves the whipsaw double-loss rate. Pinned so it cannot drift back unnoticed.
+        check(f"hedge {name} leg: SL 0.06% (widened for whipsaw)",
+              leg.sl_pct == 0.06, leg.sl_pct)
+        check(f"hedge {name} leg: profit-lock trigger 0.10%",
+              leg.profit_lock_trigger_pct == 0.10, leg.profit_lock_trigger_pct)
+        check(f"hedge {name} leg: profit-lock trail 0.03%",
+              leg.profit_lock_trail_pct == 0.03, leg.profit_lock_trail_pct)
         check(f"hedge {name} leg: breakeven floor on",
               leg.breakeven_floor_enabled is True, leg.breakeven_floor_enabled)
         check(f"hedge {name} leg: never reads stale per-position bands",
