@@ -281,7 +281,50 @@ Headline: `leg_usd = (20 + combined realized PnL) / 2`, both legs always equal, 
 well as up. **Do not enable until the double-loss rate confirms the edge** — compounding multiplies
 a negative edge just as readily as a positive one.
 
-## 12. Rules for changing anything
+## 12. SOL experiment (2026-09-30, later in the session)
+
+Switched the hedge from BTC to SOL -- "if the Solana trading is better, we can just use Solana."
+Same bot, same two sub-accounts, same strategy logic. Only 3 config fields actually depend on the
+coin (checked the whole core file):
+
+```
+             BTC              SOL (now live)
+market_index      1                2
+price_decimals    1                3
+size_decimals     5                3
+fixed_leg_usd    10.0             12.0   (bumped: Lighter's min_quote_amount is $10 on
+                                           both coins, so $10 had zero margin)
+```
+
+Values pulled directly from Lighter's `/orderBooks` endpoint, not guessed. Table names
+(`lighter_btc_optimal_*` etc.) and the dashboard panel are UNCHANGED on purpose -- "btc" in the
+table names is now a historical label, not a description of what's trading.
+
+**One real bug this caused, now fixed:** the dashboard's hedge panel computed unrealized % against
+`ocoBtcPrice` (hardcoded to Lighter market_id=1/BTC) -- so a real SOL entry (~$180) got compared
+against BTC's price (~$84k), showing +70657%/-70661% on the open legs. The bot's own real exits
+were never affected (they read price from the bot's own WS feed, tied to `cfg.market_index`) --
+display-only bug. Fixed with a separate `hedgeCoinPrice` state fetched from market_id=2, wired only
+to the hedge panel; Worker 1 (still real BTC) and the dormant Worker 3 display are untouched.
+
+### Reverting to BTC if SOL doesn't work out
+
+```
+git checkout hedge-v2-btc-before-sol -- server/lighter_hedge_dual_leg.py server/test_core.py
+git commit -m "Revert hedge to BTC"
+git push origin main
+```
+Then on the dashboard: **Close Both -> Reset -> ON**. No migration needed, same DB schema.
+
+`hedge-v2-btc-before-sol` is the tuned BTC build right before the SOL switch (SL 0.06 baseline,
+all this session's safety fixes, 10-min volatility). `hedge-v1-working` (older, same day) is BTC
+with the ORIGINAL untuned 0.03/0.05/0.01 exits -- prefer v2 for a revert, not v1.
+
+**Note:** reverting only restores `server/lighter_hedge_dual_leg.py` and `server/test_core.py` --
+it does NOT touch `app/page.tsx`, so the `hedgeCoinPrice`/SOL-price-fetch fix stays in place either
+way (harmless for BTC -- it just fetches an unused SOL price alongside the BTC one).
+
+## 13. Rules for changing anything
 
 1. **Tag first.** Experiments go on a branch or after a fresh tag. `hedge-v1-working` must keep
    pointing at this build.
