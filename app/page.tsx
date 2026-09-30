@@ -1891,6 +1891,147 @@ function CompactStochBtcPanel({
   );
 }
 
+// One strategy, two real sub-accounts, one switch. 2026-09-29, direct request: the hedge bot
+// is a single process (Worker 2's Render service) controlling both legs at once -- there is
+// no such thing as turning on "just the long leg." This panel shows both legs combined and
+// toggles both together via /api/lighter-hedge-toggle. Worker 3's own CompactStochBtcPanel
+// call is left completely untouched elsewhere on the page -- this does NOT replace it, it
+// replaces Worker 2's panel only. If the hedge strategy is ever abandoned, Worker 3 goes back
+// to running its own original strategy standalone with its panel exactly as it already is.
+function HedgeDualLegPanel({
+  longState, longTrades, shortState, shortTrades, currentPrice, loading, onToggled,
+}: {
+  longState: any; longTrades: any[]; shortState: any; shortTrades: any[];
+  currentPrice: number | null; loading: boolean; onToggled: () => void;
+}) {
+  const [toggling, setToggling] = useState(false);
+  const enabled = longState?.enabled ?? false;
+
+  async function handleToggle() {
+    const question = enabled
+      ? "Turn OFF the hedge strategy? This stops new entries on BOTH legs -- it will NOT close existing positions."
+      : "Turn ON the hedge strategy? This resumes real trading on BOTH legs together.";
+    if (!confirm(question)) return;
+    setToggling(true);
+    await fetch("/api/lighter-hedge-toggle", { method: "POST" });
+    await onToggled();
+    setToggling(false);
+  }
+
+  function legStats(state: any, trades: any[]) {
+    const side = state?.side ?? null;
+    const legs: any[] = state?.legs ?? [];
+    const seedUsd = state?.seed_usd ?? 10;
+    const realizedPnl = state?.realized_pnl_usd ?? 0;
+    const totalNotional = legs.reduce((s, l) => s + l.usd_size, 0);
+    const totalQty = legs.reduce((s, l) => s + l.usd_size / l.price, 0);
+    const avgEntry = totalQty > 0 ? totalNotional / totalQty : null;
+    const unrealizedPct = side && avgEntry && currentPrice
+      ? (side === "long" ? (currentPrice - avgEntry) / avgEntry : (avgEntry - currentPrice) / avgEntry) * 100
+      : null;
+    return { side, seedUsd, realizedPnl, avgEntry, unrealizedPct };
+  }
+  const longLeg = legStats(longState, longTrades);
+  const shortLeg = legStats(shortState, shortTrades);
+
+  const combinedSeed = longLeg.seedUsd + shortLeg.seedUsd;
+  const combinedRealized = longLeg.realizedPnl + shortLeg.realizedPnl;
+  const combinedEquity = combinedSeed + combinedRealized;
+
+  const allClosed = [
+    ...longTrades.filter((t) => t.pnl_usd != null).map((t) => ({ ...t, leg: "L" })),
+    ...shortTrades.filter((t) => t.pnl_usd != null).map((t) => ({ ...t, leg: "S" })),
+  ].sort((a, b) => new Date(b.closed_at).getTime() - new Date(a.closed_at).getTime());
+  const wins = allClosed.filter((t) => t.pnl_usd > 0).length;
+  const winRate = allClosed.length > 0 ? (wins / allClosed.length * 100).toFixed(0) : "—";
+
+  function LegBadge({ label, leg }: { label: string; leg: { side: string | null; avgEntry: number | null; unrealizedPct: number | null } }) {
+    return (
+      <div className="bg-gray-800/60 rounded-lg p-2">
+        <p className="text-gray-500 text-[10px] uppercase">{label}</p>
+        <div className="flex items-center gap-1.5">
+          <span className={`font-bold text-sm ${leg.side === "long" ? "text-green-400" : leg.side === "short" ? "text-amber-400" : "text-gray-400"}`}>
+            {leg.side ? leg.side.toUpperCase() : "FLAT"}
+          </span>
+          {leg.unrealizedPct != null && (
+            <span className={`text-[10px] ${leg.unrealizedPct >= 0 ? "text-green-400" : "text-red-400"}`}>
+              ({leg.unrealizedPct >= 0 ? "+" : ""}{leg.unrealizedPct.toFixed(3)}%)
+            </span>
+          )}
+        </div>
+      </div>
+    );
+  }
+
+  return (
+    <div className="bg-gray-900 rounded-xl p-4 space-y-3">
+      <div className="flex items-center justify-between">
+        <div>
+          <h3 className="text-white font-bold text-sm">Worker 2 · Hedge Strategy (2 legs)</h3>
+          <p className="text-gray-500 text-[11px]">
+            One process, two real sub-accounts -- Worker 2's account always tries to hold a LONG, Worker 3's account always tries to hold a SHORT, no stochastic signal at all, $10 fixed per leg. SL 0.03% cuts a losing leg; no literal TP -- profit-lock trail only (arms +0.05%, trails 0.01% behind peak). One switch controls both legs together.
+          </p>
+        </div>
+        <button
+          onClick={handleToggle}
+          disabled={toggling || loading}
+          className={`text-xs font-bold px-2.5 py-1 rounded-full shrink-0 ${enabled ? "bg-green-500/20 text-green-400" : "bg-gray-700/40 text-gray-500"}`}
+        >
+          {toggling ? "…" : enabled ? "ON" : "OFF"}
+        </button>
+      </div>
+      {loading ? (
+        <div className="h-16 bg-gray-800 rounded-lg animate-pulse" />
+      ) : (
+        <>
+          <div className="grid grid-cols-2 gap-2 text-xs">
+            <div className="bg-gray-800/60 rounded-lg p-2">
+              <p className="text-gray-500 text-[10px] uppercase">Combined Equity</p>
+              <p className={`font-bold ${combinedRealized >= 0 ? "text-green-400" : "text-red-400"}`}>
+                ${combinedEquity.toFixed(2)} <span className="text-[10px] font-normal">({combinedRealized >= 0 ? "+" : ""}{(combinedRealized / combinedSeed * 100).toFixed(2)}%)</span>
+              </p>
+            </div>
+            <div className="bg-gray-800/60 rounded-lg p-2">
+              <p className="text-gray-500 text-[10px] uppercase">Win Rate (both legs)</p>
+              <p className="font-bold text-blue-400">{winRate}% <span className="text-[10px] font-normal text-gray-500">({allClosed.length})</span></p>
+            </div>
+            <LegBadge label="Long leg (Worker 2 acct)" leg={longLeg} />
+            <LegBadge label="Short leg (Worker 3 acct)" leg={shortLeg} />
+          </div>
+          <div className="space-y-1">
+            <p className="text-gray-500 text-[10px] uppercase">Recent trades (both legs)</p>
+            <div className="max-h-72 overflow-y-auto space-y-1 pr-0.5">
+              {allClosed.slice(0, 20).map((t) => {
+                const notional = (t.avg_entry_price ?? 0) * (t.base_amount_btc ?? 0);
+                const pnlPct = notional > 0 ? (t.pnl_usd / notional * 100) : null;
+                const timeLabel = t.closed_at
+                  ? new Intl.DateTimeFormat("en-US", {
+                      timeZone: "America/New_York", hour: "numeric", minute: "2-digit", hour12: true,
+                    }).format(new Date(t.closed_at))
+                  : null;
+                return (
+                  <div key={`${t.leg}-${t.id}`} className="flex items-center justify-between text-[11px] bg-gray-800/50 rounded px-1.5 py-1">
+                    {timeLabel && <span className="text-gray-600 tabular-nums">{timeLabel}</span>}
+                    <span className={`text-[9px] font-bold px-1 rounded ${t.leg === "L" ? "bg-green-500/20 text-green-400" : "bg-amber-500/20 text-amber-400"}`}>
+                      {t.leg}
+                    </span>
+                    <span className={t.side === "long" ? "text-green-400" : "text-amber-400"}>{t.side}·{shortReason(t.reason)}</span>
+                    <span className="text-gray-500">${t.avg_entry_price?.toFixed(0)}→${t.exit_price?.toFixed(0)}</span>
+                    <span className={t.pnl_usd >= 0 ? "text-green-400" : "text-red-400"}>
+                      {t.pnl_usd >= 0 ? "+" : ""}${t.pnl_usd?.toFixed(3)}{pnlPct != null ? ` (${pnlPct >= 0 ? "+" : ""}${pnlPct.toFixed(2)}%)` : ""}
+                    </span>
+                  </div>
+                );
+              })}
+              {allClosed.length === 0 && <p className="text-gray-600 text-[11px]">No closed trades yet.</p>}
+            </div>
+          </div>
+        </>
+      )}
+    </div>
+  );
+}
+
 function LighterStochDcaBtcPanel({
   state, trades, runs, currentPrice, loading,
 }: {
@@ -2342,16 +2483,14 @@ export default function Dashboard() {
             combineEquityWinRate
             tradingHoursUtc={WORKER1_TRADING_HOURS}
           />
-          <CompactStochBtcPanel
-            title="Worker 2 · Hyper Trading, Profit-Lock Trail"
-            subtitle="Clone of Worker 3's mechanism set, SL pinned flat at 0.10% (no longer volatility-scaled) / no literal TP -- profit-lock trail is the only take-profit path: arms at +0.02% unrealized, exits if it gives back 0.01% from the peak -- worst case still +0.01%, never negative / that exit also burns the signal, but a burn now clears early once live %K reclaims the entry %K of the position that got locked, so it can pyramid into a continuing move / stoch-turn stays on as a backstop / no self-lock -- trades directly off the live signal / no book-opposition"
-            table="lighter_btc_optimal_state"
-            state={optimalBtcState}
-            trades={optimalBtcTrades.filter((t: any) => t.closed_at >= WORKER2_RESET_AT)}
+          <HedgeDualLegPanel
+            longState={optimalBtcState}
+            longTrades={optimalBtcTrades.filter((t: any) => t.closed_at >= WORKER2_RESET_AT)}
+            shortState={dcaBtcState}
+            shortTrades={dcaBtcTrades.filter((t: any) => t.closed_at >= WORKER2_RESET_AT)}
             currentPrice={ocoBtcPrice}
             loading={loading}
             onToggled={load}
-            combineEquityWinRate
           />
           <CompactStochBtcPanel
             title="Worker 3 · Joint Adaptive"
