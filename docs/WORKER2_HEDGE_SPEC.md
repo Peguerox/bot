@@ -271,7 +271,17 @@ Cleaner than the current guaranteed collision.
 **Until then: never deploy while the bot is trading.** This was violated twice in one session and
 caused both incidents.
 
-## 11. Rules for changing anything
+## 11. Next planned change: compounding
+
+Designed and agreed with the user, **not built**. Full spec — formula, why the two reported
+percentages never converge, implementation sketch, open decisions and timing — is in
+`docs/session_2026-09-30_worker2_hedge_rebuild.md` under "Planned, not built: compounding".
+
+Headline: `leg_usd = (20 + combined realized PnL) / 2`, both legs always equal, compounds down as
+well as up. **Do not enable until the double-loss rate confirms the edge** — compounding multiplies
+a negative edge just as readily as a positive one.
+
+## 12. Rules for changing anything
 
 1. **Tag first.** Experiments go on a branch or after a fresh tag. `hedge-v1-working` must keep
    pointing at this build.

@@ -202,6 +202,55 @@ exchange-side, so the real exposure is the full notional, and the cushion must n
 grows. Note the two sub-account balances drift apart over time even with equal sizing — periodic
 manual rebalancing between them will eventually be needed.
 
+### The formula
+
+```
+exposed  = 20 + combined realized PnL     (both legs' realized, summed)
+leg_usd  = exposed / 2                    (identical on both legs, ALWAYS)
+buffer   = account collateral - exposed   (left alone, absorbs per-leg drift)
+```
+
+Start $10/$10. Make $2 -> exposed $22 -> **$11/$11**. Lose $2 -> exposed $18 -> **$9/$9**.
+Confirmed by the user: compound **down** as well as up.
+
+Worked through with the user as "$12 and $10 -> 11 and 11" — i.e. each leg takes half of the
+*combined* pool, never its own account balance.
+
+### Why the two percentages never converge
+
+An earlier claim that they would was **wrong** and was corrected by the user: each sub-account needs
+a cushion beyond what it trades, precisely because one leg runs ahead of the other. Deploy the whole
+equity and a losing leg has nothing absorbing the drift. So exposed stays permanently below equity,
+and both numbers must be shown separately. Today: ~$39.7 equity, $20 exposed, ~50% utilisation —
+which means any return quoted against equity **understates the real one by ~2x**.
+
+Note the panel is currently inconsistent about this: the cycle rows already divide by deployed
+capital (correct), while the COMBINED EQUITY pill divides by total equity (understates 2x).
+
+### Implementation sketch
+
+1. `BotConfig`: `compound_enabled`, `compound_base_usd=20.0`, `compound_step_pct=10.0`,
+   `compound_max_utilisation=0.5`.
+2. Exposed capital computed from the **shared in-process hub** both legs already use — no extra DB
+   reads, and it guarantees both legs read the same number in the same tick.
+3. Cap each leg against its own account collateral so an entry can never be rejected for margin.
+4. Panel: split the equity pill into **Equity** and **Exposed**, each with its own %.
+5. Tests: equal legs at every level, compounds down, step threshold respected, cap binds correctly,
+   breakeven floor still solvable at any size.
+
+### Open decisions
+
+- **Resize every cycle, or in steps?** Steps (e.g. only on a >=10% move in exposed) while still
+  measuring — constantly changing size makes a 500-cycle sample harder to read, since each cycle's
+  dollar result is scaled differently.
+- **Floor at $10?** User said no — let it compound down.
+
+### Timing
+
+**Do not enable until the edge is established.** Compounding multiplies whatever edge exists,
+including a negative one. Build it shipped-off behind `compound_enabled=False`, flip it when the
+double-loss rate confirms the strategy is on the right side of the 24% line.
+
 ## Operating notes
 
 - Controls are **Close Both → Reset → ON**, in that order. Reset refuses while a leg is open.
