@@ -12,7 +12,7 @@ Frozen 2026-09-30 at commit tag `hedge-v1-working`. Every value below was read o
 > git push origin main          # Render redeploys both legs
 > ```
 > Then on the dashboard: **Close Both → Reset → ON**. The DB schema already supports this build.
-> Verify with `cd server && python3 test_core.py` — **443 tests must pass**.
+> Verify with `cd server && python3 test_core.py` — **445 tests must pass**.
 
 ---
 
@@ -36,6 +36,13 @@ files are untouched and still work.
 ---
 
 ## 2. The exact numbers (both legs identical unless stated)
+
+> **Exits are now DB-driven.** `override_sl_pct` / `override_profit_lock_trigger` /
+> `override_profit_lock_trail` on the state rows override the values below and are edited from the
+> dashboard (no deploy). NULL = use the config. **Live values are what the DB says, not this file.**
+> Both legs are always written together — unequal exits break the breakeven floor.
+
+**Live as of 2026-09-30 15:00: SL 0.06 / trigger 0.10 / trail 0.02.**
 
 ```
 market_index          = 1          (BTC)
@@ -190,7 +197,81 @@ partner — **real problem, investigate**.
 
 ---
 
-## 8. Rules for changing anything
+## 8. Tuning: what the data actually says
+
+**Measured live, 2026-09-30 at 0.16% volatility, SL 0.06:**
+
+```
+avg winner   +0.1154%      avg loser   -0.0704%      ratio 1.64:1
+```
+
+Losers overshoot the stop by ~0.019% (execution latency + market close). Budget for it: the real
+loss is always ~SL + 0.02.
+
+**The whole strategy reduces to one number.** With that win/loss ratio:
+
+```
+one wins / one loses :  +0.115 - 0.070  =  +0.045%
+both lose            :  -0.070 x 2      =  -0.141%
+=> profitable while the double-loss rate stays under ~24%
+```
+
+Observed 13–18% at these settings. That is the margin. **Track the double-loss rate, not the P&L** —
+it converges far faster.
+
+**Do NOT tighten the stop.** Tested on 8 days and on the volatile window; tighter is worse on both:
+
+| SL (trigger .10 / trail .02) | 8-day $/cyc | today $/cyc | double-loss |
+|---|---|---|---|
+| 0.04 | −0.00030 | +0.00003 | 20.9% |
+| 0.05 | −0.00036 | +0.00069 | 15.0% |
+| **0.06 (live)** | −0.00028 | +0.00051 | 13.4% |
+| 0.07 | −0.00009 | +0.00097 | 9.2% |
+
+0.07 tests better but is **not** recommended: with slippage the real loss becomes ~0.09 against a
+~0.115 winner, which cuts the breakeven double-loss rate from 24% to ~13% — barely above the 9%
+observed. 0.06 keeps a much wider cushion. Wider stops help because a tighter band is easier for
+one reversal to take out both legs; at 0.04 the ~0.02 slippage is half the intended loss and the
+stop stops meaning anything.
+
+## 9. No volatility formula yet — and why not
+
+Volatility ranged **0.0195% to 0.2300%** in one week (>10x). The obvious move is to scale the exits
+with it. **The data does not support a formula.** Bucketing the 8 days by volatility and finding the
+best exits per bucket gives:
+
+| regime | "best" | sigma | cycles |
+|---|---|---|---|
+| calm <0.035% | 0.14/0.20/0.06 | 1.32 | 61 |
+| mid 0.035–0.06% | 0.20/0.28/0.08 | 0.61 | 130 |
+| high 0.06–0.10% | 0.14/0.20/0.06 | 1.25 | 260 |
+| extreme >0.10% | 0.06/0.10/0.03 | 1.75 | 293 |
+
+The optimum **jumps around with no pattern** (0.14 → 0.20 → 0.14 → 0.06). If volatility genuinely
+drove the right stop it would move monotonically. Nothing reaches significance — 28 cells tested,
+best 1.75σ, which is what chance produces. **Fitting a rule to this would be overfitting**, the same
+error as the 3am-ET hour closure and the $15/$5 tilt.
+
+What IS robust: wider stops cut the double-loss rate monotonically in *every* regime. It just does
+not reliably convert to profit. Deriving a real formula needs ~500 cycles per bucket (currently
+60–300) — weeks of data. Until then the manual levers exist so the right value per regime can be
+found by observation.
+
+## 10. Known open issue: lock does not gate exits
+
+The single-instance lock gates **entries only**. During a deploy both instances therefore manage the
+same position, which on 2026-09-30 produced a double-booked close (`closed` then
+`resolved_externally`, same pnl 2s apart) and `invalid nonce` errors — two processes signing with
+one API key collide, and a collision can make a *close* order fail.
+
+**Proposed fix (not implemented):** gate all order placement on holding the lock. The old instance
+manages until it dies; the lock goes stale in 20s so a dead owner's position is picked up quickly.
+Cleaner than the current guaranteed collision.
+
+**Until then: never deploy while the bot is trading.** This was violated twice in one session and
+caused both incidents.
+
+## 11. Rules for changing anything
 
 1. **Tag first.** Experiments go on a branch or after a fresh tag. `hedge-v1-working` must keep
    pointing at this build.
