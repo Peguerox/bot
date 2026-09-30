@@ -2274,7 +2274,7 @@ function HedgeDualLegPanel({
               to tune against. Both legs are always written together. */}
           <div className="bg-gray-800/60 rounded-lg p-2 space-y-2">
             <div className="flex items-baseline justify-between">
-              <p className="text-gray-500 text-[10px] uppercase">Volatility (1-min range, 30m)</p>
+              <p className="text-gray-500 text-[10px] uppercase">Volatility (1-min range, 10m)</p>
               <p className="font-bold text-sm tabular-nums">
                 <span className={liveVol == null ? "text-gray-500"
                   : liveVol >= 0.10 ? "text-red-400"

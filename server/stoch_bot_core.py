@@ -3578,12 +3578,14 @@ class StochBot:
                 self._live_signal_persist_ts = now_s
                 patch = {"live_k": self.live_k, "live_signal": self.live_signal}
                 if cfg.schema_has_exit_overrides:
-                    # Live volatility for the dashboard, on the same cadence. This is the exact
-                    # measure the exits have to cope with -- mean 1-min (high-low)/close% over the
-                    # last 30 closed candles -- so the number on screen is the one to tune the
-                    # levers against. Observed range in a single week: 0.0195% (calm) to 0.1945%
-                    # (US open), a 10x spread.
-                    v = self._measure_vol_pct(30)
+                    # Live volatility for the dashboard, on the same cadence. Mean 1-min
+                    # (high-low)/close% over the last 10 closed candles. Was 30 -- direct request
+                    # 2026-09-30, after real tick data showed a 30-min window badly lags a real
+                    # spike: at the US-open volatility jump, true 10-min vol hit 0.235% while the
+                    # 30-min reading was still only 0.114%, less than half, several minutes behind.
+                    # 10 min matches this being a 1-min-candle strategy -- the user's own cap on
+                    # acceptable lag for a signal read against 1-min bars.
+                    v = self._measure_vol_pct(10)
                     if v is not None:
                         patch["live_vol_pct"] = v
                 try:
