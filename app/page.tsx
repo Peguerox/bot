@@ -1960,12 +1960,31 @@ function HedgeDualLegPanel({
   const combinedRealized = longLeg.realizedPnl + shortLeg.realizedPnl;
   const combinedEquity = combinedSeed + combinedRealized;
 
-  const allClosed = [
-    ...longTrades.filter((t) => t.pnl_usd != null).map((t) => ({ ...t, leg: "L" })),
-    ...shortTrades.filter((t) => t.pnl_usd != null).map((t) => ({ ...t, leg: "S" })),
-  ].sort((a, b) => new Date(b.closed_at).getTime() - new Date(a.closed_at).getTime());
-  const wins = allClosed.filter((t) => t.pnl_usd > 0).length;
-  const winRate = allClosed.length > 0 ? (wins / allClosed.length * 100).toFixed(0) : "—";
+  // Both legs always enter together (cycle_partner_table guarantees it -- see
+  // stoch_bot_core.py), so the Nth long close and the Nth short close, sorted by their own
+  // opened_at, belong to the SAME cycle even though they don't necessarily close at the same
+  // moment (one leg's SL is fast, the other's trail is patient). Pairing by entry order, not
+  // by matching timestamps, is what makes that reliable -- direct request: "each line has to
+  // be the result of both legs... they are working together for a common goal," not shown as
+  // two disconnected strategies.
+  const longClosed = longTrades.filter((t) => t.pnl_usd != null)
+    .sort((a, b) => new Date(a.opened_at).getTime() - new Date(b.opened_at).getTime());
+  const shortClosed = shortTrades.filter((t) => t.pnl_usd != null)
+    .sort((a, b) => new Date(a.opened_at).getTime() - new Date(b.opened_at).getTime());
+  const cycleCount = Math.min(longClosed.length, shortClosed.length);
+  const cycles = [];
+  for (let i = 0; i < cycleCount; i++) {
+    const L = longClosed[i], S = shortClosed[i];
+    cycles.push({
+      key: `${L.id}-${S.id}`,
+      closedAt: L.closed_at > S.closed_at ? L.closed_at : S.closed_at, // whichever leg finished the cycle
+      long: L, short: S,
+      netPnl: L.pnl_usd + S.pnl_usd,
+    });
+  }
+  cycles.sort((a, b) => new Date(b.closedAt).getTime() - new Date(a.closedAt).getTime());
+  const wins = cycles.filter((c) => c.netPnl > 0).length;
+  const winRate = cycles.length > 0 ? (wins / cycles.length * 100).toFixed(0) : "—";
 
   function LegBadge({ label, leg }: { label: string; leg: { side: string | null; avgEntry: number | null; unrealizedPct: number | null } }) {
     return (
@@ -2008,44 +2027,47 @@ function HedgeDualLegPanel({
         <>
           <div className="grid grid-cols-2 gap-2 text-xs">
             <div className="bg-gray-800/60 rounded-lg p-2">
-              <p className="text-gray-500 text-[10px] uppercase">Combined Equity</p>
+              <div className="flex items-center gap-1.5">
+                <p className="text-gray-500 text-[10px] uppercase">Combined Equity</p>
+                <span className={`text-[8px] font-bold px-1 rounded uppercase ${combinedRealized > 0 ? "bg-green-500/20 text-green-400" : combinedRealized < 0 ? "bg-red-500/20 text-red-400" : "bg-gray-700/40 text-gray-500"}`}>
+                  {combinedRealized > 0 ? "Winning" : combinedRealized < 0 ? "Losing" : "Even"}
+                </span>
+              </div>
               <p className={`font-bold ${combinedRealized >= 0 ? "text-green-400" : "text-red-400"}`}>
                 ${combinedEquity.toFixed(2)} <span className="text-[10px] font-normal">({combinedRealized >= 0 ? "+" : ""}{(combinedRealized / combinedSeed * 100).toFixed(2)}%)</span>
               </p>
             </div>
             <div className="bg-gray-800/60 rounded-lg p-2">
-              <p className="text-gray-500 text-[10px] uppercase">Win Rate (both legs)</p>
-              <p className="font-bold text-blue-400">{winRate}% <span className="text-[10px] font-normal text-gray-500">({allClosed.length})</span></p>
+              <p className="text-gray-500 text-[10px] uppercase">Win Rate (cycles)</p>
+              <p className="font-bold text-blue-400">{winRate}% <span className="text-[10px] font-normal text-gray-500">({cycles.length})</span></p>
             </div>
             <LegBadge label="Long leg (Worker 2 acct)" leg={longLeg} />
             <LegBadge label="Short leg (Worker 3 acct)" leg={shortLeg} />
           </div>
           <div className="space-y-1">
-            <p className="text-gray-500 text-[10px] uppercase">Recent trades (both legs)</p>
+            <p className="text-gray-500 text-[10px] uppercase">Recent cycles (net of both legs)</p>
             <div className="max-h-72 overflow-y-auto space-y-1 pr-0.5">
-              {allClosed.slice(0, 20).map((t) => {
-                const notional = (t.avg_entry_price ?? 0) * (t.base_amount_btc ?? 0);
-                const pnlPct = notional > 0 ? (t.pnl_usd / notional * 100) : null;
-                const timeLabel = t.closed_at
+              {cycles.slice(0, 20).map((c) => {
+                const timeLabel = c.closedAt
                   ? new Intl.DateTimeFormat("en-US", {
                       timeZone: "America/New_York", hour: "numeric", minute: "2-digit", hour12: true,
-                    }).format(new Date(t.closed_at))
+                    }).format(new Date(c.closedAt))
                   : null;
                 return (
-                  <div key={`${t.leg}-${t.id}`} className="flex items-center justify-between text-[11px] bg-gray-800/50 rounded px-1.5 py-1">
-                    {timeLabel && <span className="text-gray-600 tabular-nums">{timeLabel}</span>}
-                    <span className={`text-[9px] font-bold px-1 rounded ${t.leg === "L" ? "bg-green-500/20 text-green-400" : "bg-amber-500/20 text-amber-400"}`}>
-                      {t.leg}
+                  <div key={c.key} className="flex items-center justify-between text-[11px] bg-gray-800/50 rounded px-1.5 py-1">
+                    {timeLabel && <span className="text-gray-600 tabular-nums shrink-0">{timeLabel}</span>}
+                    <span className="text-gray-400 truncate">
+                      <span className="text-green-400">L·{shortReason(c.long.reason)}</span>
+                      {" / "}
+                      <span className="text-amber-400">S·{shortReason(c.short.reason)}</span>
                     </span>
-                    <span className={t.side === "long" ? "text-green-400" : "text-amber-400"}>{t.side}·{shortReason(t.reason)}</span>
-                    <span className="text-gray-500">${t.avg_entry_price?.toFixed(0)}→${t.exit_price?.toFixed(0)}</span>
-                    <span className={t.pnl_usd >= 0 ? "text-green-400" : "text-red-400"}>
-                      {t.pnl_usd >= 0 ? "+" : ""}${t.pnl_usd?.toFixed(3)}{pnlPct != null ? ` (${pnlPct >= 0 ? "+" : ""}${pnlPct.toFixed(2)}%)` : ""}
+                    <span className={`font-semibold shrink-0 ${c.netPnl >= 0 ? "text-green-400" : "text-red-400"}`}>
+                      {c.netPnl >= 0 ? "+" : ""}${c.netPnl.toFixed(3)}
                     </span>
                   </div>
                 );
               })}
-              {allClosed.length === 0 && <p className="text-gray-600 text-[11px]">No closed trades yet.</p>}
+              {cycles.length === 0 && <p className="text-gray-600 text-[11px]">No completed cycles yet.</p>}
             </div>
           </div>
         </>
