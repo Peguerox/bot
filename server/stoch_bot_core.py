@@ -74,6 +74,13 @@ HEARTBEAT_EVERY = 300.0   # liveness row, so "is it stuck?" is a single query
 # so the ratio here is deliberately wide: refresh 4x more often than the staleness limit.
 LOCK_REFRESH_EVERY = 5.0
 LOCK_STALE_AFTER = 20.0
+# Hedge cycle barrier (2026-09-30). How long a leg's "I am ready to enter" declaration stays
+# valid, and how long a granted clearance stays usable. Both are re-declared every tick (0.5s),
+# so these only need to outlive a few ticks -- short enough that a leg which stops wanting to
+# enter (disabled, lost the instance lock, signal gone) drops out on its own within a couple of
+# seconds instead of making its partner wait on a declaration it no longer means.
+CYCLE_READY_TTL = 3.0
+CYCLE_CLEARED_TTL = 5.0
 POSITION_TTL = 3.0        # cache the REST position read this long (~0.33 req/s, vs the
                           # 6 req/s polling that caused the original rate-limit storm)
 AUTH_TOKEN_LIFETIME_S = 10 * 60  # SDK's create_auth_token_with_expiry default validity
@@ -440,6 +447,13 @@ class BotConfig:
     # partner configured, partner never opened, or partner closed green => no floor, and the leg
     # runs on profit_lock/SL exactly as before. Requires cycle_partner_table.
     breakeven_floor_enabled: bool = False
+    # How far ABOVE the computed floor this leg must trade before the floor goes live. Must be
+    # > 0: in a symmetric hedge the winner is already sitting at the floor the instant the loser is
+    # cut, so a floor armed at 0.0 margin fires on the next tick of noise and pins every cycle to
+    # exactly zero (observed live 2026-09-30). Defaults to the profit-lock trail width when left
+    # at None, which reproduces the rule as stated -- "at 0.04, lock 0.03" for a 0.03% cut and a
+    # 0.01% trail.
+    breakeven_floor_arm_margin_pct: float = 0.01
     # requires the cycle_partner_pnl_baseline column migration -- persistence only, the
     # in-process copy is authoritative (same arrangement as profit_lock_peak_pct)
     schema_has_breakeven_floor: bool = False
@@ -1062,6 +1076,9 @@ class StochBot:
         # lighter_hedge_dual_leg.py's main(). None (default): pressure bias, if enabled, uses
         # this bot's own compute_stoch_signal() reading in isolation, same as any standalone bot.
         self.pressure_signal_hub = None
+        # Shared in-process barrier for hedge cycle entries -- see _cycle_gate_clear_to_enter.
+        # Wired by lighter_hedge_dual_leg.py's main(); None for every standalone bot.
+        self.cycle_hub = None
         self._burned_signal = None  # see BotConfig.red_exit_burns_signal
         # See BotConfig.profit_lock_burn_k_gate's docstring. _burned_signal_via distinguishes a
         # profit-lock-sourced burn (eligible for the K-reclaim early-clear) from a loss-sourced
@@ -1674,6 +1691,76 @@ class StochBot:
             return rows[0].get("side") is None
         except Exception:
             return False
+
+    @staticmethod
+    def new_cycle_hub(worker_ids):
+        """Shared state for the hedge cycle barrier. Built once in the dual-leg process's main()
+        and handed to every leg -- see _cycle_gate_clear_to_enter."""
+        return {"members": set(worker_ids), "ready": {}, "cleared": {}}
+
+    def _cycle_gate_clear_to_enter(self, now=None):
+        """True if this leg may open a position RIGHT NOW as part of a synchronised cycle.
+
+        Replaces the old cycle_partner_table DB poll for any bot wired into a shared hub, and this
+        is why. That poll only ever enforced half the rule -- "a leg that got cut waits" -- and
+        never the other half, "both legs enter together". It was a plain read: whichever leg
+        happened to poll first entered, and the other then saw a partner holding a position and
+        refused. One beat of skew was all it took, and from there the two legs ping-ponged
+        permanently, each entering ALONE while the other sat blocked. Observed live 2026-09-30 at
+        05:06:24: the long closed and the short entered in the same second, and from then on the
+        "hedge" was a single naked $10 directional leg at a time. No amount of retrying fixes a
+        non-atomic check; the decision has to be made in one place for both legs at once.
+
+        Both legs run in ONE process under a single asyncio event loop, so this method is the
+        natural place for that: it contains no `await`, which means the whole read-decide-commit
+        below is atomic with respect to the other leg by construction -- the loop cannot switch
+        tasks in the middle of it.
+
+        Protocol: a leg declares readiness each tick it wants in. Once EVERY member is
+        simultaneously ready, all of them are granted a clearance and the ready set is emptied;
+        each leg then consumes its own clearance on the tick it actually enters. Declarations and
+        clearances both expire (CYCLE_READY_TTL / CYCLE_CLEARED_TTL) so a leg that stops wanting to
+        enter -- disabled, lost the instance lock, closed unexpectedly -- stops holding its partner
+        hostage within a couple of seconds, without anyone ever entering unhedged to compensate.
+
+        Deliberately has no "give up and enter alone" timeout: for a hedge, a lone leg is not a
+        degraded cycle, it is a different (directional) strategy. Waiting forever is the safe
+        failure, and it cannot strand anything permanently in practice, because both legs live or
+        die with the same process."""
+        hub = self.cycle_hub
+        if hub is None:
+            return None  # no barrier wired -- caller falls back to the DB partner check
+        now = time.time() if now is None else now
+        wid = self.cfg.worker_id
+        # Drop anything stale before deciding, so expiry is evaluated at decision time rather
+        # than whenever some other leg last happened to tick.
+        hub["ready"] = {k: t for k, t in hub["ready"].items() if now - t < CYCLE_READY_TTL}
+        hub["cleared"] = {k: t for k, t in hub["cleared"].items() if now - t < CYCLE_CLEARED_TTL}
+        # A clearance already granted for this cycle -- consume it and go.
+        if wid in hub["cleared"]:
+            del hub["cleared"][wid]
+            return True
+        hub["ready"][wid] = now
+        if hub["members"].issubset(hub["ready"].keys()):
+            # Everyone is ready at the same instant: release them all together, then consume our
+            # own clearance immediately so this tick's caller enters too.
+            hub["cleared"] = {m: now for m in hub["members"]}
+            hub["ready"] = {}
+            del hub["cleared"][wid]
+            return True
+        return False
+
+    def _cycle_gate_withdraw(self):
+        """Drop this leg's readiness/clearance -- called whenever it turns out not to be entering
+        after all (already in a position, disabled, or the entry failed). Without this a leg could
+        sit "ready" on a declaration it no longer means, and its partner would keep waiting on it
+        until the TTL expired."""
+        hub = self.cycle_hub
+        if hub is None:
+            return
+        wid = self.cfg.worker_id
+        hub["ready"].pop(wid, None)
+        hub["cleared"].pop(wid, None)
 
     async def _acquire_instance_lock(self):
         """Take (or renew) this leg's single-instance lock. Returns True if we hold it.
@@ -3522,6 +3609,9 @@ class StochBot:
                 entry_signal = None
 
         if side is not None:
+            # Holding: not a candidate for a fresh cycle entry, so make sure no stale readiness is
+            # left sitting in the barrier from before this position opened.
+            self._cycle_gate_withdraw()
             if cfg.trend_tp_pct is not None and reversal_signal == side:
                 # Already positioned the way the current regime wants (no reversal trade
                 # needed this tick) -- but the regime may have changed SINCE entry (e.g. a
@@ -3645,11 +3735,23 @@ class StochBot:
                             })
                 floor_pct = self._breakeven_floor_pct
                 if floor_pct is not None:
-                    if unrealized_pct >= floor_pct:
-                        # Only once we have genuinely been at or above the floor does exiting AT
-                        # it lock in breakeven rather than force a premature loss.
+                    # The floor only goes live once this leg has traded a clear margin ABOVE it --
+                    # not merely at it. Proven necessary live on 2026-09-30, first session with the
+                    # floor enabled: in a symmetric hedge the winner is sitting at roughly +X% at
+                    # the exact moment the loser is cut at -X%, so a floor of X% armed precisely
+                    # where the winner already stood and the first tick of noise took it out. Every
+                    # cycle then closed at dead breakeven -- long +0.00286 / short -0.00298, long
+                    # +0.00395 / short -0.00356 -- which is a guaranteed zero, not a strategy.
+                    # Guaranteeing breakeven that way also guarantees never profiting.
+                    #
+                    # The margin is the trail width, giving the rule as originally stated: with
+                    # equal $10 legs and a 0.03% cut, the floor sits at 0.03% but stays dormant
+                    # until the winner reaches 0.04%, and only then locks 0.03% in. Above 0.05%
+                    # the ordinary profit-lock trail takes over and normally fires first.
+                    arm_at = floor_pct + cfg.breakeven_floor_arm_margin_pct
+                    if unrealized_pct >= arm_at:
                         self._breakeven_reached = True
-                    elif self._breakeven_reached:
+                    elif self._breakeven_reached and unrealized_pct <= floor_pct:
                         gap_hit = "BREAKEVEN_LOCK"
 
             if (cfg.use_joint_adaptive and cfg.stoch_turn_exit_enabled
@@ -3837,13 +3939,22 @@ class StochBot:
                         and not self.real_trading_locked and self.paper_side is not None):
                     mirror_signal = self.paper_side
                 effective_signal = entry_signal if entry_signal is not None else mirror_signal
+                # Everything that could still stop this entry is resolved BEFORE asking the cycle
+                # barrier, so a leg never declares itself ready for a cycle it then declines to
+                # join -- that would hold its partner up for nothing.
+                wants_in = (effective_signal is not None and state.get("enabled") and holds_lock)
                 partner_flat = True
-                if effective_signal is not None and cfg.cycle_partner_table is not None:
-                    partner_flat = await self._partner_is_flat()
+                if wants_in and cfg.cycle_partner_table is not None:
+                    # In-process barrier when one is wired (the hedge); it supersedes the DB poll
+                    # entirely rather than layering on top -- see _cycle_gate_clear_to_enter for
+                    # why the poll alone let the legs desync into naked single-leg trades.
+                    gate = self._cycle_gate_clear_to_enter()
+                    partner_flat = await self._partner_is_flat() if gate is None else gate
+                if not wants_in:
+                    self._cycle_gate_withdraw()
                 if cfg.debug_verbose_tick:
                     print(f"[{cfg.worker_id}] tick: effective_signal={effective_signal} enabled={state.get('enabled')} partner_flat={partner_flat}", flush=True)
-                if (effective_signal is not None and state.get("enabled") and partner_flat
-                        and holds_lock):
+                if wants_in and partner_flat:
                     fail_count = state.get("consecutive_entry_failures", 0) or 0
                     if fail_count >= 3:
                         # Hard stop rather than another retry -- unbounded retries are what

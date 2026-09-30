@@ -33,6 +33,20 @@ each making a cycle net-negative no matter the win rate, and both are fixed.
   2. The profit-lock trigger had been lowered to 0.03 with a 0.01 trail, which scalped the winner
      out at ~+0.02% while the loser kept the full -0.03%. Reverted to 0.05 and the real gap it was
      trying to close is now handled by breakeven_floor_enabled. See the exit stack below.
+
+2026-09-30, second session, after watching the above run live for the first time -- two more:
+  3. The legs desynced and traded NAKED. cycle_partner_table is a plain DB read, which enforced
+     only "a cut leg waits" and never "both enter together": whichever leg polled first entered and
+     the other was then blocked by it, so one beat of skew put them permanently out of phase, each
+     opening a lone $10 directional leg. Replaced by an in-process barrier shared through
+     main()'s cycle_hub -- both legs are in one event loop, so the decision is now made once for
+     both, atomically. See StochBot._cycle_gate_clear_to_enter.
+  4. The breakeven floor pinned every cycle to exactly zero. See breakeven_floor_arm_margin_pct in
+     the exit stack below.
+Neither was visible on the dashboard, because its cycle list paired the Nth long with the Nth
+short by index and truncated to the shorter list -- so the unpaired naked leg was silently dropped
+and it looked like trades were not being recorded. Now paired by entry time, with any unpartnered
+leg shown as UNHEDGED rather than hidden.
 Also: single_instance_lock added (Render runs two copies of this process during every deploy, and
 nothing previously stopped both from entering -- the zombie double-entry), and the shared pressure
 signal is now published every tick instead of only at the owner leg's own entry, which used to let
@@ -68,7 +82,14 @@ Exit stack, both legs identical:
 - breakeven_floor_enabled=True (2026-09-30, direct request) -- the correct fix for that same gap,
   from the other direction: once the OTHER leg has been cut, this leg's profit is never allowed to
   slide back below the level that makes the cycle break even (reason "BREAKEVEN_LOCK"). Between
-  breakeven and +0.05% it is the only protection; above +0.05% the trail normally fires first. The
+  breakeven and +0.05% it is the only protection; above +0.05% the trail normally fires first.
+  breakeven_floor_arm_margin_pct=0.01 is load-bearing, learned the hard way in this feature's very
+  first live session: a symmetric hedge puts the winner at ~+X% at the exact instant the loser is
+  cut at -X%, so a floor at X% with no margin armed precisely where the winner already stood and
+  the next tick of noise closed it. Every cycle then netted dead zero (long +0.00286 / short
+  -0.00298; long +0.00395 / short -0.00356) -- guaranteeing breakeven also guarantees never
+  profiting. With the margin the floor stays dormant until the winner clears it by the trail width
+  ("at 0.04, lock 0.03"), so it protects a genuine reversal instead of capping every winner. The
   level is computed from the partner's realized DOLLARS over this leg's own notional, not
   hardcoded, because pressure_bias can size the legs $15/$5 and +0.03% on a $5 winner does not
   offset -0.03% on a $15 loser. See BotConfig.breakeven_floor_enabled's docstring.
@@ -243,6 +264,15 @@ async def main():
     shared_pressure_hub = {"signal": None}
     long_bot.pressure_signal_hub = shared_pressure_hub
     short_bot.pressure_signal_hub = shared_pressure_hub
+    # 2026-09-30, real bug: cycle_partner_table alone (a plain DB read of "is the other leg flat?")
+    # enforced only "a cut leg waits", never "both enter together" -- whichever leg polled first
+    # entered, the other then saw it holding and refused, and from one beat of skew onward the two
+    # ping-ponged permanently, each opening a NAKED single leg while the other sat blocked. Seen
+    # live at 05:06:24. Both legs share one process and one event loop, so the decision is made
+    # once for both, atomically, in StochBot._cycle_gate_clear_to_enter instead.
+    shared_cycle_hub = StochBot.new_cycle_hub([LONG_CONFIG.worker_id, SHORT_CONFIG.worker_id])
+    long_bot.cycle_hub = shared_cycle_hub
+    short_bot.cycle_hub = shared_cycle_hub
     await asyncio.gather(
         long_bot.run(),  # default credentials: this service's own LIGHTER_* env vars
         short_bot.run(

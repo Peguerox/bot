@@ -1921,6 +1921,58 @@ async def t_breakeven_floor_arms_when_partner_cycle_was_never_observed_open():
           bot.state_row["side"] is None, bot.state_row["side"])
 
 
+async def t_breakeven_floor_does_not_pin_the_winner_to_zero():
+    print("\n[breakeven floor: must NOT exit a winner sitting AT the floor -- the live zero-net bug]")
+    # Reproduces 2026-09-30 05:05:24 exactly. A symmetric hedge puts the winner at ~+0.03% at the
+    # very instant the loser is cut at -0.03%, so the floor arms right where the winner already
+    # stands. Before the arm margin, the next tick of noise closed it and the cycle netted zero:
+    # long +0.00286 vs short -0.00298. The winner must be left alone here to run for the trail.
+    entry = 86000.0
+    ex = FakeExchange(position=round(10.0 / entry, 5), collateral=10.0)
+    partner = {"side": None, "realized_pnl_usd": -0.003}
+    bot = _breakeven_bot(ex, _breakeven_state(entry, 10.0), partner)
+    await _tick_at(bot, entry * (1 + 0.030 / 100))
+    check("floor armed at ~0.03%", abs(bot._breakeven_floor_pct - 0.03) < 0.002,
+          bot._breakeven_floor_pct)
+    check("NOT yet live -- winner has only reached the floor, not cleared it",
+          bot._breakeven_reached is False, bot._breakeven_reached)
+    # Noise wobbles it either side of the floor. None of this may close the position.
+    for p in (0.029, 0.031, 0.028, 0.032, 0.027):
+        await _tick_at(bot, entry * (1 + p / 100))
+        if bot.state_row["side"] is None:
+            break
+    check("survived noise around the floor instead of being scalped out at zero",
+          bot.state_row["side"] == "long", bot.state_row["side"])
+    # Once it genuinely clears the floor by the trail width, the floor goes live and protects.
+    await _tick_at(bot, entry * (1 + 0.040 / 100))
+    check("floor goes live at floor + 0.01%", bot._breakeven_reached is True)
+    await _tick_at(bot, entry * (1 + 0.025 / 100))
+    check("now it protects breakeven", bot.state_row["side"] is None, bot.state_row["side"])
+    check("closed via BREAKEVEN_LOCK",
+          any(a == "closed" and d.get("reason") == "BREAKEVEN_LOCK" for a, d in bot.runs),
+          [(a, d.get("reason")) for a, d in bot.runs if a == "closed"])
+
+
+async def t_breakeven_floor_lets_a_winner_reach_the_trail():
+    print("\n[breakeven floor: a winner that keeps running reaches the 0.05% trail, not the floor]")
+    entry = 86000.0
+    ex = FakeExchange(position=round(10.0 / entry, 5), collateral=10.0)
+    partner = {"side": None, "realized_pnl_usd": -0.003}
+    bot = _breakeven_bot(ex, _breakeven_state(entry, 10.0), partner)
+    for p in (0.03, 0.04, 0.05, 0.06, 0.07):
+        await _tick_at(bot, entry * (1 + p / 100))
+        check_open = bot.state_row["side"]
+        if check_open is None:
+            break
+    check("still open all the way up to +0.07%", bot.state_row["side"] == "long",
+          bot.state_row["side"])
+    check("profit-lock trail armed", bot.profit_lock_peak_pct is not None, bot.profit_lock_peak_pct)
+    await _tick_at(bot, entry * (1 + 0.055 / 100))  # gives back more than the 0.01% trail
+    check("closed by the TRAIL, well above breakeven -- real profit kept",
+          any(a == "closed" and d.get("reason") == "PROFIT_LOCK" for a, d in bot.runs),
+          [(a, d.get("reason")) for a, d in bot.runs if a == "closed"])
+
+
 async def t_breakeven_floor_ignores_a_green_partner():
     print("\n[breakeven floor: never arms when the partner closed in profit -- nothing to offset]")
     entry = 86000.0
@@ -2899,6 +2951,88 @@ async def t_no_lock_configured_is_unchanged():
           bot.state_row["side"])
 
 
+async def t_cycle_barrier_releases_both_legs_together():
+    print("\n[cycle barrier: neither leg enters until BOTH are ready, then both are cleared]")
+    hub = core.StochBot.new_cycle_hub(["worker2", "worker3"])
+    a = make_bot(FakeExchange(), candles_kind="mid", worker_id="worker2")
+    b = make_bot(FakeExchange(), candles_kind="mid", worker_id="worker3")
+    a.cycle_hub = hub; b.cycle_hub = hub
+    check("long alone is NOT cleared", a._cycle_gate_clear_to_enter() is False)
+    check("short arriving completes the barrier -> short cleared",
+          b._cycle_gate_clear_to_enter() is True)
+    check("and the long is cleared on its next tick too",
+          a._cycle_gate_clear_to_enter() is True)
+    check("clearances consumed, nothing left over", not hub["cleared"], hub["cleared"])
+
+
+async def t_cycle_barrier_prevents_the_naked_leg_pingpong():
+    print("\n[cycle barrier: reproduces the live 05:06:24 desync -- must NOT let a leg enter alone]")
+    # The exact live sequence: the long closes and the short, already flat and waiting, tries to
+    # enter in the same instant. Under the old DB poll the short got in alone and the long was
+    # then blocked by it, permanently out of phase. The barrier must hold the short back.
+    hub = core.StochBot.new_cycle_hub(["worker2", "worker3"])
+    long_bot = make_bot(FakeExchange(), candles_kind="mid", worker_id="worker2")
+    short_bot = make_bot(FakeExchange(), candles_kind="mid", worker_id="worker3")
+    long_bot.cycle_hub = hub; short_bot.cycle_hub = hub
+    # Short is flat and eager; long is still holding, so it never declares readiness.
+    for _ in range(10):
+        check_silent = short_bot._cycle_gate_clear_to_enter()
+        if check_silent:
+            break
+    check("short could NOT enter alone across 10 ticks while the long was still holding",
+          check_silent is False, check_silent)
+    # Long finally goes flat and declares -> both released on the same beat.
+    check("long completes the barrier", long_bot._cycle_gate_clear_to_enter() is True)
+    check("short now cleared too -- they enter together",
+          short_bot._cycle_gate_clear_to_enter() is True)
+
+
+async def t_cycle_barrier_readiness_expires():
+    print("\n[cycle barrier: a leg that stops wanting in releases its partner instead of stalling it]")
+    hub = core.StochBot.new_cycle_hub(["worker2", "worker3"])
+    a = make_bot(FakeExchange(), candles_kind="mid", worker_id="worker2")
+    a.cycle_hub = hub
+    t0 = 1000.0
+    a._cycle_gate_clear_to_enter(now=t0)
+    check("declared ready", "worker2" in hub["ready"])
+    # Partner never arrives; a's own declaration must age out rather than sit there forever.
+    a._cycle_gate_clear_to_enter(now=t0 + core.CYCLE_READY_TTL + 1)
+    check("stale declaration replaced, not accumulated", len(hub["ready"]) == 1, hub["ready"])
+    check("still not cleared -- never enters alone", "worker2" not in hub["cleared"])
+
+
+async def t_cycle_barrier_withdraw_frees_the_partner():
+    print("\n[cycle barrier: withdrawing removes a leg's claim immediately]")
+    hub = core.StochBot.new_cycle_hub(["worker2", "worker3"])
+    a = make_bot(FakeExchange(), candles_kind="mid", worker_id="worker2")
+    a.cycle_hub = hub
+    a._cycle_gate_clear_to_enter()
+    check("ready registered", "worker2" in hub["ready"])
+    a._cycle_gate_withdraw()
+    check("withdrawn", "worker2" not in hub["ready"], hub["ready"])
+
+
+async def t_no_cycle_hub_falls_back_to_the_db_poll():
+    print("\n[cycle barrier: a standalone bot with no hub still uses the DB partner check]")
+    ex = FakeExchange()
+    bot = make_bot(ex, candles_kind="mid", fixed_direction="long", fixed_leg_usd=10.0,
+                   sl_pct=0.03, tp_pct=0.10, disable_literal_tp=True, require_fresh_signal=False,
+                   self_lock_enabled=False, use_joint_adaptive=False,
+                   cycle_partner_table="partner_state")
+    check("no hub wired -> gate returns None so the caller falls back",
+          bot._cycle_gate_clear_to_enter() is None)
+    polled = {"n": 0}
+    async def fake_sb(method, path, body=None, extra_headers=None):
+        if path.startswith("partner_state"):
+            polled["n"] += 1
+            return [{"side": None}]
+        raise AssertionError(f"unexpected sb call: {method} {path}")
+    bot.sb = fake_sb
+    await bot.tick()
+    check("DB partner poll still ran", polled["n"] >= 1, polled["n"])
+    check("entered", bot.state_row["side"] == "long", bot.state_row["side"])
+
+
 async def t_live_configs_match_their_stated_rules():
     print("\n[live configs: the real worker files still encode the rules they are supposed to]")
     # These assert the actual shipped CONFIG objects, not a hand-built test config. Both of these
@@ -3054,6 +3188,8 @@ async def main():
               t_breakeven_floor_pct_arithmetic,
               t_breakeven_floor_holds_the_cycle_even,
               t_breakeven_floor_arms_when_partner_cycle_was_never_observed_open,
+              t_breakeven_floor_does_not_pin_the_winner_to_zero,
+              t_breakeven_floor_lets_a_winner_reach_the_trail,
               t_breakeven_floor_ignores_a_green_partner,
               t_breakeven_floor_requires_partner_to_have_opened,
               t_breakeven_floor_never_forces_a_worse_exit,
@@ -3064,6 +3200,11 @@ async def main():
               t_instance_lock_never_blocks_an_exit,
               t_instance_lock_fails_closed_on_read_error,
               t_no_lock_configured_is_unchanged,
+              t_cycle_barrier_releases_both_legs_together,
+              t_cycle_barrier_prevents_the_naked_leg_pingpong,
+              t_cycle_barrier_readiness_expires,
+              t_cycle_barrier_withdraw_frees_the_partner,
+              t_no_cycle_hub_falls_back_to_the_db_poll,
               t_live_configs_match_their_stated_rules,
               t_stale_position_bands_ignored_without_schema_flag,
               t_position_bands_still_honored_with_schema_flag):
