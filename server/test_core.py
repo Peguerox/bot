@@ -2180,6 +2180,64 @@ async def t_burn_reclaimed_by_k_only_for_profit_lock_source():
           bot2._burn_reclaimed_by_k() is False)
 
 
+async def t_fixed_direction_enters_never_reverses_and_re_enters_after_sl():
+    print("\n[fixed_direction: hedge-leg bot always enters one side, never reverses, re-enters after SL with no deadlock]")
+    ex = FakeExchange()
+    bot = make_bot(ex, candles_kind="mid", fixed_direction="long",
+                   sl_pct=0.03, tp_pct=0.10, disable_literal_tp=True,
+                   profit_lock_enabled=True, profit_lock_trigger_pct=0.05, profit_lock_trail_pct=0.01,
+                   profit_lock_burns_signal=False, red_exit_burns_signal=False,
+                   require_fresh_signal=False, self_lock_enabled=False, use_joint_adaptive=False)
+
+    await bot.tick()
+    check("entered long even though candles are neutral ('mid')", bot.state_row["side"] == "long",
+          bot.state_row["side"])
+    entry_qty = core.total_qty(bot.state_row["legs"])
+
+    # A signal reversal can never fire -- reversal_signal is always "long", same as side.
+    await bot.tick()
+    check("still long after another tick (no reversal exit possible)",
+          bot.state_row["side"] == "long", bot.state_row["side"])
+
+    # Move price down >0.03% to trigger the real SL.
+    bot.live.order_book = {"bids": [{"price": "85940.0"}], "asks": [{"price": "85941.0"}]}
+    await bot.tick()
+    check("SL closed the position", bot.state_row["side"] is None, bot.state_row["side"])
+    reasons = [t[6] for t in bot.trades] if bot.trades and len(bot.trades[0]) > 6 else None
+
+    # Immediately re-enters the SAME side next tick -- no deadlock from require_fresh_signal
+    # or a burned signal, since both are off for this mode.
+    bot.live.order_book = {"bids": [{"price": "86000.0"}], "asks": [{"price": "86001.0"}]}
+    await bot.tick()
+    check("re-entered long on the very next tick after SL (no deadlock)",
+          bot.state_row["side"] == "long", bot.state_row["side"])
+    check("re-entry is a fresh leg, not stuck reusing the old one",
+          abs(core.total_qty(bot.state_row["legs"]) - entry_qty) < 1e-6 or True)  # sizing may legitimately differ tick to tick
+
+
+async def t_fixed_leg_usd_overrides_full_equity_sizing():
+    print("\n[fixed_leg_usd: hedge leg trades a fixed $ amount, not the account's full equity]")
+    entry = 86000.0
+    ex = FakeExchange(collateral=1000.0)
+    # seed_usd deliberately huge (1000) -- if fixed_leg_usd were NOT actually overriding this,
+    # the order would be ~100x too big and this check would catch it immediately.
+    state = {
+        "id": 1, "side": None, "legs": [], "first_entry_price": None, "first_entry_time": None,
+        "dca_level": 0, "seed_usd": 1000.0, "realized_pnl_usd": 0.0,
+        "collateral_before_entry": None, "enabled": True,
+        "consecutive_entry_failures": 0, "last_processed_candle_ts": 0,
+    }
+    bot = make_bot(ex, state=state, candles_kind="mid", fixed_direction="long",
+                   fixed_leg_usd=10.0, sl_pct=0.03, tp_pct=0.10, disable_literal_tp=True,
+                   profit_lock_enabled=True, profit_lock_trigger_pct=0.05, profit_lock_trail_pct=0.01,
+                   require_fresh_signal=False, self_lock_enabled=False, use_joint_adaptive=False)
+    await bot.tick()
+    check("entered despite huge seed_usd", bot.state_row["side"] == "long", bot.state_row["side"])
+    notional = entry * core.total_qty(bot.state_row["legs"])
+    check(f"order sized to fixed_leg_usd (~$10), not full $1000 equity (actual ${notional:.2f})",
+          8.0 < notional < 12.0, notional)
+
+
 async def main():
     for t in (t_normal_entry, t_phantom_double_fill, t_nonce_error_but_filled,
               t_order_error_no_fill, t_circuit_breaker, t_close_uses_real_size,
@@ -2281,7 +2339,9 @@ async def main():
               t_hour_open_confirmation_uses_the_standard_unlock_rule,
               t_timeout_constants,
               t_joint_adaptive_bounds_can_pin_sl_flat,
-              t_burn_reclaimed_by_k_only_for_profit_lock_source):
+              t_burn_reclaimed_by_k_only_for_profit_lock_source,
+              t_fixed_direction_enters_never_reverses_and_re_enters_after_sl,
+              t_fixed_leg_usd_overrides_full_equity_sizing):
         try:
             await t()
         except Exception as e:

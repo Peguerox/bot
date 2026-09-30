@@ -409,6 +409,19 @@ class BotConfig:
     # not edge-triggered -- a late/reopened real bot can otherwise miss an entry paper already
     # caught and never catch back up until the next full signal transition).
     mirror_paper_position: bool = False
+    # 2026-09-29, direct request: "hedge bot" -- one leg of a two-account long+short straddle
+    # (see compute_fixed_direction_signal's docstring). "long" or "short", or None (default) for
+    # every other bot's normal signal-driven behavior. Takes priority over use_joint_adaptive/
+    # use_adaptive_window/use_rsi_stoch_signal when set -- bypasses all of them, no stochastic
+    # calculation at all. MUST be paired with require_fresh_signal=False,
+    # red_exit_burns_signal=False, profit_lock_burns_signal=False -- see test_core.py's
+    # t_fixed_direction_config_sanity for why combining any of those deadlocks re-entry.
+    fixed_direction: Optional[str] = None
+    # 2026-09-29, direct request (hedge bot): trade a fixed dollar amount per entry instead of
+    # the account's full equity -- e.g. two legs sharing one $20 account, $10 committed per
+    # leg per entry, not the whole balance every time. None (default) preserves every other
+    # bot's existing behavior (full seed_usd + realized_pnl_usd each entry).
+    fixed_leg_usd: Optional[float] = None
     # Joint adaptive formula (2026-09-28): see JOINT_ADAPTIVE_* constants and
     # compute_joint_adaptive_signal's docstring. False = use whichever other signal mode is
     # configured (plain / RSI / the binary-window Adaptive V2) as before.
@@ -501,6 +514,23 @@ class BotConfig:
 
 
 # ── Pure helpers ────────────────────────────────────────────────────────────────────────────
+def compute_fixed_direction_signal(candles, direction):
+    """2026-09-29, direct request: a hedge-leg bot that always wants to be in position on ONE
+    fixed side (never flips) -- entry_signal and reversal_signal are always `direction`, no
+    stochastic calculation at all. Since reversal_signal always equals the position's own side
+    once entered, reversal_ready (reversal_signal != side) can never be True -- reversal exits
+    never fire, only SL/PROFIT_LOCK. Returns (direction, direction, candle_ts) matching the
+    shape of every other compute_*_signal function so it slots into the same dispatch.
+
+    MUST be paired with require_fresh_signal=False and red_exit_burns_signal=/
+    profit_lock_burns_signal=False -- since the raw signal never changes, any of those would
+    permanently deadlock re-entry after the very first close (see BotConfig.fixed_direction's
+    docstring)."""
+    if len(candles) < 2:
+        return None, None, None
+    return direction, direction, candles[-2]["t"]
+
+
 def ms_to_iso(ms):
     if ms is None:
         return "1970-01-01T00:00:00+00:00"
@@ -2800,7 +2830,10 @@ class StochBot:
             # the retry budget and likely makes an IP-level block look more abusive, not less.
             return
 
-        if cfg.use_joint_adaptive:
+        if cfg.fixed_direction is not None:
+            entry_signal, reversal_signal, candle_ts = compute_fixed_direction_signal(
+                self.candles, cfg.fixed_direction)
+        elif cfg.use_joint_adaptive:
             entry_signal, reversal_signal, candle_ts = self.compute_joint_adaptive_signal()
         elif cfg.use_adaptive_window:
             entry_signal, reversal_signal, candle_ts = self.compute_adaptive_stoch_signal()
@@ -3281,7 +3314,8 @@ class StochBot:
                     return
                 fresh = await self.get_state()
                 fail_count = fresh.get("consecutive_entry_failures", 0) or 0
-                eq = fresh["seed_usd"] + fresh["realized_pnl_usd"]
+                eq = (cfg.fixed_leg_usd if cfg.fixed_leg_usd is not None
+                      else fresh["seed_usd"] + fresh["realized_pnl_usd"])
                 if not fresh.get("enabled"):
                     return
                 if fail_count >= 3:
@@ -3359,7 +3393,8 @@ class StochBot:
                         await self.update_state({"enabled": False,
                                                  "last_processed_candle_ts": candle_ts})
                         return
-                    eq = state["seed_usd"] + state["realized_pnl_usd"]
+                    eq = (cfg.fixed_leg_usd if cfg.fixed_leg_usd is not None
+                          else state["seed_usd"] + state["realized_pnl_usd"])
                     if eq <= 0:
                         await self.log_run("equity_non_positive", {"eq": eq})
                         await self.update_state({"enabled": False,
@@ -3384,7 +3419,14 @@ class StochBot:
             "ticks": self.ticks,
         })
 
-    async def run(self):
+    async def run(self, account_index=None, api_key_index=None, api_private_key=None):
+        """account_index/api_key_index/api_private_key: explicit credential override, for a
+        single process driving more than one sub-account concurrently (see
+        lighter_hedge_dual_leg.py) -- each StochBot instance needs its own distinct
+        credentials, which a single process's os.environ can't hold two of at once under the
+        same key names. Default (None) preserves the original behavior every other bot still
+        uses: read from the process's own LIGHTER_ACCOUNT_INDEX/LIGHTER_API_KEY_INDEX/
+        LIGHTER_API_PRIVATE_KEY env vars."""
         cfg = self.cfg
         # Python block-buffers stdout when it is not a TTY, so on Render every print() was
         # sitting in a buffer that never flushed -- which is why the service looked like it
@@ -3393,12 +3435,13 @@ class StochBot:
         sys.stderr.reconfigure(line_buffering=True)
         print(f"Stochastic bot [{cfg.name}] starting (BTC, real money) [WebSocket-based]",
               flush=True)
-        self.account_index = int(os.environ["LIGHTER_ACCOUNT_INDEX"])
+        self.account_index = account_index if account_index is not None else int(os.environ["LIGHTER_ACCOUNT_INDEX"])
+        api_key_index = api_key_index if api_key_index is not None else int(os.environ["LIGHTER_API_KEY_INDEX"])
+        api_private_key = api_private_key if api_private_key is not None else os.environ["LIGHTER_API_PRIVATE_KEY"]
         self.http = aiohttp.ClientSession(timeout=aiohttp.ClientTimeout(total=SB_TIMEOUT))
         self.client = lighter.SignerClient(
             url="https://mainnet.zklighter.elliot.ai", account_index=self.account_index,
-            api_private_keys={int(os.environ["LIGHTER_API_KEY_INDEX"]):
-                              os.environ["LIGHTER_API_PRIVATE_KEY"]},
+            api_private_keys={api_key_index: api_private_key},
         )
         self.live = LiveState(self.account_index, cfg.market_index)
 
