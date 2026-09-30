@@ -55,16 +55,19 @@ Exit stack, both legs identical:
 Sizing: base case is a fixed $10/leg (fixed_leg_usd), not each account's full equity -- direct
 request, same $ per leg regardless of either sub-account's balance. On top of that, 2026-09-29
 direct request ("we need some signal so there is pressure some where, the stochastic 25/75 is
-good enough"): pressure_bias_enabled tilts EACH leg's own size at entry time using the ordinary
-stochastic K (entry_lo=25/entry_hi=75, computed off self.candles same as every other bot --
-fixed_direction's own entry/exit logic never looks at it, this is a second, independent read of
-the same market data purely for sizing). Bigger ($10+$5=$15) when the raw signal agrees with
-that leg's own fixed_direction, smaller ($10-$5=$5, floored at pressure_bias_min_usd=$2) when it
-favors the other leg, unchanged when K sits in the neutral 25-75 zone. Both legs still always
-enter together (cycle_partner_table untouched) -- this only changes how much each leg risks on
-that cycle, giving the leg the market currently favors more weight without ever fully starving
-the other side. New, not-yet-backtested on top of the validated 0.03%-cut numbers -- noted so
-that isn't forgotten either. See BotConfig.pressure_bias_enabled's docstring in
+good enough"): pressure_bias_enabled tilts each leg's size using ONE shared stochastic K
+(entry_lo=25/entry_hi=75) -- fixed_direction's own entry/exit logic never looks at it, this is
+purely a sizing tilt on top. ONE signal only, computed by exactly one leg: LONG_CONFIG has
+pressure_signal_owner=True, so the long leg alone calls compute_stoch_signal() and publishes it
+into main()'s shared_pressure_hub; the short leg has no such flag and only ever reads that hub
+(direct correction, 2026-09-29 -- an earlier version had each leg computing and merging its own
+independent reading, needless complexity for what's one strategy with one signal). Whichever
+direction that one signal favors, both legs still always enter together as always
+(cycle_partner_table untouched) -- the signal only changes how much each leg risks that cycle:
+bigger ($10+$5=$15) for whichever leg the signal agrees with, smaller ($10-$5=$5, floored at
+pressure_bias_min_usd=$2) for the other, unchanged ($10) when K sits in the neutral 25-75 zone.
+New, not-yet-backtested on top of the validated 0.03%-cut numbers -- noted so that isn't
+forgotten either. See BotConfig.pressure_bias_enabled/pressure_signal_owner's docstrings in
 stoch_bot_core.py and _pressure_biased_leg_usd for the exact mechanics.
 
 Credentials: Worker 2's leg reads the standard LIGHTER_ACCOUNT_INDEX/LIGHTER_API_KEY_INDEX/
@@ -100,6 +103,7 @@ LONG_CONFIG = BotConfig(
     pressure_bias_enabled=True,
     pressure_bias_usd=5.0,
     pressure_bias_min_usd=2.0,
+    pressure_signal_owner=True,  # this leg computes the ONE shared signal; short just reads it
     debug_verbose_tick=False,  # off -- faulthandler below only fires if actually stuck
     # 2026-09-30, direct request, correcting a real bug: this leg will NOT re-enter on its
     # own just because it went flat -- it waits until the SHORT leg (lighter_stoch_dca_btc_
@@ -163,12 +167,11 @@ SHORT_CONFIG = BotConfig(
 async def main():
     long_bot = StochBot(LONG_CONFIG)
     short_bot = StochBot(SHORT_CONFIG)
-    # 2026-09-29, real concern raised ("you don't need two signals for each leg... they're
-    # gonna go different ways"): each leg fetches its own candles independently, so two
-    # isolated pressure-bias reads could disagree. Sharing this one dict between both bots'
-    # _pressure_signal_hub makes them merge toward whichever candle is actually newer and both
-    # act on that single agreed value -- see _pressure_biased_leg_usd's docstring.
-    shared_pressure_hub = {"signal": None, "ts": None}
+    # 2026-09-29, direct correction ("only one signal is read by one of the legs... both go in
+    # automatically"): ONE signal, period. LONG_CONFIG.pressure_signal_owner=True makes the long
+    # leg the sole computer; it publishes into this shared dict, the short leg only ever reads
+    # it -- see _pressure_biased_leg_usd's docstring.
+    shared_pressure_hub = {"signal": None}
     long_bot.pressure_signal_hub = shared_pressure_hub
     short_bot.pressure_signal_hub = shared_pressure_hub
     await asyncio.gather(

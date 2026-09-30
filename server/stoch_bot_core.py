@@ -445,6 +445,10 @@ class BotConfig:
     pressure_bias_enabled: bool = False
     pressure_bias_usd: float = 0.0
     pressure_bias_min_usd: float = 1.0
+    # 2026-09-29, direct correction: exactly one leg of a hedge computes the shared signal
+    # (see pressure_signal_hub on StochBot / _pressure_biased_leg_usd) -- every other leg just
+    # reads it. False (default) for every other bot, including a hedge's non-owner leg(s).
+    pressure_signal_owner: bool = False
     # 2026-09-29/30, temporary diagnostic: prints a checkpoint at each major step of tick()/
     # try_enter()/confirm_fill(), gated so it never fires for any other bot. Added specifically
     # to pinpoint where the hedge dual-leg process hangs (every individual piece -- reads,
@@ -1607,29 +1611,25 @@ class StochBot:
         floor, not a target -- it only ever prevents the DOWN tilt from reaching zero/negative;
         it never limits the UP tilt.
 
-        2026-09-29 correction (real concern raised: "you don't need two signals for each leg...
-        they're gonna go different ways"): each leg is its own StochBot instance with its own
-        independently-fetched candle stream, so two isolated compute_stoch_signal() reads could
-        disagree at the exact moment either leg enters (candle-fetch timing jitter between two
-        separate REST polls of the same market) -- both legs could then size UP together, or
-        both DOWN together, instead of the intended one-up/one-down complementary tilt. When
+        2026-09-29, simplified per direct correction ("only one signal is read by one of the
+        legs... automatically both [go in]" -- an earlier version had EACH leg compute its own
+        reading off its own independently-fetched candles and merge by timestamp, needless
+        complexity for what's conceptually one strategy, one signal. Now: when
         pressure_signal_hub is set (both legs of a hedge share ONE dict, wired in
-        lighter_hedge_dual_leg.py's main()), this still computes its OWN reading -- needed to
-        even have a candidate -- but merges it into the shared hub keyed by whichever candle
-        timestamp is actually newer, then uses THAT merged value, not its own local one. Both
-        legs therefore always agree on which single reading currently governs, even though each
-        still polls candles independently; the only degradation is at worst one leg using the
-        other's slightly newer read for that one entry, never a disagreement."""
+        lighter_hedge_dual_leg.py's main()), only the designated owner leg
+        (cfg.pressure_signal_owner=True) calls compute_stoch_signal() at all and publishes it;
+        every other leg just reads whatever's in the hub, full stop -- no local computation, no
+        merging, one signal for both legs."""
         cfg = self.cfg
         if not cfg.pressure_bias_enabled or cfg.fixed_direction is None:
             return base_usd
-        entry_signal, _, ts = self.compute_stoch_signal()
         hub = self.pressure_signal_hub
-        if hub is not None:
-            if ts is not None and (hub.get("ts") is None or ts >= hub["ts"]):
-                hub["signal"] = entry_signal
-                hub["ts"] = ts
+        if hub is not None and not cfg.pressure_signal_owner:
             entry_signal = hub.get("signal")
+        else:
+            entry_signal, _, _ = self.compute_stoch_signal()
+            if hub is not None:
+                hub["signal"] = entry_signal
         if entry_signal == cfg.fixed_direction:
             return base_usd + cfg.pressure_bias_usd
         if entry_signal is not None:

@@ -2392,8 +2392,8 @@ async def t_pressure_bias_noop_when_signal_neutral():
           8.0 < notional < 12.0, notional)
 
 
-async def t_pressure_bias_shared_hub_overrides_disagreeing_local_reading():
-    print("\n[pressure_bias: pressure_signal_hub forces agreement even if this leg's own candles disagree]")
+async def t_pressure_bias_owner_publishes_follower_reads_only():
+    print("\n[pressure_bias: exactly one owner leg computes the signal, the follower only reads the hub]")
     entry = 86000.0
     ex = FakeExchange(collateral=1000.0)
     state = {
@@ -2402,18 +2402,44 @@ async def t_pressure_bias_shared_hub_overrides_disagreeing_local_reading():
         "collateral_before_entry": None, "enabled": True,
         "consecutive_entry_failures": 0, "last_processed_candle_ts": 0,
     }
-    # This leg's OWN candles read "long" (K near 0) -- in isolation it would bias UP (matches
-    # its own fixed_direction="long"). But the shared hub already holds a NEWER "short" reading
-    # (as if the other leg's candle stream saw fresher data) -- the hub must win.
+    # This (follower) leg's OWN candles read "long" (K near 0) -- if it computed its own
+    # reading it would bias UP (matches its own fixed_direction="long"). It has no
+    # pressure_signal_owner flag, so it must ignore its own candles entirely and use whatever
+    # the hub says -- pre-seeded here with "short", as if the owner leg had published that.
     bot = make_bot(ex, state=state, candles_kind="long", fixed_direction="long",
                    fixed_leg_usd=10.0, sl_pct=0.03, tp_pct=0.10, disable_literal_tp=True,
                    require_fresh_signal=False, self_lock_enabled=False, use_joint_adaptive=False,
                    pressure_bias_enabled=True, pressure_bias_usd=5.0, pressure_bias_min_usd=1.0)
-    bot.pressure_signal_hub = {"signal": "short", "ts": 9_999_999_999_999}  # far in the future (ms epoch)
+    bot.pressure_signal_hub = {"signal": "short"}
     await bot.tick()
     check("entered long", bot.state_row["side"] == "long", bot.state_row["side"])
     notional = entry * core.total_qty(bot.state_row["legs"])
     check(f"order sized DOWN to ~$5 per the hub's 'short' reading, not UP per its own candles (actual ${notional:.2f})",
+          3.0 < notional < 7.0, notional)
+
+
+async def t_pressure_bias_owner_computes_and_publishes_to_hub():
+    print("\n[pressure_bias: the owner leg computes its OWN candles and writes the result into the hub]")
+    entry = 86000.0
+    ex = FakeExchange(collateral=1000.0)
+    state = {
+        "id": 1, "side": None, "legs": [], "first_entry_price": None, "first_entry_time": None,
+        "dca_level": 0, "seed_usd": 1000.0, "realized_pnl_usd": 0.0,
+        "collateral_before_entry": None, "enabled": True,
+        "consecutive_entry_failures": 0, "last_processed_candle_ts": 0,
+    }
+    bot = make_bot(ex, state=state, candles_kind="short", fixed_direction="long",
+                   fixed_leg_usd=10.0, sl_pct=0.03, tp_pct=0.10, disable_literal_tp=True,
+                   require_fresh_signal=False, self_lock_enabled=False, use_joint_adaptive=False,
+                   pressure_bias_enabled=True, pressure_bias_usd=5.0, pressure_bias_min_usd=1.0,
+                   pressure_signal_owner=True)
+    hub = {"signal": None}
+    bot.pressure_signal_hub = hub
+    await bot.tick()
+    check("entered long", bot.state_row["side"] == "long", bot.state_row["side"])
+    check("owner published its own 'short' reading into the hub", hub["signal"] == "short", hub["signal"])
+    notional = entry * core.total_qty(bot.state_row["legs"])
+    check(f"owner still sizes off its own reading ($5, opposing) (actual ${notional:.2f})",
           3.0 < notional < 7.0, notional)
 
 
@@ -2528,7 +2554,8 @@ async def main():
               t_pressure_bias_floor_prevents_negative_or_zero_sizing,
               t_pressure_bias_noop_when_disabled,
               t_pressure_bias_noop_when_signal_neutral,
-              t_pressure_bias_shared_hub_overrides_disagreeing_local_reading):
+              t_pressure_bias_owner_publishes_follower_reads_only,
+              t_pressure_bias_owner_computes_and_publishes_to_hub):
         try:
             await t()
         except Exception as e:
