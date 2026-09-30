@@ -23,11 +23,10 @@ const WORKER1_RESET_AT = "2026-09-28T01:02:25.797802+00:00";
 // reasoning as Worker 1's reset above, a clean baseline for a config that changed twice at once.
 // Reset again 2026-09-27 when stoch_window/thresholds changed, then once more after the SL
 // revert (0.05% -> 0.11%) -- same reasoning as Worker 1's reset above. Reset again 2026-09-29
-// (repeatedly, through several same-day pivots: own joint-adaptive formula, then fixed
-// settings + entry-confirmation, then a Worker 3 clone with a loosened self-lock rule and no
-// book-opposition exit, now a "hyper trading" profit-lock trail (arm 0.02%/trail 0.01%) on top
-// of that clone, plus SL tightened to 0.10%).
-const WORKER2_RESET_AT = "2026-09-29T17:47:12.524282+00:00";
+// (repeatedly, through several same-day pivots -- most recently the hedge dual-leg pivot:
+// Worker 2's account is now the long leg, Worker 3's account the short leg, both driven by
+// one process. This cutoff also gates the short leg's trade list in HedgeDualLegPanel).
+const WORKER2_RESET_AT = "2026-09-30T01:36:21.000Z";
 // Worker 3 reset 2026-09-27 ahead of testing the volatility-adaptive window formula + the
 // order-flow entry filter -- clean baseline before that config lands.
 const WORKER3_RESET_AT = "2026-09-29T00:52:00.000000+00:00";
