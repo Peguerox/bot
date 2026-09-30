@@ -2081,6 +2081,39 @@ function HedgeDualLegPanel({
           : (t.avg_entry_price - t.exit_price) / t.avg_entry_price) * 100;
   const legNotional = (t: any) =>
     t == null || !t.avg_entry_price ? 0 : t.avg_entry_price * (t.base_amount_btc ?? 0);
+  // Hover detail for a cycle row -- direct request. Native title attribute rather than a custom
+  // popover: it works on every browser, needs no state, and cannot get stuck open.
+  const legDetail = (t: any, label: string) => {
+    if (!t) return `${label}: (no leg)`;
+    const pct = legPct(t);
+    const secs = t.opened_at && t.closed_at
+      ? (new Date(t.closed_at).getTime() - new Date(t.opened_at).getTime()) / 1000 : null;
+    const notional = legNotional(t);
+    return [
+      `${label} ${t.side?.toUpperCase() ?? ""}  ${t.reason ?? ""}`,
+      `  entry  ${t.avg_entry_price?.toFixed(1) ?? "?"}`,
+      `  exit   ${t.exit_price?.toFixed(1) ?? "?"}`,
+      `  move   ${pct != null ? (pct >= 0 ? "+" : "") + pct.toFixed(4) + "%" : "?"}`,
+      `  pnl    ${t.pnl_usd >= 0 ? "+" : ""}$${t.pnl_usd?.toFixed(5) ?? "?"}  on $${notional.toFixed(2)}`,
+      secs != null ? `  held   ${secs < 90 ? secs.toFixed(0) + "s" : (secs / 60).toFixed(1) + "m"}` : "",
+    ].filter(Boolean).join("\n");
+  };
+  const cycleTooltip = (c: any) => {
+    const win = c.long && c.short
+      ? (c.long.pnl_usd >= c.short.pnl_usd ? "long" : "short") : null;
+    const parts = [
+      legDetail(c.long, win === "long" ? "WINNER  LONG " : win === "short" ? "loser   LONG " : "LONG "),
+      legDetail(c.short, win === "short" ? "WINNER  SHORT" : win === "long" ? "loser   SHORT" : "SHORT"),
+    ];
+    const p = cyclePct(c);
+    parts.push(`NET  ${c.netPnl >= 0 ? "+" : ""}$${c.netPnl.toFixed(5)}`
+      + (p != null ? `  (${p >= 0 ? "+" : ""}${p.toFixed(4)}% of capital deployed)` : ""));
+    if (!c.long || !c.short) {
+      parts.push(c.running ? "Partner leg still open -- cycle not finished."
+                           : "NO PARTNER LEG -- this trade was unhedged.");
+    }
+    return parts.join("\n\n");
+  };
   const cyclePct = (c: any) => {
     const cap = legNotional(c.long) + legNotional(c.short);
     return cap > 0 ? (c.netPnl / cap) * 100 : null;
@@ -2295,7 +2328,8 @@ function HedgeDualLegPanel({
                     }).format(new Date(c.closedAt))
                   : null;
                 return (
-                  <div key={c.key} className="flex items-center justify-between text-[11px] bg-gray-800/50 rounded px-1.5 py-1">
+                  <div key={c.key} title={cycleTooltip(c)}
+                       className="flex items-center justify-between text-[11px] bg-gray-800/50 rounded px-1.5 py-1 cursor-help hover:bg-gray-800">
                     {timeLabel && <span className="text-gray-600 tabular-nums shrink-0">{timeLabel}</span>}
                     <span className="text-gray-400 truncate">
                       {c.long && c.short ? (
