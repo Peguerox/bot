@@ -12,7 +12,7 @@ Frozen 2026-09-30 at commit tag `hedge-v1-working`. Every value below was read o
 > git push origin main          # Render redeploys both legs
 > ```
 > Then on the dashboard: **Close Both → Reset → ON**. The DB schema already supports this build.
-> Verify with `cd server && python3 test_core.py` — **445 tests must pass**.
+> Verify with `cd server && python3 test_core.py` — **458 tests must pass as of 2026-09-30 23:35** (this number grows over time; check the actual output, not this line).
 
 ---
 
@@ -42,7 +42,7 @@ files are untouched and still work.
 > dashboard (no deploy). NULL = use the config. **Live values are what the DB says, not this file.**
 > Both legs are always written together — unequal exits break the breakeven floor.
 
-**Live as of 2026-09-30 15:00: SL 0.06 / trigger 0.10 / trail 0.02.**
+**Live values are DB-driven and change often (see the note above) -- check `override_sl_pct` etc directly, do not trust any specific number written here. As of 2026-09-30 23:35: SL 0.05 / trigger 0.08 / trail 0.02, coin=SOL, pressure gate OFF, 10s min_cycle_gap_seconds (see §13).**
 
 ```
 market_index          = 1          (BTC)
@@ -324,7 +324,78 @@ with the ORIGINAL untuned 0.03/0.05/0.01 exits -- prefer v2 for a revert, not v1
 it does NOT touch `app/page.tsx`, so the `hedgeCoinPrice`/SOL-price-fetch fix stays in place either
 way (harmless for BTC -- it just fetches an unused SOL price alongside the BTC one).
 
-## 13. Rules for changing anything
+## 13. Hypertrading test (2026-09-30, same session, after the SOL switch)
+
+Direct request: turn off the 25/75 pressure gate ("don't delete it, just turn it off, enter at any
+moment"), add a fixed pause after a leg goes flat before it may re-enter ("once you finish a trade
+wait 10 seconds then another trade") -- purpose is faster cycle throughput to test the strategy,
+not a permanent behaviour change.
+
+```
+require_pressure_to_enter = False   (both legs; was True)
+min_cycle_gap_seconds     = 10.0    (both legs; new field, default 0.0 for every other bot)
+```
+
+`min_cycle_gap_seconds` tracks the exact tick each leg's own `side` goes from open to None
+(`self._went_flat_at`), and withholds that leg's cycle-barrier readiness until the gap elapses --
+see `_cycle_gap_elapsed()`. Gates entries only, confirmed with a direct test that it never delays
+an exit. Both legs must always agree on both these fields (pinned as a cross-leg check, same as
+market_index/size_decimals/fixed_leg_usd) -- a mismatch would let one leg declare barrier readiness
+on a different cadence than its partner.
+
+**To revert to the pressure-gated, non-hypertrading behaviour:** set both back to
+`require_pressure_to_enter=True`, `min_cycle_gap_seconds=0.0` (or just delete the line, since 0.0
+is the default) on both LONG_CONFIG and SHORT_CONFIG.
+
+## 14. OPEN, DISPUTED ISSUE -- read this before touching SL/exit code again
+
+**Symptom the user reported, twice:** the panel shows an open leg's unrealized loss already PAST
+the configured `override_sl_pct` (e.g. showing -0.062% while SL=0.05%) while the position is still
+open. User's read: the stop-loss is not actually firing at the configured level -- a real, serious
+bug. **The user explicitly rejected the explanation below and does not consider this resolved.**
+Next agent: do not just re-assert the same explanation -- verify it fresh, or find the real cause.
+
+**What I checked and found (2026-09-30, this session):**
+- The bot's REAL exit check reads price from its own live WebSocket order book, ticked every 0.5s
+  (`stoch_bot_core.py`, the `tick()` loop) -- completely independent of the dashboard.
+- The dashboard's displayed price (`hedgeCoinPrice` in `app/page.tsx`) comes from a single REST
+  fetch to Lighter's `/orderBookOrders`, called only inside `load()` -- and `load()` only runs once
+  on page mount and again on a debounced DB-change trigger. **There is no continuous polling timer
+  refreshing that price.** (Confirmed by reading the code directly: the fetch is inside `load()`,
+  the only unconditional call to `load()` is on mount, `app/page.tsx` ~line 2783.)
+- I pulled the actual trade that matched the second report: entered 118.135, closed via real SL at
+  actual move -0.123% (SL was 0.05%, so ~0.073% overshoot -- see the entry below on why SOL's
+  overshoot is bigger than BTC's). The runs log showed no watchdog timeout, no position-read
+  failures, no gap in heartbeats during that position's life -- the tick loop was healthy
+  throughout. The close happened correctly according to the bot's own log.
+- Conclusion offered: the panel's displayed "-0.062%, still open" was a STALE snapshot (old price,
+  correctly-still-open position), not evidence the live position had actually breached -0.05% and
+  failed to close. The bot's own real-time check would have closed it already if its own price had
+  crossed -0.05%; the close event for that exact cycle is in the log and happened correctly.
+
+**Why the user is not satisfied, and what's still genuinely open:**
+- This explanation has not been verified against a live, reproduced case where the SAME price
+  (bot's WS price at the same instant) was checked against BOTH what the dashboard showed AND what
+  the bot's own tick logged, at the same moment in time. It is an inference from two different data
+  sources read at different times, not a side-by-side proof.
+- SOL's overshoot-past-SL is measurably larger than BTC's (0.073% vs 0.02-0.03% typical) -- this
+  part is solid, real, and separately worth acting on (SOL may need a wider SL than BTC to protect
+  the same real dollar amount). But it does NOT by itself explain a report of "-0.062% while SL is
+  0.05% and STILL OPEN" -- overshoot explains a bigger-than-expected LOSS AT CLOSE, not a position
+  sitting open past its stop.
+
+**What to actually do next time this is reported:**
+1. Get the EXACT timestamp the user is looking at the panel.
+2. Pull `lighter_btc_optimal_runs`/`lighter_stoch_dca_btc_runs` for that leg in a tight window
+   around that timestamp -- look specifically for whether a `closed` event exists slightly BEFORE
+   or AFTER that timestamp (staleness) vs whether the position was genuinely still open with no
+   close event anywhere nearby despite price data showing it should have closed (a real bug).
+3. Pull the bot's own tick-level view if possible (heartbeat `ob_age`/`candle_age` right at that
+   moment) to rule out a stalled feed on the BOT's side, not just the dashboard's.
+4. Only THEN state a conclusion -- don't re-assert the dashboard-staleness read without doing 1-3
+   fresh, since that explanation was already given once and rejected.
+
+## 15. Rules for changing anything
 
 1. **Tag first.** Experiments go on a branch or after a fresh tag. `hedge-v1-working` must keep
    pointing at this build.
