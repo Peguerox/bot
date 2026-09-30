@@ -2537,6 +2537,13 @@ export default function Dashboard() {
   const [szToggling, setSzToggling] = useState(false);
   const [szClearing, setSzClearing] = useState(false);
   const [ocoBtcPrice,  setOcoBtcPrice]  = useState<number | null>(null);
+  // 2026-09-30, direct request: hedge (Worker 2) switched from BTC to SOL on the server. The
+  // dashboard's unrealized %/$ math needs a price for the SAME coin the position is actually in,
+  // never ocoBtcPrice -- comparing a real SOL entry (~$180) against ocoBtcPrice (~BTC's $84k)
+  // is exactly what produced the +70657%/-70661% reading seen live. Worker 1 (still real BTC)
+  // and the dormant Worker 3 display both keep using ocoBtcPrice unchanged; only the hedge panel
+  // switches to this.
+  const [hedgeCoinPrice, setHedgeCoinPrice] = useState<number | null>(null);
   const [dcaBtcState,  setDcaBtcState]  = useState<any>(null);
   const [dcaBtcTrades, setDcaBtcTrades] = useState<any[]>([]);
   const [dcaBtcRuns,   setDcaBtcRuns]   = useState<any[]>([]);
@@ -2660,6 +2667,16 @@ export default function Dashboard() {
         const bid = parseFloat(ob?.bids?.[0]?.price);
         const ask = parseFloat(ob?.asks?.[0]?.price);
         if (bid && ask) setOcoBtcPrice((bid + ask) / 2);
+      })
+      .catch(() => {});
+    // market_id=2 -- SOL, the coin the hedge (Worker 2) actually trades now. See
+    // hedgeCoinPrice's declaration for why this must not reuse ocoBtcPrice.
+    fetch("https://mainnet.zklighter.elliot.ai/api/v1/orderBookOrders?market_id=2&limit=1")
+      .then((r) => r.json())
+      .then((ob) => {
+        const bid = parseFloat(ob?.bids?.[0]?.price);
+        const ask = parseFloat(ob?.asks?.[0]?.price);
+        if (bid && ask) setHedgeCoinPrice((bid + ask) / 2);
       })
       .catch(() => {});
     setLoading(false);
@@ -2840,7 +2857,7 @@ export default function Dashboard() {
             longTrades={optimalBtcTrades.filter((t: any) => t.closed_at >= WORKER2_RESET_AT)}
             shortState={dcaBtcState}
             shortTrades={dcaBtcTrades.filter((t: any) => t.closed_at >= WORKER2_RESET_AT)}
-            currentPrice={ocoBtcPrice}
+            currentPrice={hedgeCoinPrice}
             loading={loading}
             onToggled={load}
           />
