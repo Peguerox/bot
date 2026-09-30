@@ -2942,6 +2942,15 @@ class StochBot:
                 self.candles, cfg.fixed_direction)
             if cfg.debug_verbose_tick:
                 print(f"[{cfg.worker_id}] tick: signal computed entry={entry_signal} candle_ts={candle_ts}", flush=True)
+            # 2026-09-30, direct request ("put the K value on the panel for worker 2 so we can
+            # see what is happening"): fixed_direction's own entry/exit decision never looks at
+            # the stochastic K, so self.live_k/live_signal would otherwise sit at None forever.
+            # Only the pressure-bias OWNER leg refreshes them here (display/hub source only --
+            # doesn't touch entry_signal/reversal_signal above); the follower leg still never
+            # computes its own, same as the sizing decision, so the dashboard only ever shows
+            # the one signal actually governing both legs.
+            if cfg.pressure_bias_enabled and cfg.pressure_signal_owner:
+                self.compute_stoch_signal()
         elif cfg.use_joint_adaptive:
             entry_signal, reversal_signal, candle_ts = self.compute_joint_adaptive_signal()
         elif cfg.use_adaptive_window:

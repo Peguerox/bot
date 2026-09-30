@@ -104,6 +104,9 @@ LONG_CONFIG = BotConfig(
     pressure_bias_usd=5.0,
     pressure_bias_min_usd=2.0,
     pressure_signal_owner=True,  # this leg computes the ONE shared signal; short just reads it
+    # 2026-09-30, direct request: show the live K value on the dashboard. Column already exists
+    # on lighter_btc_optimal_state from an earlier experiment -- no migration needed.
+    schema_has_live_signal=True,
     debug_verbose_tick=False,  # off -- faulthandler below only fires if actually stuck
     # 2026-09-30, direct request, correcting a real bug: this leg will NOT re-enter on its
     # own just because it went flat -- it waits until the SHORT leg (lighter_stoch_dca_btc_
