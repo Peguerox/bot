@@ -1424,7 +1424,11 @@ function CompactStochBtcPanel({
   combineEquityWinRate?: boolean; rsiPaperStats?: { total: number; wins: number; pnlPct: number };
   fixedSettings?: { entryLo: number; entryHi: number; tpPct: number; slPct: number;
                     entryConfirmationMaxPct?: number };
-  // Self-lock unlock label -- defaults to Worker 1/3's rule ("2 with at least 1 literal TP, or
+  // Self-lock unlock label -- defaults to the live rule: 2 wins of any kind, OR 1 literal TP.
+  // The old default said "2-3" (2 with a literal TP, or 3 of any kind); that rule no longer
+  // exists anywhere -- see lighter_stoch_dca_btc_initial.py. Kept overridable per panel.
+  // (historical note preserved below)
+  // Self-lock unlock label -- previously Worker 1/3's rule ("2 with at least 1 literal TP, or
   // 3 of any kind"). Override per-bot when the actual unlock math differs (e.g. Worker 2:
   // "2 of any kind, or 1 literal TP unlocks instantly" -- milestone range 1-2, not 2-3).
   selfLockUnlockRange?: string; selfLockUnlockTitle?: string;
@@ -1712,8 +1716,8 @@ function CompactStochBtcPanel({
               </span>
               {state?.real_trading_locked && (
                 <span className="text-[10px] font-bold text-gray-300 tabular-nums"
-                      title={selfLockUnlockTitle ?? "Consecutive paper wins needed to unlock real trading -- 2 with at least 1 literal TP, or 3 of any kind"}>
-                  {state?.paper_consecutive_tps ?? 0}/{selfLockUnlockRange ?? "2-3"} paper wins
+                      title={selfLockUnlockTitle ?? "Paper wins needed to unlock real trading: 2 wins of ANY kind, or a single literal TP on its own. A red non-SL close cancels one win; a literal SL wipes the streak."}>
+                  {Math.min(state?.paper_consecutive_tps ?? 0, 2)}/{selfLockUnlockRange ?? "2"} paper wins
                 </span>
               )}
               <span className={`text-[9px] font-bold px-1.5 py-0.5 rounded uppercase ${
@@ -2699,7 +2703,7 @@ export default function Dashboard() {
         <div className="grid grid-cols-1 sm:grid-cols-3 gap-3">
           <CompactStochBtcPanel
             title="Worker 1 · Plain Stochastic, Weekend Blocked"
-            subtitle="TP 0.10% / SL 0.11% / window 5, 25-75 (original) / 120s blanking period / weekday hours only (original fitted schedule), Sat+Sun fully closed ET, resumes Monday 12am ET / self-lock: 2 wins unlock (at least 1 literal TP), OR 3 wins of any kind -- a red non-SL close cancels one win, only a literal SL wipes the streak / an hour opening re-locks behind this same rule"
+            subtitle="TP 0.10% / SL 0.11% / window 5, 25-75 (original) / 120s blanking period / weekday hours only (original fitted schedule), Sat+Sun fully closed ET, resumes Monday 12am ET / self-lock: 2 wins of ANY kind unlock, OR a single literal TP on its own -- a red non-SL close cancels one win, only a literal SL wipes the streak / an hour opening re-locks behind this same rule"
             table="lighter_btc_initial_state"
             state={initialBtcState}
             trades={initialBtcTrades.filter((t: any) => t.closed_at >= WORKER1_RESET_AT)}
