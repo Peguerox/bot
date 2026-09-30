@@ -2238,6 +2238,52 @@ async def t_fixed_leg_usd_overrides_full_equity_sizing():
           8.0 < notional < 12.0, notional)
 
 
+async def t_cycle_partner_gate_blocks_entry_until_partner_also_flat():
+    print("\n[cycle_partner_table: won't re-enter alone -- waits for the partner leg to also be flat]")
+    ex = FakeExchange()
+    state = {
+        "id": 1, "side": None, "legs": [], "first_entry_price": None, "first_entry_time": None,
+        "dca_level": 0, "seed_usd": 20.0, "realized_pnl_usd": 0.0,
+        "collateral_before_entry": None, "enabled": True,
+        "consecutive_entry_failures": 0, "last_processed_candle_ts": 0,
+    }
+    bot = make_bot(ex, state=state, candles_kind="mid", fixed_direction="long",
+                   fixed_leg_usd=10.0, sl_pct=0.03, tp_pct=0.10, disable_literal_tp=True,
+                   require_fresh_signal=False, self_lock_enabled=False, use_joint_adaptive=False,
+                   cycle_partner_table="partner_state")
+
+    partner_side = {"value": "short"}  # partner still holding its own leg
+    async def fake_sb(method, path, body=None, extra_headers=None):
+        if path.startswith("partner_state"):
+            return [{"side": partner_side["value"]}]
+        raise AssertionError(f"unexpected sb call in this test: {method} {path}")
+    bot.sb = fake_sb
+
+    await bot.tick()
+    check("did NOT enter -- partner leg still open", bot.state_row["side"] is None,
+          bot.state_row["side"])
+
+    partner_side["value"] = None  # partner's own leg just finished too
+    await bot.tick()
+    check("entered now that partner is also flat", bot.state_row["side"] == "long",
+          bot.state_row["side"])
+
+
+async def t_cycle_partner_gate_fails_closed_on_read_error():
+    print("\n[cycle_partner_table: a failed partner read blocks entry rather than risking a lone leg]")
+    ex = FakeExchange()
+    bot = make_bot(ex, candles_kind="mid", fixed_direction="long", fixed_leg_usd=10.0,
+                   sl_pct=0.03, tp_pct=0.10, disable_literal_tp=True, require_fresh_signal=False,
+                   self_lock_enabled=False, use_joint_adaptive=False,
+                   cycle_partner_table="partner_state")
+    async def failing_sb(method, path, body=None, extra_headers=None):
+        raise RuntimeError("simulated network failure")
+    bot.sb = failing_sb
+    await bot.tick()
+    check("did NOT enter -- partner state unreadable, fails closed",
+          bot.state_row["side"] is None, bot.state_row["side"])
+
+
 async def main():
     for t in (t_normal_entry, t_phantom_double_fill, t_nonce_error_but_filled,
               t_order_error_no_fill, t_circuit_breaker, t_close_uses_real_size,
@@ -2341,7 +2387,9 @@ async def main():
               t_joint_adaptive_bounds_can_pin_sl_flat,
               t_burn_reclaimed_by_k_only_for_profit_lock_source,
               t_fixed_direction_enters_never_reverses_and_re_enters_after_sl,
-              t_fixed_leg_usd_overrides_full_equity_sizing):
+              t_fixed_leg_usd_overrides_full_equity_sizing,
+              t_cycle_partner_gate_blocks_entry_until_partner_also_flat,
+              t_cycle_partner_gate_fails_closed_on_read_error):
         try:
             await t()
         except Exception as e:

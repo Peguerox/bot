@@ -11,6 +11,16 @@ beating both always-long and always-short over the same window -- not just avera
 0.02% was too tight to get enough cycles, 0.05% was pure noise (711 "cycles" in 29h). See
 that session's chat history for the full sweep.
 
+2026-09-30, real bug fixed same day: the first live version let each leg re-enter independently
+the instant IT alone went flat, with zero awareness of the other leg -- so the leg that got cut
+could keep re-entering and re-losing several times while the other side was still riding its
+original trade, backwards from what was actually backtested (both enter TOGETHER, a cut leg
+WAITS, both re-enter together only once the winning leg also finishes). Fixed with
+cycle_partner_table (new BotConfig field, stoch_bot_core.py): each leg's fresh entry is blocked
+unless its partner's own `side` is also currently null. Verified with dedicated tests
+(t_cycle_partner_gate_blocks_entry_until_partner_also_flat,
+t_cycle_partner_gate_fails_closed_on_read_error in test_core.py) before trusting it live.
+
 Architecture: this single process runs TWO independent StochBot instances concurrently
 (asyncio.gather), each managing its own real sub-account -- Worker 2's account trades the LONG
 leg, Worker 3's account trades the SHORT leg. Worker 3's own Render service is suspended once
@@ -69,6 +79,11 @@ LONG_CONFIG = BotConfig(
     tp_pct=0.10, sl_pct=0.03,  # sl_pct is the real, live value here (use_joint_adaptive off)
     fixed_leg_usd=10.0,  # direct request: same $ per leg, not the account's full balance
     debug_verbose_tick=False,  # off -- faulthandler below only fires if actually stuck
+    # 2026-09-30, direct request, correcting a real bug: this leg will NOT re-enter on its
+    # own just because it went flat -- it waits until the SHORT leg (lighter_stoch_dca_btc_
+    # state) is also flat, so both legs enter together and a cut leg can't repeatedly re-lose
+    # while the other side is still running. See BotConfig.cycle_partner_table's docstring.
+    cycle_partner_table="lighter_stoch_dca_btc_state",
     disable_literal_tp=True,
     profit_lock_enabled=True,
     profit_lock_trigger_pct=0.05,
@@ -97,6 +112,9 @@ SHORT_CONFIG = BotConfig(
     tp_pct=0.10, sl_pct=0.03,
     fixed_leg_usd=10.0,  # direct request: same $ per leg, not the account's full balance
     debug_verbose_tick=False,  # off -- faulthandler below only fires if actually stuck
+    # Reciprocal of the long leg's gate above -- waits for lighter_btc_optimal_state (the
+    # LONG leg) to also be flat before re-entering.
+    cycle_partner_table="lighter_btc_optimal_state",
     disable_literal_tp=True,
     profit_lock_enabled=True,
     profit_lock_trigger_pct=0.05,

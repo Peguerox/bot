@@ -26,7 +26,7 @@ const WORKER1_RESET_AT = "2026-09-28T01:02:25.797802+00:00";
 // (repeatedly, through several same-day pivots -- most recently the hedge dual-leg pivot:
 // Worker 2's account is now the long leg, Worker 3's account the short leg, both driven by
 // one process. This cutoff also gates the short leg's trade list in HedgeDualLegPanel).
-const WORKER2_RESET_AT = "2026-09-30T01:36:21.000Z";
+const WORKER2_RESET_AT = "2026-09-30T02:00:28.000Z";
 // Worker 3 reset 2026-09-27 ahead of testing the volatility-adaptive window formula + the
 // order-flow entry filter -- clean baseline before that config lands.
 const WORKER3_RESET_AT = "2026-09-29T00:52:00.000000+00:00";
@@ -1410,7 +1410,7 @@ function currentSessionStart(nowUtc: Date): Date {
 function CompactStochBtcPanel({
   title, subtitle, table, state, trades, currentPrice, loading, onToggled, runs, cooldownMin,
   showSelfLock, stats, tradingHoursUtc, combineEquityWinRate, rsiPaperStats, fixedSettings,
-  selfLockUnlockRange, selfLockUnlockTitle,
+  selfLockUnlockRange, selfLockUnlockTitle, dormant,
 }: {
   title: string; subtitle: string; table: string; state: any; trades: any[];
   currentPrice: number | null; loading: boolean; onToggled: () => void;
@@ -1424,7 +1424,30 @@ function CompactStochBtcPanel({
   // 3 of any kind"). Override per-bot when the actual unlock math differs (e.g. Worker 2:
   // "2 of any kind, or 1 literal TP unlocks instantly" -- milestone range 1-2, not 2-3).
   selfLockUnlockRange?: string; selfLockUnlockTitle?: string;
+  // 2026-09-30, direct request: this bot's own account is currently being driven by a
+  // DIFFERENT process (the hedge dual-leg bot) -- its table's `enabled` field is shared with
+  // that process, so this panel's own toggle button could turn a leg of a DIFFERENT strategy
+  // on/off without anyone touching the hedge's own control. dormant=true fully disconnects
+  // this panel: no toggle button, no live state pulled from the (shared, currently
+  // hedge-owned) table at all -- purely a static placeholder so the strategy stays documented
+  // and easy to bring back later, without being able to interfere with whatever owns the
+  // table right now.
+  dormant?: boolean;
 }) {
+  if (dormant) {
+    return (
+      <div className="bg-gray-900 rounded-xl p-4 space-y-3 opacity-60">
+        <div>
+          <h3 className="text-white font-bold text-sm">{title}</h3>
+          <p className="text-gray-500 text-[11px]">{subtitle}</p>
+        </div>
+        <div className="bg-gray-800/60 rounded-lg p-3 text-center">
+          <p className="text-gray-400 text-xs font-semibold">Dormant -- account in use by another strategy</p>
+          <p className="text-gray-600 text-[10px] mt-1">No toggle, no live data pulled here on purpose. Kept for reference to restore this strategy later.</p>
+        </div>
+      </div>
+    );
+  }
   const [toggling, setToggling] = useState(false);
   const [nowTick, setNowTick] = useState(() => Date.now());
   useEffect(() => {
@@ -1968,7 +1991,7 @@ function HedgeDualLegPanel({
         <div>
           <h3 className="text-white font-bold text-sm">Worker 2 · Hedge Strategy (2 legs)</h3>
           <p className="text-gray-500 text-[11px]">
-            One process, two real sub-accounts -- Worker 2's account always tries to hold a LONG, Worker 3's account always tries to hold a SHORT, no stochastic signal at all, $10 fixed per leg. SL 0.03% cuts a losing leg; no literal TP -- profit-lock trail only (arms +0.05%, trails 0.01% behind peak). One switch controls both legs together.
+            One process, two real sub-accounts, moving in CYCLES -- both legs enter together (Worker 2's account LONG, Worker 3's account SHORT), no stochastic signal, $10 fixed per leg. SL 0.03% cuts a losing leg, which then WAITS -- no literal TP, profit-lock trail only (arms +0.05%, trails 0.01% behind peak) -- both re-enter together only once BOTH are flat again. One switch controls both legs together.
           </p>
         </div>
         <button
@@ -2503,6 +2526,7 @@ export default function Dashboard() {
             runs={dcaBtcRuns}
             showSelfLock
             combineEquityWinRate
+            dormant
           />
         </div>
 

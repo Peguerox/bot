@@ -422,6 +422,16 @@ class BotConfig:
     # leg per entry, not the whole balance every time. None (default) preserves every other
     # bot's existing behavior (full seed_usd + realized_pnl_usd each entry).
     fixed_leg_usd: Optional[float] = None
+    # 2026-09-30, direct request, correcting a real bug: hedge legs must move in CYCLES, not
+    # independently. Without this, the leg that gets cut by its SL immediately tries to
+    # re-enter on its own next tick, potentially several times, while the OTHER leg is still
+    # riding its original trade -- repeatedly losing on one side against a single win on the
+    # other, exactly backwards from what was backtested (both enter together, whichever gets
+    # cut WAITS, both re-enter together only once the winning leg also finishes). When set to
+    # the partner's own table_state, a fresh entry is blocked unless the partner's own `side`
+    # is also currently null (flat) -- see _partner_is_flat's docstring. None (default): no
+    # effect on any other bot.
+    cycle_partner_table: Optional[str] = None
     # 2026-09-29/30, temporary diagnostic: prints a checkpoint at each major step of tick()/
     # try_enter()/confirm_fill(), gated so it never fires for any other bot. Added specifically
     # to pinpoint where the hedge dual-leg process hangs (every individual piece -- reads,
@@ -1553,6 +1563,23 @@ class StochBot:
         self._burned_signal = None
         self._burned_signal_via = None
         self._burned_signal_k = None
+
+    async def _partner_is_flat(self):
+        """See BotConfig.cycle_partner_table's docstring -- hedge-cycle synchronization.
+        True if there's no partner configured (nothing to gate against) or the partner's own
+        state currently shows flat (side is null). Fails CLOSED on any read error or missing
+        row -- entering without actually knowing the partner's real state defeats the entire
+        point of this gate (better to miss a cycle than double up on entries)."""
+        cfg = self.cfg
+        if cfg.cycle_partner_table is None:
+            return True
+        try:
+            rows = await self.sb("GET", f"{cfg.cycle_partner_table}?select=side&id=eq.1")
+            if not rows:
+                return False
+            return rows[0].get("side") is None
+        except Exception:
+            return False
 
     def _book_opposition_ratio(self, side):
         """Book-opposition early exit (2026-09-28, direct request): fraction of near-touch
@@ -3410,9 +3437,12 @@ class StochBot:
                         and not self.real_trading_locked and self.paper_side is not None):
                     mirror_signal = self.paper_side
                 effective_signal = entry_signal if entry_signal is not None else mirror_signal
+                partner_flat = True
+                if effective_signal is not None and cfg.cycle_partner_table is not None:
+                    partner_flat = await self._partner_is_flat()
                 if cfg.debug_verbose_tick:
-                    print(f"[{cfg.worker_id}] tick: effective_signal={effective_signal} enabled={state.get('enabled')}", flush=True)
-                if effective_signal is not None and state.get("enabled"):
+                    print(f"[{cfg.worker_id}] tick: effective_signal={effective_signal} enabled={state.get('enabled')} partner_flat={partner_flat}", flush=True)
+                if effective_signal is not None and state.get("enabled") and partner_flat:
                     fail_count = state.get("consecutive_entry_failures", 0) or 0
                     if fail_count >= 3:
                         # Hard stop rather than another retry -- unbounded retries are what
