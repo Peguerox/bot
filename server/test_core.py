@@ -3377,14 +3377,34 @@ async def t_live_configs_match_their_stated_rules():
               leg.single_instance_lock is True, leg.single_instance_lock)
         check(f"hedge {name} leg: has a cycle partner to synchronise with",
               leg.cycle_partner_table is not None, leg.cycle_partner_table)
-        # Both legs must stay EQUAL at $10. A size tilt was added once without being asked for
-        # and it silently broke the breakeven floor (a $5 winner cannot offset a $15 loser before
-        # the trail exits it). Pinned so it cannot come back unnoticed.
-        check(f"hedge {name} leg: $10 flat", leg.fixed_leg_usd == 10.0, leg.fixed_leg_usd)
-        check(f"hedge {name} leg: NO size tilt -- legs are 10/10",
+        # 2026-09-30: switched from BTC to SOL. fixed_leg_usd bumped $10 -> $12 off Lighter's
+        # $10 min_quote_amount (same floor on both coins) -- $10 had zero margin against a single
+        # unfavourable tick rejecting the order. Pinned to a concrete floor ($11) rather than an
+        # exact value, since this number may reasonably be retuned again.
+        check(f"hedge {name} leg: fixed_leg_usd has real margin above Lighter's $10 minimum",
+              leg.fixed_leg_usd >= 11.0, leg.fixed_leg_usd)
+        check(f"hedge {name} leg: NO size tilt -- legs are equal",
               leg.pressure_bias_enabled is False, leg.pressure_bias_enabled)
         check(f"hedge {name} leg: only enters WITH pressure (25/75 gate)",
               leg.require_pressure_to_enter is True, leg.require_pressure_to_enter)
+    # Both legs must always trade the SAME market with the SAME rounding. A mismatch here is the
+    # same class of bug as unequal fixed_leg_usd -- it breaks the breakeven floor's math (which
+    # assumes both legs' notional is directly comparable) and, worse, a size_decimals mismatch
+    # specifically can make one leg's real order size wrong by a power of 10. Caught once already
+    # in this exact switch: size_decimals was typo'd as BTC's 5 instead of SOL's 3 before this
+    # test existed, which would have sent orders ~100x the intended size.
+    check("hedge legs: SAME market_index",
+          hedge.LONG_CONFIG.market_index == hedge.SHORT_CONFIG.market_index,
+          (hedge.LONG_CONFIG.market_index, hedge.SHORT_CONFIG.market_index))
+    check("hedge legs: SAME price_decimals",
+          hedge.LONG_CONFIG.price_decimals == hedge.SHORT_CONFIG.price_decimals,
+          (hedge.LONG_CONFIG.price_decimals, hedge.SHORT_CONFIG.price_decimals))
+    check("hedge legs: SAME size_decimals",
+          hedge.LONG_CONFIG.size_decimals == hedge.SHORT_CONFIG.size_decimals,
+          (hedge.LONG_CONFIG.size_decimals, hedge.SHORT_CONFIG.size_decimals))
+    check("hedge legs: SAME fixed_leg_usd",
+          hedge.LONG_CONFIG.fixed_leg_usd == hedge.SHORT_CONFIG.fixed_leg_usd,
+          (hedge.LONG_CONFIG.fixed_leg_usd, hedge.SHORT_CONFIG.fixed_leg_usd))
     check("hedge legs point at each other, not themselves",
           hedge.LONG_CONFIG.cycle_partner_table == hedge.SHORT_CONFIG.table_state
           and hedge.SHORT_CONFIG.cycle_partner_table == hedge.LONG_CONFIG.table_state)

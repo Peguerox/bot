@@ -165,17 +165,29 @@ import os
 from stoch_bot_core import BotConfig, StochBot
 
 LONG_CONFIG = BotConfig(
-    name="HEDGE LONG LEG (worker 2 account)",
+    name="HEDGE LONG LEG (worker 2 account) -- SOL",
     worker_id="worker2",
     table_state="lighter_btc_optimal_state",
     table_trades="lighter_btc_optimal_trades",
     table_runs="lighter_btc_optimal_runs",
+    # 2026-09-30, direct request: switched from BTC to SOL -- "if the Solana trading is better,
+    # we can just use Solana." Values read directly from Lighter's own /orderBooks (not guessed):
+    # BTC was market_index=1/price_decimals=1/size_decimals=5; SOL is market_index=2,
+    # price_decimals=3, size_decimals=3, min_base_amount=0.055, min_quote_amount=$10 (same as
+    # BTC's). Tables/table names are UNCHANGED on purpose (same bot, same accounts, just a
+    # different market) -- so "btc" in the table names is now a historical label, not a
+    # description of what's trading. No other code depends on which coin this is; every other
+    # piece of logic already reads the coin generically off these three fields.
+    market_index=2, price_decimals=3, size_decimals=3,
     # Unused while fixed_direction is set -- no stochastic signal computed at all -- left at
     # harmless reference values, required fields with no default.
     stoch_window=5, entry_lo=25, entry_hi=75, reversal_lo=25, reversal_hi=75,
     fixed_direction="long",
     tp_pct=0.10, sl_pct=0.06,  # sl_pct is the real, live value here (use_joint_adaptive off)
-    fixed_leg_usd=10.0,  # direct request: same $ per leg, not the account's full balance
+    # 2026-09-30, bumped $10 -> $12 on the SOL switch: Lighter's min_quote_amount is $10 for both
+    # coins, so $10 sat exactly on the floor with zero margin -- a single unfavourable tick at
+    # entry could reject the order. $12 keeps the same "same $ per leg" intent with real headroom.
+    fixed_leg_usd=12.0,
     # 2026-09-29, direct request: bias size off the raw stochastic K -- see the module
     # docstring's "Sizing" section and BotConfig.pressure_bias_enabled's docstring.
     # 2026-09-30, direct correction: BACK TO $10/$10. 7cfe5ef turned the requested 25/75 signal
@@ -247,15 +259,18 @@ LONG_CONFIG = BotConfig(
 )
 
 SHORT_CONFIG = BotConfig(
-    name="HEDGE SHORT LEG (worker 3 account)",
+    name="HEDGE SHORT LEG (worker 3 account) -- SOL",
     worker_id="worker3",
     table_state="lighter_stoch_dca_btc_state",
     table_trades="lighter_stoch_dca_btc_trades",
     table_runs="lighter_stoch_dca_btc_runs",
+    # See LONG_CONFIG's docstring for the full reasoning -- must match exactly, both legs always
+    # carry identical market/precision/sizing or the breakeven floor's math breaks.
+    market_index=2, price_decimals=3, size_decimals=3,
     stoch_window=5, entry_lo=25, entry_hi=75, reversal_lo=25, reversal_hi=75,
     fixed_direction="short",
     tp_pct=0.10, sl_pct=0.06,
-    fixed_leg_usd=10.0,  # direct request: same $ per leg, not the account's full balance
+    fixed_leg_usd=12.0,  # see LONG_CONFIG -- bumped off Lighter's $10 minimum for real headroom
     # 2026-09-29, direct request: bias size off the raw stochastic K -- see the module
     # docstring's "Sizing" section and BotConfig.pressure_bias_enabled's docstring.
     # 2026-09-30, direct correction: BACK TO $10/$10. 7cfe5ef turned the requested 25/75 signal
