@@ -81,6 +81,14 @@ LOCK_STALE_AFTER = 20.0
 # seconds instead of making its partner wait on a declaration it no longer means.
 CYCLE_READY_TTL = 3.0
 CYCLE_CLEARED_TTL = 5.0
+# Emergency-flatten response (2026-09-30). A first oversize is treated as a transient: flatten,
+# then pause entries for the cooldown so both legs resume together. Only a repeat within the
+# window is treated as systematic and hard-disables the leg. Permanently disabling on the first
+# one halted the strategy on a self-correcting bad read, and did it asymmetrically -- one leg off,
+# its partner still on and waiting forever.
+EMERGENCY_COOLDOWN = 60.0
+EMERGENCY_REPEAT_WINDOW = 3600.0
+EMERGENCY_REPEAT_LIMIT = 3
 POSITION_TTL = 3.0        # cache the REST position read this long (~0.33 req/s, vs the
                           # 6 req/s polling that caused the original rate-limit storm)
 AUTH_TOKEN_LIFETIME_S = 10 * 60  # SDK's create_auth_token_with_expiry default validity
@@ -1069,6 +1077,9 @@ class StochBot:
         # Never guess at a fill: if we cannot see the position, we do not send another order.
         self._entry_outcome_unknown = False
         self._confirm_read_ok = True
+        # Emergency-flatten bookkeeping -- see emergency_flatten / EMERGENCY_COOLDOWN.
+        self._emergency_flattens = []
+        self._entry_cooldown_until = 0.0
         # Paper shadow's own copy of the same trail -- without this, real could exit early via
         # PROFIT_LOCK while paper (running the identical signal) kept holding, making the two
         # visibly diverge even while real is unlocked and trading the exact same thing paper is.
@@ -2258,7 +2269,8 @@ class StochBot:
                 return self._pos_cache
             raise
 
-    async def confirm_fill(self, want_nonzero, expect_qty=None, tries=6, delay=0.25):
+    async def confirm_fill(self, want_nonzero, expect_qty=None, tries=6, delay=0.25,
+                           require_consecutive=1):
         """Authoritative REST answer to 'what is the real position right now'.
 
         Never reads the WS cache: account broadcasts lagging a real fill by more than one
@@ -2283,6 +2295,7 @@ class StochBot:
         # self._entry_outcome_unknown. A caller that has just placed an order MUST NOT treat the
         # second as a no-fill, because retrying then puts a second real order on the book.
         self._confirm_read_ok = True
+        agreed = 0
         for attempt in range(tries):
             try:
                 pos, coll = await self.get_position_rest()
@@ -2298,7 +2311,20 @@ class StochBot:
                 if abs(pos) < expect_qty * 0.5:
                     settled = False
             if settled:
-                return pos, coll, True
+                agreed += 1
+                # require_consecutive > 1 demands that many reads IN A ROW agree before this is
+                # believed. Proven necessary 2026-09-30 with real money: the default returns on
+                # the FIRST read that matches, so `tries` was only ever "how many chances to SEE
+                # flat", never "how many times it must AGREE". One bad read therefore condemned a
+                # live position -- both legs booked a close that had not happened, re-entered on
+                # top of the position that was still there, and ended up at 2x size (the long was
+                # adopted at 0.00024, the short tripped the oversize guard). The tell was the
+                # long's two external closes reporting +0.00323 then -0.00323, exactly equal and
+                # opposite: collateral noise, not two real closes.
+                if agreed >= require_consecutive:
+                    return pos, coll, True
+            else:
+                agreed = 0
             if attempt < tries - 1:
                 await asyncio.sleep(delay)
         return pos, coll, False
@@ -2343,8 +2369,21 @@ class StochBot:
             await self.log_run("cancel_all_failed", {"error": str(e)[:200]})
 
     async def emergency_flatten(self, reason, detail):
-        """Real position is larger than anything we asked for. Get flat and stop trading --
-        this is the guard against repeating the ~20x-leverage incident."""
+        """Real position is larger than anything we asked for. Get flat immediately -- this is the
+        guard against repeating the ~20x-leverage incident.
+
+        Flattening is unconditional. DISABLING is not, as of 2026-09-30: a single oversize caused
+        by a transient bad read used to set enabled=False permanently, which halted the strategy on
+        a self-correcting glitch -- and asymmetrically, since only the leg that tripped was
+        disabled while its partner stayed on, leaving the hedge stuck half-enabled waiting for a
+        partner that could never come. A first occurrence now flattens and pauses entries for
+        EMERGENCY_COOLDOWN, so both legs resume together through the cycle barrier. Repeat
+        occurrences still hard-disable: something systematically wrong must not be retried."""
+        state_before = None
+        try:
+            state_before = await self.get_state()
+        except Exception:
+            pass
         await self.log_run("oversize_detected", detail)
         await self.cancel_all()
         for _ in range(3):
@@ -2359,11 +2398,43 @@ class StochBot:
             await self.place_order(is_ask=(pos > 0), base_amount=abs(pos),
                                    reduce_only=True, ref_price=ref)
             await asyncio.sleep(1.0)
-        pos_after, _c, flat = await self.confirm_fill(want_nonzero=False)
+        pos_after, coll_after, flat = await self.confirm_fill(want_nonzero=False)
+        # Record the closed position like any other exit. Without this the trade table silently
+        # loses a leg -- which is exactly how a properly-hedged cycle came to be displayed as
+        # UNHEDGED on 2026-09-30: the partner leg existed and was flattened here, but never got a
+        # row, so the dashboard could not find it.
+        if state_before and state_before.get("side"):
+            try:
+                legs = state_before.get("legs") or []
+                ae = avg_entry(legs) or state_before.get("first_entry_price")
+                qty = total_qty(legs) or 0.0
+                prior = state_before.get("collateral_before_entry")
+                pnl = (coll_after - prior) if (prior is not None and coll_after is not None) else 0.0
+                implied = ae if not qty else (
+                    ae + pnl / qty if state_before["side"] == "long" else ae - pnl / qty)
+                await self.log_trade(state_before["side"], ae, implied, qty, pnl,
+                                     "EMERGENCY_FLATTEN", len(legs),
+                                     ms_to_iso(state_before.get("first_entry_time")))
+                await self.update_state({
+                    "realized_pnl_usd": (state_before.get("realized_pnl_usd") or 0.0) + pnl})
+            except Exception as e:
+                await self.log_run("emergency_flatten_log_failed", {"error": str(e)[:200]})
+        now = time.time()
+        self._emergency_flattens = [t for t in self._emergency_flattens
+                                    if now - t < EMERGENCY_REPEAT_WINDOW]
+        self._emergency_flattens.append(now)
+        repeat = len(self._emergency_flattens) >= EMERGENCY_REPEAT_LIMIT
+        self._entry_cooldown_until = now + EMERGENCY_COOLDOWN
+        await self.log_run("emergency_flatten_outcome", {
+            "reason": reason, "repeats_in_window": len(self._emergency_flattens),
+            "disabled": repeat,
+            "cooldown_s": None if repeat else EMERGENCY_COOLDOWN})
         patch = {
-            "enabled": False, "side": None, "legs": [], "first_entry_price": None,
+            "side": None, "legs": [], "first_entry_price": None,
             "first_entry_time": None, "dca_level": 0,
         }
+        if repeat:
+            patch["enabled"] = False
         if self.cfg.schema_has_position_bands:
             patch["position_tp_pct"] = None
             patch["position_sl_pct"] = None
@@ -3624,8 +3695,11 @@ class StochBot:
         # Reconcile: something external closed us (OCO, liquidation, manual). Re-verify
         # before trusting it -- acting on a single stale read is what corrupted PnL before.
         if side is not None and abs(real_pos) < QTY_EPS:
+            # 3 reads in a row must agree before believing a position vanished. A genuine close
+            # stays closed; a bad read does not repeat three times. Costs ~2s before booking an
+            # external close, which is nothing next to re-entering on top of a live position.
             real_pos, collateral, confirmed_flat = await self.confirm_fill(
-                want_nonzero=False, tries=2, delay=0.8)
+                want_nonzero=False, tries=6, delay=0.8, require_consecutive=3)
         else:
             confirmed_flat = False
         # Only book an external close when REST agrees we are actually flat. If it disagrees,
@@ -4056,7 +4130,9 @@ class StochBot:
                 # once the barrier has already cleared this leg -- see _cycle_gate_clear_to_enter.
                 wants_in = (effective_signal is not None and state.get("enabled") and holds_lock
                             # Never send a second entry while a previous one's fate is unknown.
-                            and not self._entry_outcome_unknown)
+                            and not self._entry_outcome_unknown
+                            # ...nor during the cooldown after an emergency flatten.
+                            and time.time() >= self._entry_cooldown_until)
                 partner_flat = True
                 if wants_in and cfg.cycle_partner_table is not None:
                     # In-process barrier when one is wired (the hedge); it supersedes the DB poll

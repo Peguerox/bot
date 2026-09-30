@@ -178,7 +178,11 @@ async def t_phantom_double_fill():
     actions = [a for a, _ in bot.runs]
     check("oversize detected", "oversize_detected" in actions, actions)
     check("emergency flatten ran", "emergency_flatten" in actions, actions)
-    check("bot disabled", bot.state_row["enabled"] is False)
+    # A FIRST oversize flattens and pauses; it no longer hard-disables. Permanently stopping on a
+    # transient bad read halted the strategy asymmetrically (one leg off, its partner waiting).
+    check("NOT disabled on a first occurrence", bot.state_row.get("enabled") is not False,
+          bot.state_row.get("enabled"))
+    check("entries paused by cooldown instead", bot._entry_cooldown_until > time.time())
     check("position flattened", abs(ex.position) < 1e-6, ex.position)
     check("no side left set", bot.state_row["side"] is None)
 
@@ -253,7 +257,8 @@ async def t_oversize_mismatch_in_tick():
     await bot.tick()
     actions = [a for a, _ in bot.runs]
     check("oversize detected", "oversize_detected" in actions, actions)
-    check("disabled", bot.state_row["enabled"] is False)
+    check("paused, not disabled, on a first occurrence",
+          bot.state_row.get("enabled") is not False and bot._entry_cooldown_until > time.time())
     check("flat", abs(ex.position) < 1e-6, ex.position)
 
 
@@ -3245,6 +3250,102 @@ async def t_close_on_a_genuinely_flat_bot_still_just_clears():
     check("no position opened", bot.state_row["side"] is None)
 
 
+async def t_single_flat_read_cannot_condemn_a_live_position():
+    print("\n[reconcile: ONE bad read saying flat must not book an external close (2x-size bug)]")
+    # Reproduces 2026-09-30 12:23:58, real money. confirm_fill(want_nonzero=False) returned True on
+    # the FIRST read that showed flat -- `tries` was only ever "chances to SEE flat", never "times
+    # it must AGREE". Both legs booked a close that had not happened, re-entered on top of the live
+    # position, and hit 2x size (long adopted at 0.00024, short tripped the oversize guard).
+    entry = 86000.0
+    ex = FakeExchange(position=round(10.0 / entry, 5), collateral=10.0)
+    state = {
+        "id": 1, "side": "long", "legs": [{"price": entry, "usd_size": 10.0}],
+        "first_entry_price": entry, "first_entry_time": 1700000000000, "dca_level": 0,
+        "seed_usd": 10.0, "realized_pnl_usd": 0.0, "collateral_before_entry": 10.0,
+        "enabled": True, "consecutive_entry_failures": 0, "last_processed_candle_ts": 0,
+    }
+    bot = make_bot(ex, state=state, candles_kind="mid")
+    # One glitched read reports flat, every later read tells the truth.
+    calls = {"n": 0}
+    async def flaky():
+        calls["n"] += 1
+        bot._pos_cache_at = 0.0
+        if calls["n"] == 1:
+            bot._pos_cache = (0.0, 10.0)
+        else:
+            bot._pos_cache = (ex.position, ex.collateral)
+        bot._pos_cache_at = time.time()
+        return bot._pos_cache
+    bot.get_position_rest = flaky
+    bot.live.order_book = {"bids": [{"price": str(entry)}], "asks": [{"price": str(entry + 1)}]}
+    await bot.tick()
+    check("position NOT booked as an external close", bot.state_row["side"] == "long",
+          bot.state_row["side"])
+    check("no EXTERNAL trade written",
+          not any(a == "resolved_externally" for a, _ in bot.runs), [a for a, _ in bot.runs])
+
+
+async def t_genuine_external_close_still_books():
+    print("\n[reconcile: a position that really did vanish is still booked (guard not too strict)]")
+    entry = 86000.0
+    ex = FakeExchange(position=0.0, collateral=10.05)
+    state = {
+        "id": 1, "side": "long", "legs": [{"price": entry, "usd_size": 10.0}],
+        "first_entry_price": entry, "first_entry_time": 1700000000000, "dca_level": 0,
+        "seed_usd": 10.0, "realized_pnl_usd": 0.0, "collateral_before_entry": 10.0,
+        "enabled": True, "consecutive_entry_failures": 0, "last_processed_candle_ts": 0,
+    }
+    bot = make_bot(ex, state=state, candles_kind="mid")
+    await bot.tick()
+    check("booked as an external close", bot.state_row["side"] is None, bot.state_row["side"])
+    check("logged resolved_externally", any(a == "resolved_externally" for a, _ in bot.runs))
+
+
+async def t_emergency_flatten_records_the_trade():
+    print("\n[emergency flatten: writes a trade row so the leg is not lost from history]")
+    # A flattened leg used to leave NO trade row, which is how a properly hedged cycle came to be
+    # displayed as UNHEDGED -- the partner existed but the dashboard could not see it.
+    entry = 86000.0
+    ex = FakeExchange(position=round(30.0 / entry, 5), collateral=20.0)  # 3x tracked
+    state = {
+        "id": 1, "side": "long", "legs": [{"price": entry, "usd_size": 10.0}],
+        "first_entry_price": entry, "first_entry_time": 1700000000000, "dca_level": 0,
+        "seed_usd": 20.0, "realized_pnl_usd": 0.0, "collateral_before_entry": 20.0,
+        "enabled": True, "consecutive_entry_failures": 0, "last_processed_candle_ts": 0,
+    }
+    bot = make_bot(ex, state=state, candles_kind="mid")
+    await bot.tick()
+    check("oversize handled", any(a == "oversize_detected" for a, _ in bot.runs))
+    check("a trade row WAS written", len(bot.trades) >= 1, len(bot.trades))
+    if bot.trades:
+        check("reason is EMERGENCY_FLATTEN", bot.trades[-1][5] == "EMERGENCY_FLATTEN",
+              bot.trades[-1][5])
+
+
+async def t_repeated_emergency_flattens_do_hard_disable():
+    print("\n[emergency flatten: a REPEAT within the window still hard-disables (20x guard intact)]")
+    ex = FakeExchange()
+    bot = make_bot(ex, candles_kind="mid")
+    now = time.time()
+    bot._emergency_flattens = [now - 10, now - 5]   # two already in the window
+    await bot.emergency_flatten("tracked_size_mismatch", {"test": True})
+    check("third occurrence disables", bot.state_row.get("enabled") is False,
+          bot.state_row.get("enabled"))
+
+
+async def t_cooldown_blocks_entry_then_expires():
+    print("\n[emergency flatten: cooldown pauses entries, then trading resumes on its own]")
+    ex = FakeExchange()
+    bot = make_bot(ex, candles_kind="long")
+    bot._entry_cooldown_until = time.time() + 30
+    await bot.tick()
+    check("no entry during cooldown", bot.state_row["side"] is None, bot.state_row["side"])
+    bot._entry_cooldown_until = 0.0          # cooldown elapsed
+    await bot.tick()
+    check("resumes by itself afterwards -- no manual re-enable",
+          bot.state_row["side"] == "long", bot.state_row["side"])
+
+
 async def t_live_configs_match_their_stated_rules():
     print("\n[live configs: the real worker files still encode the rules they are supposed to]")
     # These assert the actual shipped CONFIG objects, not a hand-built test config. Both of these
@@ -3436,6 +3537,11 @@ async def main():
               t_after_blackout_the_real_fill_is_adopted,
               t_close_button_works_on_an_orphan_the_row_does_not_know_about,
               t_close_on_a_genuinely_flat_bot_still_just_clears,
+              t_single_flat_read_cannot_condemn_a_live_position,
+              t_genuine_external_close_still_books,
+              t_emergency_flatten_records_the_trade,
+              t_repeated_emergency_flattens_do_hard_disable,
+              t_cooldown_blocks_entry_then_expires,
               t_live_configs_match_their_stated_rules,
               t_stale_position_bands_ignored_without_schema_flag,
               t_position_bands_still_honored_with_schema_flag):
