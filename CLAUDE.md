@@ -64,7 +64,7 @@ project with no git/Render/Vercel link -- never work there.
     A later reset failure was traced to PostgreSQL float serialization: exact PnL equality
     matched neither unchanged row. Guards now allow only machine-rounding error (8 EPSILON
     scaled by balance), retain OFF/flat/close checks, and reject changes as small as $1e-10.
-    Read-only production queries confirmed both guards match; 45 reset tests and TypeScript pass.
+    Read-only production queries confirmed both guards match; 46 reset tests and TypeScript pass.
   - **Entry hover snapshot repair deployed (2026-10-01, commit b310441):**
     `compute_stoch_signal()` returns a direction string first, not numeric K. The old snapshot
     wrote `"long"`/`"short"` into DOUBLE PRECISION `entry_k`, rejecting the entire snapshot and

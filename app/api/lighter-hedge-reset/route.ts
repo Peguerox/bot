@@ -89,7 +89,9 @@ async function resetHedge() {
 
   const seeds = [longSeed, shortSeed];
   if (results.some((r, i) => r.status !== "fulfilled" || r.value.error
-      || r.value.data?.seed_usd !== seeds[i] || r.value.data?.realized_pnl_usd !== 0
+      || !Number.isFinite(r.value.data?.seed_usd)
+      || Math.abs(r.value.data.seed_usd - seeds[i]) > tolerance(seeds[i])
+      || r.value.data?.realized_pnl_usd !== 0
       || Date.parse(r.value.data?.history_reset_at ?? "") !== Date.parse(historyResetAt))) {
     return NextResponse.json({ error: "Could not confirm the reset on both hedge legs. One leg may have reset. No trades were deleted. Refresh the dashboard and check both legs before trying again." }, { status: 500 });
   }
