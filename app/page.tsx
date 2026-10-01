@@ -1569,12 +1569,14 @@ function CompactStochBtcPanel({
 
   return (
     <div className="bg-gray-900 rounded-xl p-4 space-y-3">
-      <div className="flex items-center justify-between">
+      {/* 2026-10-01, direct request: buttons BELOW the paragraph, same layout as the Worker 2
+          hedge panel, instead of squeezed beside the title. */}
+      <div className="space-y-2.5">
         <div>
           <h3 className="text-white font-bold text-sm">{title}</h3>
-          <p className="text-gray-500 text-[11px]">{subtitle}</p>
+          <p className="text-gray-500 text-[11px] leading-relaxed">{subtitle}</p>
         </div>
-        <div className="flex items-center gap-1.5 shrink-0">
+        <div className="flex items-center gap-1.5 flex-wrap">
           {side != null && (
             <button
               onClick={handleClosePosition}
