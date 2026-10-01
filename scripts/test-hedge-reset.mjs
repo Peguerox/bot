@@ -15,7 +15,7 @@ const compile = (source) => ts.transpileModule(source, {
   compilerOptions: { module: ts.ModuleKind.CommonJS, target: ts.ScriptTarget.ES2020 },
 }).outputText;
 
-function resetHarness({ states = {}, readErrors = {}, writeErrors = {}, beforeWrite, failRead = false } = {}) {
+function resetHarness({ states = {}, readErrors = {}, writeErrors = {}, beforeWrite, failRead = false, serializeBalance = v => v } = {}) {
   const rows = { [long]: { ...flat, ...states[long] }, [short]: { ...flat, ...states[short] } };
   const writes = [];
   const sandbox = {
@@ -32,17 +32,23 @@ function resetHarness({ states = {}, readErrors = {}, writeErrors = {}, beforeWr
             select() { return query; },
             eq(key, value) { if (key !== "id") filters.push([key, value]); return query; },
             is(key, value) { filters.push([key, value]); return query; },
+            gte(key, value) { filters.push([key, value, "gte"]); return query; },
+            lte(key, value) { filters.push([key, value, "lte"]); return query; },
             update(value) { patch = value; return query; },
             async single() {
               if (!patch) {
                 if (failRead) throw new Error("network down");
-                return { data: readErrors[table] ? null : structuredClone(rows[table]), error: readErrors[table] ?? null };
+                const data = structuredClone(rows[table]);
+                for (const key of ["seed_usd", "realized_pnl_usd"]) data[key] = serializeBalance(data[key]);
+                return { data: readErrors[table] ? null : data, error: readErrors[table] ?? null };
               }
               writes.push({ table, patch, filters });
               beforeWrite?.(table, rows);
               if (writeErrors[table] === "network") throw new Error("network down");
               if (writeErrors[table]) return { data: null, error: { message: "write failed" } };
-              if (!filters.every(([key, value]) => rows[table][key] === value)) return { data: null, error: { message: "No matching row" } };
+              if (!filters.every(([key, value, op]) => op === "gte" ? rows[table][key] >= value
+                  : op === "lte" ? rows[table][key] <= value
+                  : rows[table][key] === value)) return { data: null, error: { message: "No matching row" } };
               Object.assign(rows[table], patch);
               return { data: structuredClone(rows[table]), error: null };
             },
@@ -120,6 +126,22 @@ test("read transport errors produce an actionable failure and no writes", async 
   const h = resetHarness({ failRead: true });
   assert.equal((await h.post()).status, 500);
   assert.equal(h.writes.length, 0);
+});
+
+test("reset tolerates PostgreSQL float serialization rounding", async () => {
+  const balance = 0.009301999999998127;
+  const h = resetHarness({ states: { [long]: { realized_pnl_usd: balance } }, serializeBalance: v => Number(v.toPrecision(15)) });
+  assert.notEqual(Number(balance.toPrecision(15)), balance);
+  assert.equal((await h.post()).status, 200);
+  const write = h.writes.find(w => w.table === long);
+  assert.ok(write.filters.some(([key, value, op]) => key === "realized_pnl_usd" && op === "gte" && value <= balance));
+  assert.equal(h.rows[long].realized_pnl_usd, 0);
+});
+
+test("reset rejects a balance change much smaller than a cent", async () => {
+  const h = resetHarness({ beforeWrite: (table, rows) => { if (table === long) rows[long].realized_pnl_usd += 1e-10; } });
+  assert.equal((await h.post()).status, 500);
+  assert.equal(h.rows[long].history_reset_at, null);
 });
 
 const page = ts.createSourceFile("page.tsx", readFileSync(resolve(root, "app/page.tsx"), "utf8"),

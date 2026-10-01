@@ -39,6 +39,10 @@ async function resetHedge() {
   const longSeed = longState.seed_usd + longState.realized_pnl_usd;
   const shortSeed = shortState.seed_usd + shortState.realized_pnl_usd;
   const historyResetAt = new Date().toISOString();
+  // PostgreSQL's float JSON/text output rounds the last few digits. Exact equality
+  // can miss the unchanged row. Allow only machine-rounding error (under $4e-14
+  // at a $20 balance), while rejecting meaningful concurrent balance changes.
+  const tolerance = (value: number) => 8 * Number.EPSILON * Math.max(1, Math.abs(value));
 
   const resetFields = {
     realized_pnl_usd: 0,
@@ -69,11 +73,17 @@ async function resetHedge() {
   const results = await Promise.allSettled([
     sb.from("lighter_btc_optimal_state").update({ seed_usd: longSeed, ...resetFields })
       .eq("id", 1).is("side", null).eq("enabled", false).eq("close_requested", false)
-      .eq("seed_usd", longState.seed_usd).eq("realized_pnl_usd", longState.realized_pnl_usd)
+      .gte("seed_usd", longState.seed_usd - tolerance(longState.seed_usd))
+      .lte("seed_usd", longState.seed_usd + tolerance(longState.seed_usd))
+      .gte("realized_pnl_usd", longState.realized_pnl_usd - tolerance(longState.realized_pnl_usd))
+      .lte("realized_pnl_usd", longState.realized_pnl_usd + tolerance(longState.realized_pnl_usd))
       .select("seed_usd, realized_pnl_usd, history_reset_at").single(),
     sb.from("lighter_stoch_dca_btc_state").update({ seed_usd: shortSeed, ...resetFields })
       .eq("id", 1).is("side", null).eq("enabled", false).eq("close_requested", false)
-      .eq("seed_usd", shortState.seed_usd).eq("realized_pnl_usd", shortState.realized_pnl_usd)
+      .gte("seed_usd", shortState.seed_usd - tolerance(shortState.seed_usd))
+      .lte("seed_usd", shortState.seed_usd + tolerance(shortState.seed_usd))
+      .gte("realized_pnl_usd", shortState.realized_pnl_usd - tolerance(shortState.realized_pnl_usd))
+      .lte("realized_pnl_usd", shortState.realized_pnl_usd + tolerance(shortState.realized_pnl_usd))
       .select("seed_usd, realized_pnl_usd, history_reset_at").single(),
   ]);
 

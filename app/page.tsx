@@ -2222,12 +2222,7 @@ function HedgeDualLegPanel({
   // _pressure_biased_leg_usd's docstring in stoch_bot_core.py.
   const liveK: number | null = longState?.live_k ?? null;
   const liveSignal: string | null = longState?.live_signal ?? null;
-  // Must match color_balance_index_max in lighter_hedge_dual_leg.py.
-  // Inverted band: enters OUTSIDE [HEDGE_BALANCE_MIN, HEDGE_BALANCE_MAX] -- the reverse of
-  // Worker 1's same 65-75 band. Must match color_balance_index_min/max in
-  // lighter_hedge_dual_leg.py.
-  const HEDGE_BALANCE_MIN = 65;
-  const HEDGE_BALANCE_MAX = 75;
+  // Stochastic-only entry filter: color balance remains a descriptive reading.
   const liveBalanceIdx: number | null = longState?.live_zebra_index ?? null;
 
   const combinedSeed = longLeg.seedUsd + shortLeg.seedUsd;
@@ -2475,17 +2470,14 @@ function HedgeDualLegPanel({
             <LegBadge label="Long leg (Worker 2 acct)" leg={longLeg} />
             <LegBadge label="Short leg (Worker 3 acct)" leg={shortLeg} />
             <div className="bg-gray-800/60 rounded-lg p-2">
-              <p className="text-gray-500 text-[10px] uppercase">Color-balance index (gates entry outside {HEDGE_BALANCE_MIN}–{HEDGE_BALANCE_MAX})</p>
+              <p className="text-gray-500 text-[10px] uppercase">Color-balance index (reading only)</p>
               <p className="font-bold text-sm tabular-nums">
-                <span className={liveBalanceIdx == null ? "text-gray-500"
-                  : (liveBalanceIdx < HEDGE_BALANCE_MIN || liveBalanceIdx > HEDGE_BALANCE_MAX) ? "text-green-400" : "text-amber-400"}>
+                <span className={liveBalanceIdx == null ? "text-gray-500" : "text-blue-400"}>
                   {liveBalanceIdx != null ? liveBalanceIdx.toFixed(0) : "—"}
                 </span>
                 <span className="text-[10px] font-normal text-gray-500 ml-1.5">
                   {liveBalanceIdx == null ? "no reading yet"
-                    : (liveBalanceIdx < HEDGE_BALANCE_MIN || liveBalanceIdx > HEDGE_BALANCE_MAX)
-                      ? "OUTSIDE the band — a new cycle can open"
-                      : `inside ${HEDGE_BALANCE_MIN}-${HEDGE_BALANCE_MAX} — no entry`}
+                    : "entry filter off"}
                 </span>
               </p>
             </div>
