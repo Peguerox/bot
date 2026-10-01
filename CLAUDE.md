@@ -47,9 +47,12 @@ project with no git/Render/Vercel link -- never work there.
     The dispersion floor / one-cycle-per-candle gates were built and
     then removed at the user's request (machinery still in the core, off).
   - **Exits:** loser cut at its SL; the winner's trail arms the instant the partner is cut
-    (`partner_cut_arms_trail_immediately`) and **can never close below breakeven**
-    (`profit_lock_respects_breakeven_floor`, "Option B": exit = max(peak − trail, breakeven),
-    reason BREAKEVEN_LOCK when the floor binds). The live SL/trigger/trail are the **dashboard
+    (`partner_cut_arms_trail_immediately`). On 2026-10-01 the user requested a fixed **+0.03%**
+    survivor floor (`fixed_partner_cut_floor_pct`) instead of the partner-loss-derived level.
+    The trigger is relative to this leg's entry, applies only after the partner closes red,
+    and does not guarantee the pair breaks even. The effective exit is max(peak − trail, floor);
+    fills can pass the trigger. The existing BREAKEVEN_LOCK reason is retained for floor exits.
+    Other bots keep the derived floor by default. The live SL/trigger/trail are the **dashboard
     overrides** (last seen SL 0.05 / trigger 0.10 / trail 0.04), not the 0.06/0.10/0.03 in the .py.
   - Production Reset is **non-destructive** as of 2026-10-01 (commit c78aaa3): preserves all
     trades, writes `history_reset_at` on each state

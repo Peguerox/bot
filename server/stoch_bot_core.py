@@ -576,6 +576,10 @@ class BotConfig:
     # which was never asked for -- see lighter_hedge_dual_leg.py's Sizing section.
     require_pressure_to_enter: bool = False
     breakeven_floor_enabled: bool = False
+    # Optional fixed winning-leg profit floor, in percentage points from its entry.
+    # None keeps the partner-loss-derived breakeven floor. A fixed level may leave
+    # the combined hedge at a loss; it only activates after the partner closes red.
+    fixed_partner_cut_floor_pct: Optional[float] = None
     # How far ABOVE the computed floor this leg must trade before the floor goes live. Must be
     # > 0: in a symmetric hedge the winner is already sitting at the floor the instant the loser is
     # cut, so a floor armed at 0.0 margin fires on the next tick of noise and pins every cycle to
@@ -2306,15 +2310,18 @@ class StochBot:
         self._breakeven_partner_read_at = 0.0
 
     @staticmethod
-    def breakeven_floor_pct(partner_cycle_pnl, own_notional_usd):
+    def breakeven_floor_pct(partner_cycle_pnl, own_notional_usd, fixed_floor_pct=None):
         """The unrealized % at which this leg exactly cancels the partner's realized loss for the
-        cycle. None when there is nothing to offset (partner flat/green) or no notional to divide
+        cycle, unless a fixed winning-leg floor is configured. None when there is nothing to
+        offset (partner flat/green) or no notional to divide
         by. Pure function, so the unequal-sizing arithmetic is directly testable:
         a $5 leg offsetting a $15 leg's -0.03% ($0.0045) needs +0.09%."""
         if partner_cycle_pnl is None or partner_cycle_pnl >= 0:
             return None
         if not own_notional_usd or own_notional_usd <= 0:
             return None
+        if fixed_floor_pct is not None:
+            return fixed_floor_pct
         return 100.0 * (-partner_cycle_pnl) / own_notional_usd
 
     def _compute_pressure_source_signal(self):
@@ -4663,7 +4670,8 @@ class StochBot:
                         # most needed for. A moved baseline is strictly better evidence anyway --
                         # realized_pnl_usd only changes when a position closes.
                         floor = self.breakeven_floor_pct(
-                            partner_cycle_pnl, total_qty(legs) * ae if legs else None)
+                            partner_cycle_pnl, total_qty(legs) * ae if legs else None,
+                            cfg.fixed_partner_cut_floor_pct)
                         if floor is not None:
                             self._breakeven_floor_pct = floor
                             await self.log_run("breakeven_floor_armed", {

@@ -2075,6 +2075,34 @@ async def t_breakeven_floor_holds_the_cycle_even():
           [(a, d.get("reason")) for a, d in bot.runs if a == "closed"])
 
 
+async def t_fixed_partner_cut_floor_gives_survivor_room():
+    print("\n[fixed +0.03% floor: both directions survive below partner breakeven, then exit at floor]")
+    for side in ("long", "short"):
+        entry = 86000.0
+        direction = 1 if side == "long" else -1
+        ex = FakeExchange(position=direction * round(10.0 / entry, 5), collateral=10.0)
+        partner = {"side": "short" if side == "long" else "long", "realized_pnl_usd": 0.0}
+        bot = _breakeven_bot(ex, _breakeven_state(entry, 10.0, side), partner,
+                             fixed_direction=side, sl_pct=0.06, profit_lock_trigger_pct=0.10,
+                             profit_lock_trail_pct=0.03,
+                             partner_cut_arms_trail_immediately=True,
+                             profit_lock_respects_breakeven_floor=True,
+                             fixed_partner_cut_floor_pct=0.03)
+        await _tick_at(bot, entry * (1 + direction * 0.055 / 100))
+        check(f"{side}: no floor while partner still open", bot._breakeven_floor_pct is None)
+        partner["side"] = None
+        partner["realized_pnl_usd"] = -0.006
+        await _tick_at(bot, entry * (1 + direction * 0.055 / 100))
+        check(f"{side}: fixed floor ignores larger partner loss", bot._breakeven_floor_pct == 0.03)
+        await _tick_at(bot, entry * (1 + direction * 0.04 / 100))
+        check(f"{side}: still open at +0.04%", bot.state_row["side"] == side)
+        await _tick_at(bot, entry * (1 + direction * 0.029 / 100))
+        check(f"{side}: closes below +0.03%", bot.state_row["side"] is None)
+        check(f"{side}: floor exit reason retained", any(a == "closed" and d.get("reason") == "BREAKEVEN_LOCK" for a,d in bot.runs))
+    check("fixed floor still requires partner loss", core.StochBot.breakeven_floor_pct(0.001, 10, 0.03) is None)
+    check("fixed floor still requires valid notional", core.StochBot.breakeven_floor_pct(-0.006, 0, 0.03) is None)
+
+
 async def t_breakeven_floor_arms_when_partner_cycle_was_never_observed_open():
     print("\n[breakeven floor: arms off the pnl DELTA, so a partner that opened+SL'd between polls still counts]")
     entry = 86000.0
@@ -4022,6 +4050,8 @@ async def t_live_configs_match_their_stated_rules():
               leg.profit_lock_trail_pct == 0.03, leg.profit_lock_trail_pct)
         check(f"hedge {name} leg: breakeven floor on",
               leg.breakeven_floor_enabled is True, leg.breakeven_floor_enabled)
+        check(f"hedge {name} leg: fixed survivor floor +0.03%",
+              leg.fixed_partner_cut_floor_pct == 0.03, leg.fixed_partner_cut_floor_pct)
         # 2026-10-01, direct request: real data showed a winner reaching +0.055% could give it
         # all back with zero protection (never cleared the old margin-gated floor). Starts the
         # ordinary trail the instant the partner is cut instead. See
@@ -4790,6 +4820,7 @@ async def main():
               t_pressure_hub_published_even_when_owner_does_not_enter,
               t_pressure_follower_never_computes_its_own_signal,
               t_breakeven_floor_pct_arithmetic,
+              t_fixed_partner_cut_floor_gives_survivor_room,
               t_breakeven_floor_holds_the_cycle_even,
               t_breakeven_floor_arms_when_partner_cycle_was_never_observed_open,
               t_breakeven_floor_does_not_pin_the_winner_to_zero,

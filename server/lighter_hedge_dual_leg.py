@@ -240,6 +240,8 @@ LONG_CONFIG = BotConfig(
     # partner's realized dollars, so it stays correct when pressure_bias_usd sizes the legs
     # unequally -- see BotConfig.breakeven_floor_enabled's docstring.
     breakeven_floor_enabled=True,
+    # User-requested fixed +0.03% survivor floor, instead of offsetting partner loss.
+    fixed_partner_cut_floor_pct=0.03,
     schema_has_breakeven_floor=True,
     # 2026-09-30: Render does not stop the old container before starting the new one, so every
     # deploy briefly runs two copies of this process -- and with nothing stopping them, both could
@@ -275,10 +277,8 @@ LONG_CONFIG = BotConfig(
     color_balance_index_max=None,
     color_balance_index_invert=False,
     color_balance_index_window=5,
-    # 2026-10-01, direct request ("Option B"): the trail may never close this leg below the
-    # breakeven floor -- exit at max(peak - trail, floor). Live the same day the trail armed at
-    # the cut (~+0.05%) with a 0.04 trail exited ~+0.01%, under breakeven, and once a
-    # PROFIT_LOCK closed at an outright loss. See BotConfig.profit_lock_respects_breakeven_floor.
+    # The floor also binds the trail: exit at max(peak - trail, floor). With the fixed
+    # +0.03% floor above, this protects leg profit rather than combined-cycle breakeven.
     profit_lock_respects_breakeven_floor=True,
     # 2026-09-30, direct request: retune the exits from the dashboard without a deploy, and show
     # the live volatility they have to cope with. Volatility ran 0.048% through the quiet hours
@@ -357,6 +357,8 @@ SHORT_CONFIG = BotConfig(
     # partner's realized dollars, so it stays correct when pressure_bias_usd sizes the legs
     # unequally -- see BotConfig.breakeven_floor_enabled's docstring.
     breakeven_floor_enabled=True,
+    # User-requested fixed +0.03% survivor floor, instead of offsetting partner loss.
+    fixed_partner_cut_floor_pct=0.03,
     schema_has_breakeven_floor=True,
     # 2026-09-30: Render does not stop the old container before starting the new one, so every
     # deploy briefly runs two copies of this process -- and with nothing stopping them, both could
@@ -392,10 +394,8 @@ SHORT_CONFIG = BotConfig(
     color_balance_index_max=None,
     color_balance_index_invert=False,
     color_balance_index_window=5,
-    # 2026-10-01, direct request ("Option B"): the trail may never close this leg below the
-    # breakeven floor -- exit at max(peak - trail, floor). Live the same day the trail armed at
-    # the cut (~+0.05%) with a 0.04 trail exited ~+0.01%, under breakeven, and once a
-    # PROFIT_LOCK closed at an outright loss. See BotConfig.profit_lock_respects_breakeven_floor.
+    # The floor also binds the trail: exit at max(peak - trail, floor). With the fixed
+    # +0.03% floor above, this protects leg profit rather than combined-cycle breakeven.
     profit_lock_respects_breakeven_floor=True,
     # 2026-09-30, direct request: retune the exits from the dashboard without a deploy, and show
     # the live volatility they have to cope with. Volatility ran 0.048% through the quiet hours
