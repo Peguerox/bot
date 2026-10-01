@@ -290,6 +290,11 @@ LONG_CONFIG = BotConfig(
     tick_log_defers_to=None,
     trade_flow_log_defers_to=None,
     unified_market_data_table=None,
+    # 2026-10-01, direct request: document K, the color-balance index, volatility, and
+    # dispersion at every entry so completed trades can be reviewed by hand for a pattern --
+    # e.g. which part of the day a given SL/trail setting stops working. Purely descriptive,
+    # changes no behaviour. Requires lighter_hedge_entry_features.sql.
+    schema_has_entry_features=True,
 )
 
 SHORT_CONFIG = BotConfig(
@@ -396,6 +401,11 @@ SHORT_CONFIG = BotConfig(
     tick_log_defers_to=None,
     trade_flow_log_defers_to=None,
     unified_market_data_table=None,
+    # 2026-10-01, direct request: document K, the color-balance index, volatility, and
+    # dispersion at every entry so completed trades can be reviewed by hand for a pattern --
+    # e.g. which part of the day a given SL/trail setting stops working. Purely descriptive,
+    # changes no behaviour. Requires lighter_hedge_entry_features.sql.
+    schema_has_entry_features=True,
 )
 
 

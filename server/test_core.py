@@ -140,6 +140,7 @@ def make_bot(ex, state=None, candles_kind="mid", candles=None, **cfg_overrides):
     }
     bot.runs = []
     bot.trades = []
+    bot.trade_kwargs = []
 
     async def get_state():
         return dict(bot.state_row)
@@ -152,6 +153,8 @@ def make_bot(ex, state=None, candles_kind="mid", candles=None, **cfg_overrides):
 
     async def log_trade(*a, **k):
         bot.trades.append(a)
+        bot.trade_kwargs.append(k)  # kwargs (cycle_id, entry_features, ...) kept separately so
+                                     # existing positional-index checks on bot.trades are unaffected
 
     async def get_position_rest():
         bot.get_position_rest_calls = getattr(bot, "get_position_rest_calls", 0) + 1
@@ -4390,6 +4393,37 @@ async def t_balance_gate_off_by_default():
     check("entered -- no band configured", side == "long", side)
 
 
+async def t_entry_features_persisted_on_entry_and_carried_to_trade_log():
+    print("\n[entry features: K/balance-index/vol/dispersion snapshotted on entry, carried to the trade row]")
+    ex = FakeExchange()
+    bot = make_bot(ex, candles_kind="long", schema_has_entry_features=True)
+    await bot.tick()
+    check("entered", bot.state_row["side"] == "long", bot.state_row["side"])
+    for key in ("entry_k", "entry_balance_index", "entry_vol_pct", "entry_dispersion"):
+        check(f"{key} persisted to state, not None",
+              bot.state_row.get(key) is not None, bot.state_row.get(key))
+    snapshot = {k: bot.state_row[k] for k in
+                ("entry_k", "entry_balance_index", "entry_vol_pct", "entry_dispersion")}
+    ok = await bot.close_all("SL", dict(bot.state_row), "long",
+                             bot.state_row["legs"], 1.0, 1.0, 1)
+    check("close succeeded", ok is True)
+    ef = bot.trade_kwargs[-1].get("entry_features")
+    check("trade row carries the same snapshot",
+          ef is not None and all(ef.get(k) == v for k, v in snapshot.items()),
+          ef)
+
+
+async def t_entry_features_never_touched_without_schema_flag():
+    print("\n[entry features: a bot without the migration never reads or writes these columns]")
+    ex = FakeExchange()
+    bot = make_bot(ex, candles_kind="long")  # schema_has_entry_features defaults False
+    await bot.tick()
+    check("entered", bot.state_row["side"] == "long", bot.state_row["side"])
+    for key in ("entry_k", "entry_balance_index", "entry_vol_pct", "entry_dispersion"):
+        check(f"{key} never written -- key absent from the row",
+              key not in bot.state_row, bot.state_row.get(key))
+
+
 async def main():
     for t in (t_normal_entry, t_phantom_double_fill, t_nonce_error_but_filled,
               t_order_error_no_fill, t_circuit_breaker, t_close_uses_real_size,
@@ -4601,7 +4635,9 @@ async def main():
               t_color_balance_index_values,
               t_balance_gate_blocks_outside_band,
               t_balance_gate_allows_inside_band,
-              t_balance_gate_off_by_default):
+              t_balance_gate_off_by_default,
+              t_entry_features_persisted_on_entry_and_carried_to_trade_log,
+              t_entry_features_never_touched_without_schema_flag):
         try:
             await t()
         except Exception as e:

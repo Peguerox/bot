@@ -2249,6 +2249,19 @@ function HedgeDualLegPanel({
       secs != null ? `  held   ${secs < 90 ? secs.toFixed(0) + "s" : (secs / 60).toFixed(1) + "m"}` : "",
     ].filter(Boolean).join("\n");
   };
+  // Entry-feature snapshot (2026-10-01, direct request): what K, the color-balance index,
+  // volatility, and dispersion read at the moment this cycle opened -- both legs enter on the
+  // same market at the same instant, so either leg's snapshot represents the cycle; prefer the
+  // long leg's, fall back to the short leg's. Purely descriptive, for hand-review in this
+  // tooltip, drives no bot decision. undefined (old rows, before the migration) vs null (new
+  // row, read failed) are both just "no reading" here -- != null covers both.
+  const entryFeaturesLine = (c: any) => {
+    const t = c.long ?? c.short;
+    if (!t || t.entry_k === undefined) return null;   // column doesn't exist yet on this row
+    const fmt = (v: any, suffix = "") => (v != null ? v.toFixed(v < 10 ? 2 : 1) + suffix : "—");
+    return `at entry: K ${fmt(t.entry_k)}  balance-idx ${fmt(t.entry_balance_index)}  `
+      + `vol ${fmt(t.entry_vol_pct, "%")}  dispersion ${fmt(t.entry_dispersion, "$")}`;
+  };
   const cycleTooltip = (c: any) => {
     const win = c.long && c.short
       ? (c.long.pnl_usd >= c.short.pnl_usd ? "long" : "short") : null;
@@ -2259,6 +2272,8 @@ function HedgeDualLegPanel({
     const p = cyclePct(c);
     parts.push(`NET  ${c.netPnl >= 0 ? "+" : ""}$${c.netPnl.toFixed(5)}`
       + (p != null ? `  (${p >= 0 ? "+" : ""}${p.toFixed(4)}% of capital deployed)` : ""));
+    const ef = entryFeaturesLine(c);
+    if (ef) parts.push(ef);
     if (!c.long || !c.short) {
       parts.push(c.running ? "Partner leg still open -- cycle not finished."
                            : "NO PARTNER LEG -- this trade was unhedged.");

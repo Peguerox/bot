@@ -270,6 +270,14 @@ class BotConfig:
     color_balance_index_min: Optional[float] = None
     color_balance_index_max: Optional[float] = None
     color_balance_index_window: int = 5
+    # Entry-feature snapshot (2026-10-01, direct request): on every entry, record what each
+    # live index read at that exact moment -- stochastic K, the color-weighted balance index,
+    # 10-min volatility, and 5-bar dispersion -- onto the state row, then carry them onto the
+    # trade row when the position closes. Purely descriptive: drives no decision, just lets
+    # completed trades be reviewed by hand (hover on the dashboard) for a pattern across these
+    # indices, e.g. which part of the day a given exit setting stops working. Independent of
+    # whether any of these indices actually gate entry for this bot.
+    schema_has_entry_features: bool = False
     # Low-volatility entry gate (2026-09-29, direct request): the OPPOSITE direction from the
     # pair above -- blocks new entries (and a reversal's reopen leg, never TP/SL/exits) when
     # the market is TOO QUIET rather than too spiky. Built to test a real finding from 844 real
@@ -1433,7 +1441,7 @@ class StochBot:
             print(f"  (log_run failed: {e})", flush=True)
 
     async def log_trade(self, side, ae, exit_price, base_amount, pnl_usd, reason, legs_used,
-                        opened_at, cycle_id=None):
+                        opened_at, cycle_id=None, entry_features=None):
         # Idempotent insert (proven necessary 2026-09-24): a Render restart can briefly leave
         # the old and new process both alive, and both independently finish closing the same
         # real position -- each computes and writes the identical realized_pnl_usd update (so
@@ -1451,6 +1459,10 @@ class StochBot:
             # value once the migration exists; a bot/table without that column must never see
             # this key at all, or PostgREST rejects the whole insert.
             row["cycle_id"] = cycle_id
+        if entry_features is not None:
+            # Same reasoning as cycle_id above -- only passed at all once schema_has_entry_
+            # features is on and the migration has added these columns.
+            row.update(entry_features)
         await self.sb(
             "POST",
             f"{self.cfg.table_trades}?on_conflict=opened_at,side,avg_entry_price",
@@ -2857,9 +2869,16 @@ class StochBot:
                 pnl = (coll_after - prior) if (prior is not None and coll_after is not None) else 0.0
                 implied = ae if not qty else (
                     ae + pnl / qty if state_before["side"] == "long" else ae - pnl / qty)
+                ef = None
+                if self.cfg.schema_has_entry_features:
+                    ef = {"entry_k": state_before.get("entry_k"),
+                          "entry_balance_index": state_before.get("entry_balance_index"),
+                          "entry_vol_pct": state_before.get("entry_vol_pct"),
+                          "entry_dispersion": state_before.get("entry_dispersion")}
                 await self.log_trade(state_before["side"], ae, implied, qty, pnl,
                                      "EMERGENCY_FLATTEN", len(legs),
-                                     ms_to_iso(state_before.get("first_entry_time")))
+                                     ms_to_iso(state_before.get("first_entry_time")),
+                                     entry_features=ef)
                 await self.update_state({
                     "realized_pnl_usd": (state_before.get("realized_pnl_usd") or 0.0) + pnl})
             except Exception as e:
@@ -3022,6 +3041,23 @@ class StochBot:
             except Exception:
                 pass  # best-effort only -- read back from state at close time regardless
         self._pending_cycle_id = None
+        if cfg.schema_has_entry_features:
+            # Isolated write -- see BotConfig.schema_has_entry_features. Computed fresh here
+            # (not read from self.live_k, which only the pressure-bias OWNER leg keeps current)
+            # so both hedge legs capture a real reading regardless of owner/follower role. A
+            # missing-column failure here must never cost the critical patch above.
+            k_val, _, _ = self.compute_stoch_signal()
+            snapshot = {
+                "entry_k": k_val,
+                "entry_balance_index": compute_color_weighted_balance_index(self.candles, 5),
+                "entry_vol_pct": self._measure_vol_pct(10),
+                "entry_dispersion": compute_intrabar_dispersion(self.candles, 5),
+            }
+            entry_detail["entry_features"] = snapshot
+            try:
+                await self.update_state(snapshot)
+            except Exception:
+                pass
         if cfg.breakeven_floor_enabled and cfg.cycle_partner_table is not None:
             # Snapshot the partner's CUMULATIVE realized pnl now, so its pnl for this cycle can be
             # isolated later as (realized_now - baseline). Taken after the critical patch, and
@@ -3162,8 +3198,15 @@ class StochBot:
         self.position_stoch_extreme_k = None
         self.position_stoch_activation_pct = None
         self.position_stoch_retreat_points = None
+        ef = None
+        if self.cfg.schema_has_entry_features:
+            ef = {"entry_k": state.get("entry_k"),
+                  "entry_balance_index": state.get("entry_balance_index"),
+                  "entry_vol_pct": state.get("entry_vol_pct"),
+                  "entry_dispersion": state.get("entry_dispersion")}
         await self.log_trade(side, ae, exit_price, qty, pnl, reason, len(legs),
-                             ms_to_iso(state.get("first_entry_time")), cycle_id=cycle_id)
+                             ms_to_iso(state.get("first_entry_time")), cycle_id=cycle_id,
+                             entry_features=ef)
         await self.log_run("closed", {"reason": reason, "pnl": pnl, "side": side})
         state["realized_pnl_usd"] = new_pnl
         return True
@@ -4343,8 +4386,15 @@ class StochBot:
                     await self.update_state({"cycle_id": None})
                 except Exception:
                     pass
+            ef = None
+            if cfg.schema_has_entry_features:
+                ef = {"entry_k": state.get("entry_k"),
+                      "entry_balance_index": state.get("entry_balance_index"),
+                      "entry_vol_pct": state.get("entry_vol_pct"),
+                      "entry_dispersion": state.get("entry_dispersion")}
             await self.log_trade(side, ae, implied_exit, qty, pnl, ext_reason, len(legs),
-                                 ms_to_iso(state.get("first_entry_time")), cycle_id=ext_cycle_id)
+                                 ms_to_iso(state.get("first_entry_time")), cycle_id=ext_cycle_id,
+                                 entry_features=ef)
             await self.log_run("resolved_externally", {"side": side, "pnl": pnl, "reason": ext_reason})
             state["realized_pnl_usd"] += pnl
             side, legs = None, []
