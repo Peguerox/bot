@@ -395,7 +395,28 @@ Next agent: do not just re-assert the same explanation -- verify it fresh, or fi
 4. Only THEN state a conclusion -- don't re-assert the dashboard-staleness read without doing 1-3
    fresh, since that explanation was already given once and rejected.
 
-## 15. Rules for changing anything
+## 15. Checklist: switching the hedge's coin (BTC done this 3x in one session: SOL, then ETH)
+
+1. Pull real specs from Lighter directly, never guess: `curl .../api/v1/orderBooks` -> market_id,
+   supported_price_decimals, supported_size_decimals, min_base_amount, min_quote_amount.
+2. `server/lighter_hedge_dual_leg.py` -- 3 fields, on BOTH LONG_CONFIG and SHORT_CONFIG:
+   `market_index`, `price_decimals`, `size_decimals`. Must match exactly on both legs.
+3. Sanity-check `fixed_leg_usd / coin_price > min_base_amount` for the new coin.
+4. **`app/page.tsx` -- the `hedgeCoinPrice` fetch's `market_id=` must be updated too.** Missed once
+   (the SOL->ETH switch did this proactively after learning from it) -- forgetting it compares a
+   real entry on the NEW coin against the OLD coin's price, producing wild numbers like -95.6%/
+   +95.6% (ETH ~$2680 vs stale SOL ~$118 is almost exactly that ratio).
+5. `cd server && python3 test_core.py` -- the cross-leg consistency checks catch a legs-disagree
+   mistake automatically.
+6. Confirm both legs flat on the DB AND the real exchange before deploying.
+7. Deploy both: `git push` (Render) + `npx vercel --prod --yes --scope scrivano` (dashboard).
+8. **Tell the user to hard-refresh the dashboard tab after deploying.** The price fetch is baked
+   into the page's JS bundle; an already-open tab keeps running the old bundle (old coin's price)
+   until reloaded, which reproduces the exact same wrong-number symptom as step 4 even when the
+   code itself is correct -- happened once, confirmed via checking the live deployed bundle
+   directly rather than assuming either way.
+
+## 16. Rules for changing anything
 
 1. **Tag first.** Experiments go on a branch or after a fresh tag. `hedge-v1-working` must keep
    pointing at this build.
