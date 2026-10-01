@@ -53,16 +53,19 @@ project with no git/Render/Vercel link -- never work there.
     row, carries equity forward, and requires both legs OFF/flat with no close pending.
     `supabase/migrations/lighter_hedge_reset_cutoff.sql` was applied by the user and both columns
     verified via REST. Dashboard deployed directly to Vercel and live code verified. No live
-    reset has been performed. Local audit commits have NOT been pushed to GitHub: a push
-    restarts all Render workers, and the hedge had open positions during these deployments.
-  - **Entry hover snapshot repair prepared locally (2026-10-01), awaiting worker deploy:**
+    reset has been performed. Audit commits were initially held locally while the hedge had
+    open positions, then pushed with the snapshot repair after all accounts were OFF and flat.
+  - **Entry hover snapshot repair deployed (2026-10-01, commit b310441):**
     `compute_stoch_signal()` returns a direction string first, not numeric K. The old snapshot
     wrote `"long"`/`"short"` into DOUBLE PRECISION `entry_k`, rejecting the entire snapshot and
     leaving all four trade fields null. `compute_entry_stoch_k()` now computes numeric K without
     mutating the live signal; failed snapshot writes are logged. Hover formatting falls back to
     the other leg per field and explicitly labels missing historical snapshots. 656 worker
-    checks + 75 dashboard/control tests pass. Do not push while workers are trading; the repair
-    requires a Render restart. No trading settings, signals, or exit rules changed.
+    checks + 75 dashboard/control tests pass. Both bots were confirmed OFF and all three
+    exchange accounts flat before pushing. All three worker instances restarted, acquired
+    locks, and had fresh heartbeats; the Vercel dashboard build passed. New numeric snapshots
+    still need live confirmation on the first entries after the user resumes trading. No
+    trading settings, signals, or exit rules changed. Do not push while workers are trading.
 - **Worker 3**: its own Render service is **suspended**. Its sub-account is driven entirely from
   Worker 2's process. `server/lighter_stoch_dca_btc_bot.py` still works standalone if the hedge is
   ever abandoned — re-enable that service and disable the dual-leg one, no data migration needed.
