@@ -4034,12 +4034,12 @@ async def t_live_configs_match_their_stated_rules():
               leg.single_instance_lock is True, leg.single_instance_lock)
         check(f"hedge {name} leg: has a cycle partner to synchronise with",
               leg.cycle_partner_table is not None, leg.cycle_partner_table)
-        # 2026-10-01, direct request: the reverse of Worker 1's floor (70+, balanced/choppy) --
-        # this bot wants real trends, since the payoff only comes once price runs past breakeven
-        # after the loser is cut. No ceiling: a pure one-color 0 reading is fine too.
-        check(f"hedge {name} leg: color-balance index gate is 50-or-below (trend-only)",
-              (leg.color_balance_index_min, leg.color_balance_index_max) == (None, 50.0),
-              (leg.color_balance_index_min, leg.color_balance_index_max))
+        # 2026-10-01, direct request: Worker 2's version of Worker 1's SAME 65-75 band,
+        # INVERTED -- enter OUTSIDE it instead of inside it.
+        check(f"hedge {name} leg: color-balance index gate is 65-75 INVERTED (enter outside it)",
+              (leg.color_balance_index_min, leg.color_balance_index_max, leg.color_balance_index_invert)
+              == (65.0, 75.0, True),
+              (leg.color_balance_index_min, leg.color_balance_index_max, leg.color_balance_index_invert))
         # 2026-09-30: switched from BTC to SOL, fixed_leg_usd bumped $10 -> $12 off Lighter's $10
         # min_quote_amount for real margin against a single unfavourable tick. 2026-10-01: back
         # to BTC (SOL and ETH were both tried and dropped), and back to the original $10 -- this
@@ -4562,6 +4562,49 @@ async def t_index_exit_off_by_default():
     check("still open -- feature disabled", bot.state_row["side"] == "long", bot.state_row["side"])
 
 
+async def _invert_gate_case(value, **cfg):
+    ex = FakeExchange()
+    bot = make_bot(ex, candles_kind="mid", **cfg)
+    bot.candles = make_dispersion_candles([150, 150, 150, 150, 0])   # fresh long signal (K=0)
+    orig = core.compute_color_weighted_balance_index
+    core.compute_color_weighted_balance_index = lambda c, w=5: value
+    try:
+        await bot.tick()
+    finally:
+        core.compute_color_weighted_balance_index = orig
+    return bot.state_row["side"]
+
+
+async def t_balance_invert_blocks_inside_band():
+    print("\n[balance gate, inverted: index INSIDE 65-75 blocks a fresh entry]")
+    for v in (65.0, 70.0, 75.0):
+        side = await _invert_gate_case(v, color_balance_index_min=65.0,
+                                       color_balance_index_max=75.0, color_balance_index_invert=True)
+        check(f"blocked at index {v} (inside the band)", side is None, side)
+
+
+async def t_balance_invert_allows_outside_band():
+    print("\n[balance gate, inverted: index OUTSIDE 65-75 lets a fresh entry through]")
+    for v in (40.0, 90.0):
+        side = await _invert_gate_case(v, color_balance_index_min=65.0,
+                                       color_balance_index_max=75.0, color_balance_index_invert=True)
+        check(f"entered at index {v} (outside the band)", side == "long", side)
+
+
+async def t_balance_invert_missing_reading_still_blocks():
+    print("\n[balance gate, inverted: a missing reading still blocks (never guesses entry is safe)]")
+    side = await _invert_gate_case(None, color_balance_index_min=65.0,
+                                   color_balance_index_max=75.0, color_balance_index_invert=True)
+    check("blocked -- no reading", side is None, side)
+
+
+async def t_balance_invert_off_keeps_normal_inside_band_gate():
+    print("\n[balance gate: invert False (default) keeps the normal inside-the-band behaviour]")
+    side = await _invert_gate_case(70.0, color_balance_index_min=65.0,
+                                   color_balance_index_max=75.0)  # invert defaults False
+    check("entered at index 70 -- normal gate allows INSIDE the band", side == "long", side)
+
+
 async def main():
     for t in (t_normal_entry, t_phantom_double_fill, t_nonce_error_but_filled,
               t_order_error_no_fill, t_circuit_breaker, t_close_uses_real_size,
@@ -4782,7 +4825,11 @@ async def main():
               t_index_exit_fires_when_green_and_index_out_of_band,
               t_index_exit_never_fires_when_red,
               t_index_exit_does_not_fire_inside_the_band,
-              t_index_exit_off_by_default):
+              t_index_exit_off_by_default,
+              t_balance_invert_blocks_inside_band,
+              t_balance_invert_allows_outside_band,
+              t_balance_invert_missing_reading_still_blocks,
+              t_balance_invert_off_keeps_normal_inside_band_gate):
         try:
             await t()
         except Exception as e:

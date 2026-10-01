@@ -270,6 +270,11 @@ class BotConfig:
     color_balance_index_min: Optional[float] = None
     color_balance_index_max: Optional[float] = None
     color_balance_index_window: int = 5
+    # 2026-10-01, direct request: Worker 2's version of the same index, INVERTED -- enter OUTSIDE
+    # [color_balance_index_min, color_balance_index_max] instead of inside it (the reverse of
+    # Worker 1's 65-75 band: blocked INSIDE the band, allowed when below the floor OR above the
+    # ceiling). False (default) keeps the normal inside-the-band gate everyone else uses.
+    color_balance_index_invert: bool = False
     # Entry-feature snapshot (2026-10-01, direct request): on every entry, record what each
     # live index read at that exact moment -- stochastic K, the color-weighted balance index,
     # 10-min volatility, and 5-bar dispersion -- onto the state row, then carry them onto the
@@ -4309,9 +4314,17 @@ class StochBot:
         balance_blocked = False
         if cfg.color_balance_index_min is not None or cfg.color_balance_index_max is not None:
             cwi = compute_color_weighted_balance_index(self.candles, cfg.color_balance_index_window)
-            balance_blocked = (cwi is None
-                               or (cfg.color_balance_index_min is not None and cwi < cfg.color_balance_index_min)
-                               or (cfg.color_balance_index_max is not None and cwi > cfg.color_balance_index_max))
+            if cfg.color_balance_index_invert:
+                # Blocked INSIDE the band, allowed OUTSIDE it (needs both bounds set -- with
+                # only one bound, "inside" isn't a bounded region, so nothing to invert).
+                balance_blocked = (cwi is None
+                                   or (cfg.color_balance_index_min is not None
+                                       and cfg.color_balance_index_max is not None
+                                       and cfg.color_balance_index_min <= cwi <= cfg.color_balance_index_max))
+            else:
+                balance_blocked = (cwi is None
+                                   or (cfg.color_balance_index_min is not None and cwi < cfg.color_balance_index_min)
+                                   or (cfg.color_balance_index_max is not None and cwi > cfg.color_balance_index_max))
             if balance_blocked:
                 entry_signal = None
 
