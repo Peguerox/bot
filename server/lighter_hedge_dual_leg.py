@@ -165,20 +165,23 @@ import os
 from stoch_bot_core import BotConfig, StochBot
 
 LONG_CONFIG = BotConfig(
-    name="HEDGE LONG LEG (worker 2 account) -- SOL",
+    name="HEDGE LONG LEG (worker 2 account) -- ETH",
     worker_id="worker2",
     table_state="lighter_btc_optimal_state",
     table_trades="lighter_btc_optimal_trades",
     table_runs="lighter_btc_optimal_runs",
-    # 2026-09-30, direct request: switched from BTC to SOL -- "if the Solana trading is better,
-    # we can just use Solana." Values read directly from Lighter's own /orderBooks (not guessed):
-    # BTC was market_index=1/price_decimals=1/size_decimals=5; SOL is market_index=2,
-    # price_decimals=3, size_decimals=3, min_base_amount=0.055, min_quote_amount=$10 (same as
-    # BTC's). Tables/table names are UNCHANGED on purpose (same bot, same accounts, just a
-    # different market) -- so "btc" in the table names is now a historical label, not a
-    # description of what's trading. No other code depends on which coin this is; every other
-    # piece of logic already reads the coin generically off these three fields.
-    market_index=2, price_decimals=3, size_decimals=3,
+    # 2026-09-30, direct request: BTC -> SOL -> ETH, in that order, same session. SOL's live
+    # spread (~0.0085%) was ~5x BTC's and reported as "horrible" -- "if ETH does not work we go
+    # back to BTC." Values read directly from Lighter's own /orderBooks each time, never guessed:
+    # BTC market_index=1/price_decimals=1/size_decimals=5, min_quote=$10
+    # SOL market_index=2/price_decimals=3/size_decimals=3, min_base=0.055, min_quote=$10
+    # ETH market_index=0/price_decimals=2/size_decimals=4, min_base=0.0020, min_quote=$10 (live)
+    # Tables/table names are UNCHANGED on purpose across every one of these (same bot, same
+    # accounts, just a different market) -- so "btc" in the table names has been a historical
+    # label since the first switch, not a description of what's trading. No other code depends on
+    # which coin this is; every other piece of logic already reads the coin generically off these
+    # three fields.
+    market_index=0, price_decimals=2, size_decimals=4,
     # Unused while fixed_direction is set -- no stochastic signal computed at all -- left at
     # harmless reference values, required fields with no default.
     stoch_window=5, entry_lo=25, entry_hi=75, reversal_lo=25, reversal_hi=75,
@@ -269,14 +272,14 @@ LONG_CONFIG = BotConfig(
 )
 
 SHORT_CONFIG = BotConfig(
-    name="HEDGE SHORT LEG (worker 3 account) -- SOL",
+    name="HEDGE SHORT LEG (worker 3 account) -- ETH",
     worker_id="worker3",
     table_state="lighter_stoch_dca_btc_state",
     table_trades="lighter_stoch_dca_btc_trades",
     table_runs="lighter_stoch_dca_btc_runs",
     # See LONG_CONFIG's docstring for the full reasoning -- must match exactly, both legs always
     # carry identical market/precision/sizing or the breakeven floor's math breaks.
-    market_index=2, price_decimals=3, size_decimals=3,
+    market_index=0, price_decimals=2, size_decimals=4,
     stoch_window=5, entry_lo=25, entry_hi=75, reversal_lo=25, reversal_hi=75,
     fixed_direction="short",
     tp_pct=0.10, sl_pct=0.06,
