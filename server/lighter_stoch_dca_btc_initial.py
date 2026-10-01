@@ -285,7 +285,9 @@ CONFIG = BotConfig(
     # you come out," zero give-back once armed, by design. Can only fire earlier than or instead
     # of the fixed TP/SL, never blocks them.
     profit_lock_enabled=True,
-    profit_lock_trigger_pct=0.02,
+    # 2026-10-01, direct request: back to 0.05 ("0.05 would be ok"). At 0.02 with zero give-back
+    # it banked ~+$0.013 per lock against a ~-$0.11 SL -- one SL erased ~8 locks.
+    profit_lock_trigger_pct=0.05,
     profit_lock_trail_pct=0.0,
     # 2026-09-29: briefly disabled fleet-wide during a Supabase statement-timeout incident
     # (database itself started canceling queries under cumulative write load, confirmed in
