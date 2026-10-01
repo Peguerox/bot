@@ -269,6 +269,18 @@ LONG_CONFIG = BotConfig(
     # BotConfig.partner_cut_arms_trail_immediately. Exits in this window now read PROFIT_LOCK,
     # not BREAKEVEN_LOCK.
     partner_cut_arms_trail_immediately=True,
+    # 2026-10-01, direct request: on top of require_pressure_to_enter above, also require the
+    # color-weighted balance index (same formula as Worker 1's, see
+    # compute_color_weighted_balance_index) to read 50 or BELOW -- the reverse of Worker 1's
+    # floor (70+, balanced/choppy). Low = one color dominates, i.e. a real trend -- this bot
+    # wants exactly that, since the payoff only comes when price actually runs past breakeven
+    # after the loser is cut (see profit_lock_respects_breakeven_floor above). Same
+    # entry_signal-nulling gate shape as Worker 1's, confirmed to apply identically to a
+    # fixed_direction leg (compute_fixed_direction_signal sets the same entry_signal variable
+    # these generic gates null). No ceiling needed -- a pure one-color 0 reading is fine too.
+    color_balance_index_min=None,
+    color_balance_index_max=50.0,
+    color_balance_index_window=5,
     # 2026-10-01, direct request ("Option B"): the trail may never close this leg below the
     # breakeven floor -- exit at max(peak - trail, floor). Live the same day the trail armed at
     # the cut (~+0.05%) with a 0.04 trail exited ~+0.01%, under breakeven, and once a
@@ -380,6 +392,18 @@ SHORT_CONFIG = BotConfig(
     # BotConfig.partner_cut_arms_trail_immediately. Exits in this window now read PROFIT_LOCK,
     # not BREAKEVEN_LOCK.
     partner_cut_arms_trail_immediately=True,
+    # 2026-10-01, direct request: on top of require_pressure_to_enter above, also require the
+    # color-weighted balance index (same formula as Worker 1's, see
+    # compute_color_weighted_balance_index) to read 50 or BELOW -- the reverse of Worker 1's
+    # floor (70+, balanced/choppy). Low = one color dominates, i.e. a real trend -- this bot
+    # wants exactly that, since the payoff only comes when price actually runs past breakeven
+    # after the loser is cut (see profit_lock_respects_breakeven_floor above). Same
+    # entry_signal-nulling gate shape as Worker 1's, confirmed to apply identically to a
+    # fixed_direction leg (compute_fixed_direction_signal sets the same entry_signal variable
+    # these generic gates null). No ceiling needed -- a pure one-color 0 reading is fine too.
+    color_balance_index_min=None,
+    color_balance_index_max=50.0,
+    color_balance_index_window=5,
     # 2026-10-01, direct request ("Option B"): the trail may never close this leg below the
     # breakeven floor -- exit at max(peak - trail, floor). Live the same day the trail armed at
     # the cut (~+0.05%) with a 0.04 trail exited ~+0.01%, under breakeven, and once a

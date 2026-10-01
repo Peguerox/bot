@@ -4030,6 +4030,12 @@ async def t_live_configs_match_their_stated_rules():
               leg.single_instance_lock is True, leg.single_instance_lock)
         check(f"hedge {name} leg: has a cycle partner to synchronise with",
               leg.cycle_partner_table is not None, leg.cycle_partner_table)
+        # 2026-10-01, direct request: the reverse of Worker 1's floor (70+, balanced/choppy) --
+        # this bot wants real trends, since the payoff only comes once price runs past breakeven
+        # after the loser is cut. No ceiling: a pure one-color 0 reading is fine too.
+        check(f"hedge {name} leg: color-balance index gate is 50-or-below (trend-only)",
+              (leg.color_balance_index_min, leg.color_balance_index_max) == (None, 50.0),
+              (leg.color_balance_index_min, leg.color_balance_index_max))
         # 2026-09-30: switched from BTC to SOL, fixed_leg_usd bumped $10 -> $12 off Lighter's $10
         # min_quote_amount for real margin against a single unfavourable tick. 2026-10-01: back
         # to BTC (SOL and ETH were both tried and dropped), and back to the original $10 -- this
