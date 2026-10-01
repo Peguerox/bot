@@ -19,12 +19,13 @@ project with no git/Render/Vercel link -- never work there.
 
 - **Worker 1**: `server/lighter_stoch_dca_btc_initial.py` — LIVE real money, ~$98, tables
   `lighter_btc_initial_*`. As of 2026-10-01 (commit 1cbcb79):
-  - **Entry:** a *fresh* stochastic signal (window 5, 25/75) AND the zebra / candle-size index
-    between **600 and 1000** (`zebra_index_min/max`, `compute_zebra_size_index`: % of colour switches
-    over the last 5 closed 1-min candles ÷ their mean (high-low)/close %). Nothing else enters.
+  - **Entry:** a *fresh* stochastic signal (window 5, 25/75) AND the color-weighted balance index
+    between **65 and 75** over 5 closed candles. The earlier zebra switch/size gate is disabled.
     One trade per signal (`profit_lock_burns_signal` + `red_exit_burns_signal`).
   - **Exits:** SL 0.10 / TP 0.10 / profit lock armed at +0.05% with **zero give-back** (exits on
     the first tick down), plus a stochastic reversal exit. Exchange-side native SL+TP orders on.
+    User requested INDEX_EXIT removed on BOTH long and short positions on 2026-10-01:
+    `index_exit_on_green=False`. The color-balance entry filter remains active.
   - **Off:** self-lock, hour ban (`trading_hours_utc=None`, `_WEEKDAY_SCHEDULE` kept in the file),
     dispersion filter, saving lock (`saving_lock_arm_frac_of_sl`, built 2026-10-01, available).
   - **Dashboard overrides win over the code**: `override_sl_pct / override_profit_lock_trigger /

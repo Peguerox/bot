@@ -315,7 +315,8 @@ CONFIG = BotConfig(
     # changed, bank the profit rather than hope they still hold. A RED position is never touched
     # by this -- it still rides out to its own SL/saving-lock unchanged. See
     # BotConfig.index_exit_on_green.
-    index_exit_on_green=True,
+    # User requested INDEX_EXIT removed on both LONG and SHORT positions.
+    index_exit_on_green=False,
     profit_lock_trail_pct=0.0,
     # 2026-09-29: briefly disabled fleet-wide during a Supabase statement-timeout incident
     # (database itself started canceling queries under cumulative write load, confirmed in

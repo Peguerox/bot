@@ -4034,8 +4034,8 @@ async def t_live_configs_match_their_stated_rules():
           (w1.sl_pct, w1.tp_pct, w1.profit_lock_trigger_pct, w1.saving_lock_arm_frac_of_sl))
     check("Worker 1: 2-minute post-reversal cooldown on",
           w1.post_reversal_cooldown_seconds == 120.0, w1.post_reversal_cooldown_seconds)
-    check("Worker 1: index-exit-on-green on (closes a GREEN position if the index leaves the band)",
-          w1.index_exit_on_green is True, w1.index_exit_on_green)
+    check("Worker 1: index-exit-on-green off for both directions",
+          w1.index_exit_on_green is False, w1.index_exit_on_green)
 
     hedge = importlib.import_module("lighter_hedge_dual_leg")
     for name, leg in (("long", hedge.LONG_CONFIG), ("short", hedge.SHORT_CONFIG)):
