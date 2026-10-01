@@ -362,6 +362,22 @@ class BotConfig:
     # value serves both entry and reversal (no separate reversal threshold in this signal, so
     # entry_signal == reversal_signal here, unlike the plain stochastic's separate lo/hi bands).
     use_rsi_stoch_signal: bool = False
+    # 2026-10-01 (Worker 1), direct request: swap the top-level signal source from the plain
+    # stochastic to a mean-reversion z-score, same straight-swap pattern as use_rsi_stoch_signal
+    # above -- every downstream gate (trading_hours_utc, self-lock, session breaker, etc.) is
+    # unchanged and still applies to whatever compute_zscore_signal() returns. Ported from
+    # backtest/zscore-alone-1yr-tp08-btc.ts, which was long-only on 5-min candles; this is the
+    # symmetric fade generalisation (fade long on an oversold extreme, fade short on an
+    # overbought one) Worker 1 already uses for its stochastic signal, on 1-min candles per
+    # direct request. See compute_zscore_signal's docstring.
+    use_zscore_signal: bool = False
+    # Rolling window (CLOSED candles) the z-score's mean/stdev are computed over. 5 matches the
+    # backtest's ZSCORE_WINDOW exactly.
+    zscore_window: int = 5
+    # entry_signal="long" when z <= -zscore_entry, "short" when z >= +zscore_entry -- same
+    # magnitude both directions and for both entry and reversal (the backtest only ever used one
+    # threshold, Z_ENTRY=-2.0, for its one-directional long entry). 2.0 matches that value.
+    zscore_entry: float = 2.0
     # False drops the price-confirmation half of the RSI signal (see
     # compute_rsi_stoch_confirmed_signal's docstring for the backtest numbers). Default True
     # keeps the original report's rule intact; only Worker 1's live experiment sets this False.
@@ -1564,6 +1580,44 @@ class StochBot:
         self.live_k = k
         self.live_signal = entry_signal
         return entry_signal, _sig(k, self.cfg.reversal_lo, self.cfg.reversal_hi), ts
+
+    def compute_zscore_signal(self):
+        """Mean-reversion z-score signal -- see BotConfig.use_zscore_signal. Ported from
+        backtest/zscore-alone-1yr-tp08-btc.ts: z = (last CLOSED candle's close - mean of the
+        PRECEDING cfg.zscore_window closed candles) / their POPULATION stdev. "long" when
+        z <= -zscore_entry (the latest close sitting zscore_entry std devs below the mean of the
+        candles before it -- an oversold snap, betting on reversion up), "short" when
+        z >= +zscore_entry. Same contract as compute_stoch_signal(): (entry_signal,
+        reversal_signal, candle_ts); same live_k/live_signal publish for the dashboard, except
+        live_k here holds the z-score itself, not a 0-100 stochastic K.
+
+        The window deliberately EXCLUDES the candle being scored (matching the backtest's
+        `closes.slice(i - ZSCORE_WINDOW, i)`, which stops one short of i) -- caught before this
+        ever ran live: including it, as a first pass here briefly did, bounds |z| at
+        sqrt(zscore_window - 1) (a population std always includes its own point, which caps how
+        far any single point can sit from a mean it contributed to). At the backtest's window=5
+        that bound is exactly 2.0 -- equal to the default zscore_entry threshold itself, so the
+        signal could MATHEMATICALLY never fire, approached in the limit but never reached by any
+        real data. Scoring against the PRECEDING window removes that ceiling entirely.
+        """
+        c = self.candles
+        w = self.cfg.zscore_window
+        if len(c) < w + 2:
+            return None, None, None
+        closed = c[:-1]
+        window = [x["c"] for x in closed[-(w + 1):-1]]
+        ts = closed[-1]["t"]
+        mean = sum(window) / len(window)
+        variance = sum((x - mean) ** 2 for x in window) / len(window)
+        std = variance ** 0.5
+        if std == 0:
+            return None, None, ts
+        z = (closed[-1]["c"] - mean) / std
+        thr = self.cfg.zscore_entry
+        entry_signal = _sig(z, -thr, thr)
+        self.live_k = z
+        self.live_signal = entry_signal
+        return entry_signal, entry_signal, ts
 
     def compute_adaptive_stoch_signal(self):
         """"Adaptive V2" (2026-09-27): binary window switch instead of a continuous formula --
@@ -3718,6 +3772,8 @@ class StochBot:
                 self.candles, stoch_period=cfg.stoch_window, require_confirmation=cfg.rsi_paper_require_confirmation,
                 lo=cfg.entry_lo, hi=cfg.entry_hi)
             reversal_signal = entry_signal
+        elif cfg.use_zscore_signal:
+            entry_signal, reversal_signal, candle_ts = self.compute_zscore_signal()
         else:
             entry_signal, reversal_signal, candle_ts = self.compute_stoch_signal()
         vol_pct_now = (self._measure_vol_pct(cfg.min_vol_pct_lookback)

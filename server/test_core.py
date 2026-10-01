@@ -380,6 +380,70 @@ async def t_timeout_constants():
           f"margin={core.TICK_WATCHDOG - worst:.1f}s")
 
 
+def _zscore_candles(closes, base=86000.0):
+    """7 candles with explicit closes (others flat at `base`) -- compute_zscore_signal needs
+    w+2 candles total and reads from closed[-w:], i.e. everything except the live (last) one."""
+    c = []
+    t0 = 1700000000000
+    for i, close in enumerate(closes):
+        c.append({"t": t0 + i * 60000, "o": base, "h": max(base, close) + 5,
+                  "l": min(base, close) - 5, "c": close})
+    return c
+
+
+async def t_zscore_signal_long_on_oversold_dip():
+    print("\n[zscore signal: a sharp dip below the recent mean fires LONG]")
+    ex = FakeExchange()
+    # Window of 5 closed candles: four flat near 86000, the window's OWN last closed candle
+    # (closed[-1], same inclusion rule as the stochastic window) snaps far below them.
+    candles = _zscore_candles([86000, 86010, 85995, 86005, 85990, 85800, 85800])
+    bot = make_bot(ex, candles=candles, use_zscore_signal=True, zscore_window=5, zscore_entry=2.0)
+    entry, reversal, ts = bot.compute_zscore_signal()
+    check("entry signal is long", entry == "long", entry)
+    check("reversal mirrors entry (one threshold, both directions)", reversal == entry)
+    check("live_k holds the z-score, not a 0-100 K", bot.live_k is not None and bot.live_k < -2.0,
+          bot.live_k)
+
+
+async def t_zscore_signal_short_on_overbought_spike():
+    print("\n[zscore signal: a sharp spike above the recent mean fires SHORT]")
+    ex = FakeExchange()
+    candles = _zscore_candles([86000, 85990, 86005, 85995, 86010, 86200, 86200])
+    bot = make_bot(ex, candles=candles, use_zscore_signal=True, zscore_window=5, zscore_entry=2.0)
+    entry, reversal, ts = bot.compute_zscore_signal()
+    check("entry signal is short", entry == "short", entry)
+
+
+async def t_zscore_signal_neutral_inside_normal_range():
+    print("\n[zscore signal: ordinary noise inside the threshold fires nothing]")
+    ex = FakeExchange()
+    candles = _zscore_candles([86000, 86010, 85995, 86005, 85998, 86002, 86002])
+    bot = make_bot(ex, candles=candles, use_zscore_signal=True, zscore_window=5, zscore_entry=2.0)
+    entry, reversal, ts = bot.compute_zscore_signal()
+    check("no signal -- within +-2 std devs of its own recent mean", entry is None, entry)
+
+
+async def t_zscore_signal_drives_a_real_entry_through_tick():
+    print("\n[zscore signal: wired into tick() via use_zscore_signal, same as any other signal source]")
+    ex = FakeExchange()
+    candles = _zscore_candles([86000, 86010, 85995, 86005, 85990, 85800, 85800])
+    bot = make_bot(ex, candles=candles, use_zscore_signal=True, zscore_window=5, zscore_entry=2.0,
+                   require_fresh_signal=False, self_lock_enabled=False, use_joint_adaptive=False)
+    await bot.tick()
+    check("entered long off the z-score signal", bot.state_row["side"] == "long",
+          bot.state_row["side"])
+
+
+async def t_zscore_signal_off_by_default_other_bots_unaffected():
+    print("\n[zscore signal: off by default -- every other bot still uses the plain stochastic]")
+    ex = FakeExchange()
+    bot = make_bot(ex, candles_kind="long")  # use_zscore_signal defaults False
+    await bot.tick()
+    check("entered via the ordinary stochastic path", bot.state_row["side"] == "long")
+    check("live_k is a 0-100 stochastic K, not a z-score",
+          bot.live_k is not None and 0 <= bot.live_k <= 100, bot.live_k)
+
+
 async def t_regime_switch_trend_entry_follows_direction():
     print("\n[regime switch: trending market -> entry follows trend direction, wider TP/SL]")
     trend_candles = make_trend_candles("short", n=30)  # price falling -> ER high, dir=short
@@ -3698,6 +3762,12 @@ async def t_live_configs_match_their_stated_rules():
           w1.native_take_profit_enabled is True, w1.native_take_profit_enabled)
     check("Worker 1: literal TP is actually active (native TP would be a no-op otherwise)",
           w1.disable_literal_tp is False, w1.disable_literal_tp)
+    # 2026-10-01, direct request: swapped from the plain stochastic to a mean-reversion z-score
+    # (backtest/zscore-alone-1yr-tp08-btc.ts), on 1-min candles. See
+    # BotConfig.use_zscore_signal/compute_zscore_signal.
+    check("Worker 1: z-score signal on", w1.use_zscore_signal is True, w1.use_zscore_signal)
+    check("Worker 1: zscore_window matches the backtest (5)", w1.zscore_window == 5, w1.zscore_window)
+    check("Worker 1: zscore_entry matches the backtest (2.0)", w1.zscore_entry == 2.0, w1.zscore_entry)
 
     hedge = importlib.import_module("lighter_hedge_dual_leg")
     for name, leg in (("long", hedge.LONG_CONFIG), ("short", hedge.SHORT_CONFIG)):
@@ -3783,6 +3853,11 @@ async def main():
               t_oversize_mismatch_in_tick, t_external_close_reconcile,
               t_order_timeout_bounded, t_read_position_never_trusts_stale_ws_flat,
               t_reconcile_falls_through_when_rest_disagrees,
+              t_zscore_signal_long_on_oversold_dip,
+              t_zscore_signal_short_on_overbought_spike,
+              t_zscore_signal_neutral_inside_normal_range,
+              t_zscore_signal_drives_a_real_entry_through_tick,
+              t_zscore_signal_off_by_default_other_bots_unaffected,
               t_regime_switch_trend_entry_follows_direction,
               t_regime_switch_trend_invert_flips_direction,
               t_regime_switch_no_invert_by_default,

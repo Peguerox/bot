@@ -210,15 +210,29 @@ _WEEKDAY_SCHEDULE = {
 }
 
 CONFIG = BotConfig(
-    name="PLAIN STOCHASTIC, WEEKEND BLOCKED (worker 1)",
+    name="Z-SCORE MEAN REVERSION, WEEKEND BLOCKED (worker 1)",
     worker_id="worker1",
     table_state="lighter_btc_initial_state",
     table_trades="lighter_btc_initial_trades",
     table_runs="lighter_btc_initial_runs",
-    stoch_window=5,  # 2026-09-28: back to the original value -- see docstring
+    stoch_window=5,  # unused now that use_zscore_signal=True -- kept as a harmless leftover,
+    # required field with no default; see entry_lo/hi and reversal_lo/hi below, same reasoning.
+    # 2026-10-01, direct request: straight swap of the top-level signal from the plain
+    # stochastic to a mean-reversion z-score, ported from
+    # backtest/zscore-alone-1yr-tp08-btc.ts (Z_ENTRY=-2.0, ZSCORE_WINDOW=5, there on 5-min
+    # candles) onto this bot's own 1-min candles per direct request. Symmetric fade
+    # generalisation of that backtest's long-only entry, matching how this bot already fades
+    # both ways off the stochastic. See BotConfig.use_zscore_signal / compute_zscore_signal.
+    use_zscore_signal=True,
+    zscore_window=5,
+    zscore_entry=2.0,
     tp_pct=0.10,
     sl_pct=0.11,
-    entry_lo=25, entry_hi=75,  # 2026-09-28: back to the original values
+    # Unused now that use_zscore_signal=True -- compute_zscore_signal doesn't read these at all.
+    # Left in place (required fields, no default) rather than removed, same as every other
+    # signal-source swap in this file (fixed_direction, use_rsi_stoch_signal) leaves its
+    # predecessor's now-irrelevant fields in place with a comment instead of deleting them.
+    entry_lo=25, entry_hi=75,
     reversal_lo=25, reversal_hi=75,
     reversal_guard_seconds=120,  # the "blanking period"
     trading_hours_utc=_WEEKDAY_SCHEDULE,  # 2026-09-28: blocks Saturday+Sunday, see docstring
