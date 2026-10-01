@@ -13,18 +13,43 @@ The live fleet is **Python Lighter BTC bots**, not the TypeScript Bitfinex worke
 used to describe (those are retired — see "Dead code" below). Rewritten 2026-09-30 after the
 stale version of this file caused repeated drift.
 
-- **Worker 1**: `server/lighter_stoch_dca_btc_initial.py` — LIVE real money. Stochastic BTC with a
-  blanking period, an hourly schedule, and a self-lock. Tables: `lighter_btc_initial_*`.
-  Self-lock unlock rule, **broken twice already, now pinned by a test**: *2 wins of any kind, OR 1
-  literal TP.* That is `self_lock_require_tp_in_streak=False` +
-  `self_lock_tp_unlocks_instantly=True`. Do not make a literal TP mandatory — that leaves the bot
-  locked out indefinitely on a streak of non-TP greens.
+**Before anything else: the project folder is `~/trading-bot`.** The GitHub repo and Vercel project
+are both named "bot", but `~/Bot` (capital B, home folder) is an unrelated old May-2026 Python
+project with no git/Render/Vercel link -- never work there.
+
+- **Worker 1**: `server/lighter_stoch_dca_btc_initial.py` — LIVE real money, ~$98, tables
+  `lighter_btc_initial_*`. As of 2026-10-01 (commit 1cbcb79):
+  - **Entry:** a *fresh* stochastic signal (window 5, 25/75) AND the zebra / candle-size index
+    between **600 and 1000** (`zebra_index_min/max`, `compute_zebra_size_index`: % of colour switches
+    over the last 5 closed 1-min candles ÷ their mean (high-low)/close %). Nothing else enters.
+    One trade per signal (`profit_lock_burns_signal` + `red_exit_burns_signal`).
+  - **Exits:** SL 0.10 / TP 0.10 / profit lock armed at +0.05% with **zero give-back** (exits on
+    the first tick down), plus a stochastic reversal exit. Exchange-side native SL+TP orders on.
+  - **Off:** self-lock, hour ban (`trading_hours_utc=None`, `_WEEKDAY_SCHEDULE` kept in the file),
+    dispersion filter, saving lock (`saving_lock_arm_frac_of_sl`, built 2026-10-01, available).
+  - **Dashboard overrides win over the code**: `override_sl_pct / override_profit_lock_trigger /
+    override_profit_lock_trail` on the state row (SL/Trigger/Trail boxes on the panel,
+    `app/api/lighter-btc-initial-settings`). Always check them before believing the .py values.
+  - Self-lock unlock rule, **broken twice already, pinned by a test**: *2 wins of any kind, OR 1
+    literal TP* (`self_lock_require_tp_in_streak=False` + `self_lock_tp_unlocks_instantly=True`).
+    Inert while self-lock is off; do not make a literal TP mandatory if it is turned back on.
+  - Reset (`app/api/lighter-btc-initial-reset`) is **non-destructive**: stamps `history_reset_at`,
+    rolls PnL into `seed_usd`, never deletes trades (they are the research data).
 - **Worker 2**: `server/lighter_hedge_dual_leg.py` — LIVE real money, and the one process that
   drives **two** sub-accounts. It runs two `StochBot` instances under one `asyncio.gather`: a LONG
   leg on Worker 2's account (`lighter_btc_optimal_*` tables) and a SHORT leg on Worker 3's account
   (`lighter_stoch_dca_btc_*` tables), reading `WORKER3_LIGHTER_*` env vars for the second set of
-  credentials. Both legs enter together, the loser is cut at SL 0.03%, the winner rides a
-  profit-lock trail with a breakeven floor under it.
+  credentials. $10 per leg. As of 2026-10-01 (commit 3259e51):
+  - **Entry:** both legs together whenever the 25/75 stochastic shows pressure
+    (`require_pressure_to_enter`). The dispersion floor / one-cycle-per-candle gates were built and
+    then removed at the user's request (machinery still in the core, off).
+  - **Exits:** loser cut at its SL; the winner's trail arms the instant the partner is cut
+    (`partner_cut_arms_trail_immediately`) and **can never close below breakeven**
+    (`profit_lock_respects_breakeven_floor`, "Option B": exit = max(peak − trail, breakeven),
+    reason BREAKEVEN_LOCK when the floor binds). The live SL/trigger/trail are the **dashboard
+    overrides** (last seen SL 0.05 / trigger 0.10 / trail 0.04), not the 0.06/0.10/0.03 in the .py.
+  - Its Reset still **deletes** both legs' trades (Worker 1's no longer does) -- the user was
+    offered the non-destructive version but hasn't asked for it yet.
 - **Worker 3**: its own Render service is **suspended**. Its sub-account is driven entirely from
   Worker 2's process. `server/lighter_stoch_dca_btc_bot.py` still works standalone if the hedge is
   ever abandoned — re-enable that service and disable the dual-leg one, no data migration needed.
@@ -41,7 +66,8 @@ Batch commits into one push rather than pushing repeatedly.
 
 `lock_owner`/`lock_heartbeat` on the `*_state` row, so a redeploy's new instance won't fight the
 dying old one. **This was added to the Python bots only on 2026-09-30** (`single_instance_lock`
-in `BotConfig`, currently on for both hedge legs) — before that these workers had no lock at all,
+in `BotConfig`, on for both hedge legs and, since 2026-10-01, Worker 1 -- after a deploy overlap
+made Worker 1 enter twice and the oversize guard EMERGENCY_FLATTEN it) — before that these workers had no lock at all,
 despite an earlier version of this file claiming they did, which is the root cause of the "zombie
 double-entry" incident. The retired TS workers had their own copy
 (`sol_dca_bitfinex_lock_columns.sql`).
@@ -59,6 +85,18 @@ dead instance would hold the lock for over five minutes.
 bots are all retired. Nothing in `server/*.py` is dead except
 `lighter_stoch_dca_btc_optimal.py` / `lighter_stoch_dca_btc_bot.py` (the pre-hedge Worker 2/3
 single-account configs, kept deliberately as the revert path) and the `*.bak` file.
+
+## Working with the user (read this)
+
+- **Answer questions; don't act on them.** When he asks "what is this?" or "how could we improve
+  X?", explain and stop. Only change code, push, flip settings or ask for SQL after he explicitly
+  says to do it. He has had to say "don't do anything without telling me" more than once.
+- When he *has* asked for a change, own the whole loop: tests → commit → push → Vercel deploy →
+  confirm in Supabase that the worker restarted (`started` + `instance_lock_acquired` in
+  `*_runs`) → report. Paste any SQL **into the chat** (he can't read file paths), and don't push
+  a bot change that needs new columns until he says the SQL ran.
+- He reads on a phone: short sentences, tables, no walls of text.
+- Explicitly his call, never mine: clearing a self-lock, turning a bot ON.
 
 ## Deploying code changes
 
@@ -94,7 +132,7 @@ role key (`lib/supabase-admin.ts`), which bypasses RLS.
 
 ## Repo layout
 
-- `server/*.py` — the live worker processes. **`server/stoch_bot_core.py` (~3.7k lines) holds all
+- `server/*.py` — the live worker processes. **`server/stoch_bot_core.py` (~4.9k lines) holds all
   the shared logic**; each `lighter_*.py` file is settings only — a `BotConfig` plus a docstring
   recording why every setting is what it is. Behaviour changes go in the core behind a
   `BotConfig` flag defaulting to the old behaviour, so one bot's change can't silently alter
@@ -134,6 +172,26 @@ close,reset}`. The order matters and they interlock:
    (409) while either leg holds a position** — so the sequence is always Close Both → Reset. Before
    2026-09-30 the close button didn't exist on this panel at all, which made an open cycle
    impossible to either close or reset from the dashboard.
+
+## Research findings so far (2026-10-01) -- don't redo these blind
+
+Simulators + cached data: `research/sim-2026-10-01/` (git-ignored). `w1_bt.py` replays Worker 1's
+rules on real Lighter 1-min candles (signals) + `lighter_btc_price_ticks` (exits, ~2.6s cadence,
+so it slightly under-counts quick profit locks -- compare rows, don't trust exact dollars);
+`hedge_bt.py` does the same for the hedge. Refresh ticks from `lighter_btc_price_ticks` (paginate
+by id) and candles from the Lighter candles API (count_back=500, page by end_timestamp).
+
+- Worker 1 SL width (0.05-0.25): no real difference -- a wider SL raises win rate but losses grow
+  by the same amount. Every exit style tested lands near breakeven; the edge, if any, is in entries.
+- Profit-lock give-back (trail 0.01-0.03): worse than zero give-back.
+- Reversal-only exits (no SL/TP): worse, and one trade lost $1.84; no SL + reversal + TP: worst.
+- Trend filter (efficiency ratio, against/with the 15-min move): no help -- fading a strong
+  15-min move was actually the BEST group.
+- Zebra / candle-size index (5 bars): a hill over 604 real trades, middle (≈600-1000) best, both
+  ends lose. Borderline significance -- that's the live Worker 1 experiment now.
+- Hedge: cycles opened at low 5-bar dispersion (< ~$30) carried most of the loss, but no gate made
+  it profitable; the structural problem was the trail closing the winner below breakeven (fixed by
+  Option B). Typical BTC "wiggle" ≈ $20-45 (0.02-0.05%): an exit tighter than ~0.04% is noise.
 
 ## Retiring a bot
 
