@@ -233,7 +233,10 @@ CONFIG = BotConfig(
     # position and waiting for the guard to elapse first. Read live every tick (not frozen per
     # position), so this took effect on the position already open the moment it deployed.
     reversal_guard_seconds=None,
-    trading_hours_utc=_WEEKDAY_SCHEDULE,  # 2026-09-28: blocks Saturday+Sunday, see docstring
+    # 2026-10-01, direct request: hour ban OFF for the dispersion test -- trades 24/7, weekends
+    # included. _WEEKDAY_SCHEDULE above is kept unchanged; to restore the ban, set this back to
+    # trading_hours_utc=_WEEKDAY_SCHEDULE.
+    trading_hours_utc=None,
     schema_has_position_bands=True,
     # 2026-10-01, direct request: OFF for the intrabar dispersion isolated test below -- every
     # self_lock_* field stays in the file unchanged (self_lock_enabled is the one master switch

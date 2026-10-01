@@ -2909,8 +2909,8 @@ export default function Dashboard() {
         {/* ── Lighter BTC Stochastic5: 3-worker comparison, real money, $100 each */}
         <div className="grid grid-cols-1 sm:grid-cols-3 gap-3">
           <CompactStochBtcPanel
-            title="Worker 1 · Plain Stochastic, Weekend Blocked"
-            subtitle="2026-10-01: isolated test -- self-lock OFF, all hours open, only filter is intrabar dispersion (stdev of (high+low)/2, 5-bar, raw $) blocking new entries at >= $50. TP 0.10% / SL 0.11% / window 5, 25-75 / 120s blanking period / weekday hours, Sat+Sun fully closed ET, resumes Monday 12am ET"
+            title="Worker 1 · Plain Stochastic + Dispersion"
+            subtitle="2026-10-01: isolated test -- self-lock OFF, hour ban OFF (trades 24/7, weekends included), only filter is intrabar dispersion (stdev of (high+low)/2, 5-bar, raw $) blocking new entries at >= $50. TP 0.10% / SL 0.11% / window 5, 25-75, fresh signal only / no blanking period / profit lock 0.02%"
             table="lighter_btc_initial_state"
             state={initialBtcState}
             trades={initialBtcTrades.filter((t: any) =>
@@ -2924,7 +2924,8 @@ export default function Dashboard() {
             // "REAL LOCKED" badge while the bot was actually trading freely underneath it --
             // confusing, caught live. Flip back to `showSelfLock` once self-lock is re-enabled.
             combineEquityWinRate
-            tradingHoursUtc={WORKER1_TRADING_HOURS}
+            // 2026-10-01: hour ban OFF (trading_hours_utc=None in the live config). Pass
+            // tradingHoursUtc={WORKER1_TRADING_HOURS} again when the schedule is restored.
           />
           <HedgeDualLegPanel
             longState={optimalBtcState}
