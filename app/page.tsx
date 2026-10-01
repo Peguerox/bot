@@ -2179,9 +2179,6 @@ function HedgeDualLegPanel({
   // _pressure_biased_leg_usd's docstring in stoch_bot_core.py.
   const liveK: number | null = longState?.live_k ?? null;
   const liveSignal: string | null = longState?.live_signal ?? null;
-  // Must match min_intrabar_dispersion_to_enter in lighter_hedge_dual_leg.py.
-  const HEDGE_MIN_DISPERSION = 50;
-  const liveDispersion: number | null = longState?.live_intrabar_dispersion ?? null;
 
   const combinedSeed = longLeg.seedUsd + shortLeg.seedUsd;
   const combinedRealized = longLeg.realizedPnl + shortLeg.realizedPnl;
@@ -2349,7 +2346,7 @@ function HedgeDualLegPanel({
         <div>
           <h3 className="text-white font-bold text-sm">Worker 2 · Hedge Strategy (2 legs)</h3>
           <p className="text-gray-500 text-[11px] leading-relaxed">
-            One process, two real sub-accounts, moving in CYCLES -- both legs enter together (Worker 2's account LONG, Worker 3's account SHORT), $10 fixed per leg, equal on both sides, trading BTC. A cycle only OPENS when 5-bar intrabar dispersion is $50 or more (no entries in quiet chop), at most one new cycle per 1-min candle; the stochastic no longer gates entry (its K below is a readout only). Dispersion gates WHEN, never which way. SL 0.06% cuts a losing leg (backed by a real exchange-side stop order, not just our own poll), which then WAITS -- no literal TP, profit-lock trail only (arms +0.10%, trails 0.03% behind peak by default, retunable live below) -- and the trail now starts protecting the instant the OTHER leg gets cut, not only once +0.10% is reached -- but it can never close the winner below breakeven (BREAKEVEN_LOCK); above breakeven + trail it rides and exits as PROFIT_LOCK. Both re-enter together only once BOTH are flat again. One switch controls both legs together.
+            One process, two real sub-accounts, moving in CYCLES -- both legs enter together (Worker 2's account LONG, Worker 3's account SHORT), $10 fixed per leg, equal on both sides, trading BTC. A cycle only OPENS while the 25/75 stochastic shows real pressure; the signal gates WHEN, never which way. SL 0.06% cuts a losing leg (backed by a real exchange-side stop order, not just our own poll), which then WAITS -- no literal TP, profit-lock trail only (arms +0.10%, trails 0.03% behind peak by default, retunable live below) -- and the trail now starts protecting the instant the OTHER leg gets cut, not only once +0.10% is reached -- but it can never close the winner below breakeven (BREAKEVEN_LOCK); above breakeven + trail it rides and exits as PROFIT_LOCK. Both re-enter together only once BOTH are flat again. One switch controls both legs together.
           </p>
         </div>
         <div className="flex items-center gap-1.5 flex-wrap">
@@ -2408,21 +2405,7 @@ function HedgeDualLegPanel({
             <LegBadge label="Long leg (Worker 2 acct)" leg={longLeg} />
             <LegBadge label="Short leg (Worker 3 acct)" leg={shortLeg} />
             <div className="bg-gray-800/60 rounded-lg p-2 col-span-2">
-              <p className="text-gray-500 text-[10px] uppercase">Dispersion (5-bar, gates entry at ${HEDGE_MIN_DISPERSION}+)</p>
-              <p className="font-bold text-sm">
-                <span className={liveDispersion == null ? "text-gray-500"
-                  : liveDispersion >= HEDGE_MIN_DISPERSION ? "text-green-400" : "text-amber-400"}>
-                  {liveDispersion != null ? `$${liveDispersion.toFixed(1)}` : "—"}
-                </span>
-                <span className="text-[10px] font-normal text-gray-500 ml-1.5">
-                  {liveDispersion == null ? "no reading yet"
-                    : liveDispersion >= HEDGE_MIN_DISPERSION ? "OPEN — a new cycle can start (max 1 per candle)"
-                    : "WAITING — too quiet, no new cycle"}
-                </span>
-              </p>
-            </div>
-            <div className="bg-gray-800/60 rounded-lg p-2 col-span-2">
-              <p className="text-gray-500 text-[10px] uppercase">Stoch K (readout only, not gating)</p>
+              <p className="text-gray-500 text-[10px] uppercase">Pressure Signal (stoch K, 25/75 — gates entry)</p>
               <p className="font-bold text-sm">
                 <span className={liveSignal === "long" ? "text-green-400" : liveSignal === "short" ? "text-amber-400" : "text-gray-400"}>
                   {liveK != null ? liveK.toFixed(1) : "—"}
