@@ -693,6 +693,91 @@ def make_tr_candles(tr_pct, base=86000.0, n=5):
             for i in range(n)]
 
 
+def make_dispersion_candles(mids, base=86000.0):
+    """len(mids) closed candles (h=l=mid, so (h+l)/2 is exactly that value) plus one trailing
+    live candle -- compute_intrabar_dispersion reads candles[:-1]. Prepended with one extra
+    dummy closed candle so compute_stoch_signal's own len(c) < w+2 floor (needs 7 total for
+    stoch_window=5) is satisfied without shifting which 5 candles either function's own
+    `[-window:]` slice actually lands on -- both still see exactly `mids`."""
+    t0 = 1700000000000
+    dummy = mids[0] if mids else base
+    c = [{"t": t0 - 60000, "o": dummy, "h": dummy, "l": dummy, "c": dummy}]
+    c += [{"t": t0 + i*60000, "o": m, "h": m, "l": m, "c": m} for i, m in enumerate(mids)]
+    c.append({"t": t0 + len(mids)*60000, "o": base, "h": base, "l": base, "c": base})  # live
+    return c
+
+
+async def t_compute_intrabar_dispersion_basic():
+    print("\n[compute_intrabar_dispersion: hand-computed example]")
+    # mids [10,10,10,10,20] -> mean=12, variance=[4*(10-12)^2+(20-12)^2]/5=16, std=4
+    candles = make_dispersion_candles([10,10,10,10,20])
+    d = core.compute_intrabar_dispersion(candles, window=5)
+    check("stdev matches hand calculation", d is not None and abs(d-4.0) < 1e-9, d)
+
+
+async def t_compute_intrabar_dispersion_needs_full_window():
+    print("\n[compute_intrabar_dispersion: None until the window is actually full]")
+    candles = make_dispersion_candles([10,10,10])  # only 3 closed candles, window=5
+    d = core.compute_intrabar_dispersion(candles, window=5)
+    check("not enough history yet", d is None, d)
+
+
+async def t_intrabar_dispersion_gate_blocks_entry_above_threshold():
+    print("\n[intrabar dispersion gate: blocks a fresh entry when the reading is >= threshold]")
+    ex = FakeExchange()
+    bot = make_bot(ex, candles_kind="mid", intrabar_dispersion_pause_at=50.0,
+                   intrabar_dispersion_window=5)
+    # [150,150,150,150,0] reads oversold (K=0, a real "long" signal) AND disperses at std=$60,
+    # above the $50 threshold -- verified by hand in the shell before writing this.
+    bot.candles = make_dispersion_candles([150,150,150,150,0])
+    await bot.tick()
+    check("blocked -- no entry despite a real long signal", bot.state_row["side"] is None,
+          bot.state_row["side"])
+
+
+async def t_intrabar_dispersion_gate_allows_entry_below_threshold():
+    print("\n[intrabar dispersion gate: a calm reading lets a fresh entry through normally]")
+    ex = FakeExchange()
+    bot = make_bot(ex, candles_kind="mid", intrabar_dispersion_pause_at=50.0,
+                   intrabar_dispersion_window=5)
+    # [20,20,20,20,0] -- same oversold shape (K=0), but std=$8, under the $50 threshold.
+    bot.candles = make_dispersion_candles([20,20,20,20,0])
+    await bot.tick()
+    check("entered normally", bot.state_row["side"] == "long", bot.state_row["side"])
+
+
+async def t_intrabar_dispersion_gate_off_by_default():
+    print("\n[intrabar dispersion gate: off by default -- every other bot unaffected]")
+    ex = FakeExchange()
+    bot = make_bot(ex, candles_kind="mid")  # intrabar_dispersion_pause_at defaults None
+    bot.candles = make_dispersion_candles([150,150,150,150,0])  # would block if the gate were on
+    await bot.tick()
+    check("entered normally -- gate is a no-op when unconfigured", bot.state_row["side"] == "long",
+          bot.state_row["side"])
+
+
+async def t_intrabar_dispersion_gate_never_blocks_an_exit():
+    print("\n[intrabar dispersion gate: only ever gates entries -- never blocks protecting a position]")
+    entry = 86000.0
+    sl_price = entry * (1 - 0.11/100) - 1
+    ex = FakeExchange(position=round(10.0/entry, 5), collateral=10.0)
+    state = {
+        "id": 1, "side": "long", "legs": [{"price": entry, "usd_size": 10.0}],
+        "first_entry_price": entry, "first_entry_time": 1700000000000, "dca_level": 0,
+        "seed_usd": 10.0, "realized_pnl_usd": 0.0, "collateral_before_entry": 10.0,
+        "enabled": True, "consecutive_entry_failures": 0, "last_processed_candle_ts": 0,
+    }
+    bot = make_bot(ex, state=state, candles_kind="mid", fixed_leg_usd=10.0,
+                   sl_pct=0.11, tp_pct=0.10, require_fresh_signal=False,
+                   self_lock_enabled=False, use_joint_adaptive=False,
+                   intrabar_dispersion_pause_at=50.0, intrabar_dispersion_window=5)
+    bot.candles = make_dispersion_candles([0, 50, 100, 150, 200])  # extreme, would block an entry
+    bot.live.order_book = {"bids": [{"price": str(sl_price)}], "asks": [{"price": str(sl_price+1)}]}
+    await bot.tick()
+    check("SL still fired despite extreme dispersion", bot.state_row["side"] is None,
+          bot.state_row["side"])
+
+
 async def t_entry_vol_gate_pauses_on_high_true_range():
     print("\n[entry vol gate: a completed candle spiking past the pause threshold blocks entries]")
     ex = FakeExchange()
@@ -3893,6 +3978,16 @@ async def t_live_configs_match_their_stated_rules():
           w1.use_zscore_signal is False, w1.use_zscore_signal)
     check("Worker 1: hour-open relock requires a literal TP to clear",
           w1.self_lock_hour_open_requires_tp is True, w1.self_lock_hour_open_requires_tp)
+    # 2026-10-01, direct request: isolated A/B test of the intrabar dispersion filter alone --
+    # self-lock OFF (inert; every self_lock_* field above stays in the file unchanged, flipping
+    # self_lock_enabled back to True is the whole revert) and all hours restored, so the one
+    # filter below isn't entangled with anything else.
+    check("Worker 1: self-lock OFF for the isolated dispersion-filter test",
+          w1.self_lock_enabled is False, w1.self_lock_enabled)
+    check("Worker 1: intrabar dispersion filter on at $50",
+          w1.intrabar_dispersion_pause_at == 50.0, w1.intrabar_dispersion_pause_at)
+    check("Worker 1: intrabar dispersion window is 5 bars",
+          w1.intrabar_dispersion_window == 5, w1.intrabar_dispersion_window)
 
     hedge = importlib.import_module("lighter_hedge_dual_leg")
     for name, leg in (("long", hedge.LONG_CONFIG), ("short", hedge.SHORT_CONFIG)):
@@ -4003,6 +4098,12 @@ async def main():
               t_reversal_guard_blocks_reversal_before_threshold,
               t_reversal_guard_allows_reversal_after_threshold,
               t_reversal_guard_does_not_delay_tp_or_sl,
+              t_compute_intrabar_dispersion_basic,
+              t_compute_intrabar_dispersion_needs_full_window,
+              t_intrabar_dispersion_gate_blocks_entry_above_threshold,
+              t_intrabar_dispersion_gate_allows_entry_below_threshold,
+              t_intrabar_dispersion_gate_off_by_default,
+              t_intrabar_dispersion_gate_never_blocks_an_exit,
               t_entry_vol_gate_pauses_on_high_true_range,
               t_entry_vol_gate_stays_paused_inside_hysteresis_band,
               t_entry_vol_gate_resumes_at_or_below_resume_threshold,

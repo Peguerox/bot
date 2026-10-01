@@ -233,6 +233,16 @@ class BotConfig:
     # Same persistence rationale as schema_has_session_breaker -- without this, a restart
     # (which happens on every push, to every service) forgets an active pause.
     schema_has_entry_vol_gate: bool = False
+    # Intrabar dispersion gate (2026-10-01, direct request, isolated test): blocks new entries
+    # (and a reversal's reopen leg, never TP/SL/exits -- same risk-management carve-out as every
+    # other entry gate above) whenever compute_intrabar_dispersion() reads at or above this
+    # threshold. Deliberately a single hard cutoff, no pause/resume hysteresis pair like the
+    # true-range gate above -- this is a clean, isolated A/B test of ONE filter, re-evaluated
+    # fresh every tick with no persisted state at all (the measure itself has no memory to lose
+    # on a restart, unlike the gates above). None = disabled. See
+    # compute_intrabar_dispersion's docstring for the real-data backing.
+    intrabar_dispersion_pause_at: Optional[float] = None
+    intrabar_dispersion_window: int = 5
     # Low-volatility entry gate (2026-09-29, direct request): the OPPOSITE direction from the
     # pair above -- blocks new entries (and a reversal's reopen leg, never TP/SL/exits) when
     # the market is TOO QUIET rather than too spiky. Built to test a real finding from 844 real
@@ -940,6 +950,27 @@ def compute_true_range_pct(candles):
         return None
     tr = max(last["h"] - last["l"], abs(last["h"] - prev_close), abs(last["l"] - prev_close))
     return tr / last["c"] * 100
+
+
+def compute_intrabar_dispersion(candles, window=5):
+    """Standard deviation of each closed candle's (high+low)/2 midpoint, over the trailing
+    `window` closed candles -- raw dollars, not a %. Direct request, 2026-10-01: distinct from
+    every range-based volatility measure above (which measure how big each bar's OWN swing
+    is) -- this measures how much the price LEVEL itself is dispersing bar-to-bar. Tested
+    against 575 real Worker 1 trades the same day: trades whose reading here was above
+    roughly $40-55 lost on average (-$0.02 to -$0.04/trade); trades below made money (+$0.002
+    to +$0.009/trade), and that split held up -- stayed significant, z -1.7 to -2.7 -- across
+    that entire threshold band, unlike every range-based measure tried the same way (none of
+    which held together outside one lucky cutoff). Window swept at 3/5/10/15 bars; 5 was the
+    clear best, both strongest AND most stable across nearby thresholds."""
+    closed = candles[:-1]
+    if len(closed) < window:
+        return None
+    bars = closed[-window:]
+    mids = [(c["h"] + c["l"]) / 2 for c in bars]
+    mean = sum(mids) / len(mids)
+    variance = sum((m - mean) ** 2 for m in mids) / len(mids)
+    return variance ** 0.5
 
 
 def compute_rsi_stoch_confirmed_signal(candles, rsi_period=5, stoch_period=14, require_confirmation=True, lo=20, hi=80):
@@ -4017,6 +4048,15 @@ class StochBot:
         if cfg.entry_vol_pause_at_pct is not None:
             entry_signal = await self._apply_entry_volatility_gate(state, candle_ts, entry_signal)
 
+        # Stateless -- recomputed fresh every tick, nothing to persist or restore. See
+        # BotConfig.intrabar_dispersion_pause_at's docstring.
+        intrabar_dispersion_blocked = False
+        if cfg.intrabar_dispersion_pause_at is not None:
+            dispersion = compute_intrabar_dispersion(self.candles, cfg.intrabar_dispersion_window)
+            if dispersion is not None and dispersion >= cfg.intrabar_dispersion_pause_at:
+                intrabar_dispersion_blocked = True
+                entry_signal = None
+
         if cfg.trading_hours_utc is not None:
             entry_signal = self._apply_trading_hours_gate(entry_signal)
 
@@ -4483,7 +4523,8 @@ class StochBot:
                     self._clear_burn()
                     reopen_burned = False
                 reopen_overconfirmed = self._entry_overconfirmed(reversal_signal)
-                if (self.entry_vol_paused or (cfg.self_lock_enabled and self.real_trading_locked)
+                if (self.entry_vol_paused or intrabar_dispersion_blocked
+                        or (cfg.self_lock_enabled and self.real_trading_locked)
                         or (cfg.trading_hours_utc is not None
                             and self._apply_trading_hours_gate(reversal_signal) is None)
                         or reopen_flow_blocked or reopen_stale or low_vol_blocked or reopen_burned

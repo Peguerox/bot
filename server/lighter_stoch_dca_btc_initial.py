@@ -198,19 +198,17 @@ from stoch_bot_core import BotConfig, run_bot
 # {weekday: hours} keys are hand-shifted by the EDT offset (UTC-4) so the weekend BLOCK lines up
 # with ET Saturday/Sunday, not UTC Saturday/Sunday -- see the docstring above for the derivation
 # and why the naive Sat(5)/Sun(6)-blocked version was wrong (opened 4h early, at Sunday 8pm ET).
-_FULL_WEEKDAY_HOURS = [0, 1, 4, 10, 12, 15, 16, 17, 18, 19, 20]
-# 2026-10-01, direct request after a real-data audit: hour 9 UTC removed. Overall it was the
-# worst allowed hour (-$0.026/trade avg, z=-1.97, 575-trade sample) -- but split by context it
-# wasn't the hour itself, it was reopening after a 30min+ quiet gap landing there (1 win in 6)
-# while normal-cadence hour-9 trades were fine (67% win). Blocking the whole hour is the blunt
-# version of that fix -- it also removes the good normal-cadence trades, but it's simple and
-# the gap-specific fix (tightening what counts as "proven" after an hour-open relock) hasn't
-# been built yet. Revisit if/when that lands.
-# Same day, hour 21 UTC also removed, direct request. Weaker evidence than hour 9's (-$0.0091
-# avg, z=-0.78 on the same 575-trade sample -- within normal noise, not a standout on its own),
-# but still the second-worst allowed hour and the call is his to make on his own real money.
+_FULL_WEEKDAY_HOURS = [0, 1, 4, 9, 10, 12, 15, 16, 17, 18, 19, 20, 21]
+# 2026-10-01: hours 9 and 21 UTC were removed earlier today after the timing audit (hour 9:
+# -$0.026/trade avg, z=-1.97; hour 21: -$0.0091 avg, z=-0.78 -- both on the same 575-trade
+# sample). RESTORED here, same day, direct request: isolated A/B test of the intrabar
+# dispersion filter below (intrabar_dispersion_pause_at) on its own, with every other
+# experimental gate off, including the hour exclusions -- so a clean read on whether that ONE
+# filter alone is doing real work, not entangled with the hour cuts. If this test doesn't ship,
+# revert to [0, 1, 4, 10, 12, 15, 16, 17, 18, 19, 20] (Monday: drop the 4 and 9 too) to restore
+# the hour exclusions.
 _WEEKDAY_SCHEDULE = {
-    0: [4, 10, 12, 15, 16, 17, 18, 19, 20],  # UTC Monday, hours 0-1 still Sun 8-9pm ET
+    0: [4, 9, 10, 12, 15, 16, 17, 18, 19, 20, 21],  # UTC Monday, hours 0-1 still Sun 8-9pm ET
     1: _FULL_WEEKDAY_HOURS,  # UTC Tuesday
     2: _FULL_WEEKDAY_HOURS,  # UTC Wednesday
     3: _FULL_WEEKDAY_HOURS,  # UTC Thursday
@@ -233,7 +231,11 @@ CONFIG = BotConfig(
     reversal_guard_seconds=120,  # the "blanking period"
     trading_hours_utc=_WEEKDAY_SCHEDULE,  # 2026-09-28: blocks Saturday+Sunday, see docstring
     schema_has_position_bands=True,
-    self_lock_enabled=True,
+    # 2026-10-01, direct request: OFF for the intrabar dispersion isolated test below -- every
+    # self_lock_* field stays in the file unchanged (self_lock_enabled is the one master switch
+    # that makes all of them inert) so flipping back to True is a one-line revert, nothing to
+    # rebuild. Was True before this test.
+    self_lock_enabled=False,
     schema_has_self_lock=True,  # requires lighter_btc_initial_self_lock.sql first
     schema_has_live_signal=True,  # requires lighter_btc_initial_live_signal.sql first
     self_lock_reversal_counts_as_win=True,
@@ -254,7 +256,17 @@ CONFIG = BotConfig(
     # the market was still choppy, unlocking real money right before the next trade lost. Every
     # OTHER lock (a real SL mid-session) still uses the easier rule, unchanged. See
     # BotConfig.self_lock_hour_open_requires_tp. Requires lighter_self_lock_lock_via.sql.
-    self_lock_hour_open_requires_tp=True,
+    self_lock_hour_open_requires_tp=True,  # inert while self_lock_enabled=False above
+    # 2026-10-01, direct request: isolated A/B test. stdev of each closed candle's
+    # (high+low)/2 midpoint over the trailing 5 bars, raw dollars -- block new entries (and a
+    # reversal's reopen leg; TP/SL/exits never gated) once that reads >= $50. Tested against
+    # 575 real trades the same day: below $50, +$0.0024/trade avg; above, -$0.038/trade avg,
+    # z=-2.72, stable across the whole $32-55 band. Every other experimental gate (self-lock,
+    # hour exclusions, z-score) is OFF for this run specifically so the result isn't entangled
+    # with anything else -- see BotConfig.intrabar_dispersion_pause_at /
+    # compute_intrabar_dispersion.
+    intrabar_dispersion_pause_at=50.0,
+    intrabar_dispersion_window=5,
     require_fresh_signal=True,  # 2026-09-28: only enter on the exact candle the signal first appears
     schema_has_profit_lock=True,  # harmless leftover column, profit_lock_enabled is off
     # 2026-09-29: briefly disabled fleet-wide during a Supabase statement-timeout incident
