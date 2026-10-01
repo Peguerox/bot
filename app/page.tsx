@@ -17,8 +17,14 @@ const SURFER_GIVEBACK = 0.15;
 // Non-destructive: the old rows stay in lighter_btc_initial_trades, just hidden from display.
 // Reset again 2026-09-27 when stoch_window/thresholds changed (5,25/75 -> 20,10/90), then once
 // more the same day after SL briefly went live at 0.05% before being reverted to 0.11% -- a few
-// trades ran under the wrong SL, so the baseline moved past those too.
-const WORKER1_RESET_AT = "2026-09-28T01:02:25.797802+00:00";
+// trades ran under the wrong SL, so the baseline moved past those too. Reset again 2026-10-01
+// for the intrabar dispersion isolated test (self-lock off, hours 9/21 restored) -- done by
+// hand this one last time. Every reset after this one goes through the new Reset button
+// (/api/lighter-btc-initial-reset), which writes the same cutoff into
+// lighter_btc_initial_state.history_reset_at instead of a hardcoded constant here -- see the
+// trades filter below. This constant now only matters as the fallback for trade rows from
+// before that column existed.
+const WORKER1_RESET_AT = "2026-10-01T12:53:44.000000+00:00";
 // Worker 2's schedule was removed and SL tightened (0.11% -> 0.05%) at this moment -- same
 // reasoning as Worker 1's reset above, a clean baseline for a config that changed twice at once.
 // Reset again 2026-09-27 when stoch_window/thresholds changed, then once more after the SL
@@ -1522,6 +1528,19 @@ function CompactStochBtcPanel({
 
   const [closing, setClosing] = useState(false);
   const closeRequested = Boolean(state?.close_requested);
+  const [resetting, setResetting] = useState(false);
+
+  async function handleReset() {
+    if (!confirm(`Reset ${title}? Rolls current equity into a fresh baseline and hides trade history before now (nothing is deleted). Refuses while a position is open.`)) return;
+    setResetting(true);
+    const res = await fetch("/api/lighter-btc-initial-reset", { method: "POST" });
+    if (!res.ok) {
+      const body = await res.json().catch(() => ({}));
+      alert(body.error ?? "Reset failed.");
+    }
+    await onToggled();
+    setResetting(false);
+  }
 
   async function handleToggle() {
     const question = enabled
@@ -1564,6 +1583,16 @@ function CompactStochBtcPanel({
               title="Close the real position now, regardless of the ON/OFF toggle"
             >
               {closing ? "…" : closeRequested ? "Closing…" : "Close"}
+            </button>
+          )}
+          {table === "lighter_btc_initial_state" && (
+            <button
+              onClick={handleReset}
+              disabled={resetting || side != null || loading}
+              className="text-xs font-semibold px-2.5 py-1 rounded-full bg-gray-800 text-gray-400 hover:bg-gray-700 hover:text-white transition-all disabled:opacity-50"
+              title="Roll current equity into a fresh baseline and hide trade history before now -- nothing is deleted. Refuses while a position is open."
+            >
+              {resetting ? "…" : "Reset"}
             </button>
           )}
           <button
@@ -2884,11 +2913,16 @@ export default function Dashboard() {
             subtitle="2026-10-01: isolated test -- self-lock OFF, all hours open, only filter is intrabar dispersion (stdev of (high+low)/2, 5-bar, raw $) blocking new entries at >= $50. TP 0.10% / SL 0.11% / window 5, 25-75 / 120s blanking period / weekday hours, Sat+Sun fully closed ET, resumes Monday 12am ET"
             table="lighter_btc_initial_state"
             state={initialBtcState}
-            trades={initialBtcTrades.filter((t: any) => t.closed_at >= WORKER1_RESET_AT)}
+            trades={initialBtcTrades.filter((t: any) =>
+              t.closed_at >= (initialBtcState?.history_reset_at ?? WORKER1_RESET_AT))}
             currentPrice={ocoBtcPrice}
             loading={loading}
             onToggled={load}
-            showSelfLock
+            // 2026-10-01: OFF for the isolated dispersion test -- self_lock_enabled=False in
+            // the live config right now, so real_trading_locked/paper_* in the DB are inert
+            // leftovers the bot never reads. Showing the self-lock block anyway read as a real
+            // "REAL LOCKED" badge while the bot was actually trading freely underneath it --
+            // confusing, caught live. Flip back to `showSelfLock` once self-lock is re-enabled.
             combineEquityWinRate
             tradingHoursUtc={WORKER1_TRADING_HOURS}
           />
