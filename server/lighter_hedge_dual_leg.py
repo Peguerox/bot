@@ -158,6 +158,16 @@ StochBot.run()'s new optional credential-override parameters in stoch_bot_core.p
 No migration needed -- both lighter_btc_optimal_state and lighter_stoch_dca_btc_state already
 have every column this config touches (position bands not needed since use_joint_adaptive is
 off; profit_lock_peak_pct already exists on both from earlier work tonight).
+
+2026-10-01: BTC -> SOL -> ETH -> back to BTC, same session. Both alt-coin experiments were
+tried live and dropped ("tried everything with worker 2 in ethereum and solana, let's go back
+to btc") -- this file is now byte-for-byte the pre-SOL build (restored via
+`git checkout hedge-v2-btc-before-sol -- server/lighter_hedge_dual_leg.py`: market_index back to
+1/price_decimals 1/size_decimals 5, fixed_leg_usd back to $10, require_pressure_to_enter back to
+True, min_cycle_gap_seconds's hypertrading-test value of 10.0 dropped back to the 0.0 default)
+with exactly two things re-added on top, both coin-independent and explicitly requested to
+survive the revert: native_stop_loss_enabled and schema_has_cycle_id. See their own comments
+below for what each does.
 """
 import asyncio
 import faulthandler
@@ -165,32 +175,17 @@ import os
 from stoch_bot_core import BotConfig, StochBot
 
 LONG_CONFIG = BotConfig(
-    name="HEDGE LONG LEG (worker 2 account) -- ETH",
+    name="HEDGE LONG LEG (worker 2 account)",
     worker_id="worker2",
     table_state="lighter_btc_optimal_state",
     table_trades="lighter_btc_optimal_trades",
     table_runs="lighter_btc_optimal_runs",
-    # 2026-09-30, direct request: BTC -> SOL -> ETH, in that order, same session. SOL's live
-    # spread (~0.0085%) was ~5x BTC's and reported as "horrible" -- "if ETH does not work we go
-    # back to BTC." Values read directly from Lighter's own /orderBooks each time, never guessed:
-    # BTC market_index=1/price_decimals=1/size_decimals=5, min_quote=$10
-    # SOL market_index=2/price_decimals=3/size_decimals=3, min_base=0.055, min_quote=$10
-    # ETH market_index=0/price_decimals=2/size_decimals=4, min_base=0.0020, min_quote=$10 (live)
-    # Tables/table names are UNCHANGED on purpose across every one of these (same bot, same
-    # accounts, just a different market) -- so "btc" in the table names has been a historical
-    # label since the first switch, not a description of what's trading. No other code depends on
-    # which coin this is; every other piece of logic already reads the coin generically off these
-    # three fields.
-    market_index=0, price_decimals=2, size_decimals=4,
     # Unused while fixed_direction is set -- no stochastic signal computed at all -- left at
     # harmless reference values, required fields with no default.
     stoch_window=5, entry_lo=25, entry_hi=75, reversal_lo=25, reversal_hi=75,
     fixed_direction="long",
     tp_pct=0.10, sl_pct=0.06,  # sl_pct is the real, live value here (use_joint_adaptive off)
-    # 2026-09-30, bumped $10 -> $12 on the SOL switch: Lighter's min_quote_amount is $10 for both
-    # coins, so $10 sat exactly on the floor with zero margin -- a single unfavourable tick at
-    # entry could reject the order. $12 keeps the same "same $ per leg" intent with real headroom.
-    fixed_leg_usd=12.0,
+    fixed_leg_usd=10.0,  # direct request: same $ per leg, not the account's full balance
     # 2026-09-29, direct request: bias size off the raw stochastic K -- see the module
     # docstring's "Sizing" section and BotConfig.pressure_bias_enabled's docstring.
     # 2026-09-30, direct correction: BACK TO $10/$10. 7cfe5ef turned the requested 25/75 signal
@@ -208,17 +203,7 @@ LONG_CONFIG = BotConfig(
     # a fixed_direction leg enters every single time it is flat, including in flat chop where
     # neither side travels far enough to reach the 0.05% trail and both legs just grind. Gates
     # WHEN a cycle opens, never which way -- both legs still enter together, both sides.
-    # 2026-09-30, direct request: OFF for a hypertrading test -- "turn off the stochastic
-    # entry gate, don't delete it, enter at any moment." require_pressure_to_enter stays in
-    # BotConfig and the K/vol readouts keep computing and publishing (nothing about the
-    # signal itself is touched) -- this only stops it gating WHEN a cycle may open. Paired
-    # with min_cycle_gap_seconds below so it still isn't fully unthrottled.
-    require_pressure_to_enter=False,
-    # 10s pause after THIS leg goes flat before it may enter the next cycle -- direct
-    # request, "once you finish a trade wait 10 seconds then another trade," specifically to
-    # get faster cycle throughput for testing with the pressure gate off, not zero-delay
-    # machine-gun entries.
-    min_cycle_gap_seconds=10.0,
+    require_pressure_to_enter=True,
     pressure_signal_owner=True,  # this leg computes the ONE shared signal; short just reads it
     # 2026-09-30, direct request: show the live K value on the dashboard. Column already exists
     # on lighter_btc_optimal_state from an earlier experiment -- no migration needed.
@@ -257,13 +242,15 @@ LONG_CONFIG = BotConfig(
     # instead of relying only on our own 0.5s poll + reduce_only market order. Confirmed in real
     # trade data that every software-caught SL closed 0.004-0.016 points worse than the
     # configured pct (e.g. -0.045% on a 0.03% stop) -- the exchange enforces its own trigger
-    # without waiting on our poll. See BotConfig.native_stop_loss_enabled.
+    # without waiting on our poll. See BotConfig.native_stop_loss_enabled. Kept through the
+    # ETH->BTC revert below -- this is independent of which coin is trading.
     native_stop_loss_enabled=True,
     # 2026-10-01: both legs stamp the SAME id (the cycle barrier's release instant) onto their
     # entry and carry it to their close, so the dashboard can pair a cycle's two rows by id
     # instead of guessing from opened_at proximity -- a guess that a slow confirm/retry on one
     # leg could blow past, splitting one real cycle into two unpaired rows. Requires the
-    # cycle_id column migration. See BotConfig.schema_has_cycle_id.
+    # cycle_id column migration (already run). See BotConfig.schema_has_cycle_id. Also kept
+    # through the revert below.
     schema_has_cycle_id=True,
     # 2026-09-30, direct request: retune the exits from the dashboard without a deploy, and show
     # the live volatility they have to cope with. Volatility ran 0.048% through the quiet hours
@@ -284,18 +271,15 @@ LONG_CONFIG = BotConfig(
 )
 
 SHORT_CONFIG = BotConfig(
-    name="HEDGE SHORT LEG (worker 3 account) -- ETH",
+    name="HEDGE SHORT LEG (worker 3 account)",
     worker_id="worker3",
     table_state="lighter_stoch_dca_btc_state",
     table_trades="lighter_stoch_dca_btc_trades",
     table_runs="lighter_stoch_dca_btc_runs",
-    # See LONG_CONFIG's docstring for the full reasoning -- must match exactly, both legs always
-    # carry identical market/precision/sizing or the breakeven floor's math breaks.
-    market_index=0, price_decimals=2, size_decimals=4,
     stoch_window=5, entry_lo=25, entry_hi=75, reversal_lo=25, reversal_hi=75,
     fixed_direction="short",
     tp_pct=0.10, sl_pct=0.06,
-    fixed_leg_usd=12.0,  # see LONG_CONFIG -- bumped off Lighter's $10 minimum for real headroom
+    fixed_leg_usd=10.0,  # direct request: same $ per leg, not the account's full balance
     # 2026-09-29, direct request: bias size off the raw stochastic K -- see the module
     # docstring's "Sizing" section and BotConfig.pressure_bias_enabled's docstring.
     # 2026-09-30, direct correction: BACK TO $10/$10. 7cfe5ef turned the requested 25/75 signal
@@ -313,17 +297,7 @@ SHORT_CONFIG = BotConfig(
     # a fixed_direction leg enters every single time it is flat, including in flat chop where
     # neither side travels far enough to reach the 0.05% trail and both legs just grind. Gates
     # WHEN a cycle opens, never which way -- both legs still enter together, both sides.
-    # 2026-09-30, direct request: OFF for a hypertrading test -- "turn off the stochastic
-    # entry gate, don't delete it, enter at any moment." require_pressure_to_enter stays in
-    # BotConfig and the K/vol readouts keep computing and publishing (nothing about the
-    # signal itself is touched) -- this only stops it gating WHEN a cycle may open. Paired
-    # with min_cycle_gap_seconds below so it still isn't fully unthrottled.
-    require_pressure_to_enter=False,
-    # 10s pause after THIS leg goes flat before it may enter the next cycle -- direct
-    # request, "once you finish a trade wait 10 seconds then another trade," specifically to
-    # get faster cycle throughput for testing with the pressure gate off, not zero-delay
-    # machine-gun entries.
-    min_cycle_gap_seconds=10.0,
+    require_pressure_to_enter=True,
     debug_verbose_tick=False,  # off -- faulthandler below only fires if actually stuck
     # Reciprocal of the long leg's gate above -- waits for lighter_btc_optimal_state (the
     # LONG leg) to also be flat before re-entering.
@@ -356,13 +330,15 @@ SHORT_CONFIG = BotConfig(
     # instead of relying only on our own 0.5s poll + reduce_only market order. Confirmed in real
     # trade data that every software-caught SL closed 0.004-0.016 points worse than the
     # configured pct (e.g. -0.045% on a 0.03% stop) -- the exchange enforces its own trigger
-    # without waiting on our poll. See BotConfig.native_stop_loss_enabled.
+    # without waiting on our poll. See BotConfig.native_stop_loss_enabled. Kept through the
+    # ETH->BTC revert below -- this is independent of which coin is trading.
     native_stop_loss_enabled=True,
     # 2026-10-01: both legs stamp the SAME id (the cycle barrier's release instant) onto their
     # entry and carry it to their close, so the dashboard can pair a cycle's two rows by id
     # instead of guessing from opened_at proximity -- a guess that a slow confirm/retry on one
     # leg could blow past, splitting one real cycle into two unpaired rows. Requires the
-    # cycle_id column migration. See BotConfig.schema_has_cycle_id.
+    # cycle_id column migration (already run). See BotConfig.schema_has_cycle_id. Also kept
+    # through the revert below.
     schema_has_cycle_id=True,
     # 2026-09-30, direct request: retune the exits from the dashboard without a deploy, and show
     # the live volatility they have to cope with. Volatility ran 0.048% through the quiet hours

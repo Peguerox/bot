@@ -2687,10 +2687,12 @@ export default function Dashboard() {
         if (bid && ask) setOcoBtcPrice((bid + ask) / 2);
       })
       .catch(() => {});
-    // market_id=0 -- ETH, the coin the hedge (Worker 2) actually trades now (was SOL, was BTC
-    // before that -- update this market_id every time the hedge switches coins). See
-    // hedgeCoinPrice's declaration for why this must not reuse ocoBtcPrice.
-    fetch("https://mainnet.zklighter.elliot.ai/api/v1/orderBookOrders?market_id=0&limit=1")
+    // market_id=1 -- BTC, the coin the hedge (Worker 2) trades again as of 2026-10-01 (was ETH,
+    // was SOL, was BTC before that -- update this market_id every time the hedge switches
+    // coins). See hedgeCoinPrice's declaration for why this must not reuse ocoBtcPrice -- kept
+    // as its own fetch rather than collapsed back into ocoBtcPrice specifically so this is a
+    // one-line change the next time the coin changes, not a re-wire.
+    fetch("https://mainnet.zklighter.elliot.ai/api/v1/orderBookOrders?market_id=1&limit=1")
       .then((r) => r.json())
       .then((ob) => {
         const bid = parseFloat(ob?.bids?.[0]?.price);

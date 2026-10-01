@@ -3658,12 +3658,14 @@ async def t_live_configs_match_their_stated_rules():
               leg.single_instance_lock is True, leg.single_instance_lock)
         check(f"hedge {name} leg: has a cycle partner to synchronise with",
               leg.cycle_partner_table is not None, leg.cycle_partner_table)
-        # 2026-09-30: switched from BTC to SOL. fixed_leg_usd bumped $10 -> $12 off Lighter's
-        # $10 min_quote_amount (same floor on both coins) -- $10 had zero margin against a single
-        # unfavourable tick rejecting the order. Pinned to a concrete floor ($11) rather than an
-        # exact value, since this number may reasonably be retuned again.
-        check(f"hedge {name} leg: fixed_leg_usd has real margin above Lighter's $10 minimum",
-              leg.fixed_leg_usd >= 11.0, leg.fixed_leg_usd)
+        # 2026-09-30: switched from BTC to SOL, fixed_leg_usd bumped $10 -> $12 off Lighter's $10
+        # min_quote_amount for real margin against a single unfavourable tick. 2026-10-01: back
+        # to BTC (SOL and ETH were both tried and dropped), and back to the original $10 -- this
+        # exact value ran live on BTC for a long stretch with no rejected orders, so the headroom
+        # was specifically an alt-coin caution, not a BTC requirement. Floor pinned at Lighter's
+        # actual $10 minimum rather than an exact value, so either number stays valid.
+        check(f"hedge {name} leg: fixed_leg_usd at or above Lighter's $10 minimum",
+              leg.fixed_leg_usd >= 10.0, leg.fixed_leg_usd)
         check(f"hedge {name} leg: NO size tilt -- legs are equal",
               leg.pressure_bias_enabled is False, leg.pressure_bias_enabled)
         # 2026-09-30, direct request: pressure gate turned OFF for a hypertrading test ("enter
