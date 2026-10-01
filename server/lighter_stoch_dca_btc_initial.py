@@ -275,6 +275,14 @@ CONFIG = BotConfig(
     intrabar_dispersion_pause_at=50.0,
     intrabar_dispersion_window=5,
     require_fresh_signal=True,  # 2026-09-28: only enter on the exact candle the signal first appears
+    # 2026-10-01, direct request ("you went in 2 times in the same signal, not a fresh signal"):
+    # require_fresh_signal only compares against the PRIOR closed candle, so the signal stayed
+    # "fresh" for its whole minute -- live at 14:13 UTC it entered long 3x inside one candle
+    # (PROFIT_LOCK, PROFIT_LOCK, then SL at the top). After any profit-lock or losing exit, that
+    # direction is now blocked until the signal genuinely goes away and comes back: one trade
+    # per signal. In-process only (a restart clears it).
+    profit_lock_burns_signal=True,
+    red_exit_burns_signal=True,
     schema_has_profit_lock=True,  # column already exists from the 2026-09-27 run, see below
     # 2026-10-01, direct request after watching a real position run to ~80% of the way to TP
     # then round-trip all the way to a full SL with nothing in between -- Worker 1 had zero
