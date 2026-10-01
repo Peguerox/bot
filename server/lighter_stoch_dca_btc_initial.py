@@ -228,7 +228,11 @@ CONFIG = BotConfig(
     sl_pct=0.11,
     entry_lo=25, entry_hi=75,  # 2026-09-28: back to the original values
     reversal_lo=25, reversal_hi=75,
-    reversal_guard_seconds=120,  # the "blanking period"
+    # 2026-10-01, direct request: blanking period removed. Was 120 -- if the stochastic reverses
+    # while a position is under 120s old, the bot now exits immediately instead of holding the
+    # position and waiting for the guard to elapse first. Read live every tick (not frozen per
+    # position), so this took effect on the position already open the moment it deployed.
+    reversal_guard_seconds=None,
     trading_hours_utc=_WEEKDAY_SCHEDULE,  # 2026-09-28: blocks Saturday+Sunday, see docstring
     schema_has_position_bands=True,
     # 2026-10-01, direct request: OFF for the intrabar dispersion isolated test below -- every
@@ -268,7 +272,18 @@ CONFIG = BotConfig(
     intrabar_dispersion_pause_at=50.0,
     intrabar_dispersion_window=5,
     require_fresh_signal=True,  # 2026-09-28: only enter on the exact candle the signal first appears
-    schema_has_profit_lock=True,  # harmless leftover column, profit_lock_enabled is off
+    schema_has_profit_lock=True,  # column already exists from the 2026-09-27 run, see below
+    # 2026-10-01, direct request after watching a real position run to ~80% of the way to TP
+    # then round-trip all the way to a full SL with nothing in between -- Worker 1 had zero
+    # protection between 0% and the literal TP (0.10%) since 2026-09-28, when this was stripped
+    # out in an unrelated broad reset, not because it was found to perform badly. Re-enabling
+    # the EXACT values last tuned on 2026-09-27: trigger 0.02% (tightened same day from 0.05%
+    # after a real trade peaked at 0.04% and never armed), trail 0.0% -- "if it goes down then
+    # you come out," zero give-back once armed, by design. Can only fire earlier than or instead
+    # of the fixed TP/SL, never blocks them.
+    profit_lock_enabled=True,
+    profit_lock_trigger_pct=0.02,
+    profit_lock_trail_pct=0.0,
     # 2026-09-29: briefly disabled fleet-wide during a Supabase statement-timeout incident
     # (database itself started canceling queries under cumulative write load, confirmed in
     # Postgres logs, on top of a prior Disk-IO-budget warning email). Root cause identified as
