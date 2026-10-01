@@ -274,6 +274,11 @@ LONG_CONFIG = BotConfig(
     # BotConfig.partner_cut_arms_trail_immediately. Exits in this window now read PROFIT_LOCK,
     # not BREAKEVEN_LOCK.
     partner_cut_arms_trail_immediately=True,
+    # 2026-10-01, direct request ("Option B"): the trail may never close this leg below the
+    # breakeven floor -- exit at max(peak - trail, floor). Live the same day the trail armed at
+    # the cut (~+0.05%) with a 0.04 trail exited ~+0.01%, under breakeven, and once a
+    # PROFIT_LOCK closed at an outright loss. See BotConfig.profit_lock_respects_breakeven_floor.
+    profit_lock_respects_breakeven_floor=True,
     # 2026-09-30, direct request: retune the exits from the dashboard without a deploy, and show
     # the live volatility they have to cope with. Volatility ran 0.048% through the quiet hours
     # and 0.117% at the US open the same day -- 2.4x -- and no single stop is right across that.
@@ -380,6 +385,11 @@ SHORT_CONFIG = BotConfig(
     # BotConfig.partner_cut_arms_trail_immediately. Exits in this window now read PROFIT_LOCK,
     # not BREAKEVEN_LOCK.
     partner_cut_arms_trail_immediately=True,
+    # 2026-10-01, direct request ("Option B"): the trail may never close this leg below the
+    # breakeven floor -- exit at max(peak - trail, floor). Live the same day the trail armed at
+    # the cut (~+0.05%) with a 0.04 trail exited ~+0.01%, under breakeven, and once a
+    # PROFIT_LOCK closed at an outright loss. See BotConfig.profit_lock_respects_breakeven_floor.
+    profit_lock_respects_breakeven_floor=True,
     # 2026-09-30, direct request: retune the exits from the dashboard without a deploy, and show
     # the live volatility they have to cope with. Volatility ran 0.048% through the quiet hours
     # and 0.117% at the US open the same day -- 2.4x -- and no single stop is right across that.

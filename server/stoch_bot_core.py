@@ -537,6 +537,15 @@ class BotConfig:
     # the trail starts watching, not how tight it is. Exits here read "PROFIT_LOCK", not
     # "BREAKEVEN_LOCK" -- it genuinely is the trail now, just started earlier.
     partner_cut_arms_trail_immediately: bool = False
+    # 2026-10-01, direct request ("Option B"): once the partner is cut and the breakeven floor is
+    # known, the profit-lock trail may never close this leg BELOW that floor. The exit level is
+    # max(peak - trail, floor) instead of just peak - trail. Live data the same day: with the
+    # trail armed at the partner-cut instant (winner ~+0.05%) and a 0.04% trail, the winner exited
+    # at ~+0.01% -- under breakeven, so every such cycle lost, and once (winner only +0.03% at the
+    # cut) a "PROFIT_LOCK" closed at an outright loss. With this on, a cycle whose winner never
+    # runs ends at ~$0 (reason BREAKEVEN_LOCK); one that runs past floor + trail is still ridden
+    # by the trail (reason PROFIT_LOCK). Needs breakeven_floor_enabled. False = old behaviour.
+    profit_lock_respects_breakeven_floor: bool = False
     # Requires the cycle_id column migration (state + trades, both hedge legs). Both legs stamp
     # the SAME id (the cycle barrier's release timestamp, see _cycle_gate_clear_to_enter) onto
     # their entry and carry it to their close, so the dashboard can pair a cycle's two trade rows
@@ -4343,6 +4352,13 @@ class StochBot:
                     new_peak = unrealized_pct
                 elif peak - unrealized_pct >= ov_trail:
                     gap_hit = "PROFIT_LOCK"
+                if (gap_hit is None and peak is not None
+                        and cfg.profit_lock_respects_breakeven_floor
+                        and self._breakeven_floor_pct is not None
+                        and unrealized_pct <= self._breakeven_floor_pct):
+                    # See BotConfig.profit_lock_respects_breakeven_floor: the floor sits ABOVE
+                    # peak - trail here, so it is the binding exit level.
+                    gap_hit = "BREAKEVEN_LOCK"
                 if new_peak is not None:
                     self.profit_lock_peak_pct = new_peak
                     if cfg.schema_has_profit_lock:

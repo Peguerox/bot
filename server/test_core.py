@@ -4139,6 +4139,69 @@ async def t_min_dispersion_never_discards_granted_clearance():
     check("a still enters on its clearance", a._cycle_gate_clear_to_enter(want=a._wants_new_cycle()) is True)
 
 
+async def t_profit_lock_floor_closes_at_breakeven_not_below():
+    print("\n[Option B: the trail can never close the winner below the breakeven floor]")
+    entry = 86000.0
+    ex = FakeExchange(position=round(10.0 / entry, 5), collateral=10.0)
+    partner = {"side": "short", "realized_pnl_usd": 0.0}
+    bot = _breakeven_bot(ex, _breakeven_state(entry, 10.0), partner, sl_pct=0.05,
+                         profit_lock_trigger_pct=0.10, profit_lock_trail_pct=0.04,
+                         partner_cut_arms_trail_immediately=True,
+                         profit_lock_respects_breakeven_floor=True)
+    partner["side"] = None
+    partner["realized_pnl_usd"] = -0.005  # partner cut at its stop
+    await _tick_at(bot, entry * (1 + 0.05 / 100))
+    floor = bot._breakeven_floor_pct
+    check("floor known (~breakeven)", floor is not None and 0.04 < floor < 0.06, floor)
+    await _tick_at(bot, entry * (1 + 0.06 / 100))
+    check("still open at +0.06%", bot.state_row["side"] == "long", bot.state_row["side"])
+    # +0.045%: only 0.015 off the peak (the 0.04 trail alone would hold) but under the floor.
+    await _tick_at(bot, entry * (1 + 0.045 / 100))
+    check("closed at the floor", bot.state_row["side"] is None, bot.state_row["side"])
+    check("reason BREAKEVEN_LOCK",
+          any(a == "closed" and d.get("reason") == "BREAKEVEN_LOCK" for a, d in bot.runs),
+          [(a, d.get("reason")) for a, d in bot.runs if a == "closed"])
+
+
+async def t_profit_lock_floor_off_keeps_old_behaviour():
+    print("\n[Option B off: the same path is NOT closed by a floor -- old behaviour unchanged]")
+    entry = 86000.0
+    ex = FakeExchange(position=round(10.0 / entry, 5), collateral=10.0)
+    partner = {"side": "short", "realized_pnl_usd": 0.0}
+    bot = _breakeven_bot(ex, _breakeven_state(entry, 10.0), partner, sl_pct=0.05,
+                         profit_lock_trigger_pct=0.10, profit_lock_trail_pct=0.04,
+                         partner_cut_arms_trail_immediately=True)
+    partner["side"] = None
+    partner["realized_pnl_usd"] = -0.005
+    for p in (0.05, 0.06, 0.045):
+        await _tick_at(bot, entry * (1 + p / 100))
+    check("still open -- only the 0.04 trail applies", bot.state_row["side"] == "long",
+          bot.state_row["side"])
+
+
+async def t_profit_lock_floor_still_lets_the_winner_ride():
+    print("\n[Option B: above floor + trail the ordinary trail rides and exits as PROFIT_LOCK]")
+    entry = 86000.0
+    ex = FakeExchange(position=round(10.0 / entry, 5), collateral=10.0)
+    partner = {"side": "short", "realized_pnl_usd": 0.0}
+    bot = _breakeven_bot(ex, _breakeven_state(entry, 10.0), partner, sl_pct=0.05,
+                         profit_lock_trigger_pct=0.10, profit_lock_trail_pct=0.04,
+                         partner_cut_arms_trail_immediately=True,
+                         profit_lock_respects_breakeven_floor=True)
+    partner["side"] = None
+    partner["realized_pnl_usd"] = -0.005
+    for p in (0.05, 0.12, 0.20, 0.17):
+        await _tick_at(bot, entry * (1 + p / 100))
+    check("rode to +0.20% and held a 0.03 pullback", bot.state_row["side"] == "long",
+          bot.state_row["side"])
+    await _tick_at(bot, entry * (1 + 0.155 / 100))
+    check("closed by the trail well above the floor", bot.state_row["side"] is None,
+          bot.state_row["side"])
+    check("reason PROFIT_LOCK",
+          any(a == "closed" and d.get("reason") == "PROFIT_LOCK" for a, d in bot.runs),
+          [(a, d.get("reason")) for a, d in bot.runs if a == "closed"])
+
+
 async def main():
     for t in (t_normal_entry, t_phantom_double_fill, t_nonce_error_but_filled,
               t_order_error_no_fill, t_circuit_breaker, t_close_uses_real_size,
@@ -4335,7 +4398,10 @@ async def main():
               t_min_dispersion_gate_allows_cycle_when_dispersed,
               t_min_dispersion_gate_off_by_default,
               t_one_cycle_per_candle_blocks_second_entry_same_candle,
-              t_min_dispersion_never_discards_granted_clearance):
+              t_min_dispersion_never_discards_granted_clearance,
+              t_profit_lock_floor_closes_at_breakeven_not_below,
+              t_profit_lock_floor_off_keeps_old_behaviour,
+              t_profit_lock_floor_still_lets_the_winner_ride):
         try:
             await t()
         except Exception as e:
