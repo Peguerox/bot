@@ -2108,6 +2108,16 @@ class StochBot:
             return None
         return 100.0 * (-partner_cycle_pnl) / own_notional_usd
 
+    def _compute_pressure_source_signal(self):
+        """Whatever reading drives the entry-pressure gate and the dashboard's "Pressure Signal"
+        readout for a fixed_direction bot (the hedge) -- see _has_entry_pressure and the owner
+        publish site in tick(). NOT the same selection as the main tick() elif-chain: that chain
+        checks fixed_direction FIRST and would never reach the stochastic/z-score branches at
+        all for these bots, but a fixed_direction leg still needs ONE of them to gate WHEN it
+        may enter. 2026-10-01, direct request: z-score instead of the stochastic for the hedge
+        specifically (Worker 1 keeps the plain stochastic) -- see BotConfig.use_zscore_signal."""
+        return self.compute_zscore_signal() if self.cfg.use_zscore_signal else self.compute_stoch_signal()
+
     def _has_entry_pressure(self):
         """True if there is enough pressure right now to justify opening a cycle -- see
         BotConfig.require_pressure_to_enter. Reads the ONE shared reading both legs already use
@@ -2121,7 +2131,7 @@ class StochBot:
         hub = self.pressure_signal_hub
         if hub is not None:
             return hub.get("signal") is not None
-        return self.compute_stoch_signal()[0] is not None
+        return self._compute_pressure_source_signal()[0] is not None
 
     def _cycle_gap_elapsed(self):
         """True if enough time has passed since THIS leg went flat -- see
@@ -3753,7 +3763,7 @@ class StochBot:
             # a display/hub concern and must keep working now that the sizing tilt is off (2026-09-30,
             # legs back to equal $10/$10). Still never touches entry_signal/reversal_signal above.
             if cfg.pressure_signal_owner:
-                owner_signal, _, _ = self.compute_stoch_signal()
+                owner_signal, _, _ = self._compute_pressure_source_signal()
                 # 2026-09-30, fixing a real race: publish EVERY tick, not only at this leg's own
                 # entry moment. The two legs are independent asyncio tasks on their own 0.5s tick
                 # loops, and the hub used to be written solely inside _pressure_biased_leg_usd --

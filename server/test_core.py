@@ -3238,6 +3238,41 @@ async def t_pressure_gate_allows_entry_at_an_extreme():
               bot.state_row["side"])
 
 
+async def t_pressure_source_uses_zscore_when_enabled():
+    print("\n[pressure source: the hedge's owner leg publishes a z-score reading, not the stochastic]")
+    ex = FakeExchange()
+    candles = _zscore_candles([86000, 86010, 85995, 86005, 85990, 85800, 85800])
+    bot = make_bot(ex, candles=candles, fixed_direction="long", fixed_leg_usd=10.0,
+                   sl_pct=0.03, tp_pct=0.10, disable_literal_tp=True, require_fresh_signal=False,
+                   self_lock_enabled=False, use_joint_adaptive=False,
+                   require_pressure_to_enter=True, pressure_signal_owner=True,
+                   use_zscore_signal=True, zscore_window=5, zscore_entry=2.0)
+    hub = {"signal": None}
+    bot.pressure_signal_hub = hub
+    await bot.tick()
+    check("owner published a 'long' z-score reading (oversold dip) into the hub",
+          hub["signal"] == "long", hub["signal"])
+    check("live_k holds the z-score, not a bounded 0-100 K",
+          bot.live_k is not None and bot.live_k < -2.0, bot.live_k)
+    check("entered on its own pressure reading", bot.state_row["side"] == "long")
+
+
+async def t_pressure_source_stays_stochastic_by_default():
+    print("\n[pressure source: off by default -- the stochastic still drives the pressure gate]")
+    ex = FakeExchange()
+    bot = make_bot(ex, candles_kind="short", fixed_direction="long", fixed_leg_usd=10.0,
+                   sl_pct=0.03, tp_pct=0.10, disable_literal_tp=True, require_fresh_signal=False,
+                   self_lock_enabled=False, use_joint_adaptive=False,
+                   require_pressure_to_enter=True, pressure_signal_owner=True)
+    hub = {"signal": None}
+    bot.pressure_signal_hub = hub
+    await bot.tick()
+    check("owner published the stochastic reading (K extreme, 'short' on candles_kind='short')",
+          hub["signal"] == "short", hub["signal"])
+    check("live_k is a bounded 0-100 stochastic K, not a z-score",
+          bot.live_k is not None and 0 <= bot.live_k <= 100, bot.live_k)
+
+
 async def t_pressure_gate_off_by_default_for_other_bots():
     print("\n[pressure gate: defaults off -- every other bot is untouched]")
     ex = FakeExchange()
@@ -3762,12 +3797,11 @@ async def t_live_configs_match_their_stated_rules():
           w1.native_take_profit_enabled is True, w1.native_take_profit_enabled)
     check("Worker 1: literal TP is actually active (native TP would be a no-op otherwise)",
           w1.disable_literal_tp is False, w1.disable_literal_tp)
-    # 2026-10-01, direct request: swapped from the plain stochastic to a mean-reversion z-score
-    # (backtest/zscore-alone-1yr-tp08-btc.ts), on 1-min candles. See
-    # BotConfig.use_zscore_signal/compute_zscore_signal.
-    check("Worker 1: z-score signal on", w1.use_zscore_signal is True, w1.use_zscore_signal)
-    check("Worker 1: zscore_window matches the backtest (5)", w1.zscore_window == 5, w1.zscore_window)
-    check("Worker 1: zscore_entry matches the backtest (2.0)", w1.zscore_entry == 2.0, w1.zscore_entry)
+    # 2026-10-01: the z-score signal was briefly wired to Worker 1, then corrected -- "worker 2"
+    # was the intended target. Worker 1 stays on the plain stochastic. Pinned here so that
+    # mix-up can't silently repeat.
+    check("Worker 1: plain stochastic signal (NOT z-score)",
+          w1.use_zscore_signal is False, w1.use_zscore_signal)
 
     hedge = importlib.import_module("lighter_hedge_dual_leg")
     for name, leg in (("long", hedge.LONG_CONFIG), ("short", hedge.SHORT_CONFIG)):
@@ -3810,6 +3844,11 @@ async def t_live_configs_match_their_stated_rules():
         check(f"hedge {name} leg: gate off implies a real min_cycle_gap in its place",
               leg.require_pressure_to_enter or leg.min_cycle_gap_seconds > 0,
               (leg.require_pressure_to_enter, leg.min_cycle_gap_seconds))
+        # 2026-10-01, direct request: z-score drives the pressure gate instead of the stochastic
+        # (Worker 1 keeps the plain stochastic -- hedge-specific). See
+        # BotConfig.use_zscore_signal / _compute_pressure_source_signal.
+        check(f"hedge {name} leg: pressure gate uses the z-score signal",
+              leg.use_zscore_signal is True, leg.use_zscore_signal)
         # 2026-10-01, direct request: real exchange-side stop + shared cycle id for dashboard
         # pairing. See BotConfig.native_stop_loss_enabled / schema_has_cycle_id.
         check(f"hedge {name} leg: native stop-loss on",
@@ -3839,6 +3878,9 @@ async def t_live_configs_match_their_stated_rules():
     check("hedge legs: SAME min_cycle_gap_seconds",
           hedge.LONG_CONFIG.min_cycle_gap_seconds == hedge.SHORT_CONFIG.min_cycle_gap_seconds,
           (hedge.LONG_CONFIG.min_cycle_gap_seconds, hedge.SHORT_CONFIG.min_cycle_gap_seconds))
+    check("hedge legs: SAME use_zscore_signal",
+          hedge.LONG_CONFIG.use_zscore_signal == hedge.SHORT_CONFIG.use_zscore_signal,
+          (hedge.LONG_CONFIG.use_zscore_signal, hedge.SHORT_CONFIG.use_zscore_signal))
     check("hedge legs point at each other, not themselves",
           hedge.LONG_CONFIG.cycle_partner_table == hedge.SHORT_CONFIG.table_state
           and hedge.SHORT_CONFIG.cycle_partner_table == hedge.LONG_CONFIG.table_state)
@@ -3997,6 +4039,8 @@ async def main():
               t_no_cycle_hub_falls_back_to_the_db_poll,
               t_pressure_gate_blocks_entry_in_flat_chop,
               t_pressure_gate_allows_entry_at_an_extreme,
+              t_pressure_source_uses_zscore_when_enabled,
+              t_pressure_source_stays_stochastic_by_default,
               t_pressure_gate_off_by_default_for_other_bots,
               t_pressure_gate_waits_rather_than_guessing_with_no_reading,
               t_k_readout_still_works_with_the_size_tilt_off,

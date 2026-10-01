@@ -204,6 +204,14 @@ LONG_CONFIG = BotConfig(
     # neither side travels far enough to reach the 0.05% trail and both legs just grind. Gates
     # WHEN a cycle opens, never which way -- both legs still enter together, both sides.
     require_pressure_to_enter=True,
+    # 2026-10-01, direct request: z-score instead of the stochastic for the pressure gate's
+    # underlying reading -- Worker 1 keeps the plain stochastic, this is hedge-specific. Ported
+    # from backtest/zscore-alone-1yr-tp08-btc.ts (Z_ENTRY=-2.0, ZSCORE_WINDOW=5). Direction is
+    # still fixed_direction, unaffected -- this only changes WHEN a cycle is allowed to open.
+    # See BotConfig.use_zscore_signal / _compute_pressure_source_signal.
+    use_zscore_signal=True,
+    zscore_window=5,
+    zscore_entry=2.0,
     pressure_signal_owner=True,  # this leg computes the ONE shared signal; short just reads it
     # 2026-09-30, direct request: show the live K value on the dashboard. Column already exists
     # on lighter_btc_optimal_state from an earlier experiment -- no migration needed.
@@ -306,6 +314,11 @@ SHORT_CONFIG = BotConfig(
     # neither side travels far enough to reach the 0.05% trail and both legs just grind. Gates
     # WHEN a cycle opens, never which way -- both legs still enter together, both sides.
     require_pressure_to_enter=True,
+    # See LONG_CONFIG's docstring -- must match (this leg never computes it itself, since it
+    # isn't the pressure_signal_owner, but config values should still agree for clarity).
+    use_zscore_signal=True,
+    zscore_window=5,
+    zscore_entry=2.0,
     debug_verbose_tick=False,  # off -- faulthandler below only fires if actually stuck
     # Reciprocal of the long leg's gate above -- waits for lighter_btc_optimal_state (the
     # LONG leg) to also be flat before re-entering.
