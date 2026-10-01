@@ -288,6 +288,17 @@ class BotConfig:
     # not persisted (a restart clears it, same tradeoff as every other in-process-only gate).
     # None = off (default, no other bot is affected).
     post_reversal_cooldown_seconds: Optional[float] = None
+    # Index-exit-on-green (2026-10-01, direct request): "call a reversal" -- exit immediately --
+    # the moment the color-weighted balance index goes OUTSIDE [color_balance_index_min,
+    # color_balance_index_max] (the same band gating entry), but ONLY while the position is
+    # currently GREEN (unrealized > 0). A red position is never touched by this -- it still
+    # rides out to its own SL/saving-lock exactly as before. Reasoning: the index described the
+    # conditions this entry was taken IN; if those conditions have genuinely changed while
+    # sitting on a profit, bank it now rather than hope the original read still holds. A missing
+    # reading (too few candles) never forces an exit -- only an actual out-of-band value does.
+    # Requires color_balance_index_min and/or color_balance_index_max to be set; a no-op
+    # otherwise. Reason logged as INDEX_EXIT. False = off (default).
+    index_exit_on_green: bool = False
     # Low-volatility entry gate (2026-09-29, direct request): the OPPOSITE direction from the
     # pair above -- blocks new entries (and a reversal's reopen leg, never TP/SL/exits) when
     # the market is TOO QUIET rather than too spiky. Built to test a real finding from 844 real
@@ -4539,6 +4550,21 @@ class StochBot:
                 arm_at = -cfg.saving_lock_arm_frac_of_sl * pos_sl
                 if self._saving_trough_pct <= arm_at and unrealized_pct >= cfg.saving_lock_exit_pct:
                     gap_hit = "SAVING_LOCK"
+
+            if (gap_hit is None and cfg.index_exit_on_green and ae
+                    and (cfg.color_balance_index_min is not None
+                         or cfg.color_balance_index_max is not None)):
+                # Index-exit-on-green -- see BotConfig.index_exit_on_green.
+                unrealized_pct = (100 * (check_price - ae) / ae if side == "long"
+                                  else 100 * (ae - check_price) / ae)
+                if unrealized_pct > 0:
+                    cwi = compute_color_weighted_balance_index(
+                        self.candles, cfg.color_balance_index_window)
+                    out_of_band = cwi is not None and (
+                        (cfg.color_balance_index_min is not None and cwi < cfg.color_balance_index_min)
+                        or (cfg.color_balance_index_max is not None and cwi > cfg.color_balance_index_max))
+                    if out_of_band:
+                        gap_hit = "INDEX_EXIT"
 
             if gap_hit is None and cfg.profit_lock_enabled and ae:
                 # Restore from the DB once per boot if a prior run persisted a peak (only

@@ -309,6 +309,13 @@ CONFIG = BotConfig(
     color_balance_index_min=65.0,
     color_balance_index_max=75.0,
     color_balance_index_window=5,
+    # 2026-10-01, direct request ("call a reversal when the zebra index goes out of bounds, but
+    # only when we're green"): a GREEN position closes immediately (reason INDEX_EXIT) the
+    # moment the index leaves 65-75 -- the conditions this entry was taken in have genuinely
+    # changed, bank the profit rather than hope they still hold. A RED position is never touched
+    # by this -- it still rides out to its own SL/saving-lock unchanged. See
+    # BotConfig.index_exit_on_green.
+    index_exit_on_green=True,
     profit_lock_trail_pct=0.0,
     # 2026-09-29: briefly disabled fleet-wide during a Supabase statement-timeout incident
     # (database itself started canceling queries under cumulative write load, confirmed in

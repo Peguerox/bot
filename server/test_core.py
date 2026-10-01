@@ -4006,6 +4006,8 @@ async def t_live_configs_match_their_stated_rules():
           (w1.sl_pct, w1.tp_pct, w1.profit_lock_trigger_pct, w1.saving_lock_arm_frac_of_sl))
     check("Worker 1: 2-minute post-reversal cooldown on",
           w1.post_reversal_cooldown_seconds == 120.0, w1.post_reversal_cooldown_seconds)
+    check("Worker 1: index-exit-on-green on (closes a GREEN position if the index leaves the band)",
+          w1.index_exit_on_green is True, w1.index_exit_on_green)
 
     hedge = importlib.import_module("lighter_hedge_dual_leg")
     for name, leg in (("long", hedge.LONG_CONFIG), ("short", hedge.SHORT_CONFIG)):
@@ -4502,6 +4504,64 @@ async def t_post_reversal_cooldown_off_by_default():
     check("two orders placed (close + instant reopen)", len(ex.orders) == 2, ex.orders)
 
 
+async def _index_exit_bot(**kw):
+    entry = 86000.0
+    ex = FakeExchange(position=round(99.0 / entry, 5), collateral=99.0)
+    state = {
+        "id": 1, "side": "long", "legs": [{"price": entry, "usd_size": 99.0}],
+        "first_entry_price": entry, "first_entry_time": 1700000000000, "dca_level": 0,
+        "seed_usd": 99.0, "realized_pnl_usd": 0.0, "collateral_before_entry": 99.0,
+        "enabled": True, "consecutive_entry_failures": 0, "last_processed_candle_ts": 0,
+    }
+    base = dict(candles_kind="mid", sl_pct=0.20, tp_pct=0.10, require_fresh_signal=False,
+                profit_lock_enabled=False, index_exit_on_green=True,
+                color_balance_index_min=65.0, color_balance_index_max=75.0)
+    base.update(kw)
+    return entry, make_bot(ex, state=state, **base)
+
+
+async def _px_with_index(bot, price, index_value):
+    bot.live.order_book = {"bids": [{"price": str(price)}], "asks": [{"price": str(price + 0.5)}]}
+    orig = core.compute_color_weighted_balance_index
+    core.compute_color_weighted_balance_index = lambda c, w=5: index_value
+    try:
+        await bot.tick()
+    finally:
+        core.compute_color_weighted_balance_index = orig
+
+
+async def t_index_exit_fires_when_green_and_index_out_of_band():
+    print("\n[index-exit-on-green: closes a GREEN position once the index leaves the band]")
+    entry, bot = await _index_exit_bot()
+    await _px_with_index(bot, entry * (1 + 0.03 / 100), 90.0)  # green, index above the 65-75 band
+    check("closed", bot.state_row["side"] is None, bot.state_row["side"])
+    check("reason INDEX_EXIT",
+          any(a == "closed" and d.get("reason") == "INDEX_EXIT" for a, d in bot.runs),
+          [(a, d.get("reason")) for a, d in bot.runs if a == "closed"])
+
+
+async def t_index_exit_never_fires_when_red():
+    print("\n[index-exit-on-green: a RED position is untouched even with the index out of band]")
+    entry, bot = await _index_exit_bot()
+    await _px_with_index(bot, entry * (1 - 0.03 / 100), 90.0)  # red, index out of band
+    check("still open -- index-exit only ever applies to a GREEN position",
+          bot.state_row["side"] == "long", bot.state_row["side"])
+
+
+async def t_index_exit_does_not_fire_inside_the_band():
+    print("\n[index-exit-on-green: stays open while green AND the index is still inside the band]")
+    entry, bot = await _index_exit_bot()
+    await _px_with_index(bot, entry * (1 + 0.03 / 100), 70.0)  # green, index inside 65-75
+    check("still open", bot.state_row["side"] == "long", bot.state_row["side"])
+
+
+async def t_index_exit_off_by_default():
+    print("\n[index-exit-on-green: off by default -- same green+out-of-band path stays open]")
+    entry, bot = await _index_exit_bot(index_exit_on_green=False)
+    await _px_with_index(bot, entry * (1 + 0.03 / 100), 90.0)
+    check("still open -- feature disabled", bot.state_row["side"] == "long", bot.state_row["side"])
+
+
 async def main():
     for t in (t_normal_entry, t_phantom_double_fill, t_nonce_error_but_filled,
               t_order_error_no_fill, t_circuit_breaker, t_close_uses_real_size,
@@ -4718,7 +4778,11 @@ async def main():
               t_entry_features_never_touched_without_schema_flag,
               t_post_reversal_cooldown_blocks_instant_reopen,
               t_post_reversal_cooldown_allows_reentry_once_elapsed,
-              t_post_reversal_cooldown_off_by_default):
+              t_post_reversal_cooldown_off_by_default,
+              t_index_exit_fires_when_green_and_index_out_of_band,
+              t_index_exit_never_fires_when_red,
+              t_index_exit_does_not_fire_inside_the_band,
+              t_index_exit_off_by_default):
         try:
             await t()
         except Exception as e:
