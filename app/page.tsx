@@ -1536,6 +1536,7 @@ function CompactStochBtcPanel({
   const [trailIn, setTrailIn] = useState("");
   const [savingSettings, setSavingSettings] = useState(false);
   const liveVol: number | null = state?.live_vol_pct ?? null;
+  const liveZebra: number | null = state?.live_zebra_index ?? null;
   const curSl = state?.override_sl_pct ?? null;
   const curTrig = state?.override_profit_lock_trigger ?? null;
   const curTrail = state?.override_profit_lock_trail ?? null;
@@ -1978,6 +1979,24 @@ function CompactStochBtcPanel({
           </div>
         );
       })()}
+      {showLevers && !loading && (
+        <div className="bg-gray-800/60 rounded-lg p-2">
+          {/* Must match zebra_index_min/max in lighter_stoch_dca_btc_initial.py. */}
+          <p className="text-gray-500 text-[10px] uppercase">Zebra index (5 candles, enters at 600–1000)</p>
+          <p className="font-bold text-sm tabular-nums">
+            <span className={liveZebra == null ? "text-gray-500"
+              : liveZebra >= 600 && liveZebra <= 1000 ? "text-green-400" : "text-amber-400"}>
+              {liveZebra != null ? liveZebra.toFixed(0) : "—"}
+            </span>
+            <span className="text-[10px] font-normal text-gray-500 ml-1.5">
+              {liveZebra == null ? "no reading yet"
+                : liveZebra >= 600 && liveZebra <= 1000 ? "IN BAND — a fresh signal can enter"
+                : liveZebra < 600 ? "too trendy / big candles — no entry"
+                : "too choppy / tiny candles — no entry"}
+            </span>
+          </p>
+        </div>
+      )}
       {showLevers && !loading && (
         <div className="bg-gray-800/60 rounded-lg p-2 space-y-2">
           <div className="flex items-baseline justify-between">

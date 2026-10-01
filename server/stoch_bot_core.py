@@ -4026,6 +4026,16 @@ class StochBot:
                     await self.update_state(patch)
                 except Exception:
                     pass
+                if cfg.zebra_index_min is not None or cfg.zebra_index_max is not None:
+                    # Isolated best-effort write (2026-10-01) so the dashboard can show the live
+                    # zebra / candle-size index the entry gate is reading. A missing column must
+                    # never cost the live_k write above. Requires
+                    # lighter_btc_initial_zebra_readout.sql.
+                    zi = compute_zebra_size_index(self.candles, cfg.zebra_index_window)
+                    try:
+                        await self.update_state({"live_zebra_index": zi})
+                    except Exception:
+                        pass
                 if (cfg.intrabar_dispersion_pause_at is not None
                         or cfg.min_intrabar_dispersion_to_enter is not None):
                     # Isolated write (2026-10-01): live_intrabar_dispersion is a newer, separate
