@@ -56,6 +56,13 @@ class FakeExchange:
         self.cancel_all_calls = getattr(self, "cancel_all_calls", 0) + 1
         return None, None, None
 
+    async def create_sl_order(self, market_index, client_order_index, base_amount,
+                              trigger_price, price, is_ask, reduce_only=False, **kw):
+        self.sl_orders = getattr(self, "sl_orders", [])
+        self.sl_orders.append({"qty": base_amount / 1e5, "trigger": trigger_price,
+                               "price": price, "is_ask": is_ask, "reduce_only": reduce_only})
+        return object(), object(), None
+
     CANCEL_ALL_TIF_IMMEDIATE = 0
 
 
@@ -3380,7 +3387,7 @@ async def t_cycle_gap_blocks_instant_reentry():
 
 async def t_cycle_gap_zero_is_instant_like_before():
     print("\n[cycle gap: 0.0 (default) is instant re-entry, unchanged for every other bot]")
-    ex = FakeExchange(candles_kind="long") if False else FakeExchange()
+    ex = FakeExchange() if False else FakeExchange()
     bot = make_bot(ex, candles_kind="long")  # min_cycle_gap_seconds defaults 0.0
     check("gap check is a no-op at 0.0", bot._cycle_gap_elapsed() is True)
     await bot.tick()
@@ -3406,6 +3413,169 @@ async def t_cycle_gap_never_blocks_an_exit():
     await bot.tick()
     check("the exit itself was never gated by min_cycle_gap_seconds",
           bot.state_row["side"] is None, bot.state_row["side"])
+
+
+async def t_native_stop_off_by_default_never_places_order():
+    print("\n[native stop: off by default -- every bot without the flag is unchanged]")
+    ex = FakeExchange()
+    bot = make_bot(ex, candles_kind="long")  # native_stop_loss_enabled defaults False
+    await bot.tick()
+    check("entered normally", bot.state_row["side"] == "long", bot.state_row["side"])
+    check("no native stop was ever placed", getattr(ex, "sl_orders", []) == [], getattr(ex, "sl_orders", None))
+    check("cancel_all was never called", getattr(ex, "cancel_all_calls", 0) == 0)
+
+
+async def t_native_stop_places_order_on_entry_when_enabled():
+    print("\n[native stop: a real stop order is placed the tick a position opens]")
+    ex = FakeExchange()
+    bot = make_bot(ex, candles_kind="long", native_stop_loss_enabled=True,
+                   sl_pct=0.06, disable_literal_tp=True)
+    await bot.tick()
+    check("entered", bot.state_row["side"] == "long", bot.state_row["side"])
+    # _sync_native_stop runs in the position-management block, keyed off `side` as read at the
+    # TOP of tick() -- the entry itself happens later in that same tick, so the stop is only
+    # placed on the FOLLOWING tick, same as every other post-entry protection in this file.
+    await bot.tick()
+    entry = bot.state_row["first_entry_price"]
+    expected_sl = round(entry * (1 - 0.06 / 100), 1)  # default price_decimals=1 rounding
+    check("exactly one native stop placed", len(getattr(ex, "sl_orders", [])) == 1, getattr(ex, "sl_orders", None))
+    sl = ex.sl_orders[0]
+    trigger_descaled = sl["trigger"] / (10 ** bot.cfg.price_decimals)  # same scaling as place_order
+    check("trigger matches the configured SL off entry price",
+          abs(trigger_descaled - expected_sl) < 1.0, (trigger_descaled, expected_sl))
+    check("closing side (is_ask=True to exit a long)", sl["is_ask"] is True)
+    check("reduce_only", sl["reduce_only"] is True)
+    check("sized to the real filled qty",
+          abs(sl["qty"] - abs(ex.position)) < 1e-6, (sl["qty"], ex.position))
+
+
+async def t_native_stop_noop_when_unchanged():
+    print("\n[native stop: does not re-place itself every tick once synced]")
+    entry = 86000.0
+    sl_price = entry * (1 - 0.06 / 100) + 50  # above the SL, position stays open
+    ex = FakeExchange(position=round(10.0 / entry, 5), collateral=10.0)
+    state = {
+        "id": 1, "side": "long", "legs": [{"price": entry, "usd_size": 10.0}],
+        "first_entry_price": entry, "first_entry_time": 1700000000000, "dca_level": 0,
+        "seed_usd": 10.0, "realized_pnl_usd": 0.0, "collateral_before_entry": 10.0,
+        "enabled": True, "consecutive_entry_failures": 0, "last_processed_candle_ts": 0,
+    }
+    bot = make_bot(ex, state=state, candles_kind="mid", fixed_direction="long", fixed_leg_usd=10.0,
+                   sl_pct=0.06, tp_pct=0.10, disable_literal_tp=True, require_fresh_signal=False,
+                   self_lock_enabled=False, use_joint_adaptive=False,
+                   native_stop_loss_enabled=True)
+    bot.live.order_book = {"bids": [{"price": str(sl_price)}], "asks": [{"price": str(sl_price + 1)}]}
+    await bot.tick()
+    check("one native stop placed on the first tick", len(ex.sl_orders) == 1, len(ex.sl_orders))
+    await bot.tick()
+    await bot.tick()
+    check("still just one -- unchanged trigger/qty never re-places",
+          len(ex.sl_orders) == 1, len(ex.sl_orders))
+    check("still open (never hit the SL)", bot.state_row["side"] == "long")
+
+
+async def t_native_stop_cancelled_before_our_own_close():
+    print("\n[native stop: cleared before close_all places its own closing order]")
+    entry = 86000.0
+    ex = FakeExchange(position=round(20.0 / entry, 5), collateral=20.0)
+    state = {
+        "id": 1, "side": "long", "legs": [{"price": entry, "usd_size": 20.0}],
+        "first_entry_price": entry, "first_entry_time": 1700000000000, "dca_level": 0,
+        "seed_usd": 20.0, "realized_pnl_usd": 0.0, "collateral_before_entry": 20.0,
+        "enabled": True, "consecutive_entry_failures": 0, "last_processed_candle_ts": 0,
+    }
+    bot = make_bot(ex, state=state, candles_kind="mid", native_stop_loss_enabled=True)
+    bot._native_stop_synced = (85000.0, 20.0 / entry)  # pretend one is already resting
+    ok = await bot.close_all("SL", dict(state), "long", state["legs"], 85000.0, 85001.0, 1)
+    check("close succeeded", ok is True)
+    check("cancel_all was called before closing", getattr(ex, "cancel_all_calls", 0) == 1)
+    check("tracking cleared", bot._native_stop_synced is None)
+
+
+async def t_native_stop_resyncs_when_sl_override_changes():
+    print("\n[native stop: a live SL override from the dashboard re-places the resting stop]")
+    entry = 86000.0
+    sl_price = entry * (1 - 0.06 / 100) + 50
+    ex = FakeExchange(position=round(10.0 / entry, 5), collateral=10.0)
+    state = {
+        "id": 1, "side": "long", "legs": [{"price": entry, "usd_size": 10.0}],
+        "first_entry_price": entry, "first_entry_time": 1700000000000, "dca_level": 0,
+        "seed_usd": 10.0, "realized_pnl_usd": 0.0, "collateral_before_entry": 10.0,
+        "enabled": True, "consecutive_entry_failures": 0, "last_processed_candle_ts": 0,
+        "override_sl_pct": None, "override_profit_lock_trigger": None, "override_profit_lock_trail": None,
+    }
+    bot = make_bot(ex, state=state, candles_kind="mid", fixed_direction="long", fixed_leg_usd=10.0,
+                   sl_pct=0.06, tp_pct=0.10, disable_literal_tp=True, require_fresh_signal=False,
+                   self_lock_enabled=False, use_joint_adaptive=False,
+                   native_stop_loss_enabled=True, schema_has_exit_overrides=True)
+    bot.live.order_book = {"bids": [{"price": str(sl_price)}], "asks": [{"price": str(sl_price + 1)}]}
+    await bot.tick()
+    check("placed at the compiled-in 0.06%", len(ex.sl_orders) == 1, len(ex.sl_orders))
+    bot.state_row["override_sl_pct"] = 0.10
+    await bot.tick()
+    check("re-placed once the override changed the desired trigger",
+          len(ex.sl_orders) == 2, len(ex.sl_orders))
+    check("cancelled the old one first", getattr(ex, "cancel_all_calls", 0) == 2)
+
+
+async def t_external_close_tagged_sl_when_native_stop_enabled():
+    print("\n[native stop: an external close (the stop firing) books as SL, not EXTERNAL]")
+    entry = 86000.0
+    ex = FakeExchange(position=0.0, collateral=19.97)  # already closed on the exchange
+    state = {
+        "id": 1, "side": "long", "legs": [{"price": entry, "usd_size": 20.0}],
+        "first_entry_price": entry, "first_entry_time": 1700000000000, "dca_level": 0,
+        "seed_usd": 20.0, "realized_pnl_usd": 0.0, "collateral_before_entry": 20.0,
+        "enabled": True, "consecutive_entry_failures": 0, "last_processed_candle_ts": 0,
+    }
+    bot = make_bot(ex, state=state, candles_kind="mid", native_stop_loss_enabled=True,
+                   require_fresh_signal=False, self_lock_enabled=False, use_joint_adaptive=False)
+    bot.live.order_book = {"bids": [{"price": "86001.0"}], "asks": [{"price": "86002.0"}]}
+    for _ in range(3):  # 3 agreeing flat reads required before an external close is booked
+        await bot.tick()
+    check("booked as a closed position", bot.state_row["side"] is None, bot.state_row["side"])
+    check("tagged SL, not EXTERNAL", bot.trades and bot.trades[-1][5] == "SL", bot.trades)
+
+
+async def t_cycle_id_stamped_same_for_both_legs_on_release():
+    print("\n[cycle id: the barrier stamps ONE id, read identically by both legs]")
+    hub = core.StochBot.new_cycle_hub(["worker2", "worker3"])
+    a = make_bot(FakeExchange(), candles_kind="mid", worker_id="worker2")
+    b = make_bot(FakeExchange(), candles_kind="mid", worker_id="worker3")
+    a.cycle_hub = hub; b.cycle_hub = hub
+    check("long alone not cleared", a._cycle_gate_clear_to_enter() is False)
+    check("short completes the barrier", b._cycle_gate_clear_to_enter() is True)
+    short_id = hub.get("cycle_id")
+    check("short sees a stamped id", short_id is not None, short_id)
+    check("long cleared on its next check", a._cycle_gate_clear_to_enter() is True)
+    check("long reads the SAME id the short saw", hub.get("cycle_id") == short_id)
+
+
+async def t_cycle_id_persisted_on_entry_and_cleared_on_close():
+    print("\n[cycle id: persisted through try_enter, carried to the trade log, cleared on close]")
+    ex = FakeExchange()
+    bot = make_bot(ex, candles_kind="long", schema_has_cycle_id=True)
+    bot._pending_cycle_id = "171234567890"
+    await bot.tick()
+    check("entered", bot.state_row["side"] == "long", bot.state_row["side"])
+    check("cycle_id persisted to state", bot.state_row.get("cycle_id") == "171234567890",
+          bot.state_row.get("cycle_id"))
+    check("consumed from the pending slot", bot._pending_cycle_id is None)
+    ok = await bot.close_all("SL", dict(bot.state_row), "long",
+                             bot.state_row["legs"], 1.0, 1.0, 1)
+    check("close succeeded", ok is True)
+    check("cycle_id cleared from state after close", bot.state_row.get("cycle_id") is None)
+
+
+async def t_cycle_id_never_touched_without_schema_flag():
+    print("\n[cycle id: a bot without the migration never reads or writes the column]")
+    ex = FakeExchange()
+    bot = make_bot(ex, candles_kind="long")  # schema_has_cycle_id defaults False
+    bot._pending_cycle_id = "171234567890"  # even if a hub somehow set this
+    await bot.tick()
+    check("entered", bot.state_row["side"] == "long", bot.state_row["side"])
+    check("cycle_id never written -- key absent from the row",
+          "cycle_id" not in bot.state_row, bot.state_row.get("cycle_id"))
 
 
 async def t_live_configs_match_their_stated_rules():
@@ -3453,6 +3623,12 @@ async def t_live_configs_match_their_stated_rules():
         check(f"hedge {name} leg: gate off implies a real min_cycle_gap in its place",
               leg.require_pressure_to_enter or leg.min_cycle_gap_seconds > 0,
               (leg.require_pressure_to_enter, leg.min_cycle_gap_seconds))
+        # 2026-10-01, direct request: real exchange-side stop + shared cycle id for dashboard
+        # pairing. See BotConfig.native_stop_loss_enabled / schema_has_cycle_id.
+        check(f"hedge {name} leg: native stop-loss on",
+              leg.native_stop_loss_enabled is True, leg.native_stop_loss_enabled)
+        check(f"hedge {name} leg: cycle_id schema on",
+              leg.schema_has_cycle_id is True, leg.schema_has_cycle_id)
     # Both legs must always trade the SAME market with the SAME rounding. A mismatch here is the
     # same class of bug as unequal fixed_leg_usd -- it breaks the breakeven floor's math (which
     # assumes both legs' notional is directly comparable) and, worse, a size_decimals mismatch
@@ -3641,6 +3817,15 @@ async def main():
               t_cycle_gap_blocks_instant_reentry,
               t_cycle_gap_zero_is_instant_like_before,
               t_cycle_gap_never_blocks_an_exit,
+              t_native_stop_off_by_default_never_places_order,
+              t_native_stop_places_order_on_entry_when_enabled,
+              t_native_stop_noop_when_unchanged,
+              t_native_stop_cancelled_before_our_own_close,
+              t_native_stop_resyncs_when_sl_override_changes,
+              t_external_close_tagged_sl_when_native_stop_enabled,
+              t_cycle_id_stamped_same_for_both_legs_on_release,
+              t_cycle_id_persisted_on_entry_and_cleared_on_close,
+              t_cycle_id_never_touched_without_schema_flag,
               t_live_configs_match_their_stated_rules,
               t_stale_position_bands_ignored_without_schema_flag,
               t_position_bands_still_honored_with_schema_flag):

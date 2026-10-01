@@ -2138,7 +2138,25 @@ function HedgeDualLegPanel({
 
   const cycles = [];
   const usedShort = new Set<number>();
+  // Pass 1: both legs stamp the SAME cycle_id at entry (the cycle barrier's release instant,
+  // see schema_has_cycle_id) -- an exact id match is definitive and immune to the opened_at
+  // drift a slow confirm/retry on one leg can cause, which is exactly what used to split one
+  // real cycle into two unpaired rows. Older rows (pre-migration) have no cycle_id and fall
+  // through to pass 2's time-proximity match, same as before.
   for (const L of longClosed) {
+    if (!L.cycle_id) continue;
+    const S = shortClosed.find((s) => !usedShort.has(s.id) && s.cycle_id === L.cycle_id);
+    if (!S) continue;
+    usedShort.add(S.id);
+    cycles.push({
+      key: `${L.id}-${S.id}`,
+      closedAt: L.closed_at > S.closed_at ? L.closed_at : S.closed_at,
+      long: L, short: S,
+      netPnl: L.pnl_usd + S.pnl_usd,
+    });
+  }
+  for (const L of longClosed) {
+    if (cycles.some((c) => c.long?.id === L.id)) continue;
     let best: any = null;
     for (const S of shortClosed) {
       if (usedShort.has(S.id)) continue;

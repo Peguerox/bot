@@ -114,6 +114,10 @@ MARKET_DATA_RETENTION_DAYS = 14
 
 QTY_EPS = 1e-6
 OVERSIZE_FACTOR = 1.5     # real position this much bigger than intended => emergency flatten
+# IOC execution band for a native stop order, past the trigger (see _sync_native_stop). Wide on
+# purpose: a tight band here could let the stop trigger and then fail to fill in exactly the
+# fast move it exists to protect against, which is worse than not having it at all.
+NATIVE_STOP_BAND_PCT = 0.3
 
 SUPABASE_URL = os.environ["NEXT_PUBLIC_SUPABASE_URL"]
 SUPABASE_KEY = os.environ["SUPABASE_SERVICE_ROLE_KEY"]
@@ -481,6 +485,24 @@ class BotConfig:
     # requires the cycle_partner_pnl_baseline column migration -- persistence only, the
     # in-process copy is authoritative (same arrangement as profit_lock_peak_pct)
     schema_has_breakeven_floor: bool = False
+    # Requires the cycle_id column migration (state + trades, both hedge legs). Both legs stamp
+    # the SAME id (the cycle barrier's release timestamp, see _cycle_gate_clear_to_enter) onto
+    # their entry and carry it to their close, so the dashboard can pair a cycle's two trade rows
+    # by id instead of guessing from opened_at proximity. Added 2026-09-30: that proximity match
+    # used a fixed 5s window, which a slow confirm/retry on one leg (confirm_fill backoff can run
+    # tens of seconds, see the "worst-case pathological tick" note near LOCK_STALE_AFTER) can
+    # blow past, splitting one real cycle into two unpaired single-leg rows on exactly the fast,
+    # ugly moves where seeing the true net result matters most.
+    schema_has_cycle_id: bool = False
+    # Real exchange-side stop, placed via Lighter's native ORDER_TYPE_STOP_LOSS the moment a
+    # position opens (see _sync_native_stop). Added 2026-09-30 after confirming in real trade
+    # data that every SL closes 0.004-0.016 points worse than the configured pct (e.g. -0.045%
+    # on a 0.03% stop) -- our own stop was only ever a software check on a 0.5s poll plus a
+    # reduce_only market order, so a fast move always has room to run past the configured level
+    # before our own code even sees it. The exchange enforces this one itself, no polling
+    # involved. Kept OFF by default -- it is new, unproven in this codebase, and every other bot
+    # must keep behaving exactly as before.
+    native_stop_loss_enabled: bool = False
     # Single-instance lock (2026-09-30) -- see LOCK_REFRESH_EVERY/LOCK_STALE_AFTER and
     # _acquire_instance_lock. Requires the lock_owner/lock_heartbeat column migration. False
     # (default) leaves every bot that hasn't had that migration run behaving exactly as before.
@@ -1137,6 +1159,15 @@ class StochBot:
         # Shared in-process barrier for hedge cycle entries -- see _cycle_gate_clear_to_enter.
         # Wired by lighter_hedge_dual_leg.py's main(); None for every standalone bot.
         self.cycle_hub = None
+        # Set the tick the barrier clears this leg to enter, consumed by try_enter -- see
+        # schema_has_cycle_id. Not restored across a restart because it is only needed for the
+        # brief window between a clearance and the entry it was granted for.
+        self._pending_cycle_id = None
+        # Trigger price (float, pre-rounding) of whatever native stop order we believe is
+        # currently resting on the exchange for this leg's open position -- see
+        # BotConfig.native_stop_loss_enabled / _sync_native_stop. None whenever we are flat, or
+        # believe nothing is resting (just closed, just restarted).
+        self._native_stop_synced = None  # (trigger_price, qty) last confirmed resting, or None
         self._burned_signal = None  # see BotConfig.red_exit_burns_signal
         # See BotConfig.profit_lock_burn_k_gate's docstring. _burned_signal_via distinguishes a
         # profit-lock-sourced burn (eligible for the K-reclaim early-clear) from a loss-sourced
@@ -1213,7 +1244,8 @@ class StochBot:
         except Exception as e:
             print(f"  (log_run failed: {e})", flush=True)
 
-    async def log_trade(self, side, ae, exit_price, base_amount, pnl_usd, reason, legs_used, opened_at):
+    async def log_trade(self, side, ae, exit_price, base_amount, pnl_usd, reason, legs_used,
+                        opened_at, cycle_id=None):
         # Idempotent insert (proven necessary 2026-09-24): a Render restart can briefly leave
         # the old and new process both alive, and both independently finish closing the same
         # real position -- each computes and writes the identical realized_pnl_usd update (so
@@ -1221,14 +1253,20 @@ class StochBot:
         # which duplicates unlike an UPDATE. on_conflict + resolution=ignore-duplicates makes
         # a repeat insert for the same (opened_at, side, avg_entry_price) a silent no-op
         # instead of a second row. Requires a matching unique constraint on table_trades.
+        row = {
+            "side": side, "avg_entry_price": ae, "exit_price": exit_price,
+            "base_amount_btc": base_amount, "pnl_usd": pnl_usd, "reason": reason,
+            "legs_used": legs_used, "opened_at": opened_at,
+        }
+        if cycle_id is not None:
+            # Omitted entirely rather than sent as null -- schema_has_cycle_id bots only pass a
+            # value once the migration exists; a bot/table without that column must never see
+            # this key at all, or PostgREST rejects the whole insert.
+            row["cycle_id"] = cycle_id
         await self.sb(
             "POST",
             f"{self.cfg.table_trades}?on_conflict=opened_at,side,avg_entry_price",
-            {
-                "side": side, "avg_entry_price": ae, "exit_price": exit_price,
-                "base_amount_btc": base_amount, "pnl_usd": pnl_usd, "reason": reason,
-                "legs_used": legs_used, "opened_at": opened_at,
-            },
+            row,
             extra_headers={"Prefer": "resolution=ignore-duplicates,return=representation"},
         )
 
@@ -1838,7 +1876,10 @@ class StochBot:
         hub["ready"][wid] = now
         if hub["members"].issubset(hub["ready"].keys()):
             # Everyone is ready at the same instant: release them all together, then consume our
-            # own clearance immediately so this tick's caller enters too.
+            # own clearance immediately so this tick's caller enters too. Stamp one shared id for
+            # this cycle (see schema_has_cycle_id) -- every member reads the SAME value here,
+            # before any of them has placed an order or can drift from retries.
+            hub["cycle_id"] = f"{int(now * 1000)}"
             hub["cleared"] = {m: now for m in hub["members"]}
             hub["ready"] = {}
             del hub["cleared"][wid]
@@ -2420,6 +2461,52 @@ class StochBot:
         except Exception as e:
             await self.log_run("cancel_all_failed", {"error": str(e)[:200]})
 
+    async def _sync_native_stop(self, side, qty, trigger_price):
+        """Keep a real exchange-side stop resting at `trigger_price`, sized to `qty` -- see
+        BotConfig.native_stop_loss_enabled. No-ops unless the desired (trigger, qty) pair
+        actually changed (a fresh entry, a live SL override applied mid-position, or -- for any
+        bot that DCAs, not true of either hedge leg today -- a new leg added), so this costs
+        nothing on the other ~99% of ticks.
+
+        `price` on create_sl_order is the IOC execution band once triggered, not the trigger
+        itself -- deliberately wide (NATIVE_STOP_BAND_PCT, vs. place_order's 0.05%) because the
+        whole point of this order is to still fill during the fast move our own poll could not
+        react to in time; a tight band here could let the stop trigger and then fail to fill,
+        which would be worse than not having it at all.
+
+        These bots never place any OTHER resting order (place_order is always a reduce_only or
+        entry market order), so cancel_all() here cannot cancel anything but a previous native
+        stop of our own.
+        """
+        desired = (trigger_price, round(qty, 8))
+        if desired == self._native_stop_synced:
+            return
+        await self.cancel_all()
+        is_ask = (side == "long")  # closing a long = selling; closing a short = buying
+        band = trigger_price * (1 - NATIVE_STOP_BAND_PCT / 100 if is_ask
+                                else 1 + NATIVE_STOP_BAND_PCT / 100)
+        trig_int = int(round(trigger_price * (10 ** self.cfg.price_decimals)))
+        price_int = int(round(band * (10 ** self.cfg.price_decimals)))
+        qty_int = int(round(qty * (10 ** self.cfg.size_decimals)))
+        co_idx = int(time.time() * 1000) % 500_000_000
+        try:
+            _order, _resp, err = await asyncio.wait_for(
+                self.client.create_sl_order(
+                    market_index=self.cfg.market_index, client_order_index=co_idx,
+                    base_amount=qty_int, trigger_price=trig_int, price=price_int,
+                    is_ask=is_ask, reduce_only=True,
+                ),
+                timeout=ORDER_TIMEOUT,
+            )
+            if err:
+                await self.log_run("native_stop_place_failed", {"error": str(err)[:200]})
+                return  # leave _native_stop_synced as-is -- retry next tick
+        except Exception as e:
+            await self.log_run("native_stop_place_failed", {"error": str(e)[:200]})
+            return
+        self._native_stop_synced = desired
+        await self.log_run("native_stop_synced", {"side": side, "trigger": trigger_price})
+
     async def emergency_flatten(self, reason, detail):
         """Real position is larger than anything we asked for. Get flat immediately -- this is the
         guard against repeating the ~20x-leverage incident.
@@ -2619,6 +2706,15 @@ class StochBot:
         await self.update_state(patch)
         entry_detail = {"signal": signal, "price": price, "via": via,
                         "qty": abs(pos), "regime": regime}
+        if cfg.schema_has_cycle_id and self._pending_cycle_id is not None:
+            # Isolated write, same reasoning as position_blank_seconds above -- a missing-column
+            # failure here must never cost us the critical patch that just recorded a real fill.
+            entry_detail["cycle_id"] = self._pending_cycle_id
+            try:
+                await self.update_state({"cycle_id": self._pending_cycle_id})
+            except Exception:
+                pass  # best-effort only -- read back from state at close time regardless
+        self._pending_cycle_id = None
         if cfg.breakeven_floor_enabled and cfg.cycle_partner_table is not None:
             # Snapshot the partner's CUMULATIVE realized pnl now, so its pnl for this cycle can be
             # isolated later as (realized_now - baseline). Taken after the critical patch, and
@@ -2662,6 +2758,12 @@ class StochBot:
 
     async def close_all(self, reason, state, side, legs, best_bid, best_ask, candle_ts,
                         known_pos=None):
+        if self.cfg.native_stop_loss_enabled:
+            # We are about to close ourselves -- clear the resting native stop first so it can
+            # never fire into a position that's already flat (or, worse, a fresh one from the
+            # next cycle). Safe even if nothing is resting (cancel_all is a no-op then).
+            await self.cancel_all()
+            self._native_stop_synced = None
         prior_collateral = state.get("collateral_before_entry")
         # Close what is really open. Closing only the tracked legs would leave a residual
         # position running whenever a phantom fill made the real size larger.
@@ -2715,7 +2817,17 @@ class StochBot:
         if self.cfg.schema_has_position_bands:
             close_patch["position_tp_pct"] = None
             close_patch["position_sl_pct"] = None
+        # Read back whatever try_enter persisted (survives a restart mid-position, since it comes
+        # from `state`, not an in-process field). Not bundled into close_patch -- same isolation
+        # reasoning as profit_lock_peak_pct below, a missing-column failure here must never cost
+        # the critical close write.
+        cycle_id = state.get("cycle_id") if self.cfg.schema_has_cycle_id else None
         await self.update_state(close_patch)
+        if self.cfg.schema_has_cycle_id:
+            try:
+                await self.update_state({"cycle_id": None})
+            except Exception:
+                pass
         self.profit_lock_peak_pct = None
         if self.cfg.schema_has_profit_lock:
             try:
@@ -2742,7 +2854,7 @@ class StochBot:
         self.position_stoch_activation_pct = None
         self.position_stoch_retreat_points = None
         await self.log_trade(side, ae, exit_price, qty, pnl, reason, len(legs),
-                             ms_to_iso(state.get("first_entry_time")))
+                             ms_to_iso(state.get("first_entry_time")), cycle_id=cycle_id)
         await self.log_run("closed", {"reason": reason, "pnl": pnl, "side": side})
         state["realized_pnl_usd"] = new_pnl
         return True
@@ -3771,11 +3883,17 @@ class StochBot:
         # the position normally -- returning here instead is what left three live positions
         # with no TP or SL running on 2026-09-22.
         if side is not None and confirmed_flat:
+            if cfg.native_stop_loss_enabled:
+                # The leading cause of an external close once a native stop is resting IS that
+                # stop firing -- reset so the next entry resyncs a fresh one, and tag the trade
+                # below as the designed outcome it is, not an anomaly.
+                self._native_stop_synced = None
             prior = state.get("collateral_before_entry")
             pnl = (collateral - prior) if (prior is not None and collateral is not None) else 0.0
             ae = avg_entry(legs) or state.get("first_entry_price")
             qty = total_qty(legs) or 0.0001
             implied_exit = (ae + pnl / qty) if side == "long" else (ae - pnl / qty)
+            ext_cycle_id = state.get("cycle_id") if cfg.schema_has_cycle_id else None
             ext_patch = {"side": None, "legs": [], "first_entry_price": None,
                         "first_entry_time": None, "dca_level": 0,
                         "realized_pnl_usd": state["realized_pnl_usd"] + pnl}
@@ -3805,9 +3923,19 @@ class StochBot:
             self.position_stoch_extreme_k = None
             self.position_stoch_activation_pct = None
             self.position_stoch_retreat_points = None
-            await self.log_trade(side, ae, implied_exit, qty, pnl, "EXTERNAL", len(legs),
-                                 ms_to_iso(state.get("first_entry_time")))
-            await self.log_run("resolved_externally", {"side": side, "pnl": pnl})
+            # With a native stop resting, this path is the EXPECTED way a stop-out now happens
+            # (the exchange closes it, not our own close_all) -- tag it "SL" so it reads as the
+            # designed outcome in win/loss stats, not an anomaly. Bots without the native stop
+            # keep "EXTERNAL": for them an unrequested close really is unexplained.
+            ext_reason = "SL" if cfg.native_stop_loss_enabled else "EXTERNAL"
+            if cfg.schema_has_cycle_id and ext_cycle_id is not None:
+                try:
+                    await self.update_state({"cycle_id": None})
+                except Exception:
+                    pass
+            await self.log_trade(side, ae, implied_exit, qty, pnl, ext_reason, len(legs),
+                                 ms_to_iso(state.get("first_entry_time")), cycle_id=ext_cycle_id)
+            await self.log_run("resolved_externally", {"side": side, "pnl": pnl, "reason": ext_reason})
             state["realized_pnl_usd"] += pnl
             side, legs = None, []
 
@@ -3902,6 +4030,10 @@ class StochBot:
             sl = round_trigger(state["first_entry_price"] * (1 - pos_sl / 100 if side == "long"
                                                              else 1 + pos_sl / 100),
                                up=(side != "long"))
+            if cfg.native_stop_loss_enabled:
+                qty_now = total_qty(legs)
+                if qty_now > 0:
+                    await self._sync_native_stop(side, qty_now, sl)
             check_price = best_bid if side == "long" else best_ask
             gap_hit = None
             if side == "long":
@@ -4212,6 +4344,8 @@ class StochBot:
                     # why the poll alone let the legs desync into naked single-leg trades.
                     gate = self._cycle_gate_clear_to_enter(
                         want=self._has_entry_pressure() and self._cycle_gap_elapsed())
+                    if gate and self.cycle_hub is not None:
+                        self._pending_cycle_id = self.cycle_hub.get("cycle_id")
                     partner_flat = (await self._partner_is_flat() if gate is None else gate)
                 elif wants_in:
                     # No cycle partner: this leg's own entry condition is pressure AND the gap.

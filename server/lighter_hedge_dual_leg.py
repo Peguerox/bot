@@ -253,6 +253,18 @@ LONG_CONFIG = BotConfig(
     # incident). Only the instance holding the lock on this leg's own state row takes new entries;
     # exits are never gated on it. See BotConfig.single_instance_lock.
     single_instance_lock=True,
+    # 2026-10-01, direct request: real exchange-side stop, placed the moment a position opens,
+    # instead of relying only on our own 0.5s poll + reduce_only market order. Confirmed in real
+    # trade data that every software-caught SL closed 0.004-0.016 points worse than the
+    # configured pct (e.g. -0.045% on a 0.03% stop) -- the exchange enforces its own trigger
+    # without waiting on our poll. See BotConfig.native_stop_loss_enabled.
+    native_stop_loss_enabled=True,
+    # 2026-10-01: both legs stamp the SAME id (the cycle barrier's release instant) onto their
+    # entry and carry it to their close, so the dashboard can pair a cycle's two rows by id
+    # instead of guessing from opened_at proximity -- a guess that a slow confirm/retry on one
+    # leg could blow past, splitting one real cycle into two unpaired rows. Requires the
+    # cycle_id column migration. See BotConfig.schema_has_cycle_id.
+    schema_has_cycle_id=True,
     # 2026-09-30, direct request: retune the exits from the dashboard without a deploy, and show
     # the live volatility they have to cope with. Volatility ran 0.048% through the quiet hours
     # and 0.117% at the US open the same day -- 2.4x -- and no single stop is right across that.
@@ -340,6 +352,18 @@ SHORT_CONFIG = BotConfig(
     # incident). Only the instance holding the lock on this leg's own state row takes new entries;
     # exits are never gated on it. See BotConfig.single_instance_lock.
     single_instance_lock=True,
+    # 2026-10-01, direct request: real exchange-side stop, placed the moment a position opens,
+    # instead of relying only on our own 0.5s poll + reduce_only market order. Confirmed in real
+    # trade data that every software-caught SL closed 0.004-0.016 points worse than the
+    # configured pct (e.g. -0.045% on a 0.03% stop) -- the exchange enforces its own trigger
+    # without waiting on our poll. See BotConfig.native_stop_loss_enabled.
+    native_stop_loss_enabled=True,
+    # 2026-10-01: both legs stamp the SAME id (the cycle barrier's release instant) onto their
+    # entry and carry it to their close, so the dashboard can pair a cycle's two rows by id
+    # instead of guessing from opened_at proximity -- a guess that a slow confirm/retry on one
+    # leg could blow past, splitting one real cycle into two unpaired rows. Requires the
+    # cycle_id column migration. See BotConfig.schema_has_cycle_id.
+    schema_has_cycle_id=True,
     # 2026-09-30, direct request: retune the exits from the dashboard without a deploy, and show
     # the live volatility they have to cope with. Volatility ran 0.048% through the quiet hours
     # and 0.117% at the US open the same day -- 2.4x -- and no single stop is right across that.
