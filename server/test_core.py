@@ -4414,6 +4414,11 @@ async def t_entry_features_persisted_on_entry_and_carried_to_trade_log():
               bot.state_row.get(key) is not None, bot.state_row.get(key))
     snapshot = {k: bot.state_row[k] for k in
                 ("entry_k", "entry_balance_index", "entry_vol_pct", "entry_dispersion")}
+    check("entry K is numeric, not a long/short signal",
+          isinstance(snapshot["entry_k"], (int, float)) and not isinstance(snapshot["entry_k"], bool),
+          snapshot["entry_k"])
+    check("entry K matches the closed-candle oscillator (0 for these candles)",
+          snapshot["entry_k"] == 0.0, snapshot["entry_k"])
     ok = await bot.close_all("SL", dict(bot.state_row), "long",
                              bot.state_row["legs"], 1.0, 1.0, 1)
     check("close succeeded", ok is True)
@@ -4432,6 +4437,52 @@ async def t_entry_features_never_touched_without_schema_flag():
     for key in ("entry_k", "entry_balance_index", "entry_vol_pct", "entry_dispersion"):
         check(f"{key} never written -- key absent from the row",
               key not in bot.state_row, bot.state_row.get(key))
+
+
+async def t_entry_features_numeric_k_does_not_change_live_signal():
+    print("\n[entry features: both hedge directions record numeric K without changing the live signal]")
+    for direction in ("long", "short"):
+        ex = FakeExchange()
+        bot = make_bot(ex, candles_kind="long", schema_has_entry_features=True)
+        bot.live_k, bot.live_signal = 81.25, "short"
+        await bot.try_enter(direction, 86000.0, 20.0, "test", bot.candles[-2]["t"],
+                            dict(bot.state_row), ex.collateral)
+        check(f"{direction}: snapshot K is 0 even when live K was stale",
+              bot.state_row.get("entry_k") == 0.0, bot.state_row.get("entry_k"))
+        check(f"{direction}: live K and signal untouched",
+              (bot.live_k, bot.live_signal) == (81.25, "short"), (bot.live_k, bot.live_signal))
+        check(f"{direction}: exactly one intended order", len(ex.orders) == 1, ex.orders)
+        check(f"{direction}: recorded intended direction", bot.state_row["side"] == direction)
+
+    for kind, expected in (("long", 0.0), ("short", 100.0), ("mid", 50.0)):
+        check(f"numeric K for {kind} candles", core.compute_entry_stoch_k(make_candles(kind), 5) == expected)
+    candles = make_candles("mid")
+    candles[-1].update({"h": 1e9, "l": 1.0, "c": 1.0})
+    check("unfinished candle excluded", core.compute_entry_stoch_k(candles, 5) == 50.0)
+    check("too few candles yields no invented K", core.compute_entry_stoch_k(candles[:4], 5) is None)
+    for c in candles:
+        c.update({"h": 86000.0, "l": 86000.0, "c": 86000.0})
+    check("zero-range candles yield no invented K", core.compute_entry_stoch_k(candles, 5) is None)
+
+
+async def t_entry_features_write_failure_is_visible_and_keeps_the_fill():
+    print("\n[entry features: failed snapshot write logs the issue and never loses the real fill]")
+    ex = FakeExchange()
+    bot = make_bot(ex, candles_kind="long", schema_has_entry_features=True)
+    update = bot.update_state
+
+    async def reject_snapshot(patch):
+        if "entry_k" in patch:
+            raise RuntimeError("snapshot write rejected")
+        await update(patch)
+
+    bot.update_state = reject_snapshot
+    await bot.tick()
+    check("filled position still tracked", bot.state_row["side"] == "long")
+    check("only one order sent", len(ex.orders) == 1)
+    check("snapshot failure logged", any(a == "entry_features_write_failed" for a, _ in bot.runs))
+    check("entry log retains numeric snapshot", any(a == "entered" and d.get("entry_features", {}).get("entry_k") == 0.0
+                                                    for a, d in bot.runs))
 
 
 async def t_post_reversal_cooldown_blocks_instant_reopen():
@@ -4819,6 +4870,8 @@ async def main():
               t_balance_gate_off_by_default,
               t_entry_features_persisted_on_entry_and_carried_to_trade_log,
               t_entry_features_never_touched_without_schema_flag,
+              t_entry_features_numeric_k_does_not_change_live_signal,
+              t_entry_features_write_failure_is_visible_and_keeps_the_fill,
               t_post_reversal_cooldown_blocks_instant_reopen,
               t_post_reversal_cooldown_allows_reentry_once_elapsed,
               t_post_reversal_cooldown_off_by_default,

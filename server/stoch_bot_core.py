@@ -1046,6 +1046,23 @@ def compute_true_range_pct(candles):
     return tr / last["c"] * 100
 
 
+def compute_entry_stoch_k(candles, window=5):
+    """Numeric entry diagnostic, using the same closed-candle formula as compute_stoch_signal.
+
+    Pure: never updates the live signal/K or changes the trading decision. The signal method's
+    first return value is a direction string, NOT K; persisting it rejects the whole snapshot.
+    """
+    if len(candles) < window + 2:
+        return None
+    closed = candles[:-1]
+    bars = closed[-window:]
+    hh = max(c["h"] for c in bars)
+    ll = min(c["l"] for c in bars)
+    if hh == ll:
+        return None
+    return 100 * (closed[-1]["c"] - ll) / (hh - ll)
+
+
 def compute_intrabar_dispersion(candles, window=5):
     """Standard deviation of each closed candle's (high+low)/2 midpoint, over the trailing
     `window` closed candles -- raw dollars, not a %. Direct request, 2026-10-01: distinct from
@@ -3080,9 +3097,8 @@ class StochBot:
             # (not read from self.live_k, which only the pressure-bias OWNER leg keeps current)
             # so both hedge legs capture a real reading regardless of owner/follower role. A
             # missing-column failure here must never cost the critical patch above.
-            k_val, _, _ = self.compute_stoch_signal()
             snapshot = {
-                "entry_k": k_val,
+                "entry_k": compute_entry_stoch_k(self.candles, cfg.stoch_window),
                 "entry_balance_index": compute_color_weighted_balance_index(self.candles, 5),
                 "entry_vol_pct": self._measure_vol_pct(10),
                 "entry_dispersion": compute_intrabar_dispersion(self.candles, 5),
@@ -3090,8 +3106,8 @@ class StochBot:
             entry_detail["entry_features"] = snapshot
             try:
                 await self.update_state(snapshot)
-            except Exception:
-                pass
+            except Exception as e:
+                await self.log_run("entry_features_write_failed", {"error": str(e)[:300]})
         if cfg.breakeven_floor_enabled and cfg.cycle_partner_table is not None:
             # Snapshot the partner's CUMULATIVE realized pnl now, so its pnl for this cycle can be
             # isolated later as (realized_now - baseline). Taken after the critical patch, and

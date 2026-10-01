@@ -2285,14 +2285,19 @@ function HedgeDualLegPanel({
   // volatility, and dispersion read at the moment this cycle opened -- both legs enter on the
   // same market at the same instant, so either leg's snapshot represents the cycle; prefer the
   // long leg's, fall back to the short leg's. Purely descriptive, for hand-review in this
-  // tooltip, drives no bot decision. undefined (old rows, before the migration) vs null (new
-  // row, read failed) are both just "no reading" here -- != null covers both.
+  // tooltip, drives no bot decision. Prefer a saved numeric reading from either leg; older
+  // trades with no saved snapshot say so explicitly rather than hiding this whole line.
   const entryFeaturesLine = (c: any) => {
-    const t = c.long ?? c.short;
-    if (!t || t.entry_k === undefined) return null;   // column doesn't exist yet on this row
-    const fmt = (v: any, suffix = "") => (v != null ? v.toFixed(v < 10 ? 2 : 1) + suffix : "—");
-    return `at entry: K ${fmt(t.entry_k)}  balance-idx ${fmt(t.entry_balance_index)}  `
-      + `vol ${fmt(t.entry_vol_pct, "%")}  dispersion ${fmt(t.entry_dispersion, "$")}`;
+    const read = (key: string): number | undefined =>
+      [c.long?.[key], c.short?.[key]].find((v) => typeof v === "number" && Number.isFinite(v));
+    const k = read("entry_k"), balance = read("entry_balance_index");
+    const vol = read("entry_vol_pct"), dispersion = read("entry_dispersion");
+    const fmt = (v: number | undefined, suffix = "") =>
+      v !== undefined ? v.toFixed(v < 10 ? 2 : 1) + suffix : "—";
+    const missing = [k, balance, vol, dispersion].every((v) => v === undefined);
+    return `at entry: K ${fmt(k)}  balance-idx ${fmt(balance)}  `
+      + `vol ${fmt(vol, "%")}  dispersion ${fmt(dispersion, "$")}`
+      + (missing ? " (no entry snapshot saved)" : "");
   };
   const cycleTooltip = (c: any) => {
     const win = c.long && c.short
