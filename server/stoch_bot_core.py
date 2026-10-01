@@ -3972,7 +3972,8 @@ class StochBot:
                     await self.update_state(patch)
                 except Exception:
                     pass
-                if cfg.intrabar_dispersion_pause_at is not None:
+                if (cfg.intrabar_dispersion_pause_at is not None
+                        or cfg.min_intrabar_dispersion_to_enter is not None):
                     # Isolated write (2026-10-01): live_intrabar_dispersion is a newer, separate
                     # column -- a missing-column failure here must never cost the live_k/
                     # live_signal write above. Same cadence, so the dashboard panel can show
