@@ -8,15 +8,21 @@ import { getSupabaseAdmin } from "@/lib/supabase-admin";
 // single source of truth.
 export async function POST() {
   const sb = getSupabaseAdmin();
-  const { data } = await sb
+  const { data, error: readError } = await sb
     .from("lighter_btc_optimal_state")
     .select("enabled")
     .eq("id", 1)
     .single();
-  const newState = !data?.enabled;
-  await Promise.all([
-    sb.from("lighter_btc_optimal_state").update({ enabled: newState }).eq("id", 1),
-    sb.from("lighter_stoch_dca_btc_state").update({ enabled: newState }).eq("id", 1),
+  if (readError || typeof data?.enabled !== "boolean") {
+    return NextResponse.json({ error: "Could not read the hedge's ON/OFF state. No change was requested." }, { status: 500 });
+  }
+  const newState = !data.enabled;
+  const results = await Promise.all([
+    sb.from("lighter_btc_optimal_state").update({ enabled: newState }).eq("id", 1).select("enabled").single(),
+    sb.from("lighter_stoch_dca_btc_state").update({ enabled: newState }).eq("id", 1).select("enabled").single(),
   ]);
+  if (results.some((r) => r.error || r.data?.enabled !== newState)) {
+    return NextResponse.json({ error: "Could not confirm the ON/OFF change on both hedge legs. One leg may have changed. Refresh the dashboard and check both legs before trying again." }, { status: 500 });
+  }
   return NextResponse.json({ enabled: newState });
 }

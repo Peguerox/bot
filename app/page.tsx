@@ -1585,12 +1585,21 @@ function CompactStochBtcPanel({
       : `Turn ON ${title}? This resumes real trading.`;
     if (!confirm(question)) return;
     setToggling(true);
-    await fetch("/api/lighter-btc-toggle", {
-      method: "POST", headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ table }),
-    });
-    await onToggled();
-    setToggling(false);
+    try {
+      const res = await fetch("/api/lighter-btc-toggle", {
+        method: "POST", headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ table }),
+      });
+      if (!res.ok) {
+        const body = await res.json().catch(() => null);
+        alert(body?.error ?? "Could not confirm the ON/OFF change. Check the current state before trying again.");
+      }
+      await onToggled();
+    } catch {
+      alert("Could not confirm the ON/OFF change. Refresh the dashboard to check the current state before trying again.");
+    } finally {
+      setToggling(false);
+    }
   }
 
   async function handleClosePosition() {
@@ -2139,9 +2148,18 @@ function HedgeDualLegPanel({
       : "Turn ON the hedge strategy? This resumes real trading on BOTH legs together.";
     if (!confirm(question)) return;
     setToggling(true);
-    await fetch("/api/lighter-hedge-toggle", { method: "POST" });
-    await onToggled();
-    setToggling(false);
+    try {
+      const res = await fetch("/api/lighter-hedge-toggle", { method: "POST" });
+      if (!res.ok) {
+        const body = await res.json().catch(() => null);
+        alert(body?.error ?? "Could not confirm the ON/OFF change on both hedge legs. Check both legs before trying again.");
+      }
+      await onToggled();
+    } catch {
+      alert("Could not confirm the ON/OFF change. Refresh the dashboard to check both hedge legs before trying again.");
+    } finally {
+      setToggling(false);
+    }
   }
 
   // Direct request 2026-09-30: a one-click reset -- wipes both legs' trade history, rolls any
