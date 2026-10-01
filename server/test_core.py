@@ -3984,13 +3984,19 @@ async def t_live_configs_match_their_stated_rules():
     # filter below isn't entangled with anything else.
     check("Worker 1: self-lock OFF for the isolated dispersion-filter test",
           w1.self_lock_enabled is False, w1.self_lock_enabled)
-    # 2026-10-01: dispersion filter replaced by the zebra / candle-size index band (600-1000),
-    # with exits SL 0.10 / TP 0.10 / profit lock 0.05 and nothing else.
-    check("Worker 1: dispersion filter OFF (replaced by the zebra index)",
+    # 2026-10-01: dispersion filter replaced by the zebra index, then by the color-weighted
+    # balance index (v2 -- the switch-counting zebra index scored a 4-red-1-green downtrend as
+    # "balanced" and let a losing long through live at 16:55 UTC). Exits unchanged: SL 0.10 /
+    # TP 0.10 / profit lock 0.05.
+    check("Worker 1: dispersion filter OFF (replaced by the color-balance index)",
           w1.intrabar_dispersion_pause_at is None, w1.intrabar_dispersion_pause_at)
-    check("Worker 1: zebra index band 600-1000 over 5 bars",
-          (w1.zebra_index_min, w1.zebra_index_max, w1.zebra_index_window) == (600.0, 1000.0, 5),
-          (w1.zebra_index_min, w1.zebra_index_max, w1.zebra_index_window))
+    check("Worker 1: zebra index OFF (superseded by the color-balance index)",
+          (w1.zebra_index_min, w1.zebra_index_max) == (None, None),
+          (w1.zebra_index_min, w1.zebra_index_max))
+    check("Worker 1: color-balance index band 65-75 over 5 bars",
+          (w1.color_balance_index_min, w1.color_balance_index_max, w1.color_balance_index_window)
+          == (65.0, 75.0, 5),
+          (w1.color_balance_index_min, w1.color_balance_index_max, w1.color_balance_index_window))
     check("Worker 1: SL 0.10 / TP 0.10 / profit lock 0.05, saving lock off",
           (w1.sl_pct, w1.tp_pct, w1.profit_lock_trigger_pct, w1.saving_lock_arm_frac_of_sl)
           == (0.10, 0.10, 0.05, None),
@@ -4320,6 +4326,70 @@ async def t_zebra_gate_off_by_default():
     check("entered -- no band configured", side == "long", side)
 
 
+async def t_color_balance_index_values():
+    print("\n[color-weighted balance index: size-weighted vote, one stray candle can't dominate]")
+    def bar(o, c, total_range=40.0):
+        # h - l == total_range exactly, regardless of body size -- lets tests build candles with
+        # genuinely EQUAL size even when their bodies differ.
+        hi, lo = max(o, c), min(o, c)
+        extra = total_range - (hi - lo)
+        return {"t": 0, "o": o, "c": c, "h": hi + extra / 2, "l": lo - extra / 2}
+    base = 84000.0
+    # 4 reds + 1 green, all equal $40 range -- same shape as the real 16:55 UTC trade that
+    # slipped through the old zebra gate at 50% (switch count, blind to size/dominance).
+    bars = [bar(base, base - 10, 40), bar(base - 10, base - 20, 40), bar(base - 20, base - 10, 40),
+            bar(base - 10, base - 20, 40), bar(base - 20, base - 30, 40), bar(base, base)]
+    cwi = core.compute_color_weighted_balance_index(bars, 5)
+    check("4 red + 1 green, equal size -> clearly below the old zebra's 50%",
+          cwi is not None and cwi < 50, cwi)
+    # 2 green + 2 red + 1 doji, all equal $40 range -- net vote is exactly zero.
+    alt = [bar(base, base + 10, 40), bar(base + 10, base, 40), bar(base, base + 10, 40),
+           bar(base + 10, base, 40), bar(base, base, 40), bar(base, base)]
+    # Not exactly 100 due to floating-point: size% normalizes by each candle's OWN close
+    # (84010 vs 84000 etc.), so the four non-doji candles' sizes differ by a hair. Correct
+    # behaviour, not a bug -- loose tolerance instead of exact equality.
+    check("2 green + 2 red + 1 doji, equal size -> ~100 (fully balanced)",
+          core.compute_color_weighted_balance_index(alt, 5) > 99.9,
+          core.compute_color_weighted_balance_index(alt, 5))
+    trend = [bar(base + 10 * i, base + 10 * (i + 1), 10) for i in range(5)] + [bar(base, base)]
+    check("one color only -> exactly 0 (pure trend)",
+          core.compute_color_weighted_balance_index(trend, 5) == 0.0,
+          core.compute_color_weighted_balance_index(trend, 5))
+    check("too few candles -> None", core.compute_color_weighted_balance_index(bars[:3], 5) is None)
+
+
+async def _balance_gate_case(value, **cfg):
+    ex = FakeExchange()
+    bot = make_bot(ex, candles_kind="mid", **cfg)
+    bot.candles = make_dispersion_candles([150, 150, 150, 150, 0])   # fresh long signal (K=0)
+    orig = core.compute_color_weighted_balance_index
+    core.compute_color_weighted_balance_index = lambda c, w=5: value
+    try:
+        await bot.tick()
+    finally:
+        core.compute_color_weighted_balance_index = orig
+    return bot.state_row["side"]
+
+
+async def t_balance_gate_blocks_outside_band():
+    print("\n[balance gate: index outside 65-75 blocks a fresh entry]")
+    for v in (40.0, 90.0, None):
+        side = await _balance_gate_case(v, color_balance_index_min=65.0, color_balance_index_max=75.0)
+        check(f"blocked at index {v}", side is None, side)
+
+
+async def t_balance_gate_allows_inside_band():
+    print("\n[balance gate: index inside 65-75 lets a fresh entry through]")
+    side = await _balance_gate_case(70.0, color_balance_index_min=65.0, color_balance_index_max=75.0)
+    check("entered at index 70", side == "long", side)
+
+
+async def t_balance_gate_off_by_default():
+    print("\n[balance gate: off by default]")
+    side = await _balance_gate_case(5000.0)
+    check("entered -- no band configured", side == "long", side)
+
+
 async def main():
     for t in (t_normal_entry, t_phantom_double_fill, t_nonce_error_but_filled,
               t_order_error_no_fill, t_circuit_breaker, t_close_uses_real_size,
@@ -4527,7 +4597,11 @@ async def main():
               t_zebra_index_values,
               t_zebra_gate_blocks_outside_band,
               t_zebra_gate_allows_inside_band,
-              t_zebra_gate_off_by_default):
+              t_zebra_gate_off_by_default,
+              t_color_balance_index_values,
+              t_balance_gate_blocks_outside_band,
+              t_balance_gate_allows_inside_band,
+              t_balance_gate_off_by_default):
         try:
             await t()
         except Exception as e:

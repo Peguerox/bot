@@ -264,15 +264,9 @@ CONFIG = BotConfig(
     # OTHER lock (a real SL mid-session) still uses the easier rule, unchanged. See
     # BotConfig.self_lock_hour_open_requires_tp. Requires lighter_self_lock_lock_via.sql.
     self_lock_hour_open_requires_tp=True,  # inert while self_lock_enabled=False above
-    # 2026-10-01, direct request: isolated A/B test. stdev of each closed candle's
-    # (high+low)/2 midpoint over the trailing 5 bars, raw dollars -- block new entries (and a
-    # reversal's reopen leg; TP/SL/exits never gated) once that reads >= $50. Tested against
-    # 575 real trades the same day: below $50, +$0.0024/trade avg; above, -$0.038/trade avg,
-    # z=-2.72, stable across the whole $32-55 band. Every other experimental gate (self-lock,
-    # hour exclusions, z-score) is OFF for this run specifically so the result isn't entangled
-    # with anything else -- see BotConfig.intrabar_dispersion_pause_at /
-    # compute_intrabar_dispersion.
-    intrabar_dispersion_pause_at=None,  # 2026-10-01: OFF -- replaced by the zebra index band below
+    # 2026-10-01: intrabar dispersion filter OFF -- superseded by the zebra index, then by the
+    # color-weighted balance index below. See compute_intrabar_dispersion if ever revisited.
+    intrabar_dispersion_pause_at=None,
     intrabar_dispersion_window=5,
     require_fresh_signal=True,  # 2026-09-28: only enter on the exact candle the signal first appears
     # 2026-10-01, direct request ("you went in 2 times in the same signal, not a fresh signal"):
@@ -296,13 +290,25 @@ CONFIG = BotConfig(
     # 2026-10-01, direct request: back to 0.05 ("0.05 would be ok"). At 0.02 with zero give-back
     # it banked ~+$0.013 per lock against a ~-$0.11 SL -- one SL erased ~8 locks.
     profit_lock_trigger_pct=0.05,
-    # 2026-10-01, direct request ("be more selective"): a fresh stochastic signal may only enter
-    # while the zebra / candle-size index sits between 600 and 1000 -- the profitable middle of
-    # the hill found on 604 real Worker 1 trades. Outside the band: no entry. Exits are SL 0.10 /
-    # TP 0.10 / profit lock 0.05 with zero give-back, nothing else. See BotConfig.zebra_index_min.
-    zebra_index_min=600.0,
-    zebra_index_max=1000.0,
+    # 2026-10-01: zebra index (color-SWITCH counting) turned OFF, replaced by the
+    # color-weighted-balance index below -- real trade caught live at 16:55 UTC showed the switch
+    # count's blind spot: R R G R R (clearly a downtrend, 4 of 5 red) scored 50% zebra because one
+    # green candle in the middle still counts as 2 full "switches", landed inside the 600-1000
+    # band, entered long, lost on SL. Kept in the file (inert, None/None) as the earlier attempt.
+    zebra_index_min=None,
+    zebra_index_max=None,
     zebra_index_window=5,
+    # 2026-10-01, direct request ("let's take 65 to 75"): v2 of the same idea -- each candle's
+    # color vote weighted by its own size, so one stray counter-direction candle can't fake
+    # balance the way plain switch-counting could. Backtest: 605 real trades replayed through
+    # today's exits, rolling window by index -- a plateau at 65-78 (up to +$0.017/trade, 74% win),
+    # a sharp drop right after 78. Band set to 65-75, inside the plateau rather than at its edge.
+    # In-band ~13% of all minutes (~194 min/day); fresh-signal-and-in-band coincide ~51x/day, so
+    # expect noticeably fewer trades than the zebra run, not a rare event. See
+    # BotConfig.color_balance_index_min / compute_color_weighted_balance_index.
+    color_balance_index_min=65.0,
+    color_balance_index_max=75.0,
+    color_balance_index_window=5,
     profit_lock_trail_pct=0.0,
     # 2026-09-29: briefly disabled fleet-wide during a Supabase statement-timeout incident
     # (database itself started canceling queries under cumulative write load, confirmed in

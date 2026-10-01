@@ -256,6 +256,20 @@ class BotConfig:
     zebra_index_min: Optional[float] = None
     zebra_index_max: Optional[float] = None
     zebra_index_window: int = 5
+    # Color-weighted balance index gate (2026-10-01, direct request -- v2 of the zebra idea after
+    # backtesting showed switch-counting was fooled by a single counter-direction candle). Each of
+    # the trailing color_balance_index_window CLOSED candles casts a vote of its own color
+    # (+1 green, -1 red, 0 doji) weighted by its own (high-low)/close% size; balance = (1 -
+    # |sum(size*color)/sum(size)|) x 100. 100 = perfectly balanced (good fade conditions), 0 = one
+    # color dominates in both count AND size (a real trend). A single stray candle only partially
+    # offsets the vote instead of counting as a full "switch". Same entry-only gate shape as
+    # zebra_index_min/max -- out of [min, max] blocks a fresh entry and a reversal's reopen leg,
+    # never an exit. Backing: 605 real Worker 1 trades replayed through today's exits, rolling
+    # window: a plateau at index 65-78 (up to +$0.017/trade, 74% win), a sharp drop after 78.
+    # Deliberately narrower than the plateau (65-75) to sit inside it, not right at the cliff edge.
+    color_balance_index_min: Optional[float] = None
+    color_balance_index_max: Optional[float] = None
+    color_balance_index_window: int = 5
     # Low-volatility entry gate (2026-09-29, direct request): the OPPOSITE direction from the
     # pair above -- blocks new entries (and a reversal's reopen leg, never TP/SL/exits) when
     # the market is TOO QUIET rather than too spiky. Built to test a real finding from 844 real
@@ -1036,6 +1050,28 @@ def compute_zebra_size_index(candles, window=5):
     if size_pct <= 0:
         return None
     return zebra_pct / size_pct
+
+
+def compute_color_weighted_balance_index(candles, window=5):
+    """See BotConfig.color_balance_index_min. Reads the trailing `window` CLOSED candles
+    (candles[:-1]). Each candle's color vote is weighted by its own size, so one stray
+    counter-direction candle can't swing the score the way a plain switch count can -- a big red
+    candle still dominates a small green one in between. None if too few candles, or if every
+    candle in the window has zero range (den <= 0)."""
+    closed = candles[:-1]
+    if len(closed) < window:
+        return None
+    bars = closed[-window:]
+    num = 0.0
+    den = 0.0
+    for c in bars:
+        color = 1 if c["c"] > c["o"] else -1 if c["c"] < c["o"] else 0
+        size = (c["h"] - c["l"]) / c["c"] * 100
+        num += size * color
+        den += size
+    if den <= 0:
+        return None
+    return (1 - abs(num / den)) * 100
 
 
 def compute_rsi_stoch_confirmed_signal(candles, rsi_period=5, stoch_period=14, require_confirmation=True, lo=20, hi=80):
@@ -4026,7 +4062,19 @@ class StochBot:
                     await self.update_state(patch)
                 except Exception:
                     pass
-                if cfg.zebra_index_min is not None or cfg.zebra_index_max is not None:
+                if cfg.color_balance_index_min is not None or cfg.color_balance_index_max is not None:
+                    # Isolated best-effort write (2026-10-01) so the dashboard can show the live
+                    # color-weighted balance index the entry gate is reading. Written into the
+                    # SAME live_zebra_index column the zebra gate used -- it is a live readout
+                    # column, not a semantic record, so no new migration is needed. A missing
+                    # column must never cost the live_k write above.
+                    cwi = compute_color_weighted_balance_index(
+                        self.candles, cfg.color_balance_index_window)
+                    try:
+                        await self.update_state({"live_zebra_index": cwi})
+                    except Exception:
+                        pass
+                elif cfg.zebra_index_min is not None or cfg.zebra_index_max is not None:
                     # Isolated best-effort write (2026-10-01) so the dashboard can show the live
                     # zebra / candle-size index the entry gate is reading. A missing column must
                     # never cost the live_k write above. Requires
@@ -4182,6 +4230,17 @@ class StochBot:
                              or (cfg.zebra_index_min is not None and zi < cfg.zebra_index_min)
                              or (cfg.zebra_index_max is not None and zi > cfg.zebra_index_max))
             if zebra_blocked:
+                entry_signal = None
+
+        # Stateless, recomputed every tick -- see BotConfig.color_balance_index_min. Same shape
+        # as the zebra gate above; a bot normally configures one or the other, not both.
+        balance_blocked = False
+        if cfg.color_balance_index_min is not None or cfg.color_balance_index_max is not None:
+            cwi = compute_color_weighted_balance_index(self.candles, cfg.color_balance_index_window)
+            balance_blocked = (cwi is None
+                               or (cfg.color_balance_index_min is not None and cwi < cfg.color_balance_index_min)
+                               or (cfg.color_balance_index_max is not None and cwi > cfg.color_balance_index_max))
+            if balance_blocked:
                 entry_signal = None
 
         if cfg.trading_hours_utc is not None:
@@ -4670,6 +4729,7 @@ class StochBot:
                     reopen_burned = False
                 reopen_overconfirmed = self._entry_overconfirmed(reversal_signal)
                 if (self.entry_vol_paused or intrabar_dispersion_blocked or zebra_blocked
+                        or balance_blocked
                         or (cfg.self_lock_enabled and self.real_trading_locked)
                         or (cfg.trading_hours_utc is not None
                             and self._apply_trading_hours_gate(reversal_signal) is None)
