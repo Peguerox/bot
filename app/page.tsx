@@ -2213,7 +2213,7 @@ function HedgeDualLegPanel({
         <div>
           <h3 className="text-white font-bold text-sm">Worker 2 · Hedge Strategy (2 legs)</h3>
           <p className="text-gray-500 text-[11px] leading-relaxed">
-            One process, two real sub-accounts, moving in CYCLES -- both legs enter together (Worker 2's account LONG, Worker 3's account SHORT), $10 fixed per leg, equal on both sides, trading BTC. A cycle only OPENS while a mean-reversion z-score (+-2.0, not the stochastic) shows real pressure (no entries in flat chop); the signal gates WHEN, never which way. SL 0.06% cuts a losing leg (backed by a real exchange-side stop order, not just our own poll), which then WAITS -- no literal TP, profit-lock trail only (arms +0.10%, trails 0.03% behind peak by default, retunable live below) -- and the trail now starts protecting the instant the OTHER leg gets cut, not only once +0.10% is reached. Both re-enter together only once BOTH are flat again. One switch controls both legs together.
+            One process, two real sub-accounts, moving in CYCLES -- both legs enter together (Worker 2's account LONG, Worker 3's account SHORT), $10 fixed per leg, equal on both sides, trading BTC. A cycle only OPENS while the 25/75 stochastic shows real pressure (no entries in flat chop); the signal gates WHEN, never which way. SL 0.06% cuts a losing leg (backed by a real exchange-side stop order, not just our own poll), which then WAITS -- no literal TP, profit-lock trail only (arms +0.10%, trails 0.03% behind peak by default, retunable live below) -- and the trail now starts protecting the instant the OTHER leg gets cut, not only once +0.10% is reached. Both re-enter together only once BOTH are flat again. One switch controls both legs together.
           </p>
         </div>
         <div className="flex items-center gap-1.5 flex-wrap">
@@ -2272,11 +2272,7 @@ function HedgeDualLegPanel({
             <LegBadge label="Long leg (Worker 2 acct)" leg={longLeg} />
             <LegBadge label="Short leg (Worker 3 acct)" leg={shortLeg} />
             <div className="bg-gray-800/60 rounded-lg p-2 col-span-2">
-              {/* 2026-10-01: the hedge's pressure gate switched from the stochastic (25/75 K
-                  bands) to a mean-reversion z-score (threshold +-2.0) -- see
-                  BotConfig.use_zscore_signal. Worker 1 kept the stochastic; this label is
-                  hedge-specific and must track whichever signal actually governs IT. */}
-              <p className="text-gray-500 text-[10px] uppercase">Pressure Signal (z-score, +-2.0)</p>
+              <p className="text-gray-500 text-[10px] uppercase">Pressure Signal (stoch K, 25/75)</p>
               <p className="font-bold text-sm">
                 <span className={liveSignal === "long" ? "text-green-400" : liveSignal === "short" ? "text-amber-400" : "text-gray-400"}>
                   {liveK != null ? liveK.toFixed(1) : "—"}

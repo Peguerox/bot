@@ -3844,11 +3844,10 @@ async def t_live_configs_match_their_stated_rules():
         check(f"hedge {name} leg: gate off implies a real min_cycle_gap in its place",
               leg.require_pressure_to_enter or leg.min_cycle_gap_seconds > 0,
               (leg.require_pressure_to_enter, leg.min_cycle_gap_seconds))
-        # 2026-10-01, direct request: z-score drives the pressure gate instead of the stochastic
-        # (Worker 1 keeps the plain stochastic -- hedge-specific). See
-        # BotConfig.use_zscore_signal / _compute_pressure_source_signal.
-        check(f"hedge {name} leg: pressure gate uses the z-score signal",
-              leg.use_zscore_signal is True, leg.use_zscore_signal)
+        # 2026-10-01: z-score tried on the pressure gate, then reverted same session ("z-score
+        # sucks") -- back to the plain stochastic. Pinned so the mix-up can't silently repeat.
+        check(f"hedge {name} leg: pressure gate uses the plain stochastic (NOT z-score)",
+              leg.use_zscore_signal is False, leg.use_zscore_signal)
         # 2026-10-01, direct request: real exchange-side stop + shared cycle id for dashboard
         # pairing. See BotConfig.native_stop_loss_enabled / schema_has_cycle_id.
         check(f"hedge {name} leg: native stop-loss on",
