@@ -278,6 +278,16 @@ class BotConfig:
     # indices, e.g. which part of the day a given exit setting stops working. Independent of
     # whether any of these indices actually gate entry for this bot.
     schema_has_entry_features: bool = False
+    # Post-reversal cooldown (2026-10-01, direct request): after a position closes via REVERSAL
+    # specifically (never SL/TP/PROFIT_LOCK/BREAKEVEN_LOCK), block any new entry -- fresh or
+    # another reversal reopen -- for this many seconds. The reversal mechanism itself is
+    # untouched (it still closes and flips immediately when the signal demands it); this only
+    # pauses what happens AFTER. Direct motivation: three real flips in 16 minutes (long ->
+    # short reversal -> flat 10min -> long again), the third one a plain loss -- "the reversal
+    # was not the problem... the problem was going in again without resting." In-process only,
+    # not persisted (a restart clears it, same tradeoff as every other in-process-only gate).
+    # None = off (default, no other bot is affected).
+    post_reversal_cooldown_seconds: Optional[float] = None
     # Low-volatility entry gate (2026-09-29, direct request): the OPPOSITE direction from the
     # pair above -- blocks new entries (and a reversal's reopen leg, never TP/SL/exits) when
     # the market is TOO QUIET rather than too spiky. Built to test a real finding from 844 real
@@ -1274,6 +1284,7 @@ class StochBot:
         self.profit_lock_peak_pct = None
         self._profit_lock_restored = False
         self._saving_trough_pct = None  # see BotConfig.saving_lock_arm_frac_of_sl
+        self._last_reversal_close_at = None  # see BotConfig.post_reversal_cooldown_seconds
         # Breakeven floor (see BotConfig.breakeven_floor_enabled). Same arrangement as the
         # profit-lock trail: in-process state is authoritative, the DB column only exists so a
         # Render restart mid-position doesn't lose the baseline.
@@ -2321,6 +2332,13 @@ class StochBot:
         """Every condition for DECLARING readiness for a new cycle (or, standalone, entering)."""
         return (self._has_entry_pressure() and self._cycle_gap_elapsed()
                 and self._has_entry_dispersion() and self._candle_unused())
+
+    def _reversal_cooldown_active(self):
+        """See BotConfig.post_reversal_cooldown_seconds."""
+        cd = self.cfg.post_reversal_cooldown_seconds
+        if cd is None or self._last_reversal_close_at is None:
+            return False
+        return (time.time() - self._last_reversal_close_at) < cd
 
     def _cycle_gap_elapsed(self):
         """True if enough time has passed since THIS leg went flat -- see
@@ -4286,6 +4304,11 @@ class StochBot:
             if balance_blocked:
                 entry_signal = None
 
+        # See BotConfig.post_reversal_cooldown_seconds -- blocks a fresh entry the same way the
+        # gates above do, never an exit.
+        if self._reversal_cooldown_active():
+            entry_signal = None
+
         if cfg.trading_hours_utc is not None:
             entry_signal = self._apply_trading_hours_gate(entry_signal)
 
@@ -4732,6 +4755,8 @@ class StochBot:
                 closed_ok = await self.close_all("REVERSAL", state, side, legs,
                                                  best_bid, best_ask, candle_ts,
                                                  known_pos=real_pos)
+                if closed_ok and cfg.post_reversal_cooldown_seconds is not None:
+                    self._last_reversal_close_at = time.time()
                 if closed_ok and cfg.red_exit_burns_signal and ae:
                     reversal_red = ((check_price - ae) / ae if side == "long"
                                     else (ae - check_price) / ae) <= 0
@@ -4779,7 +4804,7 @@ class StochBot:
                     reopen_burned = False
                 reopen_overconfirmed = self._entry_overconfirmed(reversal_signal)
                 if (self.entry_vol_paused or intrabar_dispersion_blocked or zebra_blocked
-                        or balance_blocked
+                        or balance_blocked or self._reversal_cooldown_active()
                         or (cfg.self_lock_enabled and self.real_trading_locked)
                         or (cfg.trading_hours_utc is not None
                             and self._apply_trading_hours_gate(reversal_signal) is None)

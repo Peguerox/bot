@@ -2197,6 +2197,9 @@ function HedgeDualLegPanel({
   // _pressure_biased_leg_usd's docstring in stoch_bot_core.py.
   const liveK: number | null = longState?.live_k ?? null;
   const liveSignal: string | null = longState?.live_signal ?? null;
+  // Must match color_balance_index_max in lighter_hedge_dual_leg.py.
+  const HEDGE_BALANCE_MAX = 50;
+  const liveBalanceIdx: number | null = longState?.live_zebra_index ?? null;
 
   const combinedSeed = longLeg.seedUsd + shortLeg.seedUsd;
   const combinedRealized = longLeg.realizedPnl + shortLeg.realizedPnl;
@@ -2437,7 +2440,21 @@ function HedgeDualLegPanel({
             </div>
             <LegBadge label="Long leg (Worker 2 acct)" leg={longLeg} />
             <LegBadge label="Short leg (Worker 3 acct)" leg={shortLeg} />
-            <div className="bg-gray-800/60 rounded-lg p-2 col-span-2">
+            <div className="bg-gray-800/60 rounded-lg p-2">
+              <p className="text-gray-500 text-[10px] uppercase">Color-balance index (gates entry at ≤{HEDGE_BALANCE_MAX})</p>
+              <p className="font-bold text-sm tabular-nums">
+                <span className={liveBalanceIdx == null ? "text-gray-500"
+                  : liveBalanceIdx <= HEDGE_BALANCE_MAX ? "text-green-400" : "text-amber-400"}>
+                  {liveBalanceIdx != null ? liveBalanceIdx.toFixed(0) : "—"}
+                </span>
+                <span className="text-[10px] font-normal text-gray-500 ml-1.5">
+                  {liveBalanceIdx == null ? "no reading yet"
+                    : liveBalanceIdx <= HEDGE_BALANCE_MAX ? "TRENDING — a new cycle can open"
+                    : "too balanced/choppy — no entry"}
+                </span>
+              </p>
+            </div>
+            <div className="bg-gray-800/60 rounded-lg p-2">
               <p className="text-gray-500 text-[10px] uppercase">Pressure Signal (stoch K, 25/75 — gates entry)</p>
               <p className="font-bold text-sm">
                 <span className={liveSignal === "long" ? "text-green-400" : liveSignal === "short" ? "text-amber-400" : "text-gray-400"}>
@@ -3028,7 +3045,7 @@ export default function Dashboard() {
         <div className="grid grid-cols-1 sm:grid-cols-3 gap-3">
           <CompactStochBtcPanel
             title="Worker 1 · Stochastic + Color-Balance Index"
-            subtitle="2026-10-01 v3: enters ONLY on a fresh 25/75 stochastic signal (window 5) while the color-weighted balance index is 70 or above, no ceiling (each of the last 5 closed 1-min candles casts a size-weighted color vote; 100 = perfectly balanced, 0 = one color dominates). Replaces the switch-counting zebra index, which scored a 4-red-1-green downtrend as 'balanced' and let a losing long through. Exits: SL 0.10% / TP 0.10% / profit lock at +0.05% (exits on first tick down). One trade per signal. Self-lock, hour ban, dispersion and saving lock all OFF."
+            subtitle="2026-10-01 v3: enters ONLY on a fresh 25/75 stochastic signal (window 5) while the color-weighted balance index is 70 or above, no ceiling (each of the last 5 closed 1-min candles casts a size-weighted color vote; 100 = perfectly balanced, 0 = one color dominates). Replaces the switch-counting zebra index, which scored a 4-red-1-green downtrend as 'balanced' and let a losing long through. Exits: SL 0.10% / TP 0.10% / profit lock at +0.05% (exits on first tick down). One trade per signal; after a REVERSAL close specifically, a 2-minute cooldown before any new entry (fresh or another reversal) -- the close itself is never delayed. Self-lock, hour ban, dispersion and saving lock all OFF."
             table="lighter_btc_initial_state"
             state={initialBtcState}
             trades={initialBtcTrades.filter((t: any) =>

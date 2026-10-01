@@ -4004,6 +4004,8 @@ async def t_live_configs_match_their_stated_rules():
           (w1.sl_pct, w1.tp_pct, w1.profit_lock_trigger_pct, w1.saving_lock_arm_frac_of_sl)
           == (0.10, 0.10, 0.05, None),
           (w1.sl_pct, w1.tp_pct, w1.profit_lock_trigger_pct, w1.saving_lock_arm_frac_of_sl))
+    check("Worker 1: 2-minute post-reversal cooldown on",
+          w1.post_reversal_cooldown_seconds == 120.0, w1.post_reversal_cooldown_seconds)
 
     hedge = importlib.import_module("lighter_hedge_dual_leg")
     for name, leg in (("long", hedge.LONG_CONFIG), ("short", hedge.SHORT_CONFIG)):
@@ -4430,6 +4432,76 @@ async def t_entry_features_never_touched_without_schema_flag():
               key not in bot.state_row, bot.state_row.get(key))
 
 
+async def t_post_reversal_cooldown_blocks_instant_reopen():
+    print("\n[post-reversal cooldown: a reversal still CLOSES, but does not instantly reopen]")
+    entry = 86000.0
+    ex = FakeExchange(position=-round(20.0 / entry, 5), collateral=20.0)  # short position
+    candles = make_candles("long")  # K near 0 -> reversal signal "long", opposite of held short
+    entry_time = candles[-1]["t"] - 200_000  # well past any guard
+    state = {
+        "id": 1, "side": "short", "legs": [{"price": entry, "usd_size": 20.0}],
+        "first_entry_price": entry, "first_entry_time": entry_time, "dca_level": 0,
+        "seed_usd": 20.0, "realized_pnl_usd": 0.0, "collateral_before_entry": 20.0,
+        "enabled": True, "consecutive_entry_failures": 0, "last_processed_candle_ts": 0,
+    }
+    bot = make_bot(ex, state=state, candles=candles, reversal_guard_seconds=None,
+                   require_fresh_signal=False, post_reversal_cooldown_seconds=120.0)
+    await bot.tick()
+    check("position closed (the close leg is never gated)", bot.state_row["side"] is None,
+          bot.state_row["side"])
+    check("logged as a REVERSAL close",
+          any(d.get("reason") == "REVERSAL" for a, d in bot.runs if a == "closed"), bot.runs)
+    check("only one order placed (the close, no instant reopen)", len(ex.orders) == 1, ex.orders)
+    check("cooldown timestamp stamped", bot._last_reversal_close_at is not None)
+    check("cooldown reads active", bot._reversal_cooldown_active() is True)
+
+
+async def t_post_reversal_cooldown_allows_reentry_once_elapsed():
+    print("\n[post-reversal cooldown: once it elapses, the normal fresh signal can enter again]")
+    entry = 86000.0
+    ex = FakeExchange(position=-round(20.0 / entry, 5), collateral=20.0)
+    candles = make_candles("long")
+    entry_time = candles[-1]["t"] - 200_000
+    state = {
+        "id": 1, "side": "short", "legs": [{"price": entry, "usd_size": 20.0}],
+        "first_entry_price": entry, "first_entry_time": entry_time, "dca_level": 0,
+        "seed_usd": 20.0, "realized_pnl_usd": 0.0, "collateral_before_entry": 20.0,
+        "enabled": True, "consecutive_entry_failures": 0, "last_processed_candle_ts": 0,
+    }
+    bot = make_bot(ex, state=state, candles=candles, reversal_guard_seconds=None,
+                   require_fresh_signal=False, post_reversal_cooldown_seconds=120.0)
+    await bot.tick()
+    check("closed, not reopened yet", bot.state_row["side"] is None and len(ex.orders) == 1)
+    # Cooldown has elapsed -- back-date the stamp instead of sleeping 120s in a test.
+    bot._last_reversal_close_at = time.time() - 200.0
+    check("cooldown now reads inactive", bot._reversal_cooldown_active() is False)
+    ex.position = 0.0
+    await bot.tick()
+    check("entered on the next tick now that the cooldown cleared",
+          bot.state_row["side"] == "long", bot.state_row["side"])
+    check("a second order was placed", len(ex.orders) == 2, ex.orders)
+
+
+async def t_post_reversal_cooldown_off_by_default():
+    print("\n[post-reversal cooldown: off by default -- a reversal reopens instantly as before]")
+    entry = 86000.0
+    ex = FakeExchange(position=-round(20.0 / entry, 5), collateral=20.0)
+    candles = make_candles("long")
+    entry_time = candles[-1]["t"] - 200_000
+    state = {
+        "id": 1, "side": "short", "legs": [{"price": entry, "usd_size": 20.0}],
+        "first_entry_price": entry, "first_entry_time": entry_time, "dca_level": 0,
+        "seed_usd": 20.0, "realized_pnl_usd": 0.0, "collateral_before_entry": 20.0,
+        "enabled": True, "consecutive_entry_failures": 0, "last_processed_candle_ts": 0,
+    }
+    bot = make_bot(ex, state=state, candles=candles, reversal_guard_seconds=None,
+                   require_fresh_signal=False)  # post_reversal_cooldown_seconds defaults None
+    await bot.tick()
+    check("reversed instantly, same tick (unchanged default behaviour)",
+          bot.state_row["side"] == "long", bot.state_row["side"])
+    check("two orders placed (close + instant reopen)", len(ex.orders) == 2, ex.orders)
+
+
 async def main():
     for t in (t_normal_entry, t_phantom_double_fill, t_nonce_error_but_filled,
               t_order_error_no_fill, t_circuit_breaker, t_close_uses_real_size,
@@ -4643,7 +4715,10 @@ async def main():
               t_balance_gate_allows_inside_band,
               t_balance_gate_off_by_default,
               t_entry_features_persisted_on_entry_and_carried_to_trade_log,
-              t_entry_features_never_touched_without_schema_flag):
+              t_entry_features_never_touched_without_schema_flag,
+              t_post_reversal_cooldown_blocks_instant_reopen,
+              t_post_reversal_cooldown_allows_reentry_once_elapsed,
+              t_post_reversal_cooldown_off_by_default):
         try:
             await t()
         except Exception as e:

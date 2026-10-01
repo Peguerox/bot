@@ -341,6 +341,14 @@ CONFIG = BotConfig(
     # See BotConfig.saving_lock_arm_frac_of_sl.
     saving_lock_arm_frac_of_sl=None,  # 2026-10-01: OFF for the zebra-index run ("and that's it")
     saving_lock_exit_pct=0.0,
+    # 2026-10-01, direct request: 3 real flips in 16 minutes (long -> short reversal -> flat
+    # 10min -> long again), the third a plain SL loss -- "the reversal was not the problem...
+    # the problem was going in again without resting." The reversal CLOSE itself is untouched
+    # (still closes and flips immediately when the signal demands it); this only pauses what
+    # happens after -- no new entry, fresh or another reversal, for 2 minutes following a
+    # REVERSAL close specifically (never after SL/TP/profit lock/saving lock). See
+    # BotConfig.post_reversal_cooldown_seconds.
+    post_reversal_cooldown_seconds=120.0,
 )
 
 if __name__ == "__main__":
