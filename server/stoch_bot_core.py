@@ -546,6 +546,16 @@ class BotConfig:
     # runs ends at ~$0 (reason BREAKEVEN_LOCK); one that runs past floor + trail is still ridden
     # by the trail (reason PROFIT_LOCK). Needs breakeven_floor_enabled. False = old behaviour.
     profit_lock_respects_breakeven_floor: bool = False
+    # 2026-10-01, direct request ("saving lock"): rescue a trade that went against us but came
+    # back. Once unrealized has been at or below -(saving_lock_arm_frac_of_sl x the live SL), the
+    # position closes the moment unrealized recovers to saving_lock_exit_pct (0 = entry price),
+    # reason SAVING_LOCK. Paired with a wide SL (0.20%, set on the dashboard the same day): the
+    # wide SL gives a bad trade room to come back, this takes the exit at ~$0 when it does instead
+    # of hoping for more. The arm fraction tracks the live SL (override included), so "half the
+    # SL" stays half if the SL is retuned. In-memory per position: a restart mid-position forgets
+    # an armed lock (the SL still protects). Burns the signal like a red exit. None = off.
+    saving_lock_arm_frac_of_sl: Optional[float] = None
+    saving_lock_exit_pct: float = 0.0
     # Requires the cycle_id column migration (state + trades, both hedge legs). Both legs stamp
     # the SAME id (the cycle barrier's release timestamp, see _cycle_gate_clear_to_enter) onto
     # their entry and carry it to their close, so the dashboard can pair a cycle's two trade rows
@@ -1187,6 +1197,7 @@ class StochBot:
         # a requirement for correctness within one continuous run.
         self.profit_lock_peak_pct = None
         self._profit_lock_restored = False
+        self._saving_trough_pct = None  # see BotConfig.saving_lock_arm_frac_of_sl
         # Breakeven floor (see BotConfig.breakeven_floor_enabled). Same arrangement as the
         # profit-lock trail: in-process state is authoritative, the DB column only exists so a
         # Render restart mid-position doesn't lose the baseline.
@@ -2806,6 +2817,7 @@ class StochBot:
             patch["position_sl_pct"] = None
         await self.update_state(patch)
         self.profit_lock_peak_pct = None
+        self._saving_trough_pct = None
         if self.cfg.schema_has_profit_lock:
             try:
                 await self.update_state({"profit_lock_peak_pct": None})
@@ -3057,6 +3069,7 @@ class StochBot:
             except Exception:
                 pass
         self.profit_lock_peak_pct = None
+        self._saving_trough_pct = None
         if self.cfg.schema_has_profit_lock:
             try:
                 await self.update_state({"profit_lock_peak_pct": None})
@@ -4332,6 +4345,16 @@ class StochBot:
                 elif not cfg.disable_literal_tp and check_price <= tp:
                     gap_hit = "TP"
 
+            if gap_hit is None and cfg.saving_lock_arm_frac_of_sl is not None and ae:
+                # Saving lock -- see BotConfig.saving_lock_arm_frac_of_sl.
+                unrealized_pct = (100 * (check_price - ae) / ae if side == "long"
+                                  else 100 * (ae - check_price) / ae)
+                if self._saving_trough_pct is None or unrealized_pct < self._saving_trough_pct:
+                    self._saving_trough_pct = unrealized_pct
+                arm_at = -cfg.saving_lock_arm_frac_of_sl * pos_sl
+                if self._saving_trough_pct <= arm_at and unrealized_pct >= cfg.saving_lock_exit_pct:
+                    gap_hit = "SAVING_LOCK"
+
             if gap_hit is None and cfg.profit_lock_enabled and ae:
                 # Restore from the DB once per boot if a prior run persisted a peak (only
                 # possible once the profit_lock_peak_pct migration has actually been run) --
@@ -4527,7 +4550,9 @@ class StochBot:
                     # SL/BOOK_OPPOSITION are always red by construction; STOCH_TURN can go
                     # either way (a fast move can beat it to SL), so check actual pnl for that
                     # one. TP/PROFIT_LOCK never burn -- structurally can't be red.
-                    gap_hit_red = gap_hit in ("SL", "BOOK_OPPOSITION") or (
+                    # SAVING_LOCK burns too: the signal already went bad once, so wait for a
+                    # genuinely new one instead of re-entering the same read at the same price.
+                    gap_hit_red = gap_hit in ("SL", "BOOK_OPPOSITION", "SAVING_LOCK") or (
                         gap_hit == "STOCH_TURN" and ae
                         and ((check_price - ae) / ae if side == "long" else (ae - check_price) / ae) <= 0)
                     if gap_hit_red:

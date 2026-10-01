@@ -4202,6 +4202,69 @@ async def t_profit_lock_floor_still_lets_the_winner_ride():
           [(a, d.get("reason")) for a, d in bot.runs if a == "closed"])
 
 
+def _saving_bot(**kw):
+    entry = 86000.0
+    ex = FakeExchange(position=round(99.0 / entry, 5), collateral=99.0)
+    state = {
+        "id": 1, "side": "long", "legs": [{"price": entry, "usd_size": 99.0}],
+        "first_entry_price": entry, "first_entry_time": 1700000000000, "dca_level": 0,
+        "seed_usd": 99.0, "realized_pnl_usd": 0.0, "collateral_before_entry": 99.0,
+        "enabled": True, "consecutive_entry_failures": 0, "last_processed_candle_ts": 0,
+    }
+    base = dict(candles_kind="mid", sl_pct=0.20, tp_pct=0.10, require_fresh_signal=False,
+                profit_lock_enabled=True, profit_lock_trigger_pct=0.05, profit_lock_trail_pct=0.0)
+    base.update(kw)
+    return entry, make_bot(ex, state=state, **base)
+
+
+async def _px(bot, price):
+    bot.live.order_book = {"bids": [{"price": str(price)}], "asks": [{"price": str(price + 0.5)}]}
+    await bot.tick()
+
+
+async def t_saving_lock_exits_at_entry_after_arming():
+    print("\n[saving lock: down past half the SL, back to entry -> exit at ~0]")
+    entry, bot = _saving_bot(saving_lock_arm_frac_of_sl=0.5)
+    await _px(bot, entry * (1 - 0.12 / 100))   # -0.12%, past the -0.10% arm point
+    check("still open while down", bot.state_row["side"] == "long", bot.state_row["side"])
+    await _px(bot, entry * (1 - 0.03 / 100))
+    check("still open on the way back, below entry", bot.state_row["side"] == "long")
+    await _px(bot, entry * (1 + 0.001 / 100))
+    check("closed once back at entry", bot.state_row["side"] is None, bot.state_row["side"])
+    check("reason SAVING_LOCK",
+          any(a == "closed" and d.get("reason") == "SAVING_LOCK" for a, d in bot.runs),
+          [(a, d.get("reason")) for a, d in bot.runs if a == "closed"])
+
+
+async def t_saving_lock_not_armed_by_a_small_dip():
+    print("\n[saving lock: a dip smaller than half the SL never arms it]")
+    entry, bot = _saving_bot(saving_lock_arm_frac_of_sl=0.5)
+    await _px(bot, entry * (1 - 0.06 / 100))   # only -0.06%
+    await _px(bot, entry * (1 + 0.001 / 100))
+    check("still open -- not armed", bot.state_row["side"] == "long", bot.state_row["side"])
+
+
+async def t_saving_lock_off_by_default():
+    print("\n[saving lock: off by default -- same path stays open]")
+    entry, bot = _saving_bot()
+    await _px(bot, entry * (1 - 0.12 / 100))
+    await _px(bot, entry * (1 + 0.001 / 100))
+    check("still open", bot.state_row["side"] == "long", bot.state_row["side"])
+
+
+async def t_saving_lock_follows_the_sl_override():
+    print("\n[saving lock: arm point is half the LIVE (override) SL, not the compiled one]")
+    entry, bot = _saving_bot(saving_lock_arm_frac_of_sl=0.5, schema_has_exit_overrides=True)
+    bot.state_row["override_sl_pct"] = 0.30          # half = 0.15%
+    await _px(bot, entry * (1 - 0.12 / 100))          # -0.12%: would arm at SL 0.20, not at 0.30
+    await _px(bot, entry * (1 + 0.001 / 100))
+    check("not armed at -0.12% when SL is 0.30", bot.state_row["side"] == "long")
+    await _px(bot, entry * (1 - 0.16 / 100))
+    await _px(bot, entry * (1 + 0.001 / 100))
+    check("armed past -0.15% and closed at entry", bot.state_row["side"] is None,
+          bot.state_row["side"])
+
+
 async def main():
     for t in (t_normal_entry, t_phantom_double_fill, t_nonce_error_but_filled,
               t_order_error_no_fill, t_circuit_breaker, t_close_uses_real_size,
@@ -4401,7 +4464,11 @@ async def main():
               t_min_dispersion_never_discards_granted_clearance,
               t_profit_lock_floor_closes_at_breakeven_not_below,
               t_profit_lock_floor_off_keeps_old_behaviour,
-              t_profit_lock_floor_still_lets_the_winner_ride):
+              t_profit_lock_floor_still_lets_the_winner_ride,
+              t_saving_lock_exits_at_entry_after_arming,
+              t_saving_lock_not_armed_by_a_small_dip,
+              t_saving_lock_off_by_default,
+              t_saving_lock_follows_the_sl_override):
         try:
             await t()
         except Exception as e:

@@ -3012,7 +3012,7 @@ export default function Dashboard() {
         <div className="grid grid-cols-1 sm:grid-cols-3 gap-3">
           <CompactStochBtcPanel
             title="Worker 1 · Plain Stochastic + Dispersion"
-            subtitle="2026-10-01: isolated test -- self-lock OFF, hour ban OFF (trades 24/7, weekends included), only filter is intrabar dispersion (stdev of (high+low)/2, 5-bar, raw $) blocking new entries at >= $50. TP 0.10% / SL 0.11% / window 5, 25-75, fresh signal only / no blanking period / profit lock 0.05%"
+            subtitle="2026-10-01: isolated test -- self-lock OFF, hour ban OFF (trades 24/7, weekends included), only filter is intrabar dispersion (stdev of (high+low)/2, 5-bar, raw $) blocking new entries at >= $50. TP 0.10% / SL set below (live) / window 5, 25-75, fresh signal only / no blanking period / profit lock 0.05% / saving lock: once down half the SL, closes at entry ($0) if price comes back (SAVING_LOCK)"
             table="lighter_btc_initial_state"
             state={initialBtcState}
             trades={initialBtcTrades.filter((t: any) =>

@@ -323,6 +323,12 @@ CONFIG = BotConfig(
     # same as Worker 2. NULL columns fall back to the values above. Requires
     # lighter_btc_initial_exit_overrides.sql (also adds live_vol_pct, written with live_k).
     schema_has_exit_overrides=True,
+    # 2026-10-01, direct request ("saving lock"): with the SL widened to 0.20% on the dashboard,
+    # a trade that drops to half the SL (-0.10%) and then comes back to entry closes right there
+    # at ~$0 instead of riding on. Tracks the live SL, so it stays "half" if the SL is retuned.
+    # See BotConfig.saving_lock_arm_frac_of_sl.
+    saving_lock_arm_frac_of_sl=0.5,
+    saving_lock_exit_pct=0.0,
 )
 
 if __name__ == "__main__":
