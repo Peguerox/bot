@@ -300,13 +300,14 @@ CONFIG = BotConfig(
     zebra_index_window=5,
     # 2026-10-01, direct request: v2 of the zebra idea -- each candle's color vote weighted by
     # its own size, so one stray counter-direction candle can't fake balance the way plain
-    # switch-counting could. First shipped as a band (65-75); raised to a floor-only gate same
-    # day, direct request ("increase the index 70 or above, do not put a top limit") -- no upper
-    # bound anymore, so a perfectly balanced 100 reading enters too, not just the 65-78 plateau
-    # found in the original backtest. See BotConfig.color_balance_index_min /
+    # switch-counting could. Band (65-75) -> floor-only 70+ (no ceiling) -> BACK to the 65-75
+    # band, same day: live data from the floor-only run showed both real losses landed above 80
+    # (83.8, 92.9) while both wins landed below 83 (79.8, 82.2) -- only 4 trades, not proof, but
+    # it matches the direction of the original 605-trade backtest, which found a sharp drop-off
+    # starting right around 78-80. See BotConfig.color_balance_index_min /
     # compute_color_weighted_balance_index.
-    color_balance_index_min=70.0,
-    color_balance_index_max=None,
+    color_balance_index_min=65.0,
+    color_balance_index_max=75.0,
     color_balance_index_window=5,
     profit_lock_trail_pct=0.0,
     # 2026-09-29: briefly disabled fleet-wide during a Supabase statement-timeout incident
