@@ -3993,9 +3993,9 @@ async def t_live_configs_match_their_stated_rules():
     check("Worker 1: zebra index OFF (superseded by the color-balance index)",
           (w1.zebra_index_min, w1.zebra_index_max) == (None, None),
           (w1.zebra_index_min, w1.zebra_index_max))
-    check("Worker 1: color-balance index band 65-75 over 5 bars",
+    check("Worker 1: color-balance index floor-only 70+ (no ceiling) over 5 bars",
           (w1.color_balance_index_min, w1.color_balance_index_max, w1.color_balance_index_window)
-          == (65.0, 75.0, 5),
+          == (70.0, None, 5),
           (w1.color_balance_index_min, w1.color_balance_index_max, w1.color_balance_index_window))
     check("Worker 1: SL 0.10 / TP 0.10 / profit lock 0.05, saving lock off",
           (w1.sl_pct, w1.tp_pct, w1.profit_lock_trigger_pct, w1.saving_lock_arm_frac_of_sl)

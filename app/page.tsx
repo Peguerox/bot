@@ -1982,17 +1982,16 @@ function CompactStochBtcPanel({
       {showLevers && !loading && (
         <div className="bg-gray-800/60 rounded-lg p-2">
           {/* Must match zebra_index_min/max in lighter_stoch_dca_btc_initial.py. */}
-          <p className="text-gray-500 text-[10px] uppercase">Color-balance index (5 candles, enters at 65–75)</p>
+          <p className="text-gray-500 text-[10px] uppercase">Color-balance index (5 candles, enters at 70+)</p>
           <p className="font-bold text-sm tabular-nums">
             <span className={liveZebra == null ? "text-gray-500"
-              : liveZebra >= 65 && liveZebra <= 75 ? "text-green-400" : "text-amber-400"}>
+              : liveZebra >= 70 ? "text-green-400" : "text-amber-400"}>
               {liveZebra != null ? liveZebra.toFixed(0) : "—"}
             </span>
             <span className="text-[10px] font-normal text-gray-500 ml-1.5">
               {liveZebra == null ? "no reading yet"
-                : liveZebra >= 65 && liveZebra <= 75 ? "IN BAND — a fresh signal can enter"
-                : liveZebra < 65 ? "too trendy — no entry"
-                : "too balanced/choppy — no entry"}
+                : liveZebra >= 70 ? "IN BAND — a fresh signal can enter"
+                : "too trendy — no entry"}
             </span>
           </p>
         </div>
@@ -3014,7 +3013,7 @@ export default function Dashboard() {
         <div className="grid grid-cols-1 sm:grid-cols-3 gap-3">
           <CompactStochBtcPanel
             title="Worker 1 · Stochastic + Color-Balance Index"
-            subtitle="2026-10-01 v2: enters ONLY on a fresh 25/75 stochastic signal (window 5) while the color-weighted balance index is 65-75 (each of the last 5 closed 1-min candles casts a size-weighted color vote; 100 = balanced, 0 = one color dominates). Replaces the switch-counting zebra index, which scored a 4-red-1-green downtrend as 'balanced' and let a losing long through. Exits: SL 0.10% / TP 0.10% / profit lock at +0.05% (exits on first tick down). One trade per signal. Self-lock, hour ban, dispersion and saving lock all OFF."
+            subtitle="2026-10-01 v3: enters ONLY on a fresh 25/75 stochastic signal (window 5) while the color-weighted balance index is 70 or above, no ceiling (each of the last 5 closed 1-min candles casts a size-weighted color vote; 100 = perfectly balanced, 0 = one color dominates). Replaces the switch-counting zebra index, which scored a 4-red-1-green downtrend as 'balanced' and let a losing long through. Exits: SL 0.10% / TP 0.10% / profit lock at +0.05% (exits on first tick down). One trade per signal. Self-lock, hour ban, dispersion and saving lock all OFF."
             table="lighter_btc_initial_state"
             state={initialBtcState}
             trades={initialBtcTrades.filter((t: any) =>
