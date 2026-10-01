@@ -582,6 +582,20 @@ class BotConfig:
     # parameter and the standalone min_cycle_gap check in tick()) -- never touches an exit, so it
     # cannot strand a position.
     min_cycle_gap_seconds: float = 0.0
+    # 2026-10-01, direct request (hedge): open a new cycle only when compute_intrabar_dispersion()
+    # (over intrabar_dispersion_window bars) reads AT OR ABOVE this -- the opposite direction from
+    # intrabar_dispersion_pause_at, which blocks when it is too HIGH. Backtested the same day on 9
+    # days of real ticks against the hedge's own exits: low-dispersion cycles (< $30) carried most
+    # of the loss (-$1.18 of -$1.43 entering every candle); gating at >= $30 more than halved it.
+    # $50 chosen by the user as the safer cut. Like require_pressure_to_enter it only decides
+    # whether a leg DECLARES readiness for a new cycle -- a clearance already granted is honoured
+    # (see _cycle_gate_clear_to_enter), and it never touches an exit. None = disabled.
+    min_intrabar_dispersion_to_enter: Optional[float] = None
+    # 2026-10-01, direct request ("enter every clean candle"): at most ONE new cycle per 1-min
+    # candle. Without it a fixed_direction leg re-declares the instant it goes flat, so a fast
+    # cycle could be followed by another inside the same candle on the same reading. False keeps
+    # the original behaviour.
+    one_cycle_per_candle: bool = False
     # Mirror-paper fallback (2026-09-27): if real is flat, unlocked, and enabled, but has no
     # live entry_signal this tick while the paper shadow already holds a position, real enters
     # to match paper's side directly instead of waiting for its own fresh signal. See the
@@ -1208,6 +1222,7 @@ class StochBot:
         # "closed just now" signal -- side is already read fresh every tick regardless.
         self._was_in_position = False
         self._went_flat_at = 0.0
+        self._last_cycle_candle_t = None  # see BotConfig.one_cycle_per_candle
         # Paper shadow's own copy of the same trail -- without this, real could exit early via
         # PROFIT_LOCK while paper (running the identical signal) kept holding, making the two
         # visibly diverge even while real is unlocked and trading the exact same thing paper is.
@@ -2182,6 +2197,30 @@ class StochBot:
         if hub is not None:
             return hub.get("signal") is not None
         return self._compute_pressure_source_signal()[0] is not None
+
+    def _has_entry_dispersion(self):
+        """True unless min_intrabar_dispersion_to_enter is set and the current reading is below
+        it. No reading yet (too few candles) -> False, so a freshly-booted leg waits for a real
+        reading rather than entering on nothing -- same stance as _has_entry_pressure."""
+        floor = self.cfg.min_intrabar_dispersion_to_enter
+        if floor is None:
+            return True
+        d = compute_intrabar_dispersion(self.candles, self.cfg.intrabar_dispersion_window)
+        return d is not None and d >= floor
+
+    def _current_candle_t(self):
+        return self.candles[-1]["t"] if self.candles else None
+
+    def _candle_unused(self):
+        """See BotConfig.one_cycle_per_candle."""
+        if not self.cfg.one_cycle_per_candle:
+            return True
+        return self._current_candle_t() != self._last_cycle_candle_t
+
+    def _wants_new_cycle(self):
+        """Every condition for DECLARING readiness for a new cycle (or, standalone, entering)."""
+        return (self._has_entry_pressure() and self._cycle_gap_elapsed()
+                and self._has_entry_dispersion() and self._candle_unused())
 
     def _cycle_gap_elapsed(self):
         """True if enough time has passed since THIS leg went flat -- see
@@ -4596,19 +4635,20 @@ class StochBot:
                     # In-process barrier when one is wired (the hedge); it supersedes the DB poll
                     # entirely rather than layering on top -- see _cycle_gate_clear_to_enter for
                     # why the poll alone let the legs desync into naked single-leg trades.
-                    gate = self._cycle_gate_clear_to_enter(
-                        want=self._has_entry_pressure() and self._cycle_gap_elapsed())
+                    gate = self._cycle_gate_clear_to_enter(want=self._wants_new_cycle())
                     if gate and self.cycle_hub is not None:
                         self._pending_cycle_id = self.cycle_hub.get("cycle_id")
                     partner_flat = (await self._partner_is_flat() if gate is None else gate)
                 elif wants_in:
                     # No cycle partner: this leg's own entry condition is pressure AND the gap.
-                    wants_in = self._has_entry_pressure() and self._cycle_gap_elapsed()
+                    wants_in = self._wants_new_cycle()
                 if not wants_in:
                     self._cycle_gate_withdraw()
                 if cfg.debug_verbose_tick:
                     print(f"[{cfg.worker_id}] tick: effective_signal={effective_signal} enabled={state.get('enabled')} partner_flat={partner_flat}", flush=True)
                 if wants_in and partner_flat:
+                    # one_cycle_per_candle: this candle is spent the moment an entry is attempted.
+                    self._last_cycle_candle_t = self._current_candle_t()
                     fail_count = state.get("consecutive_entry_failures", 0) or 0
                     if fail_count >= 3:
                         # Hard stop rather than another retry -- unbounded retries are what

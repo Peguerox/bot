@@ -203,7 +203,16 @@ LONG_CONFIG = BotConfig(
     # a fixed_direction leg enters every single time it is flat, including in flat chop where
     # neither side travels far enough to reach the 0.05% trail and both legs just grind. Gates
     # WHEN a cycle opens, never which way -- both legs still enter together, both sides.
-    require_pressure_to_enter=True,
+    # 2026-10-01, direct request: stochastic pressure gate OFF, replaced by a dispersion floor --
+    # "enter every clean candle if dispersion > 50". Backtested the same day on 9 days of real
+    # ticks with these exits: cycles opened at 5-bar dispersion < $30 carried most of the loss;
+    # gating at >= $30 more than halved it (-$1.43 -> -$0.42). $50 is the user's safer cut, not
+    # a swept optimum. Still not a proven profit -- a test. Revert: require_pressure_to_enter=True
+    # and drop the two lines below.
+    require_pressure_to_enter=False,
+    min_intrabar_dispersion_to_enter=50.0,
+    intrabar_dispersion_window=5,
+    one_cycle_per_candle=True,  # at most one new cycle per 1-min candle
     # 2026-10-01: briefly tried the z-score here instead of the stochastic (same session) --
     # direct request to revert, "z-score sucks". Back to the plain stochastic
     # (BotConfig.use_zscore_signal defaults False). The machinery stays in stoch_bot_core.py
@@ -310,7 +319,16 @@ SHORT_CONFIG = BotConfig(
     # a fixed_direction leg enters every single time it is flat, including in flat chop where
     # neither side travels far enough to reach the 0.05% trail and both legs just grind. Gates
     # WHEN a cycle opens, never which way -- both legs still enter together, both sides.
-    require_pressure_to_enter=True,
+    # 2026-10-01, direct request: stochastic pressure gate OFF, replaced by a dispersion floor --
+    # "enter every clean candle if dispersion > 50". Backtested the same day on 9 days of real
+    # ticks with these exits: cycles opened at 5-bar dispersion < $30 carried most of the loss;
+    # gating at >= $30 more than halved it (-$1.43 -> -$0.42). $50 is the user's safer cut, not
+    # a swept optimum. Still not a proven profit -- a test. Revert: require_pressure_to_enter=True
+    # and drop the two lines below.
+    require_pressure_to_enter=False,
+    min_intrabar_dispersion_to_enter=50.0,
+    intrabar_dispersion_window=5,
+    one_cycle_per_candle=True,  # at most one new cycle per 1-min candle
     # See LONG_CONFIG's docstring -- z-score tried and reverted same session.
     debug_verbose_tick=False,  # off -- faulthandler below only fires if actually stuck
     # Reciprocal of the long leg's gate above -- waits for lighter_btc_optimal_state (the

@@ -4027,9 +4027,14 @@ async def t_live_configs_match_their_stated_rules():
         # 2026-09-30, direct request: pressure gate turned OFF for a hypertrading test ("enter
         # at any moment"), paired with a 10s min_cycle_gap_seconds so cycles still aren't
         # zero-delay -- see the cross-leg check below for why BOTH must hold together.
-        check(f"hedge {name} leg: gate off implies a real min_cycle_gap in its place",
-              leg.require_pressure_to_enter or leg.min_cycle_gap_seconds > 0,
-              (leg.require_pressure_to_enter, leg.min_cycle_gap_seconds))
+        # 2026-10-01: the stochastic gate's replacement can also be the dispersion floor plus
+        # one-cycle-per-candle ("enter every clean candle if dispersion > 50") -- still never a
+        # zero-delay, every-tick re-entry.
+        check(f"hedge {name} leg: gate off implies a real entry throttle in its place",
+              leg.require_pressure_to_enter or leg.min_cycle_gap_seconds > 0
+              or (leg.min_intrabar_dispersion_to_enter is not None and leg.one_cycle_per_candle),
+              (leg.require_pressure_to_enter, leg.min_cycle_gap_seconds,
+               leg.min_intrabar_dispersion_to_enter, leg.one_cycle_per_candle))
         # 2026-10-01: z-score tried on the pressure gate, then reverted same session ("z-score
         # sucks") -- back to the plain stochastic. Pinned so the mix-up can't silently repeat.
         check(f"hedge {name} leg: pressure gate uses the plain stochastic (NOT z-score)",
@@ -4072,6 +4077,66 @@ async def t_live_configs_match_their_stated_rules():
     check("exactly one hedge leg owns the shared pressure signal",
           [hedge.LONG_CONFIG.pressure_signal_owner,
            hedge.SHORT_CONFIG.pressure_signal_owner].count(True) == 1)
+
+
+def _hedge_leg(**kw):
+    base = dict(candles_kind="mid", fixed_direction="long", fixed_leg_usd=10.0, sl_pct=0.06,
+                tp_pct=0.10, disable_literal_tp=True, require_fresh_signal=False,
+                self_lock_enabled=False, use_joint_adaptive=False, require_pressure_to_enter=False)
+    base.update(kw)
+    return make_bot(FakeExchange(), **base)
+
+
+async def t_min_dispersion_gate_blocks_cycle_when_quiet():
+    print("\n[min dispersion gate: a hedge leg does NOT open a cycle while dispersion is below the floor]")
+    bot = _hedge_leg(min_intrabar_dispersion_to_enter=50.0)
+    bot.candles = make_dispersion_candles([20, 20, 20, 20, 0])  # std $8
+    check("not wanting a cycle at $8", bot._wants_new_cycle() is False)
+    await bot.tick()
+    check("did not enter", bot.state_row["side"] is None, bot.state_row["side"])
+
+
+async def t_min_dispersion_gate_allows_cycle_when_dispersed():
+    print("\n[min dispersion gate: a cycle opens once dispersion is at/above the floor]")
+    bot = _hedge_leg(min_intrabar_dispersion_to_enter=50.0)
+    bot.candles = make_dispersion_candles([150, 150, 150, 150, 0])  # std $60
+    check("wants a cycle at $60", bot._wants_new_cycle() is True)
+    await bot.tick()
+    check("entered", bot.state_row["side"] == "long", bot.state_row["side"])
+
+
+async def t_min_dispersion_gate_off_by_default():
+    print("\n[min dispersion gate: off by default -- every other bot unaffected]")
+    bot = _hedge_leg()
+    bot.candles = make_dispersion_candles([20, 20, 20, 20, 0])
+    check("quiet market still wants a cycle when unconfigured", bot._wants_new_cycle() is True)
+
+
+async def t_one_cycle_per_candle_blocks_second_entry_same_candle():
+    print("\n[one cycle per candle: after an entry, no new cycle until the next candle]")
+    bot = _hedge_leg(one_cycle_per_candle=True)
+    bot.candles = make_dispersion_candles([150, 150, 150, 150, 0])
+    await bot.tick()
+    check("first entry on this candle", bot.state_row["side"] == "long", bot.state_row["side"])
+    check("same candle is now spent", bot._candle_unused() is False)
+    nxt = dict(bot.candles[-1]); nxt["t"] += 60000
+    bot.candles = bot.candles + [nxt]
+    check("next candle is fresh again", bot._candle_unused() is True)
+    off = _hedge_leg()
+    off._last_cycle_candle_t = off._current_candle_t()
+    check("off by default -- never blocks", off._candle_unused() is True)
+
+
+async def t_min_dispersion_never_discards_granted_clearance():
+    print("\n[min dispersion gate: a clearance already granted is honoured even if dispersion drops]")
+    hub = core.StochBot.new_cycle_hub(["worker2", "worker3"])
+    a = _hedge_leg(worker_id="worker2", min_intrabar_dispersion_to_enter=50.0)
+    b = _hedge_leg(worker_id="worker3", min_intrabar_dispersion_to_enter=50.0)
+    a.cycle_hub = hub; b.cycle_hub = hub
+    check("a declares", a._cycle_gate_clear_to_enter(want=True) is False)
+    check("b completes the barrier", b._cycle_gate_clear_to_enter(want=True) is True)
+    a.candles = make_dispersion_candles([20, 20, 20, 20, 0])
+    check("a still enters on its clearance", a._cycle_gate_clear_to_enter(want=a._wants_new_cycle()) is True)
 
 
 async def main():
@@ -4265,7 +4330,12 @@ async def main():
               t_cycle_id_never_touched_without_schema_flag,
               t_live_configs_match_their_stated_rules,
               t_stale_position_bands_ignored_without_schema_flag,
-              t_position_bands_still_honored_with_schema_flag):
+              t_position_bands_still_honored_with_schema_flag,
+              t_min_dispersion_gate_blocks_cycle_when_quiet,
+              t_min_dispersion_gate_allows_cycle_when_dispersed,
+              t_min_dispersion_gate_off_by_default,
+              t_one_cycle_per_candle_blocks_second_entry_same_candle,
+              t_min_dispersion_never_discards_granted_clearance):
         try:
             await t()
         except Exception as e:
