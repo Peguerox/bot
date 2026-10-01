@@ -198,9 +198,16 @@ from stoch_bot_core import BotConfig, run_bot
 # {weekday: hours} keys are hand-shifted by the EDT offset (UTC-4) so the weekend BLOCK lines up
 # with ET Saturday/Sunday, not UTC Saturday/Sunday -- see the docstring above for the derivation
 # and why the naive Sat(5)/Sun(6)-blocked version was wrong (opened 4h early, at Sunday 8pm ET).
-_FULL_WEEKDAY_HOURS = [0, 1, 4, 9, 10, 12, 15, 16, 17, 18, 19, 20, 21]
+_FULL_WEEKDAY_HOURS = [0, 1, 4, 10, 12, 15, 16, 17, 18, 19, 20, 21]
+# 2026-10-01, direct request after a real-data audit: hour 9 UTC removed. Overall it was the
+# worst allowed hour (-$0.026/trade avg, z=-1.97, 575-trade sample) -- but split by context it
+# wasn't the hour itself, it was reopening after a 30min+ quiet gap landing there (1 win in 6)
+# while normal-cadence hour-9 trades were fine (67% win). Blocking the whole hour is the blunt
+# version of that fix -- it also removes the good normal-cadence trades, but it's simple and
+# the gap-specific fix (tightening what counts as "proven" after an hour-open relock) hasn't
+# been built yet. Revisit if/when that lands.
 _WEEKDAY_SCHEDULE = {
-    0: [4, 9, 10, 12, 15, 16, 17, 18, 19, 20, 21],  # UTC Monday, hours 0-1 still Sun 8-9pm ET
+    0: [4, 10, 12, 15, 16, 17, 18, 19, 20, 21],  # UTC Monday, hours 0-1 still Sun 8-9pm ET
     1: _FULL_WEEKDAY_HOURS,  # UTC Tuesday
     2: _FULL_WEEKDAY_HOURS,  # UTC Wednesday
     3: _FULL_WEEKDAY_HOURS,  # UTC Thursday
