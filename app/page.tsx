@@ -1529,6 +1529,42 @@ function CompactStochBtcPanel({
   const [closing, setClosing] = useState(false);
   const closeRequested = Boolean(state?.close_requested);
   const [resetting, setResetting] = useState(false);
+  // Worker 1 manual exit levers -- same as the Worker 2 hedge panel, one row instead of two.
+  const showLevers = table === "lighter_btc_initial_state";
+  const [slIn, setSlIn] = useState("");
+  const [trigIn, setTrigIn] = useState("");
+  const [trailIn, setTrailIn] = useState("");
+  const [savingSettings, setSavingSettings] = useState(false);
+  const liveVol: number | null = state?.live_vol_pct ?? null;
+  const curSl = state?.override_sl_pct ?? null;
+  const curTrig = state?.override_profit_lock_trigger ?? null;
+  const curTrail = state?.override_profit_lock_trail ?? null;
+
+  async function handleApplySettings() {
+    const payload: Record<string, string> = {};
+    if (slIn.trim()) payload.sl = slIn.trim();
+    if (trigIn.trim()) payload.trigger = trigIn.trim();
+    if (trailIn.trim()) payload.trail = trailIn.trim();
+    if (Object.keys(payload).length === 0) return;
+    if (!confirm(
+      `Apply to ${title}?\n\n`
+      + `SL      ${payload.sl ?? "(unchanged)"}%\n`
+      + `Trigger ${payload.trigger ?? "(unchanged)"}%\n`
+      + `Trail   ${payload.trail ?? "(unchanged)"}%\n\n`
+      + `Takes effect immediately, including on an open position.`
+    )) return;
+    setSavingSettings(true);
+    const res = await fetch("/api/lighter-btc-initial-settings", {
+      method: "POST", headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(payload),
+    });
+    if (!res.ok) {
+      const b = await res.json().catch(() => ({}));
+      alert(b.error || "Could not apply settings.");
+    } else { setSlIn(""); setTrigIn(""); setTrailIn(""); }
+    await onToggled();
+    setSavingSettings(false);
+  }
 
   async function handleReset() {
     if (!confirm(`Reset ${title}? Rolls PnL into equity and hides trades before now -- nothing is deleted, all trades stay in the database for research. Only works while flat.`)) return;
@@ -1942,6 +1978,53 @@ function CompactStochBtcPanel({
           </div>
         );
       })()}
+      {showLevers && !loading && (
+        <div className="bg-gray-800/60 rounded-lg p-2 space-y-2">
+          <div className="flex items-baseline justify-between">
+            <p className="text-gray-500 text-[10px] uppercase">Volatility (1-min range, 10m)</p>
+            <p className="font-bold text-sm tabular-nums">
+              <span className={liveVol == null ? "text-gray-500"
+                : liveVol >= 0.10 ? "text-red-400"
+                : liveVol >= 0.06 ? "text-amber-400" : "text-green-400"}>
+                {liveVol != null ? liveVol.toFixed(4) + "%" : "—"}
+              </span>
+              <span className="text-[10px] font-normal text-gray-500 ml-1.5">
+                {liveVol == null ? "" : liveVol >= 0.10 ? "HIGH" : liveVol >= 0.06 ? "elevated" : "calm"}
+              </span>
+            </p>
+          </div>
+          <div className="grid grid-cols-3 gap-1.5">
+            {([["SL", slIn, setSlIn, curSl],
+               ["Trigger", trigIn, setTrigIn, curTrig],
+               ["Trail", trailIn, setTrailIn, curTrail]] as const).map(([label, val, set, cur]) => (
+              <div key={label}>
+                <p className="text-gray-500 text-[9px] uppercase">
+                  {label} <span className="text-gray-600">now {cur != null ? cur + "%" : "—"}</span>
+                </p>
+                <input
+                  value={val}
+                  onChange={(e) => set(e.target.value)}
+                  placeholder={cur != null ? String(cur) : ""}
+                  inputMode="decimal"
+                  className="w-full bg-gray-900 border border-gray-700 rounded px-1.5 py-1 text-xs text-white tabular-nums focus:outline-none focus:border-blue-500"
+                />
+              </div>
+            ))}
+          </div>
+          <button
+            onClick={handleApplySettings}
+            disabled={savingSettings || loading || (!slIn.trim() && !trigIn.trim() && !trailIn.trim())}
+            className="w-full text-xs font-bold px-2.5 py-1 rounded bg-blue-500/20 text-blue-400 hover:bg-blue-500/30 disabled:opacity-30"
+          >
+            {savingSettings ? "Applying…" : "Apply"}
+          </button>
+          <p className="text-gray-600 text-[9px] leading-snug">
+            Leave a box blank to keep it. Takes effect immediately, including on an open position
+            (the exchange-side stop is re-placed at the new SL). TP stays 0.10%. Trail 0 = exit on
+            the first tick down after the trigger.
+          </p>
+        </div>
+      )}
       <div className="space-y-1">
         <p className="text-gray-500 text-[10px] uppercase">Recent trades</p>
         <div className="max-h-72 overflow-y-auto space-y-1 pr-0.5">

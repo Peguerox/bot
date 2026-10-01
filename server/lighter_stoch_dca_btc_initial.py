@@ -319,6 +319,10 @@ CONFIG = BotConfig(
     # open new entries; exits are never gated. Fails CLOSED: no entries at all until
     # lighter_btc_initial_lock_columns.sql has been run. See BotConfig.single_instance_lock.
     single_instance_lock=True,
+    # 2026-10-01, direct request: SL / profit-lock trigger / trail retunable from the dashboard,
+    # same as Worker 2. NULL columns fall back to the values above. Requires
+    # lighter_btc_initial_exit_overrides.sql (also adds live_vol_pct, written with live_k).
+    schema_has_exit_overrides=True,
 )
 
 if __name__ == "__main__":
