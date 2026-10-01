@@ -290,6 +290,20 @@ class BotConfig:
     # self_lock_require_tp_in_streak/self_lock_no_tp_fallback_wins already allow, not a
     # replacement for them.
     self_lock_tp_unlocks_instantly: bool = False
+    # 2026-10-01, direct request after the timing audit: scoped version of
+    # self_lock_require_tp_in_streak -- ONLY tightens the unlock bar for a lock whose CAUSE was
+    # an hour-open relock (_check_hour_open_confirmation, via="hour_open"), not an ordinary
+    # real-SL lock. Real data showed exactly this gap live: 09:00 UTC force-relocks, two quick
+    # REVERSAL wins (not a real TP) satisfied the ordinary "2 wins of any kind" rule 29 minutes
+    # later while the market was still choppy, real money unlocked, and the very next trade lost
+    # within 3 minutes. Deliberately NOT the same as self_lock_require_tp_in_streak=True
+    # globally -- CLAUDE.md is explicit that making a literal TP mandatory everywhere leaves the
+    # bot locked out indefinitely on a streak of non-TP greens, which is exactly what this field
+    # avoids: ordinary real-SL locks keep the existing "2 wins, any kind" rule untouched, only an
+    # hour-open lock demands the stronger proof. self_lock_tp_unlocks_instantly still bypasses
+    # this the moment a literal TP actually lands, same as always -- a real TP already satisfies
+    # "requires TP" by definition, nothing extra needed there.
+    self_lock_hour_open_requires_tp: bool = False
     # 2026-09-29, direct request: whenever the bot boots (a restart, which happens on every
     # push -- or the user turning it on) it must go back in locked, requiring the normal unlock
     # proof all over again (2 wins of any kind, or a single literal TP with
@@ -1090,6 +1104,11 @@ class StochBot:
         # means it's forgotten even if a real TP happened before the restart, which only ever
         # makes unlock MORE conservative (may ask for one extra TP win), never less safe.
         self.paper_streak_has_tp = False
+        # What caused the CURRENT lock -- "real_sl", "hour_open", "boot", "enabled_toggle". See
+        # cfg.self_lock_hour_open_requires_tp, the only thing that reads this. Persisted (unlike
+        # paper_streak_has_tp above): losing this on restart would make unlock LESS
+        # conservative, the opposite direction of safe to forget.
+        self._lock_via = None
         self._self_lock_loaded = False
         self._last_enabled_seen = None  # see self_lock_relocks_on_boot's tick()-level check
         # Hour-open confirmation (2026-09-28: redefined to reuse the self-lock's own
@@ -3082,11 +3101,23 @@ class StochBot:
         open_hours = schedule.get(now_utc.weekday(), []) if isinstance(schedule, dict) else schedule
         is_open_now = now_utc.hour in open_hours
         if is_open_now and self._last_hour_open is not True and not has_open_position:
+            # Deliberately NOT routed through _lock_real_trading: that helper no-ops when
+            # already locked, but an hour boundary must always demand FRESH proof, even if a
+            # real SL locked it seconds before 09:00 -- otherwise self_lock_hour_open_requires_tp
+            # would silently miss exactly the overlap case it exists for (an hour opening on top
+            # of an already-locked bot), still unlockable on whatever easier rule locked it last.
             self.real_trading_locked = True
             self.paper_consecutive_tps = 0
             self.paper_streak_has_tp = False
+            self._lock_via = "hour_open"
             if cfg.schema_has_self_lock:
                 await self.update_state({"real_trading_locked": True, "paper_consecutive_tps": 0})
+                # Isolated write (2026-10-01): lock_via is a newer, separate column -- a missing-
+                # column failure here must never cost the critical lock write above.
+                try:
+                    await self.update_state({"lock_via": "hour_open"})
+                except Exception:
+                    pass
             await self.log_run("real_trading_locked", {"via": "hour_open"})
         self._last_hour_open = is_open_now
 
@@ -3283,6 +3314,7 @@ class StochBot:
             self.paper_entry = state.get("paper_entry_price")
             self.paper_entry_ms = state.get("paper_entry_time")
             self.paper_consecutive_tps = state.get("paper_consecutive_tps") or 0
+            self._lock_via = state.get("lock_via")
             if (self.cfg.use_joint_adaptive and self.cfg.schema_has_joint_checkpoint
                     and self.paper_side is not None):
                 # Restore paper's frozen joint-adaptive TP/SL/blanking and stoch-turn state --
@@ -3324,8 +3356,15 @@ class StochBot:
         self.real_trading_locked = True
         self.paper_consecutive_tps = 0
         self.paper_streak_has_tp = False
+        self._lock_via = via
         if self.cfg.schema_has_self_lock:
             await self.update_state({"real_trading_locked": True, "paper_consecutive_tps": 0})
+            # Isolated write (2026-10-01): lock_via is a newer, separate column -- a missing-
+            # column failure here must never cost the critical lock write above.
+            try:
+                await self.update_state({"lock_via": via})
+            except Exception:
+                pass
         await self.log_run("real_trading_locked", {"via": via})
 
     async def _update_paper_shadow(self, state, entry_signal, reversal_signal, best_bid, best_ask, now_ms):
@@ -3500,7 +3539,12 @@ class StochBot:
             # extending (counter keeps incrementing past 2, doesn't reset) until a literal TP
             # shows up somewhere in it; unlocks the moment both conditions are true together,
             # not necessarily right at the 2nd win. Only a real loss (SL) resets either flag.
-            tp_requirement_met = (not cfg.self_lock_require_tp_in_streak) or self.paper_streak_has_tp
+            # cfg.self_lock_hour_open_requires_tp (2026-10-01) ORs in the same requirement, but
+            # ONLY when self._lock_via says an hour-open relock caused the current lock -- see
+            # its own docstring for why this is scoped rather than global.
+            require_tp_now = (cfg.self_lock_require_tp_in_streak
+                             or (cfg.self_lock_hour_open_requires_tp and self._lock_via == "hour_open"))
+            tp_requirement_met = (not require_tp_now) or self.paper_streak_has_tp
             # self_lock_no_tp_fallback_wins (2026-09-28, direct request): a long enough streak
             # unlocks on its own even with no literal TP in it yet -- watched a real 7-win
             # streak (zero SL) stay locked out the entire time waiting for a TP that never came.

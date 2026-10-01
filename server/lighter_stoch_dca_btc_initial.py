@@ -248,6 +248,13 @@ CONFIG = BotConfig(
     self_lock_tp_unlocks_instantly=True,  # ...and a single literal TP unlocks on its own
     self_lock_loss_decrements_streak=True,
     hour_open_requires_self_lock=True,  # 2026-09-28: an hour opening re-locks behind this same rule
+    # 2026-10-01, direct request after the timing audit: an hour-open relock specifically now
+    # needs a literal TP to clear, not just "2 wins of any kind" -- real data showed the
+    # ordinary rule satisfied by two quick REVERSAL wins 29 minutes after a 09:00 relock, while
+    # the market was still choppy, unlocking real money right before the next trade lost. Every
+    # OTHER lock (a real SL mid-session) still uses the easier rule, unchanged. See
+    # BotConfig.self_lock_hour_open_requires_tp. Requires lighter_self_lock_lock_via.sql.
+    self_lock_hour_open_requires_tp=True,
     require_fresh_signal=True,  # 2026-09-28: only enter on the exact candle the signal first appears
     schema_has_profit_lock=True,  # harmless leftover column, profit_lock_enabled is off
     # 2026-09-29: briefly disabled fleet-wide during a Supabase statement-timeout incident

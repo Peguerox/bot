@@ -2616,6 +2616,95 @@ async def t_hour_open_confirmation_uses_the_standard_unlock_rule():
     check("counter incremented normally instead", bot.paper_consecutive_tps == 1, bot.paper_consecutive_tps)
 
 
+async def t_hour_open_confirmation_sets_lock_via():
+    print("\n[hour-open confirmation: tags the lock cause so self_lock_hour_open_requires_tp can read it]")
+    ex = FakeExchange()
+    bot = make_bot(ex, trading_hours_utc=[16], hour_open_requires_self_lock=True,
+                    self_lock_enabled=True)
+    await bot._check_hour_open_confirmation(
+        now_utc=_dt.datetime(2026, 9, 24, 16, 0, tzinfo=_dt.timezone.utc))
+    check("lock_via tagged hour_open", bot._lock_via == "hour_open", bot._lock_via)
+
+
+async def t_self_lock_hour_open_requires_tp_blocks_reversal_only_unlock():
+    print("\n[self_lock_hour_open_requires_tp: 2 reversal wins do NOT unlock an hour-open lock]")
+    ex = FakeExchange()
+    bot = make_bot(ex, self_lock_enabled=True, self_lock_reversal_counts_as_win=True,
+                    self_lock_hour_open_requires_tp=True)
+    bot._self_lock_loaded = True
+    bot.real_trading_locked = True
+    bot._lock_via = "hour_open"
+    state = dict(bot.state_row)
+    for i in range(2):
+        bot.paper_side = "long"
+        bot.paper_entry = 86000.0
+        bot.paper_entry_ms = 1700000000000 + i * 60000
+        await bot._update_paper_shadow(state, None, "short", 86040.0, 86041.0,
+                                       1700000000000 + i * 60000)
+    check("2 reversal wins banked", bot.paper_consecutive_tps == 2, bot.paper_consecutive_tps)
+    check("still locked -- neither win was a literal TP", bot.real_trading_locked is True)
+
+
+async def t_self_lock_hour_open_requires_tp_unlocks_once_a_real_tp_lands():
+    print("\n[self_lock_hour_open_requires_tp: a literal TP in the streak clears an hour-open lock]")
+    ex = FakeExchange()
+    bot = make_bot(ex, self_lock_enabled=True, self_lock_reversal_counts_as_win=True,
+                    self_lock_hour_open_requires_tp=True)
+    bot._self_lock_loaded = True
+    bot.real_trading_locked = True
+    bot._lock_via = "hour_open"
+    state = dict(bot.state_row)
+    bot.paper_side = "long"
+    bot.paper_entry = 86000.0
+    bot.paper_entry_ms = 1700000000000
+    await bot._update_paper_shadow(state, None, "short", 86040.0, 86041.0, 1700000000000)
+    check("still locked after 1 reversal win", bot.real_trading_locked is True)
+    bot.paper_side = "long"
+    bot.paper_entry = 86000.0
+    bot.paper_entry_ms = 1700000060000
+    tp_price = 86000.0 * 1.0011
+    await bot._update_paper_shadow(state, None, None, tp_price, tp_price + 1, 1700000120000)
+    check("unlocked once the 2nd win was a literal TP", bot.real_trading_locked is False,
+          bot.real_trading_locked)
+
+
+async def t_self_lock_hour_open_requires_tp_does_not_affect_real_sl_locks():
+    print("\n[self_lock_hour_open_requires_tp: an ordinary real-SL lock keeps the easier 2-wins rule]")
+    ex = FakeExchange()
+    bot = make_bot(ex, self_lock_enabled=True, self_lock_reversal_counts_as_win=True,
+                    self_lock_hour_open_requires_tp=True)
+    bot._self_lock_loaded = True
+    bot.real_trading_locked = True
+    bot._lock_via = "real_sl"
+    state = dict(bot.state_row)
+    for i in range(2):
+        bot.paper_side = "long"
+        bot.paper_entry = 86000.0
+        bot.paper_entry_ms = 1700000000000 + i * 60000
+        await bot._update_paper_shadow(state, None, "short", 86040.0, 86041.0,
+                                       1700000000000 + i * 60000)
+    check("unlocked on 2 reversal wins -- not an hour-open lock, so the stricter rule never applied",
+          bot.real_trading_locked is False, bot.real_trading_locked)
+
+
+async def t_lock_via_off_by_default_other_bots_unaffected():
+    print("\n[self_lock_hour_open_requires_tp: off by default -- every other self-lock bot unchanged]")
+    ex = FakeExchange()
+    bot = make_bot(ex, self_lock_enabled=True, self_lock_reversal_counts_as_win=True)
+    bot._self_lock_loaded = True
+    bot.real_trading_locked = True
+    bot._lock_via = "hour_open"  # even if somehow tagged, the flag is off
+    state = dict(bot.state_row)
+    for i in range(2):
+        bot.paper_side = "long"
+        bot.paper_entry = 86000.0
+        bot.paper_entry_ms = 1700000000000 + i * 60000
+        await bot._update_paper_shadow(state, None, "short", 86040.0, 86041.0,
+                                       1700000000000 + i * 60000)
+    check("unlocked normally -- flag defaults off", bot.real_trading_locked is False,
+          bot.real_trading_locked)
+
+
 async def t_log_trade_upserts_to_prevent_duplicate_rows():
     print("\n[log_trade: posts with on_conflict + ignore-duplicates so a race can't double-insert]")
     cfg = BotConfig(name="t", worker_id="w", table_state="s", table_trades="lighter_test_trades",
@@ -3802,6 +3891,8 @@ async def t_live_configs_match_their_stated_rules():
     # mix-up can't silently repeat.
     check("Worker 1: plain stochastic signal (NOT z-score)",
           w1.use_zscore_signal is False, w1.use_zscore_signal)
+    check("Worker 1: hour-open relock requires a literal TP to clear",
+          w1.self_lock_hour_open_requires_tp is True, w1.self_lock_hour_open_requires_tp)
 
     hedge = importlib.import_module("lighter_hedge_dual_leg")
     for name, leg in (("long", hedge.LONG_CONFIG), ("short", hedge.SHORT_CONFIG)):
@@ -3995,6 +4086,11 @@ async def main():
               t_hour_open_confirmation_does_not_rearm_while_staying_open,
               t_hour_open_confirmation_blocks_entry_signal,
               t_hour_open_confirmation_uses_the_standard_unlock_rule,
+              t_hour_open_confirmation_sets_lock_via,
+              t_self_lock_hour_open_requires_tp_blocks_reversal_only_unlock,
+              t_self_lock_hour_open_requires_tp_unlocks_once_a_real_tp_lands,
+              t_self_lock_hour_open_requires_tp_does_not_affect_real_sl_locks,
+              t_lock_via_off_by_default_other_bots_unaffected,
               t_timeout_constants,
               t_joint_adaptive_bounds_can_pin_sl_flat,
               t_burn_reclaimed_by_k_only_for_profit_lock_source,
