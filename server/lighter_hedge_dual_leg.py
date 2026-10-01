@@ -269,15 +269,11 @@ LONG_CONFIG = BotConfig(
     # BotConfig.partner_cut_arms_trail_immediately. Exits in this window now read PROFIT_LOCK,
     # not BREAKEVEN_LOCK.
     partner_cut_arms_trail_immediately=True,
-    # 2026-10-01, direct request: Worker 2's version of Worker 1's SAME band (65-75), INVERTED
-    # -- enter OUTSIDE it instead of inside it ("put it as a band... if less than 65 and more
-    # than 75 then you are in, of course with the stochastic"). On top of
-    # require_pressure_to_enter above (both required). Was a 50-or-below floor-only trend gate
-    # earlier today; replaced with this exact inversion of Worker 1's band per direct request.
-    # Confirmed the entry_signal-nulling gate applies identically to a fixed_direction leg.
-    color_balance_index_min=65.0,
-    color_balance_index_max=75.0,
-    color_balance_index_invert=True,
+    # 2026-10-01, direct request: stochastic-only entry filter for both hedge legs.
+    # Keep the color-balance reading available for entry snapshots, without gating entries.
+    color_balance_index_min=None,
+    color_balance_index_max=None,
+    color_balance_index_invert=False,
     color_balance_index_window=5,
     # 2026-10-01, direct request ("Option B"): the trail may never close this leg below the
     # breakeven floor -- exit at max(peak - trail, floor). Live the same day the trail armed at
@@ -390,15 +386,11 @@ SHORT_CONFIG = BotConfig(
     # BotConfig.partner_cut_arms_trail_immediately. Exits in this window now read PROFIT_LOCK,
     # not BREAKEVEN_LOCK.
     partner_cut_arms_trail_immediately=True,
-    # 2026-10-01, direct request: Worker 2's version of Worker 1's SAME band (65-75), INVERTED
-    # -- enter OUTSIDE it instead of inside it ("put it as a band... if less than 65 and more
-    # than 75 then you are in, of course with the stochastic"). On top of
-    # require_pressure_to_enter above (both required). Was a 50-or-below floor-only trend gate
-    # earlier today; replaced with this exact inversion of Worker 1's band per direct request.
-    # Confirmed the entry_signal-nulling gate applies identically to a fixed_direction leg.
-    color_balance_index_min=65.0,
-    color_balance_index_max=75.0,
-    color_balance_index_invert=True,
+    # 2026-10-01, direct request: stochastic-only entry filter for both hedge legs.
+    # Keep the color-balance reading available for entry snapshots, without gating entries.
+    color_balance_index_min=None,
+    color_balance_index_max=None,
+    color_balance_index_invert=False,
     color_balance_index_window=5,
     # 2026-10-01, direct request ("Option B"): the trail may never close this leg below the
     # breakeven floor -- exit at max(peak - trail, floor). Live the same day the trail armed at

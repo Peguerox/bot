@@ -4034,11 +4034,10 @@ async def t_live_configs_match_their_stated_rules():
               leg.single_instance_lock is True, leg.single_instance_lock)
         check(f"hedge {name} leg: has a cycle partner to synchronise with",
               leg.cycle_partner_table is not None, leg.cycle_partner_table)
-        # 2026-10-01, direct request: Worker 2's version of Worker 1's SAME 65-75 band,
-        # INVERTED -- enter OUTSIDE it instead of inside it.
-        check(f"hedge {name} leg: color-balance index gate is 65-75 INVERTED (enter outside it)",
+        # 2026-10-01, direct request: keep stochastic, remove the color-balance entry gate.
+        check(f"hedge {name} leg: color-balance entry gate is disabled",
               (leg.color_balance_index_min, leg.color_balance_index_max, leg.color_balance_index_invert)
-              == (65.0, 75.0, True),
+              == (None, None, False),
               (leg.color_balance_index_min, leg.color_balance_index_max, leg.color_balance_index_invert))
         # 2026-09-30: switched from BTC to SOL, fixed_leg_usd bumped $10 -> $12 off Lighter's $10
         # min_quote_amount for real margin against a single unfavourable tick. 2026-10-01: back

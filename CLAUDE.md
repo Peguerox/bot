@@ -41,7 +41,10 @@ project with no git/Render/Vercel link -- never work there.
   (`lighter_stoch_dca_btc_*` tables), reading `WORKER3_LIGHTER_*` env vars for the second set of
   credentials. $10 per leg. As of 2026-10-01 (commit 3259e51):
   - **Entry:** both legs together whenever the 25/75 stochastic shows pressure
-    (`require_pressure_to_enter`). The dispersion floor / one-cycle-per-candle gates were built and
+    (`require_pressure_to_enter`). On 2026-10-01 the user requested stochastic-only entries:
+    both hedge legs have the color-balance min/max disabled. The numeric balance index still
+    saves in entry snapshots for review. Exit overrides remain the user's dashboard settings.
+    The dispersion floor / one-cycle-per-candle gates were built and
     then removed at the user's request (machinery still in the core, off).
   - **Exits:** loser cut at its SL; the winner's trail arms the instant the partner is cut
     (`partner_cut_arms_trail_immediately`) and **can never close below breakeven**
