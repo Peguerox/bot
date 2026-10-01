@@ -503,6 +503,12 @@ class BotConfig:
     # involved. Kept OFF by default -- it is new, unproven in this codebase, and every other bot
     # must keep behaving exactly as before.
     native_stop_loss_enabled: bool = False
+    # Same idea as native_stop_loss_enabled, for the TP side (ORDER_TYPE_TAKE_PROFIT) -- only
+    # meaningful when disable_literal_tp is False, i.e. a literal TP actually governs exits.
+    # Irrelevant for the hedge legs (disable_literal_tp=True there), real for a plain fixed-TP/SL
+    # bot like Worker 1: both its exits are static price levels with no trail or partner-pnl
+    # dependency, so BOTH sides can be backed by a real exchange order with nothing lost.
+    native_take_profit_enabled: bool = False
     # Single-instance lock (2026-09-30) -- see LOCK_REFRESH_EVERY/LOCK_STALE_AFTER and
     # _acquire_instance_lock. Requires the lock_owner/lock_heartbeat column migration. False
     # (default) leaves every bot that hasn't had that migration run behaving exactly as before.
@@ -1168,6 +1174,7 @@ class StochBot:
         # BotConfig.native_stop_loss_enabled / _sync_native_stop. None whenever we are flat, or
         # believe nothing is resting (just closed, just restarted).
         self._native_stop_synced = None  # (trigger_price, qty) last confirmed resting, or None
+        self._native_tp_synced = None    # same, for native_take_profit_enabled
         self._burned_signal = None  # see BotConfig.red_exit_burns_signal
         # See BotConfig.profit_lock_burn_k_gate's docstring. _burned_signal_via distinguishes a
         # profit-lock-sourced burn (eligible for the K-reclaim early-clear) from a loss-sourced
@@ -2461,27 +2468,14 @@ class StochBot:
         except Exception as e:
             await self.log_run("cancel_all_failed", {"error": str(e)[:200]})
 
-    async def _sync_native_stop(self, side, qty, trigger_price):
-        """Keep a real exchange-side stop resting at `trigger_price`, sized to `qty` -- see
-        BotConfig.native_stop_loss_enabled. No-ops unless the desired (trigger, qty) pair
-        actually changed (a fresh entry, a live SL override applied mid-position, or -- for any
-        bot that DCAs, not true of either hedge leg today -- a new leg added), so this costs
-        nothing on the other ~99% of ticks.
-
-        `price` on create_sl_order is the IOC execution band once triggered, not the trigger
-        itself -- deliberately wide (NATIVE_STOP_BAND_PCT, vs. place_order's 0.05%) because the
-        whole point of this order is to still fill during the fast move our own poll could not
-        react to in time; a tight band here could let the stop trigger and then fail to fill,
-        which would be worse than not having it at all.
-
-        These bots never place any OTHER resting order (place_order is always a reduce_only or
-        entry market order), so cancel_all() here cannot cancel anything but a previous native
-        stop of our own.
-        """
+    async def _place_native_stop(self, side, qty, trigger_price):
+        """Place one native stop order, unconditionally -- see _sync_native_exits, which is the
+        only caller and owns the cancel-first + no-op-unless-changed logic. Never call this
+        directly from tick(): placing an SL and a TP separately would each cancel_all() the
+        OTHER one, since Lighter has no selective cancel-by-order-id in this codebase (these
+        bots never place any other resting order, so a blanket cancel is normally safe -- except
+        between two native orders of our own on the same position)."""
         desired = (trigger_price, round(qty, 8))
-        if desired == self._native_stop_synced:
-            return
-        await self.cancel_all()
         is_ask = (side == "long")  # closing a long = selling; closing a short = buying
         band = trigger_price * (1 - NATIVE_STOP_BAND_PCT / 100 if is_ask
                                 else 1 + NATIVE_STOP_BAND_PCT / 100)
@@ -2500,12 +2494,71 @@ class StochBot:
             )
             if err:
                 await self.log_run("native_stop_place_failed", {"error": str(err)[:200]})
-                return  # leave _native_stop_synced as-is -- retry next tick
+                return
         except Exception as e:
             await self.log_run("native_stop_place_failed", {"error": str(e)[:200]})
             return
         self._native_stop_synced = desired
         await self.log_run("native_stop_synced", {"side": side, "trigger": trigger_price})
+
+    async def _place_native_tp(self, side, qty, trigger_price):
+        """TP sibling of _place_native_stop -- see _sync_native_exits for the only caller."""
+        desired = (trigger_price, round(qty, 8))
+        is_ask = (side == "long")
+        band = trigger_price * (1 - NATIVE_STOP_BAND_PCT / 100 if is_ask
+                                else 1 + NATIVE_STOP_BAND_PCT / 100)
+        trig_int = int(round(trigger_price * (10 ** self.cfg.price_decimals)))
+        price_int = int(round(band * (10 ** self.cfg.price_decimals)))
+        qty_int = int(round(qty * (10 ** self.cfg.size_decimals)))
+        co_idx = int(time.time() * 1000) % 500_000_000
+        try:
+            _order, _resp, err = await asyncio.wait_for(
+                self.client.create_tp_order(
+                    market_index=self.cfg.market_index, client_order_index=co_idx,
+                    base_amount=qty_int, trigger_price=trig_int, price=price_int,
+                    is_ask=is_ask, reduce_only=True,
+                ),
+                timeout=ORDER_TIMEOUT,
+            )
+            if err:
+                await self.log_run("native_tp_place_failed", {"error": str(err)[:200]})
+                return
+        except Exception as e:
+            await self.log_run("native_tp_place_failed", {"error": str(e)[:200]})
+            return
+        self._native_tp_synced = desired
+        await self.log_run("native_tp_synced", {"side": side, "trigger": trigger_price})
+
+    async def _sync_native_exits(self, side, qty, sl_trigger, tp_trigger):
+        """Keep whichever native orders are enabled resting at the current trigger levels, sized
+        to `qty` -- see BotConfig.native_stop_loss_enabled / native_take_profit_enabled. No-ops
+        unless at least one desired (trigger, qty) pair actually changed (a fresh entry, a live
+        override applied mid-position, or -- for a DCA bot -- a new leg added), so this costs
+        nothing on the other ~99% of ticks.
+
+        Always cancels and re-places BOTH enabled sides together, even if only one changed:
+        Lighter has no selective cancel-by-order-id here, so a cancel_all() for just the stale
+        side would also wipe out the still-valid other side, leaving the position with only one
+        of its two native exits resting until the next change happened to notice. Re-placing an
+        unchanged side is cheap; silently losing a side's protection is not.
+        """
+        cfg = self.cfg
+        want_sl = cfg.native_stop_loss_enabled
+        want_tp = cfg.native_take_profit_enabled and not cfg.disable_literal_tp
+        if not (want_sl or want_tp):
+            return
+        q = round(qty, 8)
+        desired_sl = (sl_trigger, q) if want_sl else None
+        desired_tp = (tp_trigger, q) if want_tp else None
+        if desired_sl == self._native_stop_synced and desired_tp == self._native_tp_synced:
+            return
+        await self.cancel_all()
+        self._native_stop_synced = None
+        self._native_tp_synced = None
+        if want_sl:
+            await self._place_native_stop(side, qty, sl_trigger)
+        if want_tp:
+            await self._place_native_tp(side, qty, tp_trigger)
 
     async def emergency_flatten(self, reason, detail):
         """Real position is larger than anything we asked for. Get flat immediately -- this is the
@@ -2758,12 +2811,13 @@ class StochBot:
 
     async def close_all(self, reason, state, side, legs, best_bid, best_ask, candle_ts,
                         known_pos=None):
-        if self.cfg.native_stop_loss_enabled:
-            # We are about to close ourselves -- clear the resting native stop first so it can
-            # never fire into a position that's already flat (or, worse, a fresh one from the
-            # next cycle). Safe even if nothing is resting (cancel_all is a no-op then).
+        if self.cfg.native_stop_loss_enabled or self.cfg.native_take_profit_enabled:
+            # We are about to close ourselves -- clear whatever native order(s) are resting first
+            # so neither can fire into a position that's already flat (or, worse, a fresh one
+            # from the next cycle). Safe even if nothing is resting (cancel_all is a no-op then).
             await self.cancel_all()
             self._native_stop_synced = None
+            self._native_tp_synced = None
         prior_collateral = state.get("collateral_before_entry")
         # Close what is really open. Closing only the tracked legs would leave a residual
         # position running whenever a phantom fill made the real size larger.
@@ -3883,11 +3937,15 @@ class StochBot:
         # the position normally -- returning here instead is what left three live positions
         # with no TP or SL running on 2026-09-22.
         if side is not None and confirmed_flat:
+            # The leading cause of an external close once a native order is resting IS that
+            # order firing -- capture which levels were resting (for the SL-vs-TP inference
+            # below) before resetting so the next entry resyncs fresh ones.
+            last_native_sl = self._native_stop_synced[0] if self._native_stop_synced else None
+            last_native_tp = self._native_tp_synced[0] if self._native_tp_synced else None
             if cfg.native_stop_loss_enabled:
-                # The leading cause of an external close once a native stop is resting IS that
-                # stop firing -- reset so the next entry resyncs a fresh one, and tag the trade
-                # below as the designed outcome it is, not an anomaly.
                 self._native_stop_synced = None
+            if cfg.native_take_profit_enabled:
+                self._native_tp_synced = None
             prior = state.get("collateral_before_entry")
             pnl = (collateral - prior) if (prior is not None and collateral is not None) else 0.0
             ae = avg_entry(legs) or state.get("first_entry_price")
@@ -3923,11 +3981,15 @@ class StochBot:
             self.position_stoch_extreme_k = None
             self.position_stoch_activation_pct = None
             self.position_stoch_retreat_points = None
-            # With a native stop resting, this path is the EXPECTED way a stop-out now happens
-            # (the exchange closes it, not our own close_all) -- tag it "SL" so it reads as the
-            # designed outcome in win/loss stats, not an anomaly. Bots without the native stop
+            # With a native order resting, this path is the EXPECTED way a TP/SL now happens
+            # (the exchange closes it, not our own close_all) -- infer which one by comparing the
+            # actual fill to whichever resting trigger it landed closer to, so it reads as the
+            # designed outcome in win/loss stats, not an anomaly. Bots with neither native order
             # keep "EXTERNAL": for them an unrequested close really is unexplained.
-            ext_reason = "SL" if cfg.native_stop_loss_enabled else "EXTERNAL"
+            candidates = [("SL", last_native_sl), ("TP", last_native_tp)]
+            candidates = [(r, t) for r, t in candidates if t is not None]
+            ext_reason = (min(candidates, key=lambda c: abs(implied_exit - c[1]))[0]
+                         if candidates else "EXTERNAL")
             if cfg.schema_has_cycle_id and ext_cycle_id is not None:
                 try:
                     await self.update_state({"cycle_id": None})
@@ -4030,10 +4092,10 @@ class StochBot:
             sl = round_trigger(state["first_entry_price"] * (1 - pos_sl / 100 if side == "long"
                                                              else 1 + pos_sl / 100),
                                up=(side != "long"))
-            if cfg.native_stop_loss_enabled:
+            if cfg.native_stop_loss_enabled or cfg.native_take_profit_enabled:
                 qty_now = total_qty(legs)
                 if qty_now > 0:
-                    await self._sync_native_stop(side, qty_now, sl)
+                    await self._sync_native_exits(side, qty_now, sl, tp)
             check_price = best_bid if side == "long" else best_ask
             gap_hit = None
             if side == "long":

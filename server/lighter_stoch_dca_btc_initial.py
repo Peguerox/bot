@@ -249,6 +249,13 @@ CONFIG = BotConfig(
     # last resort, only writes if Worker 2 has gone quiet.
     tick_log_defers_to=["worker2", "worker3"],
     trade_flow_log_defers_to=None,
+    # 2026-10-01, direct request: real exchange-side TP AND SL, placed the moment a position
+    # opens, instead of relying only on our own 0.5s poll + reduce_only market order. This bot is
+    # a BETTER fit than the hedge for both sides: both exits here are static price levels (no
+    # trail, no partner-pnl floor), so neither side loses anything by also being backed by a real
+    # order on the exchange. See BotConfig.native_stop_loss_enabled / native_take_profit_enabled.
+    native_stop_loss_enabled=True,
+    native_take_profit_enabled=True,
 )
 
 if __name__ == "__main__":

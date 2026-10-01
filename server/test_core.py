@@ -63,6 +63,13 @@ class FakeExchange:
                                "price": price, "is_ask": is_ask, "reduce_only": reduce_only})
         return object(), object(), None
 
+    async def create_tp_order(self, market_index, client_order_index, base_amount,
+                              trigger_price, price, is_ask, reduce_only=False, **kw):
+        self.tp_orders = getattr(self, "tp_orders", [])
+        self.tp_orders.append({"qty": base_amount / 1e5, "trigger": trigger_price,
+                               "price": price, "is_ask": is_ask, "reduce_only": reduce_only})
+        return object(), object(), None
+
     CANCEL_ALL_TIF_IMMEDIATE = 0
 
 
@@ -3521,7 +3528,7 @@ async def t_native_stop_resyncs_when_sl_override_changes():
 async def t_external_close_tagged_sl_when_native_stop_enabled():
     print("\n[native stop: an external close (the stop firing) books as SL, not EXTERNAL]")
     entry = 86000.0
-    ex = FakeExchange(position=0.0, collateral=19.97)  # already closed on the exchange
+    ex = FakeExchange(position=round(20.0 / entry, 5), collateral=20.0)  # still open
     state = {
         "id": 1, "side": "long", "legs": [{"price": entry, "usd_size": 20.0}],
         "first_entry_price": entry, "first_entry_time": 1700000000000, "dca_level": 0,
@@ -3531,10 +3538,43 @@ async def t_external_close_tagged_sl_when_native_stop_enabled():
     bot = make_bot(ex, state=state, candles_kind="mid", native_stop_loss_enabled=True,
                    require_fresh_signal=False, self_lock_enabled=False, use_joint_adaptive=False)
     bot.live.order_book = {"bids": [{"price": "86001.0"}], "asks": [{"price": "86002.0"}]}
+    await bot.tick()  # syncs the native stop while the position is still genuinely open
+    check("native stop synced before the external close", bot._native_stop_synced is not None)
+    ex.position = 0.0  # the resting native stop firing on the exchange, outside our own code
+    ex.collateral = 19.97
+    bot._pos_cache_at = 0  # force a fresh REST read instead of serving the pre-close cache
     for _ in range(3):  # 3 agreeing flat reads required before an external close is booked
         await bot.tick()
     check("booked as a closed position", bot.state_row["side"] is None, bot.state_row["side"])
     check("tagged SL, not EXTERNAL", bot.trades and bot.trades[-1][5] == "SL", bot.trades)
+
+
+async def t_native_exits_both_placed_with_a_single_cancel():
+    print("\n[native exits: SL+TP both enabled -- one cancel_all, both orders survive]")
+    ex = FakeExchange()
+    bot = make_bot(ex, candles_kind="long", native_stop_loss_enabled=True,
+                   native_take_profit_enabled=True, disable_literal_tp=False,
+                   sl_pct=0.06, tp_pct=0.10)
+    await bot.tick()
+    await bot.tick()  # position-management block (and the native sync) runs on the FOLLOWING tick
+    check("exactly one cancel_all for this sync", getattr(ex, "cancel_all_calls", 0) == 1,
+          getattr(ex, "cancel_all_calls", None))
+    check("stop order placed", len(getattr(ex, "sl_orders", [])) == 1, getattr(ex, "sl_orders", None))
+    check("tp order placed", len(getattr(ex, "tp_orders", [])) == 1, getattr(ex, "tp_orders", None))
+    check("neither tracker left stale/empty",
+          bot._native_stop_synced is not None and bot._native_tp_synced is not None)
+
+
+async def t_native_tp_skipped_when_literal_tp_disabled():
+    print("\n[native TP: never placed when disable_literal_tp=True, even if the flag is on]")
+    ex = FakeExchange()
+    bot = make_bot(ex, candles_kind="long", native_stop_loss_enabled=True,
+                   native_take_profit_enabled=True, disable_literal_tp=True, sl_pct=0.06)
+    await bot.tick()
+    await bot.tick()
+    check("stop order placed", len(getattr(ex, "sl_orders", [])) == 1, getattr(ex, "sl_orders", None))
+    check("NO tp order -- literal TP is off for this bot (the hedge legs)",
+          getattr(ex, "tp_orders", []) == [], getattr(ex, "tp_orders", None))
 
 
 async def t_cycle_id_stamped_same_for_both_legs_on_release():
@@ -3589,6 +3629,15 @@ async def t_live_configs_match_their_stated_rules():
           w1.self_lock_require_tp_in_streak is False, w1.self_lock_require_tp_in_streak)
     check("Worker 1: a single literal TP unlocks on its own",
           w1.self_lock_tp_unlocks_instantly is True, w1.self_lock_tp_unlocks_instantly)
+    # 2026-10-01, direct request: real exchange-side TP and SL -- both this bot's exits are
+    # static price levels (no trail, no partner-pnl floor), so neither loses anything by also
+    # being backed by a real order. See BotConfig.native_stop_loss_enabled/native_take_profit_enabled.
+    check("Worker 1: native stop-loss on",
+          w1.native_stop_loss_enabled is True, w1.native_stop_loss_enabled)
+    check("Worker 1: native take-profit on",
+          w1.native_take_profit_enabled is True, w1.native_take_profit_enabled)
+    check("Worker 1: literal TP is actually active (native TP would be a no-op otherwise)",
+          w1.disable_literal_tp is False, w1.disable_literal_tp)
 
     hedge = importlib.import_module("lighter_hedge_dual_leg")
     for name, leg in (("long", hedge.LONG_CONFIG), ("short", hedge.SHORT_CONFIG)):
@@ -3823,6 +3872,8 @@ async def main():
               t_native_stop_cancelled_before_our_own_close,
               t_native_stop_resyncs_when_sl_override_changes,
               t_external_close_tagged_sl_when_native_stop_enabled,
+              t_native_exits_both_placed_with_a_single_cancel,
+              t_native_tp_skipped_when_literal_tp_disabled,
               t_cycle_id_stamped_same_for_both_legs_on_release,
               t_cycle_id_persisted_on_entry_and_cleared_on_close,
               t_cycle_id_never_touched_without_schema_flag,
