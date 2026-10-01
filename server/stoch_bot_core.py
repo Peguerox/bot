@@ -3933,6 +3933,18 @@ class StochBot:
                     await self.update_state(patch)
                 except Exception:
                     pass
+                if cfg.intrabar_dispersion_pause_at is not None:
+                    # Isolated write (2026-10-01): live_intrabar_dispersion is a newer, separate
+                    # column -- a missing-column failure here must never cost the live_k/
+                    # live_signal write above. Same cadence, so the dashboard panel can show
+                    # exactly what the gate is seeing right now. Requires
+                    # lighter_btc_initial_dispersion_readout.sql.
+                    dispersion = compute_intrabar_dispersion(self.candles, cfg.intrabar_dispersion_window)
+                    if dispersion is not None:
+                        try:
+                            await self.update_state({"live_intrabar_dispersion": dispersion})
+                        except Exception:
+                            pass
         if cfg.entry_confirmation_max_pct is not None and cfg.schema_has_entry_confirmation:
             # Dashboard readout for the entry-confirmation book filter (2026-09-29), same
             # cadence as live_k -- "what would the confirmation check say right now" for

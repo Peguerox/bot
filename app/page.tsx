@@ -1465,6 +1465,11 @@ function CompactStochBtcPanel({
   const side = state?.side ?? null;
   const liveK = state?.live_k ?? null;
   const liveSignal = state?.live_signal ?? null;
+  // 2026-10-01: the intrabar dispersion filter's own live reading -- stdev of (high+low)/2
+  // over the trailing N bars, raw $. Only meaningful for a bot running
+  // intrabar_dispersion_pause_at (Worker 1's isolated test right now); null for every other
+  // bot since the column is never written there. See compute_intrabar_dispersion.
+  const liveDispersion = state?.live_intrabar_dispersion ?? null;
   const legs: any[] = state?.legs ?? [];
   const seedUsd = state?.seed_usd ?? 100;
   const realizedPnl = state?.realized_pnl_usd ?? 0;
@@ -1733,6 +1738,13 @@ function CompactStochBtcPanel({
                   K {liveK.toFixed(1)} {liveSignal ? liveSignal.toUpperCase() : "—"}
                 </span>
               )}
+              {liveDispersion != null && (
+                <span className={`text-[9px] font-bold px-1.5 py-0.5 rounded tabular-nums ${
+                  liveDispersion >= 50 ? "bg-red-500/20 text-red-400" : "bg-gray-700/40 text-gray-400"
+                }`} title="Intrabar dispersion: stdev of (high+low)/2 over the trailing 5 bars, raw $. Gate blocks new entries at or above $50 -- see BotConfig.intrabar_dispersion_pause_at.">
+                  disp ${liveDispersion.toFixed(1)}{liveDispersion >= 50 ? " ⛔" : ""}
+                </span>
+              )}
             </div>
           </div>
         );
@@ -1748,6 +1760,13 @@ function CompactStochBtcPanel({
                   title="Live stochastic K value and direction, this tick">
               K {liveK.toFixed(1)} {liveSignal ? liveSignal.toUpperCase() : "—"}
             </span>
+            {liveDispersion != null && (
+              <span className={`ml-2 text-[9px] font-bold px-1.5 py-0.5 rounded tabular-nums ${
+                liveDispersion >= 50 ? "bg-red-500/20 text-red-400" : "bg-gray-700/40 text-gray-400"
+              }`} title="Intrabar dispersion: stdev of (high+low)/2 over the trailing 5 bars, raw $. Gate blocks new entries at or above $50.">
+                disp ${liveDispersion.toFixed(1)}{liveDispersion >= 50 ? " ⛔" : ""}
+              </span>
+            )}
           </div>
         );
 
@@ -2862,7 +2881,7 @@ export default function Dashboard() {
         <div className="grid grid-cols-1 sm:grid-cols-3 gap-3">
           <CompactStochBtcPanel
             title="Worker 1 · Plain Stochastic, Weekend Blocked"
-            subtitle="TP 0.10% / SL 0.11% / window 5, 25-75 (original) / 120s blanking period / weekday hours only (original fitted schedule), Sat+Sun fully closed ET, resumes Monday 12am ET / self-lock: 2 wins of ANY kind unlock, OR a single literal TP on its own -- a red non-SL close cancels one win, only a literal SL wipes the streak / an hour opening re-locks behind this same rule"
+            subtitle="2026-10-01: isolated test -- self-lock OFF, all hours open, only filter is intrabar dispersion (stdev of (high+low)/2, 5-bar, raw $) blocking new entries at >= $50. TP 0.10% / SL 0.11% / window 5, 25-75 / 120s blanking period / weekday hours, Sat+Sun fully closed ET, resumes Monday 12am ET"
             table="lighter_btc_initial_state"
             state={initialBtcState}
             trades={initialBtcTrades.filter((t: any) => t.closed_at >= WORKER1_RESET_AT)}
