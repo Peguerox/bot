@@ -485,6 +485,18 @@ class BotConfig:
     # requires the cycle_partner_pnl_baseline column migration -- persistence only, the
     # in-process copy is authoritative (same arrangement as profit_lock_peak_pct)
     schema_has_breakeven_floor: bool = False
+    # 2026-10-01, direct request, replaces the margin-gated floor/BREAKEVEN_LOCK exit above with
+    # the ordinary profit-lock trail, started the instant the partner is confirmed cut at a loss
+    # instead of only once profit_lock_trigger_pct is reached. Still requires
+    # breakeven_floor_enabled (reuses its partner-cut detection) -- this only changes what happens
+    # once that detection fires. Real data showed a winner can reach a meaningful gain (+0.055%)
+    # and give all of it back with ZERO protection, because it never cleared the floor's own
+    # margin (arm_at = floor_pct + margin) -- the gap this closes is between "partner just got
+    # cut" and "profit_lock_trigger_pct reached", where the old design offered nothing. Same
+    # trail_pct buffer as always, so ordinary noise still can't scalp it -- this changes WHEN
+    # the trail starts watching, not how tight it is. Exits here read "PROFIT_LOCK", not
+    # "BREAKEVEN_LOCK" -- it genuinely is the trail now, just started earlier.
+    partner_cut_arms_trail_immediately: bool = False
     # Requires the cycle_id column migration (state + trades, both hedge legs). Both legs stamp
     # the SAME id (the cycle barrier's release timestamp, see _cycle_gate_clear_to_enter) onto
     # their entry and carry it to their close, so the dashboard can pair a cycle's two trade rows
@@ -4179,7 +4191,24 @@ class StochBot:
                                 "own_notional_usd": round(total_qty(legs) * ae, 4),
                             })
                 floor_pct = self._breakeven_floor_pct
-                if floor_pct is not None:
+                if floor_pct is not None and cfg.partner_cut_arms_trail_immediately:
+                    # See BotConfig.partner_cut_arms_trail_immediately -- arm the ordinary
+                    # profit-lock trail RIGHT NOW at wherever this leg currently sits, instead of
+                    # the margin-gated floor/BREAKEVEN_LOCK exit below. Only sets the peak; the
+                    # profit-lock block above (which already ran this tick) picks it up and starts
+                    # tracking/exiting through its normal PROFIT_LOCK path from the NEXT tick on --
+                    # same trail_pct buffer as always.
+                    if self.profit_lock_peak_pct is None:
+                        self.profit_lock_peak_pct = unrealized_pct
+                        if cfg.schema_has_profit_lock:
+                            try:
+                                await self.update_state(
+                                    {"profit_lock_peak_pct": unrealized_pct})
+                            except Exception:
+                                pass  # best-effort only -- in-memory copy above is authoritative
+                        await self.log_run("trail_armed_on_partner_cut",
+                                           {"unrealized_pct": round(unrealized_pct, 5)})
+                elif floor_pct is not None:
                     # The floor only goes live once this leg has traded a clear margin ABOVE it --
                     # not merely at it. Proven necessary live on 2026-09-30, first session with the
                     # floor enabled: in a symmetric hedge the winner is sitting at roughly +X% at

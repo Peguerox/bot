@@ -1994,6 +1994,66 @@ async def t_breakeven_floor_lets_a_winner_reach_the_trail():
           [(a, d.get("reason")) for a, d in bot.runs if a == "closed"])
 
 
+async def t_partner_cut_arms_trail_immediately_below_the_old_margin():
+    print("\n[partner_cut_arms_trail_immediately: trail arms right away, not at floor+margin]")
+    entry = 86000.0
+    ex = FakeExchange(position=round(10.0 / entry, 5), collateral=10.0)
+    partner = {"side": "short", "realized_pnl_usd": 0.0}
+    bot = _breakeven_bot(ex, _breakeven_state(entry, 10.0), partner,
+                         partner_cut_arms_trail_immediately=True)
+    # Partner cuts at its 0.03% SL while this leg sits at only +0.02% -- well below both the old
+    # arm_at (0.03+0.01=0.04%) AND the 0.05% profit-lock trigger. Under the OLD design this would
+    # have zero protection; this is exactly the real gap found live (+0.055% given back entirely).
+    partner["side"] = None
+    partner["realized_pnl_usd"] = -0.003
+    await _tick_at(bot, entry * (1 + 0.02 / 100))
+    check("trail armed immediately at +0.02%, not held back for +0.04% or +0.05%",
+          bot.profit_lock_peak_pct is not None
+          and abs(bot.profit_lock_peak_pct - 0.02) < 0.002, bot.profit_lock_peak_pct)
+    check("logged as trail_armed_on_partner_cut",
+          any(a == "trail_armed_on_partner_cut" for a, _ in bot.runs), bot.runs)
+    # Retreat by more than the 0.01% trail from that +0.02% peak -> exits via the ordinary trail.
+    await _tick_at(bot, entry * (1 + 0.005 / 100))
+    check("closed once it gave back the trail width from the early peak",
+          bot.state_row["side"] is None, bot.state_row["side"])
+    check("closed with reason PROFIT_LOCK, not BREAKEVEN_LOCK -- it genuinely is the trail now",
+          any(a == "closed" and d.get("reason") == "PROFIT_LOCK" for a, d in bot.runs),
+          [(a, d.get("reason")) for a, d in bot.runs if a == "closed"])
+
+
+async def t_partner_cut_arms_trail_immediately_still_tracks_a_rising_peak():
+    print("\n[partner_cut_arms_trail_immediately: armed early still rides a real run-up normally]")
+    entry = 86000.0
+    ex = FakeExchange(position=round(10.0 / entry, 5), collateral=10.0)
+    partner = {"side": None, "realized_pnl_usd": -0.003}
+    bot = _breakeven_bot(ex, _breakeven_state(entry, 10.0), partner,
+                         partner_cut_arms_trail_immediately=True)
+    await _tick_at(bot, entry * (1 + 0.02 / 100))
+    check("armed at +0.02%", abs(bot.profit_lock_peak_pct - 0.02) < 0.002, bot.profit_lock_peak_pct)
+    await _tick_at(bot, entry * (1 + 0.08 / 100))
+    check("peak keeps rising with price, same as the ordinary trail",
+          abs(bot.profit_lock_peak_pct - 0.08) < 0.002, bot.profit_lock_peak_pct)
+    check("still open at the new peak", bot.state_row["side"] == "long")
+    await _tick_at(bot, entry * (1 + 0.065 / 100))  # gives back 0.015%, more than the 0.01% trail
+    check("closed off the RAISED peak, not the original +0.02% arm point",
+          bot.state_row["side"] is None, bot.state_row["side"])
+
+
+async def t_partner_cut_arms_trail_immediately_off_by_default():
+    print("\n[partner_cut_arms_trail_immediately: off by default -- old margin-gated floor unchanged]")
+    entry = 86000.0
+    ex = FakeExchange(position=round(10.0 / entry, 5), collateral=10.0)
+    partner = {"side": "short", "realized_pnl_usd": 0.0}
+    bot = _breakeven_bot(ex, _breakeven_state(entry, 10.0), partner)  # flag defaults False
+    partner["side"] = None
+    partner["realized_pnl_usd"] = -0.003
+    await _tick_at(bot, entry * (1 + 0.02 / 100))
+    check("trail NOT armed at +0.02% -- old behaviour needs profit_lock_trigger_pct (0.05%)",
+          bot.profit_lock_peak_pct is None, bot.profit_lock_peak_pct)
+    check("no trail_armed_on_partner_cut logged", not any(a == "trail_armed_on_partner_cut"
+                                                           for a, _ in bot.runs))
+
+
 async def t_breakeven_floor_ignores_a_green_partner():
     print("\n[breakeven floor: never arms when the partner closed in profit -- nothing to offset]")
     entry = 86000.0
@@ -3652,6 +3712,12 @@ async def t_live_configs_match_their_stated_rules():
               leg.profit_lock_trail_pct == 0.03, leg.profit_lock_trail_pct)
         check(f"hedge {name} leg: breakeven floor on",
               leg.breakeven_floor_enabled is True, leg.breakeven_floor_enabled)
+        # 2026-10-01, direct request: real data showed a winner reaching +0.055% could give it
+        # all back with zero protection (never cleared the old margin-gated floor). Starts the
+        # ordinary trail the instant the partner is cut instead. See
+        # BotConfig.partner_cut_arms_trail_immediately.
+        check(f"hedge {name} leg: trail arms immediately on partner cut (not margin-gated)",
+              leg.partner_cut_arms_trail_immediately is True, leg.partner_cut_arms_trail_immediately)
         check(f"hedge {name} leg: never reads stale per-position bands",
               leg.schema_has_position_bands is False, leg.schema_has_position_bands)
         check(f"hedge {name} leg: single-instance lock on (zombie double-entry)",
@@ -3834,6 +3900,9 @@ async def main():
               t_breakeven_floor_arms_when_partner_cycle_was_never_observed_open,
               t_breakeven_floor_does_not_pin_the_winner_to_zero,
               t_breakeven_floor_lets_a_winner_reach_the_trail,
+              t_partner_cut_arms_trail_immediately_below_the_old_margin,
+              t_partner_cut_arms_trail_immediately_still_tracks_a_rising_peak,
+              t_partner_cut_arms_trail_immediately_off_by_default,
               t_breakeven_floor_ignores_a_green_partner,
               t_breakeven_floor_requires_partner_to_have_opened,
               t_breakeven_floor_never_forces_a_worse_exit,

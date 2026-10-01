@@ -252,6 +252,14 @@ LONG_CONFIG = BotConfig(
     # cycle_id column migration (already run). See BotConfig.schema_has_cycle_id. Also kept
     # through the revert below.
     schema_has_cycle_id=True,
+    # 2026-10-01, direct request: real data showed a winner can reach a meaningful gain
+    # (+0.055%, right up against the floor) and give it ALL back with zero protection, because
+    # it never cleared the floor's own margin (arm_at = floor_pct + margin). This starts the
+    # ordinary profit-lock trail the instant the partner is confirmed cut, instead of waiting for
+    # profit_lock_trigger_pct -- same trail_pct buffer either way, just starting earlier. See
+    # BotConfig.partner_cut_arms_trail_immediately. Exits in this window now read PROFIT_LOCK,
+    # not BREAKEVEN_LOCK.
+    partner_cut_arms_trail_immediately=True,
     # 2026-09-30, direct request: retune the exits from the dashboard without a deploy, and show
     # the live volatility they have to cope with. Volatility ran 0.048% through the quiet hours
     # and 0.117% at the US open the same day -- 2.4x -- and no single stop is right across that.
@@ -340,6 +348,14 @@ SHORT_CONFIG = BotConfig(
     # cycle_id column migration (already run). See BotConfig.schema_has_cycle_id. Also kept
     # through the revert below.
     schema_has_cycle_id=True,
+    # 2026-10-01, direct request: real data showed a winner can reach a meaningful gain
+    # (+0.055%, right up against the floor) and give it ALL back with zero protection, because
+    # it never cleared the floor's own margin (arm_at = floor_pct + margin). This starts the
+    # ordinary profit-lock trail the instant the partner is confirmed cut, instead of waiting for
+    # profit_lock_trigger_pct -- same trail_pct buffer either way, just starting earlier. See
+    # BotConfig.partner_cut_arms_trail_immediately. Exits in this window now read PROFIT_LOCK,
+    # not BREAKEVEN_LOCK.
+    partner_cut_arms_trail_immediately=True,
     # 2026-09-30, direct request: retune the exits from the dashboard without a deploy, and show
     # the live volatility they have to cope with. Volatility ran 0.048% through the quiet hours
     # and 0.117% at the US open the same day -- 2.4x -- and no single stop is right across that.
