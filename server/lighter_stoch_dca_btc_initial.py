@@ -313,6 +313,12 @@ CONFIG = BotConfig(
     # order on the exchange. See BotConfig.native_stop_loss_enabled / native_take_profit_enabled.
     native_stop_loss_enabled=True,
     native_take_profit_enabled=True,
+    # 2026-10-01: Render runs the old and new container together for ~30-60s on every deploy, and
+    # Worker 1 had no lock -- at 14:40 UTC both copies entered the same candle (0.00234 BTC vs
+    # 0.00117 intended) and the oversize guard emergency-flattened it. Only the lock holder may
+    # open new entries; exits are never gated. Fails CLOSED: no entries at all until
+    # lighter_btc_initial_lock_columns.sql has been run. See BotConfig.single_instance_lock.
+    single_instance_lock=True,
 )
 
 if __name__ == "__main__":
