@@ -1531,7 +1531,7 @@ function CompactStochBtcPanel({
   const [resetting, setResetting] = useState(false);
 
   async function handleReset() {
-    if (!confirm(`Reset ${title}? This wipes Worker 1's trade history and zeroes PnL into equity. Only works while flat.`)) return;
+    if (!confirm(`Reset ${title}? Rolls PnL into equity and hides trades before now -- nothing is deleted, all trades stay in the database for research. Only works while flat.`)) return;
     setResetting(true);
     const res = await fetch("/api/lighter-btc-initial-reset", { method: "POST" });
     if (!res.ok) {

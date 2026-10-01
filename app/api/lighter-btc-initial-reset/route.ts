@@ -5,12 +5,14 @@ import { getSupabaseAdmin } from "@/lib/supabase-admin";
 // lighter_stoch_dca_btc_state/lighter_btc_optimal_state are owned by the hedge dual-leg process;
 // mixing them into one endpoint risks resetting the wrong bot.
 //
-// 2026-10-01, direct request: same behaviour as the hedge reset (lighter-hedge-reset) -- wipes
-// the trade history, rolls residual PnL into seed_usd, clears transient fields, leaves the bot
-// disabled. The previous version never worked: it wrote history_reset_at, a column whose
-// migration was never run, so PostgREST rejected the whole update and the route still returned
-// ok:true because it never checked the error. Every write is now checked. Refuses while a
-// position is open.
+// NON-DESTRUCTIVE, deliberately unlike the hedge reset: trade rows are NEVER deleted -- they are
+// the research data (e.g. the 575-trade timing/dispersion audits). Reset only stamps
+// history_reset_at, and the dashboard hides trades closed before it. Rolls residual PnL into
+// seed_usd, clears transient fields, leaves the bot disabled, refuses while a position is open.
+//
+// 2026-10-01: the first version silently did nothing -- history_reset_at's migration
+// (lighter_btc_initial_reset_cutoff.sql) had never been run, PostgREST rejected the whole update,
+// and the route returned ok:true without checking the error. Every call is now checked.
 export async function POST() {
   const sb = getSupabaseAdmin();
 
@@ -33,16 +35,14 @@ export async function POST() {
 
   const newSeed = (state?.seed_usd ?? 0) + (state?.realized_pnl_usd ?? 0);
 
-  const { error: deleteError } = await sb.from("lighter_btc_initial_trades").delete().gt("id", 0);
-  if (deleteError) {
-    return NextResponse.json({ error: `Reset failed deleting trades: ${deleteError.message}` }, { status: 500 });
-  }
+  const nowIso = new Date().toISOString();
 
   const { error: updateError } = await sb
     .from("lighter_btc_initial_state")
     .update({
       seed_usd: newSeed,
       realized_pnl_usd: 0,
+      history_reset_at: nowIso,
       consecutive_entry_failures: 0,
       position_tp_pct: null,
       position_sl_pct: null,
@@ -69,5 +69,5 @@ export async function POST() {
     return NextResponse.json({ error: `Reset failed updating state: ${updateError.message}` }, { status: 500 });
   }
 
-  return NextResponse.json({ ok: true, seed: newSeed });
+  return NextResponse.json({ ok: true, seed: newSeed, historyResetAt: nowIso });
 }
