@@ -1,22 +1,28 @@
 import { NextResponse } from "next/server";
 import { getSupabaseAdmin } from "@/lib/supabase-admin";
 
-// Worker 1 only (lighter_btc_initial_state) -- deliberately NOT a shared multi-table route like
-// lighter-hedge-reset, since lighter_stoch_dca_btc_state/lighter_btc_optimal_state are currently
-// owned by the hedge dual-leg process, not Worker 1; mixing them into one generic endpoint risks
-// resetting the wrong bot. Also deliberately NOT destructive, unlike the hedge reset: Worker 1's
-// reset has always kept every trade row forever (audit trail) and just hidden everything before
-// a cutoff -- this route is that same non-destructive pattern, just moved out of a hardcoded
-// frontend constant (WORKER1_RESET_AT, bumped by hand on every prior reset) into the DB so the
-// button can set it itself. Refuses while a position is open, same as the hedge reset.
+// Worker 1 only (lighter_btc_initial_state) -- deliberately NOT a shared multi-table route, since
+// lighter_stoch_dca_btc_state/lighter_btc_optimal_state are owned by the hedge dual-leg process;
+// mixing them into one endpoint risks resetting the wrong bot.
+//
+// 2026-10-01, direct request: same behaviour as the hedge reset (lighter-hedge-reset) -- wipes
+// the trade history, rolls residual PnL into seed_usd, clears transient fields, leaves the bot
+// disabled. The previous version never worked: it wrote history_reset_at, a column whose
+// migration was never run, so PostgREST rejected the whole update and the route still returned
+// ok:true because it never checked the error. Every write is now checked. Refuses while a
+// position is open.
 export async function POST() {
   const sb = getSupabaseAdmin();
 
-  const { data: state } = await sb
+  const { data: state, error: readError } = await sb
     .from("lighter_btc_initial_state")
     .select("side, seed_usd, realized_pnl_usd")
     .eq("id", 1)
     .single();
+
+  if (readError) {
+    return NextResponse.json({ error: `Reset failed reading state: ${readError.message}` }, { status: 500 });
+  }
 
   if (state?.side != null) {
     return NextResponse.json(
@@ -26,14 +32,17 @@ export async function POST() {
   }
 
   const newSeed = (state?.seed_usd ?? 0) + (state?.realized_pnl_usd ?? 0);
-  const nowIso = new Date().toISOString();
 
-  await sb
+  const { error: deleteError } = await sb.from("lighter_btc_initial_trades").delete().gt("id", 0);
+  if (deleteError) {
+    return NextResponse.json({ error: `Reset failed deleting trades: ${deleteError.message}` }, { status: 500 });
+  }
+
+  const { error: updateError } = await sb
     .from("lighter_btc_initial_state")
     .update({
       seed_usd: newSeed,
       realized_pnl_usd: 0,
-      history_reset_at: nowIso,
       consecutive_entry_failures: 0,
       position_tp_pct: null,
       position_sl_pct: null,
@@ -56,5 +65,9 @@ export async function POST() {
     })
     .eq("id", 1);
 
-  return NextResponse.json({ ok: true, seed: newSeed, historyResetAt: nowIso });
+  if (updateError) {
+    return NextResponse.json({ error: `Reset failed updating state: ${updateError.message}` }, { status: 500 });
+  }
+
+  return NextResponse.json({ ok: true, seed: newSeed });
 }
