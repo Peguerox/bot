@@ -48,8 +48,11 @@ project with no git/Render/Vercel link -- never work there.
     (`profit_lock_respects_breakeven_floor`, "Option B": exit = max(peak − trail, breakeven),
     reason BREAKEVEN_LOCK when the floor binds). The live SL/trigger/trail are the **dashboard
     overrides** (last seen SL 0.05 / trigger 0.10 / trail 0.04), not the 0.06/0.10/0.03 in the .py.
-  - Its Reset still **deletes** both legs' trades (Worker 1's no longer does) -- the user was
-    offered the non-destructive version but hasn't asked for it yet.
+  - Production Reset still **deletes** both legs' trades. A non-destructive replacement is
+    prepared locally (2026-10-01): preserves all trades, writes `history_reset_at` on each state
+    row, carries equity forward, and requires both legs OFF/flat with no close pending.
+    **Awaiting manual SQL:** `supabase/migrations/lighter_hedge_reset_cutoff.sql` must be applied
+    and confirmed before deployment. No live reset has been performed.
 - **Worker 3**: its own Render service is **suspended**. Its sub-account is driven entirely from
   Worker 2's process. `server/lighter_stoch_dca_btc_bot.py` still works standalone if the hedge is
   ever abandoned — re-enable that service and disable the dual-leg one, no data migration needed.
@@ -168,8 +171,13 @@ close,reset}`. The order matters and they interlock:
    exchange — Lighter's signing SDK is Python-only, so the running worker picks the flag up on its
    next tick and closes through its own `close_all()`, retrying with backoff until REST confirms
    flat, then clears the flag and sets `enabled=false`.
-3. **Reset** wipes both legs' trade history and rolls residual PnL into `seed_usd`. It **refuses
-   (409) while either leg holds a position** — so the sequence is always Close Both → Reset. Before
+3. **Reset** in production wipes both legs' trade history and rolls residual PnL into `seed_usd`.
+   The locally prepared replacement preserves trades, filters displayed history by each leg's
+   `history_reset_at`, and checks every read/update result. It requires both legs OFF and flat
+   with no close pending; conditional updates reject concurrent balance/state changes. Updates
+   are still separate, so a partial reset is reported explicitly (atomic updates remain an audit
+   follow-up). Apply `lighter_hedge_reset_cutoff.sql` before deploying it.
+   The sequence remains Close Both → wait for both legs OFF/flat → Reset. Before
    2026-09-30 the close button didn't exist on this panel at all, which made an open cycle
    impossible to either close or reset from the dashboard.
 

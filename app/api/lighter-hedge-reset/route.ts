@@ -1,32 +1,48 @@
 import { NextResponse } from "next/server";
 import { getSupabaseAdmin } from "@/lib/supabase-admin";
 
-// One button, both legs. Wipes trade history, rolls any residual realized PnL into seed_usd
-// (cumulative equity carries through the reset instead of vanishing), clears transient
-// self-lock/checkpoint fields left over from earlier experiments, and leaves both legs
-// disabled -- matches the manual reset flow done by hand throughout 2026-09-30 (built into a
-// single button after that turned out to need too many individual steps). Refuses if either
-// leg has an open position: a reset is for a clean flat slate, never meant to touch a live one.
+// Preserves every trade row for research. The shared cutoff clears the displayed history;
+// realized PnL rolls into seed_usd so equity carries through. Both legs must already be OFF
+// and flat, with no close pending. Requires lighter_hedge_reset_cutoff.sql on both tables.
 export async function POST() {
+  try {
+    return await resetHedge();
+  } catch {
+    return NextResponse.json({ error: "Could not confirm the reset. Refresh the dashboard and check both legs before trying again." }, { status: 500 });
+  }
+}
+
+async function resetHedge() {
   const sb = getSupabaseAdmin();
 
-  const [{ data: longState }, { data: shortState }] = await Promise.all([
-    sb.from("lighter_btc_optimal_state").select("side, seed_usd, realized_pnl_usd").eq("id", 1).single(),
-    sb.from("lighter_stoch_dca_btc_state").select("side, seed_usd, realized_pnl_usd").eq("id", 1).single(),
+  const columns = "side, enabled, close_requested, seed_usd, realized_pnl_usd, history_reset_at";
+  const states = await Promise.all([
+    sb.from("lighter_btc_optimal_state").select(columns).eq("id", 1).single(),
+    sb.from("lighter_stoch_dca_btc_state").select(columns).eq("id", 1).single(),
   ]);
 
-  if (longState?.side != null || shortState?.side != null) {
+  if (states.some((r) => r.error || !r.data)) {
+    return NextResponse.json({ error: "Could not read both hedge states. Nothing was reset. Check that the reset database update has been applied." }, { status: 500 });
+  }
+  const [longState, shortState] = states.map((r) => r.data!);
+  if ([longState, shortState].some((s) => s.side !== null || s.enabled !== false || s.close_requested !== false)) {
     return NextResponse.json(
-      { error: "Refusing to reset -- one or both legs still have an open position." },
+      { error: "Reset requires BOTH legs to be OFF and flat, with no close pending. Use Close Both and wait for it to finish first." },
       { status: 409 }
     );
   }
 
-  const longSeed = (longState?.seed_usd ?? 0) + (longState?.realized_pnl_usd ?? 0);
-  const shortSeed = (shortState?.seed_usd ?? 0) + (shortState?.realized_pnl_usd ?? 0);
+  if ([longState, shortState].some((s) => !Number.isFinite(s.seed_usd) || !Number.isFinite(s.realized_pnl_usd)
+      || !Number.isFinite(s.seed_usd + s.realized_pnl_usd))) {
+    return NextResponse.json({ error: "Could not read both hedge balances. Nothing was reset." }, { status: 500 });
+  }
+  const longSeed = longState.seed_usd + longState.realized_pnl_usd;
+  const shortSeed = shortState.seed_usd + shortState.realized_pnl_usd;
+  const historyResetAt = new Date().toISOString();
 
   const resetFields = {
     realized_pnl_usd: 0,
+    history_reset_at: historyResetAt,
     close_requested: false,
     consecutive_entry_failures: 0,
     profit_lock_peak_pct: null,
@@ -48,12 +64,24 @@ export async function POST() {
     enabled: false,
   };
 
-  await Promise.all([
-    sb.from("lighter_btc_optimal_trades").delete().gt("id", 0),
-    sb.from("lighter_stoch_dca_btc_trades").delete().gt("id", 0),
-    sb.from("lighter_btc_optimal_state").update({ seed_usd: longSeed, ...resetFields }).eq("id", 1),
-    sb.from("lighter_stoch_dca_btc_state").update({ seed_usd: shortSeed, ...resetFields }).eq("id", 1),
+  // Match the state we read: a concurrent balance change or re-enable must not be overwritten.
+  // These are separate updates; report a partial result rather than pretending both succeeded.
+  const results = await Promise.allSettled([
+    sb.from("lighter_btc_optimal_state").update({ seed_usd: longSeed, ...resetFields })
+      .eq("id", 1).is("side", null).eq("enabled", false).eq("close_requested", false)
+      .eq("seed_usd", longState.seed_usd).eq("realized_pnl_usd", longState.realized_pnl_usd)
+      .select("seed_usd, realized_pnl_usd, history_reset_at").single(),
+    sb.from("lighter_stoch_dca_btc_state").update({ seed_usd: shortSeed, ...resetFields })
+      .eq("id", 1).is("side", null).eq("enabled", false).eq("close_requested", false)
+      .eq("seed_usd", shortState.seed_usd).eq("realized_pnl_usd", shortState.realized_pnl_usd)
+      .select("seed_usd, realized_pnl_usd, history_reset_at").single(),
   ]);
 
-  return NextResponse.json({ ok: true, longSeed, shortSeed });
+  const seeds = [longSeed, shortSeed];
+  if (results.some((r, i) => r.status !== "fulfilled" || r.value.error
+      || r.value.data?.seed_usd !== seeds[i] || r.value.data?.realized_pnl_usd !== 0
+      || Date.parse(r.value.data?.history_reset_at ?? "") !== Date.parse(historyResetAt))) {
+    return NextResponse.json({ error: "Could not confirm the reset on both hedge legs. One leg may have reset. No trades were deleted. Refresh the dashboard and check both legs before trying again." }, { status: 500 });
+  }
+  return NextResponse.json({ ok: true, longSeed, shortSeed, historyResetAt });
 }

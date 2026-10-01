@@ -2099,7 +2099,9 @@ function HedgeDualLegPanel({
   const [resetting, setResetting] = useState(false);
   const [closing, setClosing] = useState(false);
   const enabled = longState?.enabled ?? false;
-  const anyLegOpen = (longState?.side ?? null) !== null || (shortState?.side ?? null) !== null;
+  const resetReady = longState?.side === null && shortState?.side === null
+    && longState?.enabled === false && shortState?.enabled === false
+    && longState?.close_requested === false && shortState?.close_requested === false;
   // The worker keeps close_requested set while it is still retrying the close, so this is a live
   // "close in flight" indicator rather than just optimistic local state.
   const closePending = (longState?.close_requested ?? false) || (shortState?.close_requested ?? false);
@@ -2162,19 +2164,23 @@ function HedgeDualLegPanel({
     }
   }
 
-  // Direct request 2026-09-30: a one-click reset -- wipes both legs' trade history, rolls any
-  // residual PnL into seed_usd, leaves both disabled. Server refuses (409) if either leg still
-  // has an open position; that response is surfaced here rather than silently doing nothing.
+  // Reset clears the displayed history, preserves trade rows, and carries equity forward.
+  // Both legs must already be OFF and flat; errors are surfaced and the button always recovers.
   async function handleReset() {
-    if (!confirm("Reset the hedge? This wipes BOTH legs' trade history and zeroes PnL into equity. Only works while both legs are flat.")) return;
+    if (!confirm("Reset the hedge display? All trades stay saved. PnL rolls into equity. Both legs must be OFF and flat, with no close pending.")) return;
     setResetting(true);
-    const res = await fetch("/api/lighter-hedge-reset", { method: "POST" });
-    if (!res.ok) {
-      const body = await res.json().catch(() => ({}));
-      alert(body.error || "Reset failed.");
+    try {
+      const res = await fetch("/api/lighter-hedge-reset", { method: "POST" });
+      if (!res.ok) {
+        const body = await res.json().catch(() => null);
+        alert(body?.error ?? "Could not confirm the reset. Check both legs before trying again.");
+      }
+      await onToggled();
+    } catch {
+      alert("Could not confirm the reset. Refresh the dashboard and check both legs before trying again.");
+    } finally {
+      setResetting(false);
     }
-    await onToggled();
-    setResetting(false);
   }
 
   // 2026-09-30: the missing escape hatch. The hedge pivot removed both legs' individual "Close
@@ -2424,10 +2430,10 @@ function HedgeDualLegPanel({
           </button>
           <button
             onClick={handleReset}
-            disabled={resetting || toggling || loading || anyLegOpen}
-            title={anyLegOpen
-              ? "Close both legs first -- a reset only runs from a flat slate"
-              : "Wipe trade history and zero PnL into equity -- only while both legs are flat"}
+            disabled={resetting || toggling || closing || loading || !resetReady}
+            title={resetReady
+              ? "Clear the displayed history, keep all trades saved, and roll PnL into equity"
+              : "Use Close Both and wait until both legs are OFF and flat before resetting"}
             className="text-xs font-bold px-2.5 py-1 rounded-full bg-gray-700/40 text-gray-400 hover:bg-gray-700/70 disabled:opacity-40"
           >
             {resetting ? "…" : "Reset"}
@@ -3088,9 +3094,9 @@ export default function Dashboard() {
           />
           <HedgeDualLegPanel
             longState={optimalBtcState}
-            longTrades={optimalBtcTrades.filter((t: any) => t.closed_at >= WORKER2_RESET_AT)}
+            longTrades={optimalBtcTrades.filter((t: any) => Date.parse(t.closed_at) >= Date.parse(optimalBtcState?.history_reset_at ?? WORKER2_RESET_AT))}
             shortState={dcaBtcState}
-            shortTrades={dcaBtcTrades.filter((t: any) => t.closed_at >= WORKER2_RESET_AT)}
+            shortTrades={dcaBtcTrades.filter((t: any) => Date.parse(t.closed_at) >= Date.parse(dcaBtcState?.history_reset_at ?? WORKER2_RESET_AT))}
             currentPrice={hedgeCoinPrice}
             loading={loading}
             onToggled={load}
@@ -3100,7 +3106,7 @@ export default function Dashboard() {
             subtitle="Window, K thresholds, TP, SL, and reversal blanking all move continuously with volatility (R = vol_pct/0.0712) -- unchanged formula / real SL locks real orders, 2 consecutive paper wins unlock (at least 1 must be a literal TP), OR 3 wins of any kind unlocks regardless / book-opposition early exit added (10s age, losing >=0.05%, near-touch opposing depth >60% within 0.05% of price)"
             table="lighter_stoch_dca_btc_state"
             state={dcaBtcState}
-            trades={dcaBtcTrades.filter((t: any) => t.closed_at >= WORKER3_RESET_AT)}
+            trades={dcaBtcTrades.filter((t: any) => Date.parse(t.closed_at) >= Date.parse(dcaBtcState?.history_reset_at ?? WORKER3_RESET_AT))}
             currentPrice={ocoBtcPrice}
             loading={loading}
             onToggled={load}
