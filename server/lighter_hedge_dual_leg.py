@@ -305,8 +305,11 @@ LONG_CONFIG = BotConfig(
     # 2026-10-01, direct request: document K, the color-balance index, volatility, and
     # dispersion at every entry so completed trades can be reviewed by hand for a pattern --
     # e.g. which part of the day a given SL/trail setting stops working. Purely descriptive,
-    # changes no behaviour. Requires lighter_hedge_entry_features.sql.
-    schema_has_entry_features=True,
+    # changes no behaviour. TEMPORARILY OFF (direct request, "test it right now") until
+    # lighter_hedge_entry_features.sql has actually been run -- log_trade's INSERT is NOT
+    # wrapped in try/except, so writing these columns before they exist would fail every single
+    # trade-row insert, not just the snapshot. Flip to True once the migration is confirmed run.
+    schema_has_entry_features=False,
 )
 
 SHORT_CONFIG = BotConfig(
@@ -428,8 +431,11 @@ SHORT_CONFIG = BotConfig(
     # 2026-10-01, direct request: document K, the color-balance index, volatility, and
     # dispersion at every entry so completed trades can be reviewed by hand for a pattern --
     # e.g. which part of the day a given SL/trail setting stops working. Purely descriptive,
-    # changes no behaviour. Requires lighter_hedge_entry_features.sql.
-    schema_has_entry_features=True,
+    # changes no behaviour. TEMPORARILY OFF (direct request, "test it right now") until
+    # lighter_hedge_entry_features.sql has actually been run -- log_trade's INSERT is NOT
+    # wrapped in try/except, so writing these columns before they exist would fail every single
+    # trade-row insert, not just the snapshot. Flip to True once the migration is confirmed run.
+    schema_has_entry_features=False,
 )
 
 
