@@ -2994,8 +2994,8 @@ export default function Dashboard() {
         {/* ── Lighter BTC Stochastic5: 3-worker comparison, real money, $100 each */}
         <div className="grid grid-cols-1 sm:grid-cols-3 gap-3">
           <CompactStochBtcPanel
-            title="Worker 1 · Plain Stochastic + Dispersion"
-            subtitle="2026-10-01: isolated test -- self-lock OFF, hour ban OFF (trades 24/7, weekends included), only filter is intrabar dispersion (stdev of (high+low)/2, 5-bar, raw $) blocking new entries at >= $50. TP 0.10% / SL set below (live) / window 5, 25-75, fresh signal only / no blanking period / profit lock 0.05% / saving lock: once down half the SL, closes at entry ($0) if price comes back (SAVING_LOCK)"
+            title="Worker 1 · Stochastic + Zebra Index"
+            subtitle="2026-10-01: enters ONLY on a fresh 25/75 stochastic signal (window 5) while the zebra index is 600-1000 (zebra % of color switches over the last 5 closed 1-min candles ÷ their mean candle size %); anything else, no entry. Exits: SL 0.10% / TP 0.10% / profit lock at +0.05% (exits on the first tick down). One trade per signal. Self-lock, hour ban, dispersion and saving lock all OFF."
             table="lighter_btc_initial_state"
             state={initialBtcState}
             trades={initialBtcTrades.filter((t: any) =>

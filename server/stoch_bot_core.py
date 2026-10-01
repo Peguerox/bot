@@ -243,6 +243,19 @@ class BotConfig:
     # compute_intrabar_dispersion's docstring for the real-data backing.
     intrabar_dispersion_pause_at: Optional[float] = None
     intrabar_dispersion_window: int = 5
+    # Zebra / candle-size index gate (2026-10-01, direct request). compute_zebra_size_index():
+    # zebra % (color switches between consecutive closed 1-min candles / possible switches x 100)
+    # divided by the mean candle size % ((high-low)/close x 100), over zebra_index_window closed
+    # candles. Low = one-directional and/or big candles (a real move the stochastic fade gets run
+    # over by); very high = tiny choppy candles (too little movement to reach the profit lock).
+    # New entries (and a reversal's reopen leg) are allowed only while the index is inside
+    # [zebra_index_min, zebra_index_max]; exits are never gated. Backing: 604 real Worker 1
+    # trades, index quintiles low->high totalled -$2.00 / +$0.22 / +$1.21 / +$0.14 / -$0.91 --
+    # a hill, best in the middle; borderline significance (z +1.3 / +2.2), chosen deliberately
+    # narrow by the user. None = no bound on that side.
+    zebra_index_min: Optional[float] = None
+    zebra_index_max: Optional[float] = None
+    zebra_index_window: int = 5
     # Low-volatility entry gate (2026-09-29, direct request): the OPPOSITE direction from the
     # pair above -- blocks new entries (and a reversal's reopen leg, never TP/SL/exits) when
     # the market is TOO QUIET rather than too spiky. Built to test a real finding from 844 real
@@ -1004,6 +1017,25 @@ def compute_intrabar_dispersion(candles, window=5):
     mean = sum(mids) / len(mids)
     variance = sum((m - mean) ** 2 for m in mids) / len(mids)
     return variance ** 0.5
+
+
+def compute_zebra_size_index(candles, window=5):
+    """See BotConfig.zebra_index_min. Reads the trailing `window` CLOSED candles (candles[:-1]).
+    A doji (close == open) has no color and is skipped when counting switches. None if there
+    are not enough candles or fewer than two colored ones."""
+    closed = candles[:-1]
+    if len(closed) < window:
+        return None
+    bars = closed[-window:]
+    colors = [1 if c["c"] > c["o"] else -1 if c["c"] < c["o"] else 0 for c in bars]
+    colors = [x for x in colors if x != 0]
+    if len(colors) < 2:
+        return None
+    zebra_pct = 100.0 * sum(colors[i] != colors[i - 1] for i in range(1, len(colors))) / (len(colors) - 1)
+    size_pct = sum((c["h"] - c["l"]) / c["c"] * 100 for c in bars) / len(bars)
+    if size_pct <= 0:
+        return None
+    return zebra_pct / size_pct
 
 
 def compute_rsi_stoch_confirmed_signal(candles, rsi_period=5, stoch_period=14, require_confirmation=True, lo=20, hi=80):
@@ -4131,6 +4163,17 @@ class StochBot:
                 intrabar_dispersion_blocked = True
                 entry_signal = None
 
+        # Stateless, recomputed every tick -- see BotConfig.zebra_index_min. Out of band (or no
+        # reading yet) blocks new entries and a reversal's reopen leg, never an exit.
+        zebra_blocked = False
+        if cfg.zebra_index_min is not None or cfg.zebra_index_max is not None:
+            zi = compute_zebra_size_index(self.candles, cfg.zebra_index_window)
+            zebra_blocked = (zi is None
+                             or (cfg.zebra_index_min is not None and zi < cfg.zebra_index_min)
+                             or (cfg.zebra_index_max is not None and zi > cfg.zebra_index_max))
+            if zebra_blocked:
+                entry_signal = None
+
         if cfg.trading_hours_utc is not None:
             entry_signal = self._apply_trading_hours_gate(entry_signal)
 
@@ -4616,7 +4659,7 @@ class StochBot:
                     self._clear_burn()
                     reopen_burned = False
                 reopen_overconfirmed = self._entry_overconfirmed(reversal_signal)
-                if (self.entry_vol_paused or intrabar_dispersion_blocked
+                if (self.entry_vol_paused or intrabar_dispersion_blocked or zebra_blocked
                         or (cfg.self_lock_enabled and self.real_trading_locked)
                         or (cfg.trading_hours_utc is not None
                             and self._apply_trading_hours_gate(reversal_signal) is None)

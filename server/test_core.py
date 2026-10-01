@@ -3984,10 +3984,17 @@ async def t_live_configs_match_their_stated_rules():
     # filter below isn't entangled with anything else.
     check("Worker 1: self-lock OFF for the isolated dispersion-filter test",
           w1.self_lock_enabled is False, w1.self_lock_enabled)
-    check("Worker 1: intrabar dispersion filter on at $50",
-          w1.intrabar_dispersion_pause_at == 50.0, w1.intrabar_dispersion_pause_at)
-    check("Worker 1: intrabar dispersion window is 5 bars",
-          w1.intrabar_dispersion_window == 5, w1.intrabar_dispersion_window)
+    # 2026-10-01: dispersion filter replaced by the zebra / candle-size index band (600-1000),
+    # with exits SL 0.10 / TP 0.10 / profit lock 0.05 and nothing else.
+    check("Worker 1: dispersion filter OFF (replaced by the zebra index)",
+          w1.intrabar_dispersion_pause_at is None, w1.intrabar_dispersion_pause_at)
+    check("Worker 1: zebra index band 600-1000 over 5 bars",
+          (w1.zebra_index_min, w1.zebra_index_max, w1.zebra_index_window) == (600.0, 1000.0, 5),
+          (w1.zebra_index_min, w1.zebra_index_max, w1.zebra_index_window))
+    check("Worker 1: SL 0.10 / TP 0.10 / profit lock 0.05, saving lock off",
+          (w1.sl_pct, w1.tp_pct, w1.profit_lock_trigger_pct, w1.saving_lock_arm_frac_of_sl)
+          == (0.10, 0.10, 0.05, None),
+          (w1.sl_pct, w1.tp_pct, w1.profit_lock_trigger_pct, w1.saving_lock_arm_frac_of_sl))
 
     hedge = importlib.import_module("lighter_hedge_dual_leg")
     for name, leg in (("long", hedge.LONG_CONFIG), ("short", hedge.SHORT_CONFIG)):
@@ -4265,6 +4272,54 @@ async def t_saving_lock_follows_the_sl_override():
           bot.state_row["side"])
 
 
+async def t_zebra_index_values():
+    print("\n[zebra/size index: switches% / mean candle size%]")
+    def bar(o, c, rng=40.0):
+        return {"t": 0, "o": o, "c": c, "h": max(o, c) + rng / 2, "l": min(o, c) - rng / 2}
+    base = 84000.0
+    alt = [bar(base, base + 10), bar(base + 10, base), bar(base, base + 10), bar(base + 10, base),
+           bar(base, base + 10), bar(base, base)]                      # G R G R G + live
+    size = sum(((max(b["o"], b["c"]) + 20) - (min(b["o"], b["c"]) - 20)) / b["c"] * 100 for b in alt[:5]) / 5
+    zi = core.compute_zebra_size_index(alt, 5)
+    check("perfect zebra -> 100 / size", abs(zi - 100 / size) < 1e-6, (zi, 100 / size))
+    trend = [bar(base + 10 * i, base + 10 * (i + 1)) for i in range(5)] + [bar(base, base)]
+    check("one color only -> 0", core.compute_zebra_size_index(trend, 5) == 0.0,
+          core.compute_zebra_size_index(trend, 5))
+    check("too few candles -> None", core.compute_zebra_size_index(alt[:3], 5) is None)
+
+
+async def _zebra_gate_case(value, **cfg):
+    ex = FakeExchange()
+    bot = make_bot(ex, candles_kind="mid", **cfg)
+    bot.candles = make_dispersion_candles([150, 150, 150, 150, 0])   # fresh long signal (K=0)
+    orig = core.compute_zebra_size_index
+    core.compute_zebra_size_index = lambda c, w=5: value
+    try:
+        await bot.tick()
+    finally:
+        core.compute_zebra_size_index = orig
+    return bot.state_row["side"]
+
+
+async def t_zebra_gate_blocks_outside_band():
+    print("\n[zebra gate: index outside 600-1000 blocks a fresh entry]")
+    for v in (300.0, 1500.0, None):
+        side = await _zebra_gate_case(v, zebra_index_min=600.0, zebra_index_max=1000.0)
+        check(f"blocked at index {v}", side is None, side)
+
+
+async def t_zebra_gate_allows_inside_band():
+    print("\n[zebra gate: index inside 600-1000 lets a fresh entry through]")
+    side = await _zebra_gate_case(800.0, zebra_index_min=600.0, zebra_index_max=1000.0)
+    check("entered at index 800", side == "long", side)
+
+
+async def t_zebra_gate_off_by_default():
+    print("\n[zebra gate: off by default]")
+    side = await _zebra_gate_case(5000.0)
+    check("entered -- no band configured", side == "long", side)
+
+
 async def main():
     for t in (t_normal_entry, t_phantom_double_fill, t_nonce_error_but_filled,
               t_order_error_no_fill, t_circuit_breaker, t_close_uses_real_size,
@@ -4468,7 +4523,11 @@ async def main():
               t_saving_lock_exits_at_entry_after_arming,
               t_saving_lock_not_armed_by_a_small_dip,
               t_saving_lock_off_by_default,
-              t_saving_lock_follows_the_sl_override):
+              t_saving_lock_follows_the_sl_override,
+              t_zebra_index_values,
+              t_zebra_gate_blocks_outside_band,
+              t_zebra_gate_allows_inside_band,
+              t_zebra_gate_off_by_default):
         try:
             await t()
         except Exception as e:

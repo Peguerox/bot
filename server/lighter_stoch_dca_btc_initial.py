@@ -225,7 +225,7 @@ CONFIG = BotConfig(
     table_runs="lighter_btc_initial_runs",
     stoch_window=5,  # 2026-09-28: back to the original value -- see docstring
     tp_pct=0.10,
-    sl_pct=0.11,
+    sl_pct=0.10,  # 2026-10-01, direct request (dashboard override_sl_pct set to match)
     entry_lo=25, entry_hi=75,  # 2026-09-28: back to the original values
     reversal_lo=25, reversal_hi=75,
     # 2026-10-01, direct request: blanking period removed. Was 120 -- if the stochastic reverses
@@ -272,7 +272,7 @@ CONFIG = BotConfig(
     # hour exclusions, z-score) is OFF for this run specifically so the result isn't entangled
     # with anything else -- see BotConfig.intrabar_dispersion_pause_at /
     # compute_intrabar_dispersion.
-    intrabar_dispersion_pause_at=50.0,
+    intrabar_dispersion_pause_at=None,  # 2026-10-01: OFF -- replaced by the zebra index band below
     intrabar_dispersion_window=5,
     require_fresh_signal=True,  # 2026-09-28: only enter on the exact candle the signal first appears
     # 2026-10-01, direct request ("you went in 2 times in the same signal, not a fresh signal"):
@@ -296,6 +296,13 @@ CONFIG = BotConfig(
     # 2026-10-01, direct request: back to 0.05 ("0.05 would be ok"). At 0.02 with zero give-back
     # it banked ~+$0.013 per lock against a ~-$0.11 SL -- one SL erased ~8 locks.
     profit_lock_trigger_pct=0.05,
+    # 2026-10-01, direct request ("be more selective"): a fresh stochastic signal may only enter
+    # while the zebra / candle-size index sits between 600 and 1000 -- the profitable middle of
+    # the hill found on 604 real Worker 1 trades. Outside the band: no entry. Exits are SL 0.10 /
+    # TP 0.10 / profit lock 0.05 with zero give-back, nothing else. See BotConfig.zebra_index_min.
+    zebra_index_min=600.0,
+    zebra_index_max=1000.0,
+    zebra_index_window=5,
     profit_lock_trail_pct=0.0,
     # 2026-09-29: briefly disabled fleet-wide during a Supabase statement-timeout incident
     # (database itself started canceling queries under cumulative write load, confirmed in
@@ -327,7 +334,7 @@ CONFIG = BotConfig(
     # a trade that drops to half the SL (-0.10%) and then comes back to entry closes right there
     # at ~$0 instead of riding on. Tracks the live SL, so it stays "half" if the SL is retuned.
     # See BotConfig.saving_lock_arm_frac_of_sl.
-    saving_lock_arm_frac_of_sl=0.5,
+    saving_lock_arm_frac_of_sl=None,  # 2026-10-01: OFF for the zebra-index run ("and that's it")
     saving_lock_exit_pct=0.0,
 )
 
