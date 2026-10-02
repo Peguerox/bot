@@ -1166,6 +1166,45 @@ def compute_candle_volume_avg(candles, window=10):
     return sum(c["v"] for c in bars) / len(bars)
 
 
+def compute_live_flip_streak(candles, lookback=20):
+    """Live readout (2026-10-02, direct request: "a candle counter so i can see we are doing
+    it correctly... 1 2 3 waiting for flip") -- how many consecutive same-color CLOSED candles
+    are running right now, and which direction compute_flip_signal would enter if the VERY
+    NEXT candle broke that streak (the streak's own color -- see compute_flip_signal's
+    docstring for why direction follows the streak, not the interrupting candle).
+
+    Purely a display helper, drives no decision: counts the SAME streak compute_flip_signal
+    itself counts (one candle short of it -- this reads the latest closed candle as the
+    streak's own tail; compute_flip_signal only measures that streak's length AFTER a
+    different-colored candle has already interrupted it), so the two can never silently drift
+    out of sync. Returns (None, 0) if there are no closed candles or the latest one is a doji."""
+    closed = candles[:-1]
+    if not closed:
+        return None, 0
+
+    def _color(c):
+        if c["c"] > c["o"]:
+            return 1
+        if c["c"] < c["o"]:
+            return -1
+        return 0
+
+    last_color = _color(closed[-1])
+    if last_color == 0:
+        return None, 0
+
+    length = 1
+    for k in range(1, lookback):
+        idx = len(closed) - 1 - k
+        if idx < 0:
+            break
+        if _color(closed[idx]) != last_color:
+            break
+        length += 1
+
+    return ("long" if last_color == 1 else "short"), length
+
+
 def compute_flip_signal(candles, min_trend_len=3, min_size_pct=None, trend_lookback=20):
     """"Flip" entry -- REVISED 2026-10-02, direct request, after this bot's own first 5 live
     trades under the original version went 1-4: trade in the direction of the TREND that was
@@ -4399,6 +4438,16 @@ class StochBot:
                             await self.update_state({"live_candle_volume": cv})
                         except Exception:
                             pass
+                    # Isolated best-effort write (2026-10-02, direct request: "a candle
+                    # counter so i can see we are doing it correctly... 1 2 3 waiting for
+                    # flip"). SEPARATE call for the same reason as live_candle_volume just
+                    # above -- requires lighter_btc_initial_live_flip_streak.sql.
+                    streak_dir, streak_len = compute_live_flip_streak(self.candles)
+                    try:
+                        await self.update_state({"live_flip_streak_dir": streak_dir,
+                                                  "live_flip_streak_len": streak_len})
+                    except Exception:
+                        pass
                 if cfg.color_balance_index_min is not None or cfg.color_balance_index_max is not None:
                     # Isolated best-effort write (2026-10-01) so the dashboard can show the live
                     # color-weighted balance index the entry gate is reading. Written into the

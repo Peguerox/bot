@@ -1538,6 +1538,8 @@ function CompactStochBtcPanel({
   const liveVol: number | null = state?.live_vol_pct ?? null;
   const liveZebra: number | null = state?.live_zebra_index ?? null;
   const liveCandleVolume: number | null = state?.live_candle_volume ?? null;
+  const liveStreakDir: string | null = state?.live_flip_streak_dir ?? null;
+  const liveStreakLen: number | null = state?.live_flip_streak_len ?? null;
   const curSl = state?.override_sl_pct ?? null;
   const curTrig = state?.override_profit_lock_trigger ?? null;
   const curTrail = state?.override_profit_lock_trail ?? null;
@@ -2026,6 +2028,30 @@ function CompactStochBtcPanel({
           </p>
         </div>
       )}
+      {showLevers && liveCandleVolume != null && liveCandleVolume >= 2 && !loading && (() => {
+        const dots = liveStreakLen != null ? "●".repeat(Math.min(liveStreakLen, 5)) + (liveStreakLen > 5 ? "+" : "") : "—";
+        const dirLabel = liveStreakDir === "long" ? "GREEN" : liveStreakDir === "short" ? "RED" : "—";
+        return (
+          <div className="bg-gray-800/60 rounded-lg p-2">
+            {/* 2026-10-02, direct request: "a candle counter so i can see we are doing it
+                correctly... 1 2 3 waiting for flip" -- mirrors compute_flip_signal's own
+                streak count exactly (compute_live_flip_streak), only shown while the flip
+                signal actually governs entries (volume >= 2). */}
+            <p className="text-gray-500 text-[10px] uppercase">Flip streak -- {dirLabel} candles in a row (needs 3+)</p>
+            <p className="font-bold text-sm tabular-nums">
+              <span className={liveStreakLen == null ? "text-gray-500"
+                : liveStreakLen >= 3 ? "text-green-400" : "text-amber-400"}>
+                {dots}
+              </span>
+              <span className="text-[10px] font-normal text-gray-500 ml-1.5">
+                {liveStreakLen == null ? "no reading yet"
+                  : liveStreakLen < 3 ? `${liveStreakLen}/3 — waiting, needs one more ${dirLabel.toLowerCase()} candle`
+                  : `ready — next opposite-color candle enters ${liveStreakDir?.toUpperCase()}`}
+              </span>
+            </p>
+          </div>
+        );
+      })()}
       {showLevers && !loading && (
         <div className="bg-gray-800/60 rounded-lg p-2 space-y-2">
           <div className="flex items-baseline justify-between">
