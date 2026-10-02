@@ -225,7 +225,14 @@ CONFIG = BotConfig(
     table_runs="lighter_btc_initial_runs",
     stoch_window=5,  # 2026-09-28: back to the original value -- see docstring
     tp_pct=0.10,
-    sl_pct=0.10,  # 2026-10-01, direct request (dashboard override_sl_pct set to match)
+    # 2026-10-02, direct request: tightened 0.10 -> 0.06 (now equal to the profit-lock trigger)
+    # after a real-data sweep -- SL 0.06 beat 0.10 both on the full 644-trade history (+$2.41 vs
+    # +$1.80) and on the live 20-trade window since the 0.06 profit-lock trigger went in (+$0.38
+    # vs +$0.11, same simulator both sides). A 3-stage ratchet SL (0.10->0.05->0 as the trade
+    # goes positive) was tested too and rejected: it looked good on the small window but lost
+    # badly on the full history (-$0.87), getting tripped by ordinary price noise once a trade
+    # merely touches positive. Dashboard override_sl_pct set to match.
+    sl_pct=0.06,
     entry_lo=25, entry_hi=75,  # 2026-09-28: back to the original values
     reversal_lo=25, reversal_hi=75,
     # 2026-10-01, direct request: blanking period removed. Was 120 -- if the stochastic reverses
