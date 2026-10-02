@@ -4039,63 +4039,42 @@ async def t_live_configs_match_their_stated_rules():
 
     hedge = importlib.import_module("lighter_hedge_dual_leg")
     for name, leg in (("long", hedge.LONG_CONFIG), ("short", hedge.SHORT_CONFIG)):
-        # Widened 2026-09-30 after the US-open volatility spike -- verified against real ticks
-        # first: the old 0.03/0.05/0.01 was a 5.98-sigma loser over 4880 cycles, and widening
-        # halves the whipsaw double-loss rate. Pinned so it cannot drift back unnoticed.
-        check(f"hedge {name} leg: SL 0.06% (widened for whipsaw)",
-              leg.sl_pct == 0.06, leg.sl_pct)
-        check(f"hedge {name} leg: profit-lock trigger 0.10%",
-              leg.profit_lock_trigger_pct == 0.10, leg.profit_lock_trigger_pct)
-        check(f"hedge {name} leg: profit-lock trail 0.03%",
-              leg.profit_lock_trail_pct == 0.03, leg.profit_lock_trail_pct)
-        check(f"hedge {name} leg: breakeven floor on",
-              leg.breakeven_floor_enabled is True, leg.breakeven_floor_enabled)
-        check(f"hedge {name} leg: fixed survivor floor +0.03%",
-              leg.fixed_partner_cut_floor_pct == 0.03, leg.fixed_partner_cut_floor_pct)
-        # 2026-10-01, direct request: real data showed a winner reaching +0.055% could give it
-        # all back with zero protection (never cleared the old margin-gated floor). Starts the
-        # ordinary trail the instant the partner is cut instead. See
-        # BotConfig.partner_cut_arms_trail_immediately.
-        check(f"hedge {name} leg: trail arms immediately on partner cut (not margin-gated)",
-              leg.partner_cut_arms_trail_immediately is True, leg.partner_cut_arms_trail_immediately)
-        check(f"hedge {name} leg: never reads stale per-position bands",
-              leg.schema_has_position_bands is False, leg.schema_has_position_bands)
-        check(f"hedge {name} leg: single-instance lock on (zombie double-entry)",
-              leg.single_instance_lock is True, leg.single_instance_lock)
-        check(f"hedge {name} leg: has a cycle partner to synchronise with",
-              leg.cycle_partner_table is not None, leg.cycle_partner_table)
-        # 2026-10-01, direct request: keep stochastic, remove the color-balance entry gate.
+        # 2026-10-01, direct request ("give it another try... let's get the same settings"):
+        # FULL REVERT to the exact 2026-09-29 original economics (commit 8469702 -- 124 cycles,
+        # 90.3% win, +2.55% in the backtest). Pinned so none of the later tuning (0.06 SL, 0.10/
+        # 0.03 profit-lock, the pressure gate, either color-balance index direction, the
+        # breakeven floor) can silently drift back in.
+        check(f"hedge {name} leg: SL back to the original 0.03%",
+              leg.sl_pct == 0.03, leg.sl_pct)
+        check(f"hedge {name} leg: profit-lock trigger back to 0.05%",
+              leg.profit_lock_trigger_pct == 0.05, leg.profit_lock_trigger_pct)
+        check(f"hedge {name} leg: profit-lock trail back to 0.01%",
+              leg.profit_lock_trail_pct == 0.01, leg.profit_lock_trail_pct)
+        check(f"hedge {name} leg: breakeven floor OFF (did not exist in the original)",
+              leg.breakeven_floor_enabled is False, leg.breakeven_floor_enabled)
+        check(f"hedge {name} leg: fixed survivor floor OFF",
+              leg.fixed_partner_cut_floor_pct is None, leg.fixed_partner_cut_floor_pct)
+        check(f"hedge {name} leg: partner-cut-arms-trail OFF (needs the breakeven floor)",
+              leg.partner_cut_arms_trail_immediately is False, leg.partner_cut_arms_trail_immediately)
+        check(f"hedge {name} leg: no entry gate at all -- always try to be in when flat",
+              leg.require_pressure_to_enter is False, leg.require_pressure_to_enter)
         check(f"hedge {name} leg: color-balance entry gate is disabled",
               (leg.color_balance_index_min, leg.color_balance_index_max, leg.color_balance_index_invert)
               == (None, None, False),
               (leg.color_balance_index_min, leg.color_balance_index_max, leg.color_balance_index_invert))
-        # 2026-09-30: switched from BTC to SOL, fixed_leg_usd bumped $10 -> $12 off Lighter's $10
-        # min_quote_amount for real margin against a single unfavourable tick. 2026-10-01: back
-        # to BTC (SOL and ETH were both tried and dropped), and back to the original $10 -- this
-        # exact value ran live on BTC for a long stretch with no rejected orders, so the headroom
-        # was specifically an alt-coin caution, not a BTC requirement. Floor pinned at Lighter's
-        # actual $10 minimum rather than an exact value, so either number stays valid.
+        check(f"hedge {name} leg: never reads stale per-position bands",
+              leg.schema_has_position_bands is False, leg.schema_has_position_bands)
+        # KEPT through the revert -- correctness/infra fixes for real bugs, not economics.
+        check(f"hedge {name} leg: single-instance lock on (zombie double-entry)",
+              leg.single_instance_lock is True, leg.single_instance_lock)
+        check(f"hedge {name} leg: has a cycle partner to synchronise with",
+              leg.cycle_partner_table is not None, leg.cycle_partner_table)
         check(f"hedge {name} leg: fixed_leg_usd at or above Lighter's $10 minimum",
               leg.fixed_leg_usd >= 10.0, leg.fixed_leg_usd)
         check(f"hedge {name} leg: NO size tilt -- legs are equal",
               leg.pressure_bias_enabled is False, leg.pressure_bias_enabled)
-        # 2026-09-30, direct request: pressure gate turned OFF for a hypertrading test ("enter
-        # at any moment"), paired with a 10s min_cycle_gap_seconds so cycles still aren't
-        # zero-delay -- see the cross-leg check below for why BOTH must hold together.
-        # 2026-10-01: the stochastic gate's replacement can also be the dispersion floor plus
-        # one-cycle-per-candle ("enter every clean candle if dispersion > 50") -- still never a
-        # zero-delay, every-tick re-entry.
-        check(f"hedge {name} leg: gate off implies a real entry throttle in its place",
-              leg.require_pressure_to_enter or leg.min_cycle_gap_seconds > 0
-              or (leg.min_intrabar_dispersion_to_enter is not None and leg.one_cycle_per_candle),
-              (leg.require_pressure_to_enter, leg.min_cycle_gap_seconds,
-               leg.min_intrabar_dispersion_to_enter, leg.one_cycle_per_candle))
-        # 2026-10-01: z-score tried on the pressure gate, then reverted same session ("z-score
-        # sucks") -- back to the plain stochastic. Pinned so the mix-up can't silently repeat.
         check(f"hedge {name} leg: pressure gate uses the plain stochastic (NOT z-score)",
               leg.use_zscore_signal is False, leg.use_zscore_signal)
-        # 2026-10-01, direct request: real exchange-side stop + shared cycle id for dashboard
-        # pairing. See BotConfig.native_stop_loss_enabled / schema_has_cycle_id.
         check(f"hedge {name} leg: native stop-loss on",
               leg.native_stop_loss_enabled is True, leg.native_stop_loss_enabled)
         check(f"hedge {name} leg: cycle_id schema on",

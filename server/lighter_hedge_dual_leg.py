@@ -184,108 +184,53 @@ LONG_CONFIG = BotConfig(
     # harmless reference values, required fields with no default.
     stoch_window=5, entry_lo=25, entry_hi=75, reversal_lo=25, reversal_hi=75,
     fixed_direction="long",
-    tp_pct=0.10, sl_pct=0.06,  # sl_pct is the real, live value here (use_joint_adaptive off)
+    # 2026-10-01, direct request ("give it another try... let's get the same settings"): FULL
+    # REVERT of every strategy/economics setting to the exact original from 2026-09-29 (commit
+    # 8469702, the config that ran 124 cycles at 90.3% win / +2.55% in the original backtest and
+    # was "insane" live before 2+ days of tuning): tp_pct/sl_pct 0.10/0.03, profit_lock trigger/
+    # trail 0.05/0.01, NO entry gate at all (require_pressure_to_enter=False -- always try to be
+    # in position on both sides whenever flat, exactly as originally built), NO breakeven floor
+    # (didn't exist yet), NO color-balance index gate. Every later strategy tweak -- the pressure
+    # gate, the dispersion experiments, the color-balance index (both directions), the breakeven
+    # floor and its fixed-0.03% variant, the wider 0.06 SL -- is removed.
+    #
+    # Kept deliberately, NOT reverted: these are correctness/infra fixes for real bugs found
+    # live, not economics changes, and reverting them would reintroduce the bugs they fixed.
+    #   - cycle_partner_table + main()'s cycle_hub: without this, the two legs can desync and
+    #     each trade naked, unhedged (observed live 2026-09-30 05:06:24).
+    #   - single_instance_lock: without this, a Render deploy's old+new container overlap can
+    #     double-enter (the zombie double-entry incident).
+    #   - native_stop_loss_enabled: a real exchange-side stop fires more precisely than our own
+    #     0.5s poll (software-caught stops measured 0.004-0.016 points worse) -- this changes
+    #     EXECUTION QUALITY, not the strategy itself; the configured SL level is unchanged.
+    #   - schema_has_cycle_id / schema_has_entry_features: dashboard pairing and hover-only
+    #     documentation, no effect on any trading decision.
+    tp_pct=0.10, sl_pct=0.03,
     fixed_leg_usd=10.0,  # direct request: same $ per leg, not the account's full balance
-    # 2026-09-29, direct request: bias size off the raw stochastic K -- see the module
-    # docstring's "Sizing" section and BotConfig.pressure_bias_enabled's docstring.
-    # 2026-09-30, direct correction: BACK TO $10/$10. 7cfe5ef turned the requested 25/75 signal
-    # into a 3:1 SIZE tilt ($15 favoured leg / $5 other) that was never asked for -- the request
-    # was for a signal to look at, not for unequal legs. The tilt also quietly broke the breakeven
-    # floor: a $5 winner must make +0.09% to offset a $15 loser's -0.03%, but the profit-lock trail
-    # exits at ~0.05%, so whenever the small leg was the winner the cycle could not be brought back
-    # to even and the floor never got the chance to fire. Equal legs keep the hedge delta-neutral
-    # and keep breakeven reachable from either side.
-    # The K value is still computed and shown on the dashboard (schema_has_live_signal +
-    # pressure_signal_owner below) -- it is a readout now, and changes nothing about size.
     pressure_bias_enabled=False,
-    # 2026-09-30, direct request -- what the 25/75 was for all along: only OPEN a cycle when the
-    # stochastic is at an extreme, i.e. when there is real pressure behind the move. Without this
-    # a fixed_direction leg enters every single time it is flat, including in flat chop where
-    # neither side travels far enough to reach the 0.05% trail and both legs just grind. Gates
-    # WHEN a cycle opens, never which way -- both legs still enter together, both sides.
-    # 2026-10-01, direct request: dispersion floor removed ("not working, just leave the
-    # stochastic") -- back to the plain 25/75 stochastic gate, no one-cycle-per-candle limit, so
-    # it trades more. The min_intrabar_dispersion_to_enter / one_cycle_per_candle machinery stays
-    # in stoch_bot_core.py, off.
-    require_pressure_to_enter=True,
-    # 2026-10-01: briefly tried the z-score here instead of the stochastic (same session) --
-    # direct request to revert, "z-score sucks". Back to the plain stochastic
-    # (BotConfig.use_zscore_signal defaults False). The machinery stays in stoch_bot_core.py
-    # (compute_zscore_signal, _compute_pressure_source_signal) in case it's worth another look
-    # later, just not wired on here.
-    pressure_signal_owner=True,  # this leg computes the ONE shared signal; short just reads it
-    # 2026-09-30, direct request: show the live K value on the dashboard. Column already exists
-    # on lighter_btc_optimal_state from an earlier experiment -- no migration needed.
+    require_pressure_to_enter=False,  # REVERTED: no entry gate, always try to be in when flat
+    pressure_signal_owner=True,  # harmless readout only now -- K no longer gates anything
     schema_has_live_signal=True,
-    debug_verbose_tick=False,  # off -- faulthandler below only fires if actually stuck
-    # 2026-09-30, direct request, correcting a real bug: this leg will NOT re-enter on its
-    # own just because it went flat -- it waits until the SHORT leg (lighter_stoch_dca_btc_
-    # state) is also flat, so both legs enter together and a cut leg can't repeatedly re-lose
-    # while the other side is still running. See BotConfig.cycle_partner_table's docstring.
-    cycle_partner_table="lighter_stoch_dca_btc_state",
+    debug_verbose_tick=False,
+    cycle_partner_table="lighter_stoch_dca_btc_state",  # KEPT -- see note above
     disable_literal_tp=True,
     profit_lock_enabled=True,
-    # 2026-09-30, reverted from 0.03 back to the backtested 0.05 after an audit: at 0.03 the
-    # winner armed at +0.03% and was stopped by the 0.01% trail on the next wiggle (~$8 on BTC,
-    # pure noise), booking ~+0.02% while the loser was allowed the full -0.03% -- roughly
-    # -0.01% per cycle, negative regardless of win rate. The "protection gap" the 0.03 change
-    # was meant to close (a leg peaking under the trigger with nothing but its own SL beneath
-    # it) is now closed properly by breakeven_floor_enabled below instead.
-    profit_lock_trigger_pct=0.10,
-    profit_lock_trail_pct=0.03,
+    profit_lock_trigger_pct=0.05,  # REVERTED to the original backtested pair
+    profit_lock_trail_pct=0.01,
     schema_has_profit_lock=True,
-    # 2026-09-30, direct request: once the OTHER leg has been cut, never let this leg's profit
-    # slide back below the level that makes the cycle even. Between breakeven and +0.05% this is
-    # the only protection; above +0.05% the trail above normally fires first. Derived from the
-    # partner's realized dollars, so it stays correct when pressure_bias_usd sizes the legs
-    # unequally -- see BotConfig.breakeven_floor_enabled's docstring.
-    breakeven_floor_enabled=True,
-    # User-requested fixed +0.03% survivor floor, instead of offsetting partner loss.
-    fixed_partner_cut_floor_pct=0.03,
-    schema_has_breakeven_floor=True,
-    # 2026-09-30: Render does not stop the old container before starting the new one, so every
-    # deploy briefly runs two copies of this process -- and with nothing stopping them, both could
-    # see "flat, partner flat, enter" and each place a real order (the zombie double-entry
-    # incident). Only the instance holding the lock on this leg's own state row takes new entries;
-    # exits are never gated on it. See BotConfig.single_instance_lock.
-    single_instance_lock=True,
-    # 2026-10-01, direct request: real exchange-side stop, placed the moment a position opens,
-    # instead of relying only on our own 0.5s poll + reduce_only market order. Confirmed in real
-    # trade data that every software-caught SL closed 0.004-0.016 points worse than the
-    # configured pct (e.g. -0.045% on a 0.03% stop) -- the exchange enforces its own trigger
-    # without waiting on our poll. See BotConfig.native_stop_loss_enabled. Kept through the
-    # ETH->BTC revert below -- this is independent of which coin is trading.
-    native_stop_loss_enabled=True,
-    # 2026-10-01: both legs stamp the SAME id (the cycle barrier's release instant) onto their
-    # entry and carry it to their close, so the dashboard can pair a cycle's two rows by id
-    # instead of guessing from opened_at proximity -- a guess that a slow confirm/retry on one
-    # leg could blow past, splitting one real cycle into two unpaired rows. Requires the
-    # cycle_id column migration (already run). See BotConfig.schema_has_cycle_id. Also kept
-    # through the revert below.
-    schema_has_cycle_id=True,
-    # 2026-10-01, direct request: real data showed a winner can reach a meaningful gain
-    # (+0.055%, right up against the floor) and give it ALL back with zero protection, because
-    # it never cleared the floor's own margin (arm_at = floor_pct + margin). This starts the
-    # ordinary profit-lock trail the instant the partner is confirmed cut, instead of waiting for
-    # profit_lock_trigger_pct -- same trail_pct buffer either way, just starting earlier. See
-    # BotConfig.partner_cut_arms_trail_immediately. Exits in this window now read PROFIT_LOCK,
-    # not BREAKEVEN_LOCK.
-    partner_cut_arms_trail_immediately=True,
-    # 2026-10-01, direct request: stochastic-only entry filter for both hedge legs.
-    # Keep the color-balance reading available for entry snapshots, without gating entries.
-    color_balance_index_min=None,
+    breakeven_floor_enabled=False,  # REVERTED -- did not exist in the original
+    fixed_partner_cut_floor_pct=None,
+    schema_has_breakeven_floor=False,
+    partner_cut_arms_trail_immediately=False,
+    profit_lock_respects_breakeven_floor=False,
+    color_balance_index_min=None,  # REVERTED -- no index gate, either direction
     color_balance_index_max=None,
     color_balance_index_invert=False,
     color_balance_index_window=5,
-    # The floor also binds the trail: exit at max(peak - trail, floor). With the fixed
-    # +0.03% floor above, this protects leg profit rather than combined-cycle breakeven.
-    profit_lock_respects_breakeven_floor=True,
-    # 2026-09-30, direct request: retune the exits from the dashboard without a deploy, and show
-    # the live volatility they have to cope with. Volatility ran 0.048% through the quiet hours
-    # and 0.117% at the US open the same day -- 2.4x -- and no single stop is right across that.
-    # Manual levers first, so the best value per regime is found by observation before any
-    # adaptive rule is committed to. NULL columns simply fall back to the values above.
-    schema_has_exit_overrides=True,
+    single_instance_lock=True,  # KEPT -- see note above
+    native_stop_loss_enabled=True,  # KEPT -- see note above
+    schema_has_cycle_id=True,  # KEPT -- dashboard pairing only
+    schema_has_exit_overrides=True,  # dashboard levers still work; values reset to match below
     require_fresh_signal=False,
     red_exit_burns_signal=False,
     profit_lock_burns_signal=False,
@@ -296,11 +241,7 @@ LONG_CONFIG = BotConfig(
     tick_log_defers_to=None,
     trade_flow_log_defers_to=None,
     unified_market_data_table=None,
-    # 2026-10-01, direct request: document K, the color-balance index, volatility, and
-    # dispersion at every entry so completed trades can be reviewed by hand for a pattern --
-    # e.g. which part of the day a given SL/trail setting stops working. Purely descriptive,
-    # changes no behaviour. Migration confirmed run (lighter_hedge_entry_features.sql) -- back on.
-    schema_has_entry_features=True,
+    schema_has_entry_features=True,  # KEPT -- hover documentation only
 )
 
 SHORT_CONFIG = BotConfig(
@@ -311,98 +252,32 @@ SHORT_CONFIG = BotConfig(
     table_runs="lighter_stoch_dca_btc_runs",
     stoch_window=5, entry_lo=25, entry_hi=75, reversal_lo=25, reversal_hi=75,
     fixed_direction="short",
-    tp_pct=0.10, sl_pct=0.06,
+    # See LONG_CONFIG's docstring -- full revert to the 2026-09-29 original, infra/correctness
+    # fixes kept.
+    tp_pct=0.10, sl_pct=0.03,
     fixed_leg_usd=10.0,  # direct request: same $ per leg, not the account's full balance
-    # 2026-09-29, direct request: bias size off the raw stochastic K -- see the module
-    # docstring's "Sizing" section and BotConfig.pressure_bias_enabled's docstring.
-    # 2026-09-30, direct correction: BACK TO $10/$10. 7cfe5ef turned the requested 25/75 signal
-    # into a 3:1 SIZE tilt ($15 favoured leg / $5 other) that was never asked for -- the request
-    # was for a signal to look at, not for unequal legs. The tilt also quietly broke the breakeven
-    # floor: a $5 winner must make +0.09% to offset a $15 loser's -0.03%, but the profit-lock trail
-    # exits at ~0.05%, so whenever the small leg was the winner the cycle could not be brought back
-    # to even and the floor never got the chance to fire. Equal legs keep the hedge delta-neutral
-    # and keep breakeven reachable from either side.
-    # The K value is still computed and shown on the dashboard (schema_has_live_signal +
-    # pressure_signal_owner below) -- it is a readout now, and changes nothing about size.
     pressure_bias_enabled=False,
-    # 2026-09-30, direct request -- what the 25/75 was for all along: only OPEN a cycle when the
-    # stochastic is at an extreme, i.e. when there is real pressure behind the move. Without this
-    # a fixed_direction leg enters every single time it is flat, including in flat chop where
-    # neither side travels far enough to reach the 0.05% trail and both legs just grind. Gates
-    # WHEN a cycle opens, never which way -- both legs still enter together, both sides.
-    # 2026-10-01, direct request: dispersion floor removed ("not working, just leave the
-    # stochastic") -- back to the plain 25/75 stochastic gate, no one-cycle-per-candle limit, so
-    # it trades more. The min_intrabar_dispersion_to_enter / one_cycle_per_candle machinery stays
-    # in stoch_bot_core.py, off.
-    require_pressure_to_enter=True,
-    # See LONG_CONFIG's docstring -- z-score tried and reverted same session.
-    debug_verbose_tick=False,  # off -- faulthandler below only fires if actually stuck
-    # Reciprocal of the long leg's gate above -- waits for lighter_btc_optimal_state (the
-    # LONG leg) to also be flat before re-entering.
-    cycle_partner_table="lighter_btc_optimal_state",
+    require_pressure_to_enter=False,  # REVERTED: no entry gate, always try to be in when flat
+    debug_verbose_tick=False,
+    cycle_partner_table="lighter_btc_optimal_state",  # KEPT -- see LONG_CONFIG's note
     disable_literal_tp=True,
     profit_lock_enabled=True,
-    # 2026-09-30, reverted from 0.03 back to the backtested 0.05 after an audit: at 0.03 the
-    # winner armed at +0.03% and was stopped by the 0.01% trail on the next wiggle (~$8 on BTC,
-    # pure noise), booking ~+0.02% while the loser was allowed the full -0.03% -- roughly
-    # -0.01% per cycle, negative regardless of win rate. The "protection gap" the 0.03 change
-    # was meant to close (a leg peaking under the trigger with nothing but its own SL beneath
-    # it) is now closed properly by breakeven_floor_enabled below instead.
-    profit_lock_trigger_pct=0.10,
-    profit_lock_trail_pct=0.03,
+    profit_lock_trigger_pct=0.05,  # REVERTED to the original backtested pair
+    profit_lock_trail_pct=0.01,
     schema_has_profit_lock=True,
-    # 2026-09-30, direct request: once the OTHER leg has been cut, never let this leg's profit
-    # slide back below the level that makes the cycle even. Between breakeven and +0.05% this is
-    # the only protection; above +0.05% the trail above normally fires first. Derived from the
-    # partner's realized dollars, so it stays correct when pressure_bias_usd sizes the legs
-    # unequally -- see BotConfig.breakeven_floor_enabled's docstring.
-    breakeven_floor_enabled=True,
-    # User-requested fixed +0.03% survivor floor, instead of offsetting partner loss.
-    fixed_partner_cut_floor_pct=0.03,
-    schema_has_breakeven_floor=True,
-    # 2026-09-30: Render does not stop the old container before starting the new one, so every
-    # deploy briefly runs two copies of this process -- and with nothing stopping them, both could
-    # see "flat, partner flat, enter" and each place a real order (the zombie double-entry
-    # incident). Only the instance holding the lock on this leg's own state row takes new entries;
-    # exits are never gated on it. See BotConfig.single_instance_lock.
-    single_instance_lock=True,
-    # 2026-10-01, direct request: real exchange-side stop, placed the moment a position opens,
-    # instead of relying only on our own 0.5s poll + reduce_only market order. Confirmed in real
-    # trade data that every software-caught SL closed 0.004-0.016 points worse than the
-    # configured pct (e.g. -0.045% on a 0.03% stop) -- the exchange enforces its own trigger
-    # without waiting on our poll. See BotConfig.native_stop_loss_enabled. Kept through the
-    # ETH->BTC revert below -- this is independent of which coin is trading.
-    native_stop_loss_enabled=True,
-    # 2026-10-01: both legs stamp the SAME id (the cycle barrier's release instant) onto their
-    # entry and carry it to their close, so the dashboard can pair a cycle's two rows by id
-    # instead of guessing from opened_at proximity -- a guess that a slow confirm/retry on one
-    # leg could blow past, splitting one real cycle into two unpaired rows. Requires the
-    # cycle_id column migration (already run). See BotConfig.schema_has_cycle_id. Also kept
-    # through the revert below.
-    schema_has_cycle_id=True,
-    # 2026-10-01, direct request: real data showed a winner can reach a meaningful gain
-    # (+0.055%, right up against the floor) and give it ALL back with zero protection, because
-    # it never cleared the floor's own margin (arm_at = floor_pct + margin). This starts the
-    # ordinary profit-lock trail the instant the partner is confirmed cut, instead of waiting for
-    # profit_lock_trigger_pct -- same trail_pct buffer either way, just starting earlier. See
-    # BotConfig.partner_cut_arms_trail_immediately. Exits in this window now read PROFIT_LOCK,
-    # not BREAKEVEN_LOCK.
-    partner_cut_arms_trail_immediately=True,
-    # 2026-10-01, direct request: stochastic-only entry filter for both hedge legs.
-    # Keep the color-balance reading available for entry snapshots, without gating entries.
-    color_balance_index_min=None,
+    breakeven_floor_enabled=False,  # REVERTED -- did not exist in the original
+    fixed_partner_cut_floor_pct=None,
+    schema_has_breakeven_floor=False,
+    partner_cut_arms_trail_immediately=False,
+    profit_lock_respects_breakeven_floor=False,
+    color_balance_index_min=None,  # REVERTED -- no index gate, either direction
     color_balance_index_max=None,
     color_balance_index_invert=False,
     color_balance_index_window=5,
-    # The floor also binds the trail: exit at max(peak - trail, floor). With the fixed
-    # +0.03% floor above, this protects leg profit rather than combined-cycle breakeven.
-    profit_lock_respects_breakeven_floor=True,
-    # 2026-09-30, direct request: retune the exits from the dashboard without a deploy, and show
-    # the live volatility they have to cope with. Volatility ran 0.048% through the quiet hours
-    # and 0.117% at the US open the same day -- 2.4x -- and no single stop is right across that.
-    # Manual levers first, so the best value per regime is found by observation before any
-    # adaptive rule is committed to. NULL columns simply fall back to the values above.
-    schema_has_exit_overrides=True,
+    single_instance_lock=True,  # KEPT -- see LONG_CONFIG's note
+    native_stop_loss_enabled=True,  # KEPT -- see LONG_CONFIG's note
+    schema_has_cycle_id=True,  # KEPT -- dashboard pairing only
+    schema_has_exit_overrides=True,  # dashboard levers still work; values reset to match below
     require_fresh_signal=False,
     red_exit_burns_signal=False,
     profit_lock_burns_signal=False,
@@ -413,11 +288,7 @@ SHORT_CONFIG = BotConfig(
     tick_log_defers_to=None,
     trade_flow_log_defers_to=None,
     unified_market_data_table=None,
-    # 2026-10-01, direct request: document K, the color-balance index, volatility, and
-    # dispersion at every entry so completed trades can be reviewed by hand for a pattern --
-    # e.g. which part of the day a given SL/trail setting stops working. Purely descriptive,
-    # changes no behaviour. Migration confirmed run (lighter_hedge_entry_features.sql) -- back on.
-    schema_has_entry_features=True,
+    schema_has_entry_features=True,  # KEPT -- hover documentation only
 )
 
 

@@ -2482,7 +2482,7 @@ function HedgeDualLegPanel({
               </p>
             </div>
             <div className="bg-gray-800/60 rounded-lg p-2">
-              <p className="text-gray-500 text-[10px] uppercase">Pressure Signal (stoch K, 25/75 — gates entry)</p>
+              <p className="text-gray-500 text-[10px] uppercase">Pressure Signal (stoch K — readout only, not gating)</p>
               <p className="font-bold text-sm">
                 <span className={liveSignal === "long" ? "text-green-400" : liveSignal === "short" ? "text-amber-400" : "text-gray-400"}>
                   {liveK != null ? liveK.toFixed(1) : "—"}
