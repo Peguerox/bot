@@ -36,7 +36,27 @@ project with no git/Render/Vercel link -- never work there.
     Inert while self-lock is off; do not make a literal TP mandatory if it is turned back on.
   - Reset (`app/api/lighter-btc-initial-reset`) is **non-destructive**: stamps `history_reset_at`,
     rolls PnL into `seed_usd`, never deletes trades (they are the research data).
-- **Worker 2 environment monitor (2026-10-02, two-switch update prepared):** user explicitly
+- **Worker 2 filters removed (2026-10-02 user request):** both hedge configs now set
+  environment_entry_gate_enabled=False. ER15/Vol10 readings and minute checkpoints remain
+  active for research, but never block new paired cycles, including red/missing/stale readings.
+  Original exits and $10 legs unchanged. Dashboard says Filters OFF / readings only.
+  Other bots retain the default environment gate behavior. 705 worker checks pass.
+- **Worker 2 layout + window research (2026-10-02):** dashboard-only deployment
+  dpl_B7eXUfcorAqSLEoZqGSBZFVm9wCZ READY. ER15 and Vol10 now together in the
+  color-balance pill, same font/size, individual green/red labels and combined OK/paused.
+  Exit-settings pill contains controls only. No backend/settings changes or Render restart.
+  Offline research/codex-worker2/window_sweep.py compares 5/10/15/20/30 independently,
+  all 25 paired combinations, separate binary-signal controls and no-filter baseline.
+  Thresholds fixed at ER>=.15 and Vol<=.045%, no hysteresis. Continuous latest-era
+  01:00:48–03:44:25 UTC and extended counterfactual 19:56–03:44:25 UTC quote replays;
+  original .03/.05/.01 exits, $10 legs, extra adverse SL .01% sensitivity, open marks tracked.
+  ER15/Vol15 beats ER15/Vol10 in both ranges; ER30/Vol5 highest extended stress result
+  but still negative (-$0.026700 across39 pairs). All extended stress variants negative.
+  One evening, sampled fills, no fees/funding or entry/PL latency: not independent validation.
+  Results WINDOW_SWEEP_FINDINGS.txt/window_sweep.json. Live windows remain15/10.
+  TypeScript,32control/tooltip checks and Vercelproductionbuild passed.
+  Dashboard source change remains local; no git push while workers enabled.
+- **Worker 2 environment monitor (deployed 2026-10-02, commit 7ae86ac):** user explicitly
   requested TWO binary environment switches, replacing the former ER-only hysteresis.
   ER15 >=0.15 is green, below0.15 red. Vol10 <=0.045% is green, above red. BOTH must be
   green to allow NEW paired cycles; either red pauses and both green resume immediately
@@ -52,6 +72,13 @@ project with no git/Render/Vercel link -- never work there.
   red/green independently. Onlybothgreenpermits newcycles; OFF remains a manualoverride.
   Research was small and retrospective. The user's ER>=0.15 binary rule differs from
   the tested hysteresis candidate; do notclaim the9simulatedcycles validate this newrule.
+  Live verification at03:34UTC: new instance locks on allthree rows, ER0.58258GREEN,
+  Vol0.060659%RED, combinedallowedFalse; thresholds .15/.15 and cap .045 matchuserrequest.
+  Dashboard dpl_BzcNQC8qTSvvefuzBgPznNW44Q8K READY. 703workerchecks,32UI/controlchecks,
+  TypeScript andproductionbuildpassed. OFF/flatconfirmedonstateandexchangebeforedeploy;
+  priorenabledsettings restoredafterlocks/monitorverified. ConcurrentClaudecommitb901372
+  changedWorker1profittrigger to.06anditsliveoverride; preserve that separatelyauthorizedchange.
+  Verification-onlydocupdate is localtoavoidunnecessaryfleetrestart.
 - **Worker 2**: `server/lighter_hedge_dual_leg.py` — LIVE real money, and the one process that
   drives **two** sub-accounts. It runs two `StochBot` instances under one `asyncio.gather`: a LONG
   leg on Worker 2's account (`lighter_btc_optimal_*` tables) and a SHORT leg on Worker 3's account

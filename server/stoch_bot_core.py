@@ -577,6 +577,7 @@ class BotConfig:
     require_pressure_to_enter: bool = False
     # Optional environment permission for NEW paired cycles, independent of entry direction.
     # Below pause => red; at/above resume => green; middle holds the previous state.
+    environment_entry_gate_enabled: bool = True  # False keeps monitoring without blocking entries.
     environment_er_pause_below: Optional[float] = None
     environment_er_resume_at: float = 0.25
     environment_er_window: int = 15
@@ -2381,7 +2382,7 @@ class StochBot:
         return self._current_candle_t() != self._last_cycle_candle_t
 
     def _environment_allows_cycle(self):
-        if self.cfg.environment_er_pause_below is None:
+        if not self.cfg.environment_entry_gate_enabled or self.cfg.environment_er_pause_below is None:
             return True
         reading = self.environment_hub if self.environment_hub is not None else self._environment_reading
         return bool(reading.get("allowed") and time.time() - reading.get("checked_at", 0) <= 90)

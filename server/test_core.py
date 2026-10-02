@@ -4666,6 +4666,9 @@ async def t_balance_invert_off_keeps_normal_inside_band_gate():
 
 async def t_environment_er_hysteresis_and_freshness():
     bot = _hedge_leg(environment_er_pause_below=0.15)
+    ungated = _hedge_leg(environment_er_pause_below=0.15, environment_entry_gate_enabled=False)
+    ungated.environment_hub = {"allowed": False, "checked_at": 0}
+    check("disabled environment gate permits cycles with red/stale readings", ungated._wants_new_cycle())
     bot._environment_restored = True
     now = time.time()
     base_t = (int(now // 60) - 16) * 60000
@@ -4722,6 +4725,7 @@ async def t_environment_shared_clearance_and_scope():
     import lighter_hedge_dual_leg as hedge
     import lighter_stoch_dca_btc_initial as initial
     check("ER only hedge enabled", initial.CONFIG.environment_er_pause_below is None)
+    check("hedge environment filters disabled both sides", all(not c.environment_entry_gate_enabled for c in [hedge.LONG_CONFIG,hedge.SHORT_CONFIG]))
     check("hedge exact ER thresholds both sides", all((c.environment_er_pause_below,c.environment_er_resume_at,c.environment_er_window)==(0.15,0.15,15) for c in [hedge.LONG_CONFIG,hedge.SHORT_CONFIG]))
     check("hedge only long computes environment", hedge.LONG_CONFIG.environment_signal_owner and not hedge.SHORT_CONFIG.environment_signal_owner)
     check("hedge still no stochastic entry filter", not hedge.LONG_CONFIG.require_pressure_to_enter and not hedge.SHORT_CONFIG.require_pressure_to_enter)

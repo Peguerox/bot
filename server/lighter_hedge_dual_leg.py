@@ -186,6 +186,7 @@ LONG_CONFIG = BotConfig(
     fixed_direction="long",
     # User-authorized experimental market environment monitor, 2026-10-02.
     # No stochastic entry gate: green permits the original always-paired strategy.
+    environment_entry_gate_enabled=False,  # User request: no environment filters; retain research readings.
     environment_er_pause_below=0.15,
     environment_er_resume_at=0.15,  # User requested one ER switch; no hysteresis.
     environment_vol_max_pct=0.045,
@@ -260,6 +261,7 @@ SHORT_CONFIG = BotConfig(
     table_runs="lighter_stoch_dca_btc_runs",
     stoch_window=5, entry_lo=25, entry_hi=75, reversal_lo=25, reversal_hi=75,
     fixed_direction="short",
+    environment_entry_gate_enabled=False,  # User request: no environment filters; retain research readings.
     environment_er_pause_below=0.15,
     environment_er_resume_at=0.15,  # User requested one ER switch; no hysteresis.
     environment_vol_max_pct=0.045,

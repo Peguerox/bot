@@ -2419,7 +2419,7 @@ function HedgeDualLegPanel({
         <div>
           <h3 className="text-white font-bold text-sm">Worker 2 · Hedge Strategy (2 legs)</h3>
           <p className="text-gray-500 text-[11px] leading-relaxed">
-            Both legs open together whenever both accounts are flat and the environment is green: Worker 2 LONG, Worker 3 SHORT, $10 per leg. No stochastic or balance entry filter. SL 0.03%; profit lock arms at +0.05% and trails 0.01% (dashboard overrides apply). New pairs require BOTH ER15 at least 0.15 AND volatility (10 closed one-minute candles) at most 0.045%. Either red pauses new pairs; both green resume. Existing stops and exits stay active while paused. These environment thresholds are experimental.
+            Both legs open together whenever both accounts are flat: Worker 2 LONG, Worker 3 SHORT, $10 per leg. No stochastic or balance entry filter. SL 0.03%; profit lock arms at +0.05% and trails 0.01% (dashboard overrides apply). Environment filters are OFF. ER15 and Vol10 are readings only for gathering data; their colors do not block trading.
           </p>
         </div>
         <div className="flex items-center gap-1.5 flex-wrap">
@@ -2497,12 +2497,25 @@ function HedgeDualLegPanel({
                     : "entry filter off"}
                 </span>
               </p>
-              <p className="text-[10px] tabular-nums mt-1" title="ER15: green at 0.15 or above, red below. Both ER15 and volatility must be green.">
-                <span className="text-gray-500 mr-1">ER15</span>
-                <span className={environmentGreen ? "text-green-400" : "text-red-400"}>
-                  {environmentFresh && typeof environment?.er === "number" ? environment.er.toFixed(3) : "—"}
-                </span>
-              </p>
+              <div className="mt-1 space-y-1">
+                <p className="font-bold text-sm tabular-nums" title="ER15: green at 0.15 or above. Uses 15 closed one-minute moves.">
+                  <span className="text-gray-500 mr-1">ER15</span>
+                  <span className={environmentGreen ? "text-green-400" : "text-red-400"}>
+                    {environmentFresh && typeof environment?.er === "number" ? environment.er.toFixed(3) : "—"}
+                  </span>
+                  <span className="text-[10px] font-normal text-gray-500 ml-1.5">{!environmentFresh ? "waiting" : environmentGreen ? "green" : "red"}</span>
+                </p>
+                <p className="font-bold text-sm tabular-nums" title="Vol10: mean range of 10 closed one-minute candles. Green at 0.045% or below.">
+                  <span className="text-gray-500 mr-1">Vol10</span>
+                  <span className={volatilityGreen ? "text-green-400" : "text-red-400"}>
+                    {liveVol != null ? liveVol.toFixed(4) + "%" : "—"}
+                  </span>
+                  <span className="text-[10px] font-normal text-gray-500 ml-1.5">{liveVol == null ? "waiting" : volatilityGreen ? "green" : "red"}</span>
+                </p>
+                <p className="text-[10px] text-gray-400">
+                  Filters OFF · readings only
+                </p>
+              </div>
             </div>
             <div className="bg-gray-800/60 rounded-lg p-2">
               <p className="text-gray-500 text-[10px] uppercase">Pressure Signal (stoch K — readout only, not gating)</p>
@@ -2520,22 +2533,9 @@ function HedgeDualLegPanel({
               </p>
             </div>
           </div>
-          {/* Live volatility + manual exit levers. The volatility shown is exactly what the exits
-              have to cope with (mean 1-min high-low/close %, 30-min lookback), so it is the number
-              to tune against. Both legs are always written together. */}
+          {/* Manual exit settings; environment readings are together above. */}
           <div className="bg-gray-800/60 rounded-lg p-2 space-y-2">
-            <div className="flex items-baseline justify-between">
-              <p className="text-gray-500 text-[10px] uppercase">Volatility (1-min range, 10m)</p>
-              <p className="font-bold text-sm tabular-nums">
-                <span className={volatilityGreen ? "text-green-400" : "text-red-400"}
-                      title="Volatility: green at 0.045% or below, red above. Both signals must be green.">
-                  {liveVol != null ? liveVol.toFixed(4) + "%" : "—"}
-                </span>
-                <span className="text-[10px] font-normal text-gray-500 ml-1.5">
-                  {liveVol == null ? "waiting for data" : volatilityGreen ? "green" : "red"}
-                </span>
-              </p>
-            </div>
+            <p className="text-gray-500 text-[10px] uppercase">Exit settings (both legs)</p>
             <div className="grid grid-cols-3 gap-1.5">
               {([["SL", slIn, setSlIn, curSl],
                  ["Trigger", trigIn, setTrigIn, curTrig],
