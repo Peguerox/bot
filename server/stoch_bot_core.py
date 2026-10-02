@@ -575,6 +575,12 @@ class BotConfig:
     # NOT a size control. An earlier reading of the same request turned it into a $15/$5 leg tilt,
     # which was never asked for -- see lighter_hedge_dual_leg.py's Sizing section.
     require_pressure_to_enter: bool = False
+    # Optional environment permission for NEW paired cycles, independent of entry direction.
+    # Below pause => red; at/above resume => green; middle holds the previous state.
+    environment_er_pause_below: Optional[float] = None
+    environment_er_resume_at: float = 0.25
+    environment_er_window: int = 15
+    environment_signal_owner: bool = True
     breakeven_floor_enabled: bool = False
     # Optional fixed winning-leg profit floor, in percentage points from its entry.
     # None keeps the partner-loss-derived breakeven floor. A fixed level may leave
@@ -1399,6 +1405,10 @@ class StochBot:
         # lighter_hedge_dual_leg.py's main(). None (default): pressure bias, if enabled, uses
         # this bot's own compute_stoch_signal() reading in isolation, same as any standalone bot.
         self.pressure_signal_hub = None
+        self.environment_hub = None
+        self._environment_reading = {"allowed": False}
+        self._environment_restored = False
+        self._environment_logged_key = None
         # Shared in-process barrier for hedge cycle entries -- see _cycle_gate_clear_to_enter.
         # Wired by lighter_hedge_dual_leg.py's main(); None for every standalone bot.
         self.cycle_hub = None
@@ -2368,9 +2378,66 @@ class StochBot:
             return True
         return self._current_candle_t() != self._last_cycle_candle_t
 
+    def _environment_allows_cycle(self):
+        if self.cfg.environment_er_pause_below is None:
+            return True
+        reading = self.environment_hub if self.environment_hub is not None else self._environment_reading
+        return bool(reading.get("allowed") and time.time() - reading.get("checked_at", 0) <= 90)
+
+    async def _refresh_environment(self, holds_lock):
+        """One shared, direction-independent ER15 monitor; never gates position management.
+
+        Store minute checkpoints in the existing runs JSON, avoiding schema changes. Only the
+        lock owner publishes; a recent checkpoint preserves hysteresis across a restart.
+        Missing, stale or discontinuous candles fail paused, even if the last reading was green.
+        """
+        cfg = self.cfg
+        if cfg.environment_er_pause_below is None or not cfg.environment_signal_owner or not holds_lock:
+            return
+        now = time.time()
+        reading = self.environment_hub if self.environment_hub is not None else self._environment_reading
+        if not self._environment_restored:
+            self._environment_restored = True
+            try:
+                rows = await self.sb("GET", f"{cfg.table_runs}?select=detail&action=eq.environment_er&order=id.desc&limit=1")
+                d = rows[0]["detail"] if rows else {}
+                if (d.get("window") == cfg.environment_er_window
+                        and d.get("pause_below") == cfg.environment_er_pause_below
+                        and d.get("resume_at") == cfg.environment_er_resume_at
+                        and 0 <= now - d.get("checked_at", 0) <= 90):
+                    reading.update(d)
+            except Exception:
+                pass  # Start paused if the checkpoint cannot be read.
+        bars = self.candles[:-1][-(cfg.environment_er_window + 1):]
+        valid = (len(bars) == cfg.environment_er_window + 1
+                 and 0 <= now - self.candles_updated_at <= 90)
+        if valid:
+            valid = (all(b["t"] - a["t"] == 60000 for a, b in zip(bars, bars[1:]))
+                     and 0 <= now - (bars[-1]["t"] / 1000 + 60) <= 90
+                     and all(math.isfinite(b["c"]) and b["c"] > 0 for b in bars))
+        er = compute_er_and_direction(self.candles, cfg.environment_er_window)[0] if valid else None
+        allowed = bool(reading.get("allowed", False))
+        if er is None or er < cfg.environment_er_pause_below:
+            allowed = False
+        elif er >= cfg.environment_er_resume_at:
+            allowed = True
+        candle_t = bars[-1]["t"] if bars else None
+        snapshot = {"allowed": allowed, "er": er, "candle_t": candle_t,
+                    "checked_at": now, "window": cfg.environment_er_window,
+                    "pause_below": cfg.environment_er_pause_below,
+                    "resume_at": cfg.environment_er_resume_at}
+        reading.update(snapshot)
+        key = (candle_t, allowed, er is not None)
+        if key != self._environment_logged_key:
+            try:
+                await self.log_run("environment_er", snapshot)
+                self._environment_logged_key = key
+            except Exception:
+                pass  # Dashboard logging cannot interrupt stops/exits.
+
     def _wants_new_cycle(self):
         """Every condition for DECLARING readiness for a new cycle (or, standalone, entering)."""
-        return (self._has_entry_pressure() and self._cycle_gap_elapsed()
+        return (self._environment_allows_cycle() and self._has_entry_pressure() and self._cycle_gap_elapsed()
                 and self._has_entry_dispersion() and self._candle_unused())
 
     def _reversal_cooldown_active(self):
@@ -3959,6 +4026,7 @@ class StochBot:
         # otherwise its lock would go stale and a zombie from an earlier deploy could claim it.
         # The result only ever gates new entries; every exit path below runs regardless.
         holds_lock = await self._acquire_instance_lock()
+        await self._refresh_environment(holds_lock)
 
         if cfg.self_lock_enabled and cfg.self_lock_relocks_on_boot:
             # Covers the one gap _load_self_lock_state's own boot-time re-lock can't: the user

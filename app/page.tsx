@@ -2090,9 +2090,10 @@ function CompactStochBtcPanel({
 // replaces Worker 2's panel only. If the hedge strategy is ever abandoned, Worker 3 goes back
 // to running its own original strategy standalone with its panel exactly as it already is.
 function HedgeDualLegPanel({
-  longState, longTrades, shortState, shortTrades, currentPrice, loading, onToggled,
+  longState, longTrades, shortState, shortTrades, currentPrice, loading, onToggled, environmentRun, now,
 }: {
   longState: any; longTrades: any[]; shortState: any; shortTrades: any[];
+  environmentRun: any; now: number;
   currentPrice: number | null; loading: boolean; onToggled: () => void;
 }) {
   const [toggling, setToggling] = useState(false);
@@ -2112,6 +2113,11 @@ function HedgeDualLegPanel({
   const [trigIn, setTrigIn] = useState("");
   const [trailIn, setTrailIn] = useState("");
   const [savingSettings, setSavingSettings] = useState(false);
+  const environment = environmentRun?.detail;
+  const environmentAge = Math.max(now, Date.now()) / 1000 - (environment?.checked_at ?? 0);
+  const environmentFresh = environment?.window === 15 && environment?.pause_below === 0.15
+    && environment?.resume_at === 0.25 && environmentAge >= 0 && environmentAge <= 90;
+  const environmentGreen = environmentFresh && environment?.allowed === true;
   const liveVol: number | null = longState?.live_vol_pct ?? null;
   const curSl = longState?.override_sl_pct ?? null;
   const curTrig = longState?.override_profit_lock_trigger ?? null;
@@ -2404,6 +2410,11 @@ function HedgeDualLegPanel({
 
   return (
     <div className="bg-gray-900 rounded-xl p-4 space-y-3">
+      <div className={`rounded-lg p-2 text-xs ${environmentGreen ? "bg-green-500/10 text-green-400" : "bg-red-500/10 text-red-400"}`}>
+        <span className="font-bold">Environment: {environmentGreen ? "GREEN · Trading allowed" : "RED · New pairs paused"}</span>
+        <span className="ml-2">ER15 {environmentFresh && typeof environment?.er === "number" ? environment.er.toFixed(3) : "—"}</span>
+        <p className="text-[10px] mt-1">{!environmentFresh || environment?.er == null ? "Waiting for fresh market data." : "Pause below 0.15 · Resume at 0.25 · Hold status between them."} Existing trades keep their stops and exits.</p>
+      </div>
       {/* Title + description get the FULL panel width, controls sit on their own row beneath.
           Side-by-side squeezed this (long) description into a narrow column many lines tall with
           the buttons floating in the middle of it. */}
@@ -2411,7 +2422,7 @@ function HedgeDualLegPanel({
         <div>
           <h3 className="text-white font-bold text-sm">Worker 2 · Hedge Strategy (2 legs)</h3>
           <p className="text-gray-500 text-[11px] leading-relaxed">
-            One process, two real sub-accounts, moving in CYCLES -- both legs enter together (Worker 2's account LONG, Worker 3's account SHORT), $10 fixed per leg, equal on both sides, trading BTC. A cycle only OPENS while the 25/75 stochastic shows real pressure AND the color-weighted balance index is OUTSIDE 65-75 (the inverse of Worker 1's own 65-75 band -- Worker 1 wants inside it, this wants outside it); the signal gates WHEN, never which way. SL 0.06% cuts a losing leg (backed by a real exchange-side stop order, not just our own poll), which then WAITS -- no literal TP, profit-lock trail only (arms +0.10%, trails 0.03% behind peak by default, retunable live below) -- and the trail now starts protecting the instant the OTHER leg gets cut, not only once +0.10% is reached -- but it can never close the winner below breakeven (BREAKEVEN_LOCK); above breakeven + trail it rides and exits as PROFIT_LOCK. Both re-enter together only once BOTH are flat again. One switch controls both legs together.
+            Both legs open together whenever both accounts are flat and the environment is green: Worker 2 LONG, Worker 3 SHORT, $10 per leg. No stochastic or balance entry filter. SL 0.03%; profit lock arms at +0.05% and trails 0.01% (dashboard overrides apply). ER15 pauses new pairs below 0.15 and resumes at 0.25 or higher; between those levels it holds its previous status. Existing stops and exits stay active while paused. These environment thresholds are experimental.
           </p>
         </div>
         <div className="flex items-center gap-1.5 flex-wrap">
@@ -2790,6 +2801,7 @@ export default function Dashboard() {
   const [optimalBtcState,  setOptimalBtcState]  = useState<any>(null);
   const [optimalBtcTrades, setOptimalBtcTrades] = useState<any[]>([]);
   const [optimalBtcRuns,   setOptimalBtcRuns]   = useState<any[]>([]);
+  const [hedgeEnvironmentRun, setHedgeEnvironmentRun] = useState<any>(null);
   // True lifetime trade/win counts -- the trades arrays above are capped at 200 rows for
   // display purposes, which silently froze the win-rate % and trade count once any worker
   // passed 200 real trades (Worker 2 hit this first, at 606 real trades and counting).
@@ -2830,6 +2842,7 @@ export default function Dashboard() {
       { count: rsiPaperTotal },
       { count: rsiPaperWins },
       { data: rsiPaperPnlRows },
+      { data: hedgeEnvironmentRows },
     ] = await Promise.all([
       getSupabase().from("surfer_state").select("*").eq("id", 1).single(),
       getSupabase().from("surfer_trades").select("*").order("exit_time", { ascending: false }).limit(5000),
@@ -2868,6 +2881,7 @@ export default function Dashboard() {
       getSupabase().from("lighter_btc_rsi_paper_trades").select("id", { count: "exact", head: true }).eq("worker_id", "worker1"),
       getSupabase().from("lighter_btc_rsi_paper_trades").select("id", { count: "exact", head: true }).eq("worker_id", "worker1").gt("pnl_pct", 0),
       getSupabase().from("lighter_btc_rsi_paper_trades").select("pnl_pct").eq("worker_id", "worker1"),
+      getSupabase().from("lighter_btc_optimal_runs").select("ran_at,detail").eq("action", "environment_er").order("id", { ascending: false }).limit(1),
     ]);
     setSurferState(surferSt ?? null);
     setSurferTrades(surferTr ?? []);
@@ -2890,6 +2904,7 @@ export default function Dashboard() {
     setOptimalBtcState(optimalBtcSt ?? null);
     setOptimalBtcTrades(optimalBtcTr ?? []);
     setOptimalBtcRuns(optimalBtcRs ?? []);
+    setHedgeEnvironmentRun(hedgeEnvironmentRows?.[0] ?? null);
     setDcaBtcStats({ total: dcaBtcTotal ?? 0, wins: dcaBtcWins ?? 0 });
     setInitialBtcStats({ total: initialBtcTotal ?? 0, wins: initialBtcWins ?? 0 });
     setOptimalBtcStats({ total: optimalBtcTotal ?? 0, wins: optimalBtcWins ?? 0 });
@@ -3099,6 +3114,8 @@ export default function Dashboard() {
             // tradingHoursUtc={WORKER1_TRADING_HOURS} again when the schedule is restored.
           />
           <HedgeDualLegPanel
+            environmentRun={hedgeEnvironmentRun}
+            now={healthTick}
             longState={optimalBtcState}
             longTrades={optimalBtcTrades.filter((t: any) => Date.parse(t.closed_at) >= Date.parse(optimalBtcState?.history_reset_at ?? WORKER2_RESET_AT))}
             shortState={dcaBtcState}

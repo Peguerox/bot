@@ -4664,8 +4664,108 @@ async def t_balance_invert_off_keeps_normal_inside_band_gate():
     check("entered at index 70 -- normal gate allows INSIDE the band", side == "long", side)
 
 
+async def t_environment_er_hysteresis_and_freshness():
+    bot = _hedge_leg(environment_er_pause_below=0.15)
+    bot._environment_restored = True
+    now = time.time()
+    base_t = (int(now // 60) - 16) * 60000
+    bot.candles = [{"t": base_t + i * 60000, "c": 86000 + i} for i in range(17)]
+    bot.candles_updated_at = now
+    original = core.compute_er_and_direction
+    value = [0.20]
+    core.compute_er_and_direction = lambda candles, window: (value[0], "long")
+    try:
+        await bot._refresh_environment(True)
+        check("ER starts paused in middle band", not bot._wants_new_cycle())
+        value[0] = 0.25
+        await bot._refresh_environment(True)
+        check("ER resumes at exactly .25", bot._wants_new_cycle())
+        value[0] = 0.15
+        await bot._refresh_environment(True)
+        check("ER holds green at exactly .15", bot._wants_new_cycle())
+        value[0] = 0.149
+        await bot._refresh_environment(True)
+        check("ER pauses below .15", not bot._wants_new_cycle())
+        value[0] = 0.249
+        await bot._refresh_environment(True)
+        check("ER holds red below .25", not bot._wants_new_cycle())
+        value[0] = 0.9
+        bot.candles_updated_at = now - 100
+        await bot._refresh_environment(True)
+        check("stale candles pause despite high ER", not bot._wants_new_cycle())
+        bot.candles_updated_at = now
+        bot.candles[4]["t"] += 1000
+        await bot._refresh_environment(True)
+        check("discontinuous candles pause", not bot._wants_new_cycle())
+        bot.candles[4]["t"] -= 1000
+        await bot._refresh_environment(True)
+        check("fresh high ER resumes", bot._wants_new_cycle())
+        bot._environment_reading["checked_at"] = now - 100
+        check("stale shared snapshot pauses", not bot._wants_new_cycle())
+    finally:
+        core.compute_er_and_direction = original
+
+
+async def t_environment_shared_clearance_and_scope():
+    a = _hedge_leg(environment_er_pause_below=0.15)
+    b = _hedge_leg(environment_er_pause_below=0.15, environment_signal_owner=False)
+    a.cfg.worker_id = "a"; b.cfg.worker_id = "b"
+    a.environment_hub = b.environment_hub = {"allowed": True, "checked_at": time.time()}
+    a.cycle_hub = b.cycle_hub = StochBot.new_cycle_hub(["a", "b"])
+    check("ER green both legs want cycle", a._wants_new_cycle() and b._wants_new_cycle())
+    check("ER first leg waits for partner", a._cycle_gate_clear_to_enter(want=a._wants_new_cycle()) is False)
+    check("ER second leg releases pair", b._cycle_gate_clear_to_enter(want=b._wants_new_cycle()) is True)
+    a.environment_hub.update(allowed=False)
+    check("ER red blocks next cycle for both", not a._wants_new_cycle() and not b._wants_new_cycle())
+    check("ER change honors already granted partner clearance", a._cycle_gate_clear_to_enter(want=a._wants_new_cycle()) is True)
+    check("unconfigured bots unaffected", _hedge_leg()._wants_new_cycle())
+    import lighter_hedge_dual_leg as hedge
+    import lighter_stoch_dca_btc_initial as initial
+    check("ER only hedge enabled", initial.CONFIG.environment_er_pause_below is None)
+    check("hedge exact ER thresholds both sides", all((c.environment_er_pause_below,c.environment_er_resume_at,c.environment_er_window)==(0.15,0.25,15) for c in [hedge.LONG_CONFIG,hedge.SHORT_CONFIG]))
+    check("hedge only long computes environment", hedge.LONG_CONFIG.environment_signal_owner and not hedge.SHORT_CONFIG.environment_signal_owner)
+    check("hedge still no stochastic entry filter", not hedge.LONG_CONFIG.require_pressure_to_enter and not hedge.SHORT_CONFIG.require_pressure_to_enter)
+
+
+async def t_environment_paused_exits_still_run():
+    ex = FakeExchange(position=0.00012)
+    bot = make_bot(ex, fixed_direction="long", sl_pct=0.03, environment_er_pause_below=0.15)
+    bot._environment_restored = True
+    bot.state_row.update(side="long", legs=[{"price": 86100.0, "usd_size": 86100.0 * 0.00012}], first_entry_price=86100.0)
+    await bot.tick()
+    check("ER paused position still stops out", bot.state_row["side"] is None)
+    check("ER paused stop sends reduce only", any(o["reduce_only"] for o in ex.orders))
+
+
+async def t_environment_restart_checkpoint():
+    bot = _hedge_leg(environment_er_pause_below=0.15)
+    now = time.time(); base_t = (int(now // 60) - 16) * 60000
+    bot.candles = [{"t": base_t+i*60000,"c":86000+i} for i in range(17)]
+    bot.candles_updated_at = now
+    async def sb(method, path):
+        return [{"detail":{"allowed":True,"checked_at":now,"window":15,"pause_below":0.15,"resume_at":0.25}}]
+    bot.sb = sb
+    original = core.compute_er_and_direction
+    core.compute_er_and_direction = lambda candles, window: (0.20, "short")
+    try:
+        await bot._refresh_environment(True)
+        check("ER recent checkpoint holds green through restart", bot._wants_new_cycle())
+        bot._environment_restored=False
+        bot._environment_reading={"allowed":False}
+        async def stale_sb(method,path):
+            d=(await sb(method,path))[0]; d["detail"]["checked_at"]=now-120; return [d]
+        bot.sb=stale_sb
+        await bot._refresh_environment(True)
+        check("ER stale checkpoint starts paused", not bot._wants_new_cycle())
+    finally:
+        core.compute_er_and_direction=original
+
+
 async def main():
-    for t in (t_normal_entry, t_phantom_double_fill, t_nonce_error_but_filled,
+    for t in (t_environment_er_hysteresis_and_freshness,
+              t_environment_shared_clearance_and_scope,
+              t_environment_paused_exits_still_run,
+              t_environment_restart_checkpoint,t_normal_entry, t_phantom_double_fill, t_nonce_error_but_filled,
               t_order_error_no_fill, t_circuit_breaker, t_close_uses_real_size,
               t_oversize_mismatch_in_tick, t_external_close_reconcile,
               t_order_timeout_bounded, t_read_position_never_trusts_stale_ws_flat,

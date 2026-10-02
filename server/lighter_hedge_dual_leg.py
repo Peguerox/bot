@@ -184,6 +184,12 @@ LONG_CONFIG = BotConfig(
     # harmless reference values, required fields with no default.
     stoch_window=5, entry_lo=25, entry_hi=75, reversal_lo=25, reversal_hi=75,
     fixed_direction="long",
+    # User-authorized experimental market environment monitor, 2026-10-02.
+    # No stochastic entry gate: green permits the original always-paired strategy.
+    environment_er_pause_below=0.15,
+    environment_er_resume_at=0.25,
+    environment_er_window=15,
+    environment_signal_owner=True,
     # 2026-10-01, direct request ("give it another try... let's get the same settings"): FULL
     # REVERT of every strategy/economics setting to the exact original from 2026-09-29 (commit
     # 8469702, the config that ran 124 cycles at 90.3% win / +2.55% in the original backtest and
@@ -252,6 +258,10 @@ SHORT_CONFIG = BotConfig(
     table_runs="lighter_stoch_dca_btc_runs",
     stoch_window=5, entry_lo=25, entry_hi=75, reversal_lo=25, reversal_hi=75,
     fixed_direction="short",
+    environment_er_pause_below=0.15,
+    environment_er_resume_at=0.25,
+    environment_er_window=15,
+    environment_signal_owner=False,  # Both legs use the long owner's single reading.
     # See LONG_CONFIG's docstring -- full revert to the 2026-09-29 original, infra/correctness
     # fixes kept.
     tp_pct=0.10, sl_pct=0.03,
@@ -299,6 +309,9 @@ async def main():
     # automatically"): ONE signal, period. LONG_CONFIG.pressure_signal_owner=True makes the long
     # leg the sole computer; it publishes into this shared dict, the short leg only ever reads
     # it -- see _pressure_biased_leg_usd's docstring.
+    shared_environment_hub = {"allowed": False}
+    long_bot.environment_hub = shared_environment_hub
+    short_bot.environment_hub = shared_environment_hub
     shared_pressure_hub = {"signal": None}
     long_bot.pressure_signal_hub = shared_pressure_hub
     short_bot.pressure_signal_hub = shared_pressure_hub
