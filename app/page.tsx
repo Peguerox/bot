@@ -1537,6 +1537,7 @@ function CompactStochBtcPanel({
   const [savingSettings, setSavingSettings] = useState(false);
   const liveVol: number | null = state?.live_vol_pct ?? null;
   const liveZebra: number | null = state?.live_zebra_index ?? null;
+  const liveCandleVolume: number | null = state?.live_candle_volume ?? null;
   const curSl = state?.override_sl_pct ?? null;
   const curTrig = state?.override_profit_lock_trigger ?? null;
   const curTrail = state?.override_profit_lock_trail ?? null;
@@ -2002,6 +2003,25 @@ function CompactStochBtcPanel({
                 : liveZebra >= 65 && liveZebra <= 75 ? "IN BAND — a fresh signal can enter"
                 : liveZebra < 65 ? "too trendy — no entry"
                 : "too balanced/choppy — no entry"}
+            </span>
+          </p>
+        </div>
+      )}
+      {showLevers && !loading && (
+        <div className="bg-gray-800/60 rounded-lg p-2">
+          {/* Must match volume_regime_switch_threshold in lighter_stoch_dca_btc_initial.py.
+              2026-10-02, direct request: a visible readout of the exact traded-volume figure
+              the entry switch itself acts on, and which signal currently governs entries. */}
+          <p className="text-gray-500 text-[10px] uppercase">Traded volume (10 candles) — switches signal at 2</p>
+          <p className="font-bold text-sm tabular-nums">
+            <span className={liveCandleVolume == null ? "text-gray-500"
+              : liveCandleVolume >= 2 ? "text-amber-400" : "text-green-400"}>
+              {liveCandleVolume != null ? liveCandleVolume.toFixed(2) + " BTC" : "—"}
+            </span>
+            <span className="text-[10px] font-normal text-gray-500 ml-1.5">
+              {liveCandleVolume == null ? "no reading yet"
+                : liveCandleVolume >= 2 ? "HIGH — flip signal governs entries"
+                : "normal — stochastic + color-balance governs entries"}
             </span>
           </p>
         </div>

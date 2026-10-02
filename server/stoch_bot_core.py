@@ -4372,6 +4372,21 @@ class StochBot:
                     await self.update_state(patch)
                 except Exception:
                     pass
+                if cfg.volume_regime_switch_threshold is not None:
+                    # Isolated best-effort write (2026-10-02, direct request: "make sure you
+                    # put the volume in somewhere... so I have an idea what's happening and
+                    # why the bot is losing") -- the exact traded-volume reading the regime
+                    # switch itself acts on. SEPARATE call, same reasoning as the zebra/balance
+                    # readout just below: a missing column (before
+                    # lighter_btc_initial_live_candle_volume.sql is run) must never cost the
+                    # live_k/live_vol_pct write above, which it would if merged into that same
+                    # patch dict -- PostgREST rejects the whole update on one unknown column.
+                    cv = compute_candle_volume_avg(self.candles, cfg.volume_regime_switch_window)
+                    if cv is not None:
+                        try:
+                            await self.update_state({"live_candle_volume": cv})
+                        except Exception:
+                            pass
                 if cfg.color_balance_index_min is not None or cfg.color_balance_index_max is not None:
                     # Isolated best-effort write (2026-10-01) so the dashboard can show the live
                     # color-weighted balance index the entry gate is reading. Written into the
