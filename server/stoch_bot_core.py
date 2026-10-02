@@ -324,6 +324,12 @@ class BotConfig:
     # an $84,314 price). Requires the INTERRUPTING candle's own body -- not the streak -- to
     # clear this floor. See compute_flip_signal's docstring for the moderate-cutoff reasoning.
     flip_signal_min_body_pct: Optional[float] = None
+    # Direct request, 2026-10-02 ("give me control of the signals"): live on/off toggles for
+    # the stochastic regime, the zebra/color-balance band, and the flip regime, plus a live
+    # override for the volume switch threshold itself -- see _regime_controls. False (default)
+    # means every other bot is unaffected; reads are always safe even before the migration
+    # (state.get on a missing column just returns None), only a write would need the gate.
+    schema_has_regime_overrides: bool = False
     # Low-volatility entry gate (2026-09-29, direct request): the OPPOSITE direction from the
     # pair above -- blocks new entries (and a reversal's reopen leg, never TP/SL/exits) when
     # the market is TOO QUIET rather than too spiky. Built to test a real finding from 844 real
@@ -1586,6 +1592,10 @@ class StochBot:
         self._native_stop_synced = None  # (trigger_price, qty) last confirmed resting, or None
         self._native_tp_synced = None    # same, for native_take_profit_enabled
         self._burned_signal = None  # see BotConfig.red_exit_burns_signal
+        # See _regime_controls -- defaults match that method's own defaults, in case
+        # _prior_candle_signal is ever read before the first tick has run.
+        self._regime_flip_enabled = True
+        self._regime_vol_threshold = self.cfg.volume_regime_switch_threshold
         # See BotConfig.profit_lock_burn_k_gate's docstring. _burned_signal_via distinguishes a
         # profit-lock-sourced burn (eligible for the K-reclaim early-clear) from a loss-sourced
         # one (always needs the ordinary full signal reset). _position_entry_k is the real
@@ -2046,6 +2056,32 @@ class StochBot:
         self.live_signal = signal
         return signal, signal, ts
 
+    def _regime_controls(self, state):
+        """(stochastic_enabled, zebra_enabled, flip_enabled, volume_switch_threshold) for this
+        tick -- direct request, 2026-10-02 ("give me control of the signals"). Same override
+        shape as _exit_params just below: a non-NULL value on the state row wins over the
+        compiled-in default, read live every tick. stochastic_enabled/flip_enabled gate the
+        low/high-volume regimes respectively (False = that regime places no new entries and
+        attempts no reversal -- existing exits on an already-open position are untouched,
+        same contract as the master ON/OFF toggle). zebra_enabled gates the color-balance band
+        on top of the stochastic signal specifically; False lets the raw stochastic signal
+        trade unfiltered. volume_switch_threshold overrides
+        BotConfig.volume_regime_switch_threshold itself. See
+        BotConfig.schema_has_regime_overrides."""
+        cfg = self.cfg
+        stochastic_enabled, zebra_enabled, flip_enabled = True, True, True
+        vol_threshold = cfg.volume_regime_switch_threshold
+        if cfg.schema_has_regime_overrides:
+            o = state.get("override_stochastic_enabled")
+            if o is not None: stochastic_enabled = bool(o)
+            o = state.get("override_zebra_enabled")
+            if o is not None: zebra_enabled = bool(o)
+            o = state.get("override_flip_enabled")
+            if o is not None: flip_enabled = bool(o)
+            o = state.get("override_volume_switch_threshold")
+            if o is not None: vol_threshold = float(o)
+        return stochastic_enabled, zebra_enabled, flip_enabled, vol_threshold
+
     def _exit_params(self, state):
         """(sl_pct, profit_lock_trigger, profit_lock_trail) for this tick.
 
@@ -2157,12 +2193,14 @@ class StochBot:
                     self.candles, stoch_period=cfg.stoch_window,
                     require_confirmation=cfg.rsi_paper_require_confirmation,
                     lo=cfg.entry_lo, hi=cfg.entry_hi)
-            elif (cfg.volume_regime_switch_threshold is not None
+            elif (self._regime_flip_enabled and self._regime_vol_threshold is not None
                   and (compute_candle_volume_avg(self.candles, cfg.volume_regime_switch_window) or -1)
-                  >= cfg.volume_regime_switch_threshold):
+                  >= self._regime_vol_threshold):
                 # Mirrors the regime switch in tick() -- what would have fired one candle
                 # earlier is judged by whichever signal WOULD have been active then, not
-                # always the stochastic one.
+                # always the stochastic one. Reads the SAME cached toggle state tick() just
+                # resolved this tick (self._regime_flip_enabled/_regime_vol_threshold), not a
+                # second DB read -- see _regime_controls.
                 sig, _, _ = compute_flip_signal(
                     self.candles, cfg.flip_signal_min_trend_len, cfg.flip_signal_min_size_pct,
                     cfg.flip_signal_min_body_pct)
@@ -4363,15 +4401,28 @@ class StochBot:
         else:
             entry_signal, reversal_signal, candle_ts = self.compute_stoch_signal()
         # See BotConfig.volume_regime_switch_threshold -- a full override, not an extra gate:
-        # at/above the threshold this REPLACES whatever the block above just computed.
+        # at/above the threshold this REPLACES whatever the block above just computed. See
+        # _regime_controls for the four live toggles layered on top.
+        (regime_stochastic_enabled, regime_zebra_enabled, regime_flip_enabled,
+         regime_vol_threshold) = self._regime_controls(state)
+        # _prior_candle_signal (the freshness check) reads these back rather than re-deriving
+        # them, so "what would have fired one candle earlier" is judged against the SAME
+        # live toggle state as this tick, not a second, possibly different DB read.
+        self._regime_flip_enabled = regime_flip_enabled
+        self._regime_vol_threshold = regime_vol_threshold
         flip_regime_active = False
-        if cfg.volume_regime_switch_threshold is not None:
+        if regime_vol_threshold is not None:
             candle_volume_now = compute_candle_volume_avg(self.candles, cfg.volume_regime_switch_window)
-            if candle_volume_now is not None and candle_volume_now >= cfg.volume_regime_switch_threshold:
-                flip_regime_active = True
-                entry_signal, reversal_signal, candle_ts = compute_flip_signal(
-                    self.candles, cfg.flip_signal_min_trend_len, cfg.flip_signal_min_size_pct,
-                    cfg.flip_signal_min_body_pct)
+            if candle_volume_now is not None and candle_volume_now >= regime_vol_threshold:
+                if regime_flip_enabled:
+                    flip_regime_active = True
+                    entry_signal, reversal_signal, candle_ts = compute_flip_signal(
+                        self.candles, cfg.flip_signal_min_trend_len, cfg.flip_signal_min_size_pct,
+                        cfg.flip_signal_min_body_pct)
+                else:
+                    entry_signal, reversal_signal = None, None  # high-vol regime off -- sit idle
+            elif not regime_stochastic_enabled:
+                entry_signal, reversal_signal = None, None  # low-vol regime off -- sit idle
         vol_pct_now = (self._measure_vol_pct(cfg.min_vol_pct_lookback)
                        if cfg.min_vol_pct_to_trade is not None else None)
         low_vol_blocked = (cfg.min_vol_pct_to_trade is not None
@@ -4642,9 +4693,12 @@ class StochBot:
 
         # Stateless, recomputed every tick -- see BotConfig.color_balance_index_min. Same shape
         # as the zebra gate above; a bot normally configures one or the other, not both. Also
-        # skipped in flip_regime_active, same reasoning as the zebra gate just above.
+        # skipped in flip_regime_active (same reasoning as the zebra gate just above) and when
+        # the live zebra_enabled toggle is off (see _regime_controls) -- a bot can run the raw
+        # stochastic signal unfiltered without this band.
         balance_blocked = False
-        if not flip_regime_active and (cfg.color_balance_index_min is not None or cfg.color_balance_index_max is not None):
+        if (not flip_regime_active and regime_zebra_enabled
+                and (cfg.color_balance_index_min is not None or cfg.color_balance_index_max is not None)):
             cwi = compute_color_weighted_balance_index(self.candles, cfg.color_balance_index_window)
             if cfg.color_balance_index_invert:
                 # Blocked INSIDE the band, allowed OUTSIDE it (needs both bounds set -- with

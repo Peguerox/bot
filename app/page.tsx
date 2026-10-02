@@ -1543,6 +1543,48 @@ function CompactStochBtcPanel({
   const curSl = state?.override_sl_pct ?? null;
   const curTrig = state?.override_profit_lock_trigger ?? null;
   const curTrail = state?.override_profit_lock_trail ?? null;
+  // Signal on/off toggles -- NULL on the row means "use the compiled default", which is True
+  // for all three signal toggles. Must match BotConfig's own defaults in _regime_controls.
+  const stochasticOn = state?.override_stochastic_enabled ?? true;
+  const zebraOn = state?.override_zebra_enabled ?? true;
+  const flipOn = state?.override_flip_enabled ?? true;
+  // Must match volume_regime_switch_threshold in lighter_stoch_dca_btc_initial.py.
+  const curVolThreshold: number = state?.override_volume_switch_threshold ?? 4;
+  const [volThresholdIn, setVolThresholdIn] = useState("");
+  const [savingSignal, setSavingSignal] = useState<string | null>(null);
+
+  async function handleToggleSignal(key: "stochastic" | "zebra" | "flip", label: string, next: boolean) {
+    if (!confirm(`Turn ${label} ${next ? "ON" : "OFF"} for ${title}? Takes effect immediately.`)) return;
+    setSavingSignal(key);
+    const res = await fetch("/api/lighter-btc-initial-settings", {
+      method: "POST", headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ [key]: next }),
+    });
+    if (!res.ok) {
+      const b = await res.json().catch(() => ({}));
+      alert(b.error || "Could not apply the change.");
+    }
+    await onToggled();
+    setSavingSignal(null);
+  }
+
+  async function handleApplyVolThreshold() {
+    if (!volThresholdIn.trim()) return;
+    if (!confirm(`Set the volume switch threshold to ${volThresholdIn.trim()} BTC for ${title}? Takes effect immediately.`)) return;
+    setSavingSignal("volThreshold");
+    const res = await fetch("/api/lighter-btc-initial-settings", {
+      method: "POST", headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ volThreshold: volThresholdIn.trim() }),
+    });
+    if (!res.ok) {
+      const b = await res.json().catch(() => ({}));
+      alert(b.error || "Could not apply the change.");
+    } else {
+      setVolThresholdIn("");
+    }
+    await onToggled();
+    setSavingSignal(null);
+  }
 
   async function handleApplySettings() {
     const payload: Record<string, string> = {};
@@ -2010,25 +2052,68 @@ function CompactStochBtcPanel({
         </div>
       )}
       {showLevers && !loading && (
-        <div className="bg-gray-800/60 rounded-lg p-2">
-          {/* Must match volume_regime_switch_threshold in lighter_stoch_dca_btc_initial.py.
-              2026-10-02, direct request: a visible readout of the exact traded-volume figure
-              the entry switch itself acts on, and which signal currently governs entries. */}
-          <p className="text-gray-500 text-[10px] uppercase">Traded volume (10 candles) — switches signal at 4</p>
+        <div className="bg-gray-800/60 rounded-lg p-2 space-y-2">
+          {/* 2026-10-02, direct request: a visible readout of the exact traded-volume figure
+              the entry switch itself acts on, and which signal currently governs entries --
+              threshold is now live/adjustable (curVolThreshold), not hardcoded. */}
+          <p className="text-gray-500 text-[10px] uppercase">Traded volume (10 candles) — switches signal at {curVolThreshold}</p>
           <p className="font-bold text-sm tabular-nums">
             <span className={liveCandleVolume == null ? "text-gray-500"
-              : liveCandleVolume >= 4 ? "text-amber-400" : "text-green-400"}>
+              : liveCandleVolume >= curVolThreshold ? "text-amber-400" : "text-green-400"}>
               {liveCandleVolume != null ? liveCandleVolume.toFixed(2) + " BTC" : "—"}
             </span>
             <span className="text-[10px] font-normal text-gray-500 ml-1.5">
               {liveCandleVolume == null ? "no reading yet"
-                : liveCandleVolume >= 4 ? "HIGH — flip signal governs entries"
+                : liveCandleVolume >= curVolThreshold ? "HIGH — flip signal governs entries"
                 : "normal — stochastic + color-balance governs entries"}
             </span>
           </p>
+          <div className="flex items-end gap-1.5">
+            <div className="flex-1">
+              <p className="text-gray-500 text-[9px] uppercase">
+                Switch at <span className="text-gray-600">now {curVolThreshold} BTC</span>
+              </p>
+              <input
+                value={volThresholdIn}
+                onChange={(e) => setVolThresholdIn(e.target.value)}
+                placeholder={String(curVolThreshold)}
+                inputMode="decimal"
+                className="w-full bg-gray-900 border border-gray-700 rounded px-1.5 py-1 text-xs text-white tabular-nums focus:outline-none focus:border-blue-500"
+              />
+            </div>
+            <button
+              onClick={handleApplyVolThreshold}
+              disabled={savingSignal !== null || loading || !volThresholdIn.trim()}
+              className="text-xs font-bold px-2.5 py-1 rounded bg-blue-500/20 text-blue-400 hover:bg-blue-500/30 disabled:opacity-30"
+            >
+              {savingSignal === "volThreshold" ? "…" : "Set"}
+            </button>
+          </div>
+          <div className="grid grid-cols-3 gap-1.5 pt-1">
+            {([["stochastic", "Stochastic", stochasticOn],
+               ["zebra", "Zebra band", zebraOn],
+               ["flip", "Flip", flipOn]] as const).map(([key, label, on]) => (
+              <button
+                key={key}
+                onClick={() => handleToggleSignal(key, label, !on)}
+                disabled={savingSignal !== null || loading}
+                className={`text-xs font-bold px-2 py-1.5 rounded disabled:opacity-30 ${
+                  on ? "bg-green-500/20 text-green-400 hover:bg-green-500/30"
+                     : "bg-gray-700/50 text-gray-500 hover:bg-gray-700"
+                }`}
+              >
+                {label} {savingSignal === key ? "…" : on ? "ON" : "OFF"}
+              </button>
+            ))}
+          </div>
+          <p className="text-gray-600 text-[9px] leading-snug">
+            Stochastic/Zebra apply below the volume switch; Flip applies at/above it. Zebra OFF
+            lets the raw stochastic signal trade without the 65-75 band. Turning a regime OFF
+            only blocks new entries there -- never closes a position already open.
+          </p>
         </div>
       )}
-      {showLevers && liveCandleVolume != null && liveCandleVolume >= 4 && !loading && (() => {
+      {showLevers && liveCandleVolume != null && liveCandleVolume >= curVolThreshold && !loading && (() => {
         const dots = liveStreakLen != null ? "●".repeat(Math.min(liveStreakLen, 5)) + (liveStreakLen > 5 ? "+" : "") : "—";
         const dirLabel = liveStreakDir === "long" ? "GREEN" : liveStreakDir === "short" ? "RED" : "—";
         return (

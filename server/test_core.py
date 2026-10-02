@@ -4959,6 +4959,86 @@ async def _volume_switch_case(candle_volume, threshold=2.0):
     return bot.state_row["side"]
 
 
+async def _regime_toggle_case(state_overrides, schema_on=True, candle_volume=1.0, threshold=2.0,
+                               zebra_band=True, flip_side="short"):
+    """Stochastic says 'long' (K=0). color_balance band, if `zebra_band`, is set to a value
+    the mock reports as OUT of band (would block). Flip, if volume ends up routed there, is
+    mocked to `flip_side` so a flip entry is distinguishable from a stochastic one."""
+    ex = FakeExchange()
+    cfg_kwargs = dict(candles_kind="mid", volume_regime_switch_threshold=threshold,
+                       flip_signal_min_trend_len=3, schema_has_regime_overrides=schema_on)
+    if zebra_band:
+        cfg_kwargs.update(color_balance_index_min=65.0, color_balance_index_max=75.0)
+    bot = make_bot(ex, **cfg_kwargs)
+    bot.candles = make_dispersion_candles([150, 150, 150, 150, 0])  # fresh long signal (K=0)
+    bot.state_row.update(state_overrides)
+    orig_vol = core.compute_candle_volume_avg
+    orig_balance = core.compute_color_weighted_balance_index
+    orig_flip = core.compute_flip_signal
+    core.compute_candle_volume_avg = lambda c, w=10: candle_volume
+    core.compute_color_weighted_balance_index = lambda c, w=5: 40.0  # out of 65-75 -- would block
+    core.compute_flip_signal = lambda c, min_trend_len, min_size_pct, min_body_pct: (flip_side, None, c[-2]["t"])
+    try:
+        await bot.tick()
+    finally:
+        core.compute_candle_volume_avg = orig_vol
+        core.compute_color_weighted_balance_index = orig_balance
+        core.compute_flip_signal = orig_flip
+    return bot.state_row["side"]
+
+
+async def t_regime_toggle_stochastic_off_blocks_low_volume_entry():
+    print("\n[regime toggle: override_stochastic_enabled=False blocks the low-volume regime]")
+    side = await _regime_toggle_case({"override_stochastic_enabled": False}, zebra_band=False)
+    check("blocked -- stochastic regime off, below the volume switch", side is None, side)
+
+
+async def t_regime_toggle_stochastic_on_default():
+    print("\n[regime toggle: no override -- stochastic regime on by default]")
+    side = await _regime_toggle_case({}, zebra_band=False)
+    check("entered long -- default is on", side == "long", side)
+
+
+async def t_regime_toggle_zebra_off_bypasses_band():
+    print("\n[regime toggle: override_zebra_enabled=False lets the raw stochastic signal through]")
+    side = await _regime_toggle_case({"override_zebra_enabled": False}, zebra_band=True)
+    check("entered long -- band bypassed, even though it would have blocked", side == "long", side)
+
+
+async def t_regime_toggle_zebra_on_default_still_blocks():
+    print("\n[regime toggle: no override -- the color-balance band still gates by default]")
+    side = await _regime_toggle_case({}, zebra_band=True)
+    check("blocked -- band still applies", side is None, side)
+
+
+async def t_regime_toggle_flip_off_blocks_high_volume_entry():
+    print("\n[regime toggle: override_flip_enabled=False blocks the high-volume regime entirely]")
+    side = await _regime_toggle_case({"override_flip_enabled": False}, zebra_band=False,
+                                      candle_volume=5.0, threshold=2.0)
+    check("blocked -- flip regime off, does NOT fall back to stochastic", side is None, side)
+
+
+async def t_regime_toggle_flip_on_default():
+    print("\n[regime toggle: no override -- flip regime on by default]")
+    side = await _regime_toggle_case({}, zebra_band=False, candle_volume=5.0, threshold=2.0, flip_side="short")
+    check("entered short -- the mocked flip side, flip regime active", side == "short", side)
+
+
+async def t_regime_toggle_volume_threshold_override():
+    print("\n[regime toggle: override_volume_switch_threshold changes which regime is active]")
+    # Compiled threshold is 2.0; candle_volume is 5.0 (would normally route to flip). Override
+    # raises the threshold to 10.0, so this reading should stay in the stochastic regime.
+    side = await _regime_toggle_case({"override_volume_switch_threshold": 10.0}, zebra_band=False,
+                                      candle_volume=5.0, threshold=2.0)
+    check("entered long -- stochastic regime, override threshold not yet crossed", side == "long", side)
+
+
+async def t_regime_toggle_off_by_default_schema_flag():
+    print("\n[regime toggle: schema_has_regime_overrides=False ignores the override columns entirely]")
+    side = await _regime_toggle_case({"override_stochastic_enabled": False}, schema_on=False, zebra_band=False)
+    check("entered long -- override present on the row but the schema flag is off", side == "long", side)
+
+
 async def t_volume_switch_uses_flip_above_threshold():
     print("\n[volume regime switch: at/above threshold, flip signal wins and gates are bypassed]")
     side = await _volume_switch_case(candle_volume=5.0, threshold=2.0)
@@ -5037,6 +5117,14 @@ async def main():
               t_volume_switch_uses_flip_above_threshold,
               t_volume_switch_keeps_normal_path_below_threshold,
               t_volume_switch_off_by_default,
+              t_regime_toggle_stochastic_off_blocks_low_volume_entry,
+              t_regime_toggle_stochastic_on_default,
+              t_regime_toggle_zebra_off_bypasses_band,
+              t_regime_toggle_zebra_on_default_still_blocks,
+              t_regime_toggle_flip_off_blocks_high_volume_entry,
+              t_regime_toggle_flip_on_default,
+              t_regime_toggle_volume_threshold_override,
+              t_regime_toggle_off_by_default_schema_flag,
               t_entry_vol_gate_rehydrates_paused_state_after_restart,
               t_entry_vol_gate_blocks_reversal_reopen_but_not_the_close,
               t_self_lock_paper_shadow_opens_when_flat,

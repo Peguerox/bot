@@ -12,16 +12,18 @@ const LIMITS = {
   sl: { min: 0.01, max: 0.5, label: "stop-loss" },
   trigger: { min: 0.01, max: 1.0, label: "profit-lock trigger" },
   trail: { min: 0, max: 0.5, label: "profit-lock trail" },
+  volThreshold: { min: 0, max: 100, label: "volume switch threshold" },
 };
 
 export async function POST(req: NextRequest) {
   const body = await req.json();
-  const out: Record<string, number> = {};
+  const out: Record<string, number | boolean> = {};
 
   for (const [key, col] of [
     ["sl", "override_sl_pct"],
     ["trigger", "override_profit_lock_trigger"],
     ["trail", "override_profit_lock_trail"],
+    ["volThreshold", "override_volume_switch_threshold"],
   ] as const) {
     const raw = body[key];
     if (raw === undefined || raw === null || raw === "") continue;
@@ -39,6 +41,21 @@ export async function POST(req: NextRequest) {
     out[col] = v;
   }
 
+  // Signal on/off toggles -- booleans, sent only when actually changed (the panel tracks this
+  // client-side), so `undefined` here means "leave it alone", not "turn it off".
+  for (const [key, col] of [
+    ["stochastic", "override_stochastic_enabled"],
+    ["zebra", "override_zebra_enabled"],
+    ["flip", "override_flip_enabled"],
+  ] as const) {
+    const raw = body[key];
+    if (raw === undefined || raw === null) continue;
+    if (typeof raw !== "boolean") {
+      return NextResponse.json({ error: `${key} must be true or false.` }, { status: 400 });
+    }
+    out[col] = raw;
+  }
+
   if (Object.keys(out).length === 0) {
     return NextResponse.json({ error: "Nothing to change." }, { status: 400 });
   }
@@ -54,8 +71,8 @@ export async function POST(req: NextRequest) {
   if (readError) {
     return NextResponse.json({ error: readError.message }, { status: 500 });
   }
-  const trig = out["override_profit_lock_trigger"] ?? cur?.override_profit_lock_trigger;
-  const trail = out["override_profit_lock_trail"] ?? cur?.override_profit_lock_trail;
+  const trig = (out["override_profit_lock_trigger"] as number | undefined) ?? cur?.override_profit_lock_trigger;
+  const trail = (out["override_profit_lock_trail"] as number | undefined) ?? cur?.override_profit_lock_trail;
   // trail == trigger is valid (2026-10-02, direct request: trigger 0.03 / trail 0.03) -- once
   // armed at the trigger level, the exit only fires after giving back a further `trail`, which
   // is well-defined even when the two numbers match (nothing fires on the arming tick itself).

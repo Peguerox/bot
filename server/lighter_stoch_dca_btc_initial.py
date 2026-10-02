@@ -416,6 +416,12 @@ CONFIG = BotConfig(
     # same as Worker 2. NULL columns fall back to the values above. Requires
     # lighter_btc_initial_exit_overrides.sql (also adds live_vol_pct, written with live_k).
     schema_has_exit_overrides=True,
+    # 2026-10-02, direct request ("give me control of the signals"): dashboard on/off toggles
+    # for the stochastic regime, the zebra/color-balance band, and the flip regime, plus a live
+    # override for the volume switch threshold. Requires
+    # lighter_btc_initial_regime_overrides.sql. See BotConfig.schema_has_regime_overrides /
+    # StochBot._regime_controls.
+    schema_has_regime_overrides=True,
     # 2026-10-01, direct request ("saving lock"): with the SL widened to 0.20% on the dashboard,
     # a trade that drops to half the SL (-0.10%) and then comes back to entry closes right there
     # at ~$0 instead of riding on. Tracks the live SL, so it stays "half" if the SL is retuned.
