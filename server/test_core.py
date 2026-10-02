@@ -3568,7 +3568,8 @@ async def t_waf_blackout_does_not_stack_a_second_order():
 async def t_after_blackout_the_real_fill_is_adopted():
     print("\n[WAF blackout: once the exchange is readable again, whatever filled gets adopted]")
     ex = FakeExchange()
-    bot = make_bot(ex, candles_kind="long")
+    bot = make_bot(ex, candles_kind="long", schema_has_cycle_id=True, fixed_direction="long")
+    bot._pending_cycle_id = "test-blackout-cycle"
     real_read = bot.get_position_rest
     bot._pos_cache = (0.0, 20.0); bot._pos_cache_at = time.time()
     async def blind(*a, **k):
@@ -3577,6 +3578,10 @@ async def t_after_blackout_the_real_fill_is_adopted():
     await bot.tick()
     check("blind -> unknown", bot._entry_outcome_unknown is True)
     check("row still shows flat", bot.state_row["side"] is None)
+    attempt_time = bot.state_row.get("first_entry_time")
+    check("unknown entry identity persisted", bot.state_row.get("cycle_id") == "test-blackout-cycle")
+    check("unknown entry time persisted", attempt_time is not None)
+    bot._pending_cycle_id = None  # recovery must work from persisted state alone
     # Reads recover; the order had in fact filled (FakeExchange holds the real position).
     bot.get_position_rest = real_read
     bot._pos_cache_at = 0.0          # force a fresh authoritative read
@@ -3584,6 +3589,25 @@ async def t_after_blackout_the_real_fill_is_adopted():
     check("unknown flag cleared by a good read", bot._entry_outcome_unknown is False)
     check("real position adopted instead of being left unmanaged",
           bot.state_row["side"] == "long", bot.state_row["side"])
+
+
+    check("adoption preserves cycle ID", bot.state_row.get("cycle_id") == "test-blackout-cycle")
+    check("adoption preserves original entry attempt time", bot.state_row.get("first_entry_time") == attempt_time)
+
+
+    nofill = make_bot(FakeExchange(), schema_has_cycle_id=True, fixed_direction="long")
+    nofill._pending_cycle_id = "unfilled-cycle"
+    async def no_order_fill(**kw):
+        return None
+    async def confirmed_flat(**kw):
+        nofill._confirm_read_ok = True
+        return 0.0, 20.0, False
+    nofill.place_order = no_order_fill
+    nofill.confirm_fill = confirmed_flat
+    await nofill.try_enter("long", 86000, 10, "entry", 0, dict(nofill.state_row), 20)
+    check("definite no-fill clears persisted cycle", nofill.state_row.get("cycle_id") is None)
+    check("definite no-fill clears persisted entry time", nofill.state_row.get("first_entry_time") is None)
+    check("definite no-fill clears pending ID", nofill._pending_cycle_id is None)
 
 
 async def t_close_button_works_on_an_orphan_the_row_does_not_know_about():

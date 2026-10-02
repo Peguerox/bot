@@ -3083,6 +3083,12 @@ class StochBot:
         intended_qty = leg_usd / price
         if cfg.debug_verbose_tick:
             print(f"[{cfg.worker_id}] try_enter: about to call place_order qty={intended_qty}", flush=True)
+        entry_attempt_ms = self._entry_clock_ms()
+        if cfg.schema_has_cycle_id and self._pending_cycle_id is not None:
+            # Persist identity BEFORE sending a real order: confirmation may be unreadable,
+            # or the process may restart after the fill. Side stays flat until confirmed.
+            await self.update_state({"cycle_id": self._pending_cycle_id,
+                                     "first_entry_time": entry_attempt_ms})
         err = await self.place_order(is_ask=(signal == "short"), base_amount=intended_qty,
                                      reduce_only=False, ref_price=price)
         if cfg.debug_verbose_tick:
@@ -3111,6 +3117,9 @@ class StochBot:
             await self.update_state({"last_processed_candle_ts": candle_ts})
             return False
         if not confirmed:
+            if cfg.schema_has_cycle_id:
+                await self.update_state({"cycle_id": None, "first_entry_time": None})
+                self._pending_cycle_id = None
             await self.log_run("enter_no_fill", {"signal": signal, "via": via,
                                                  "error": str(err)[:200] if err else None,
                                                  "fail_count": fail_count + 1})
@@ -3129,7 +3138,7 @@ class StochBot:
         patch = {
             "side": signal, "legs": [{"price": price, "usd_size": real_usd}],
             "consecutive_entry_failures": 0, "first_entry_price": price,
-            "first_entry_time": self._entry_clock_ms(), "dca_level": 0,
+            "first_entry_time": entry_attempt_ms if cfg.schema_has_cycle_id else self._entry_clock_ms(), "dca_level": 0,
             "collateral_before_entry": coll if coll is not None else collateral_hint,
             "last_processed_candle_ts": candle_ts,
         }
@@ -3355,6 +3364,12 @@ class StochBot:
 
     def now_ms(self):
         return self.candles[-1]["t"] if self.candles else int(time.time() * 1000)
+
+    def _recovered_entry_time(self, state, adopted_side):
+        if (self.cfg.schema_has_cycle_id and self.cfg.fixed_direction == adopted_side
+                and state.get("cycle_id") is not None and state.get("first_entry_time") is not None):
+            return state["first_entry_time"]
+        return self._entry_clock_ms()
 
     def _entry_clock_ms(self):
         """BUG FIX (2026-09-28, caught by external review, then broadened): now_ms() returns a
@@ -4095,7 +4110,7 @@ class StochBot:
                     await self.update_state({
                         "side": adopted,
                         "legs": [{"price": px, "usd_size": px * abs(real_pos)}],
-                        "first_entry_price": px, "first_entry_time": self._entry_clock_ms(),
+                        "first_entry_price": px, "first_entry_time": self._recovered_entry_time(state, adopted),
                         "dca_level": 0, "collateral_before_entry": real_coll})
                     await self.log_run("adopted_orphan_position", {
                         "side": adopted, "qty": abs(real_pos), "via": "close_requested"})
@@ -4975,7 +4990,7 @@ class StochBot:
                 price = best_ask if adopted == "long" else best_bid
                 await self.update_state({
                     "side": adopted, "legs": [{"price": price, "usd_size": price * abs(real_pos)}],
-                    "first_entry_price": price, "first_entry_time": self._entry_clock_ms(),
+                    "first_entry_price": price, "first_entry_time": self._recovered_entry_time(state, adopted),
                     "dca_level": 0, "collateral_before_entry": collateral,
                     "last_processed_candle_ts": candle_ts})
                 await self.log_run("adopted_orphan_position", {"side": adopted, "qty": abs(real_pos)})

@@ -36,11 +36,22 @@ project with no git/Render/Vercel link -- never work there.
     Inert while self-lock is off; do not make a literal TP mandatory if it is turned back on.
   - Reset (`app/api/lighter-btc-initial-reset`) is **non-destructive**: stamps `history_reset_at`,
     rolls PnL into `seed_usd`, never deletes trades (they are the research data).
+- **Hedge interrupted-entry identity fix (2026-10-02):** persist the cycle ID and
+  original order-attempt time in existing state columns BEFORE submitting a hedge entry.
+  Unreadable confirmation retains them; definite no-fill clears them. Orphan adoption
+  preserves persisted timing for matching fixed-direction hedge entries (including the
+  close-request recovery path). ID remains on state for the final trade row. No migration,
+  table matching tolerance changes, history rewrites, filters, sizing or exit changes.
+  Regression reproduces unreadable fill then recovery with empty in-memory pending ID;
+  verifies original time/ID survive; definite no-fill clears pending identity. 712 worker checks pass.
 - **Worker 2 filters removed (2026-10-02 user request):** both hedge configs now set
   environment_entry_gate_enabled=False. ER15/Vol10 readings and minute checkpoints remain
   active for research, but never block new paired cycles, including red/missing/stale readings.
   Original exits and $10 legs unchanged. Dashboard says Filters OFF / readings only.
   Other bots retain the default environment gate behavior. 705 worker checks pass.
+  Deployed9c9df72; dashboard dpl_ExBTkwh7i4pHhC5JQs2bqVsKTKRj READY. All three
+  new locks verified09:49UTC; priorONsettings restored. NewLONGentry verified while
+  bothenvironmentreadingsred. TypeScript and productionbuildpassed.
 - **Worker 2 layout + window research (2026-10-02):** dashboard-only deployment
   dpl_B7eXUfcorAqSLEoZqGSBZFVm9wCZ READY. ER15 and Vol10 now together in the
   color-balance pill, same font/size, individual green/red labels and combined OK/paused.
