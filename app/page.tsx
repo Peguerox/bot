@@ -2462,6 +2462,15 @@ function HedgeDualLegPanel({
               <p className={`font-bold ${combinedRealized >= 0 ? "text-green-400" : "text-red-400"}`}>
                 ${combinedEquity.toFixed(2)} <span className="text-[10px] font-normal">({combinedRealized >= 0 ? "+" : ""}{(combinedRealized / combinedSeed * 100).toFixed(2)}%)</span>
               </p>
+              {/* Direct request: earnings relative to capital actually AT RISK ($10 fixed per
+                  leg x 2 legs = $20), not the full account seed above -- seed_usd includes
+                  balance never put at risk by this strategy, so that % understates the real
+                  return on what's actually deployed. */}
+              <p className="text-[10px] text-gray-500">
+                <span className={combinedRealized >= 0 ? "text-green-400" : "text-red-400"}>
+                  {combinedRealized >= 0 ? "+" : ""}{(combinedRealized / 20 * 100).toFixed(2)}%
+                </span> of $20 risked capital
+              </p>
             </div>
             <div className="bg-gray-800/60 rounded-lg p-2">
               <p className="text-gray-500 text-[10px] uppercase">Win Rate (cycles)</p>
