@@ -36,14 +36,24 @@ project with no git/Render/Vercel link -- never work there.
     Inert while self-lock is off; do not make a literal TP mandatory if it is turned back on.
   - Reset (`app/api/lighter-btc-initial-reset`) is **non-destructive**: stamps `history_reset_at`,
     rolls PnL into `seed_usd`, never deletes trades (they are the research data).
+- **Late-visible fill follow-up (2026-10-02):** previous recovery fix missed successful
+  position reads that temporarily report flat. At13:57:54UTC long logged enter_no_fill;
+  at13:57:57 its fill became visible, after earlier code erased identity. Retain durable
+  cycle/time on enter_no_fill; only release in-memory pending ID. Next attempt atomically
+  overwrites old durable metadata. Tests cover late adoption and next-attempt replacement.
+  714workerchecks pass. Other12:30unmatchedcycles logged actual enter_no_fill on one leg
+  with no matching closed partner: do not invent pairs or hide genuine entry failures.
+  Historicalrows remain untouched; no change to retry policy, matching tolerance or exits.
 - **Hedge interrupted-entry identity fix (2026-10-02):** persist the cycle ID and
   original order-attempt time in existing state columns BEFORE submitting a hedge entry.
-  Unreadable confirmation retains them; definite no-fill clears them. Orphan adoption
+  Unreadable confirmation retains them; see late-visible-fill follow-up for no-fill retention. Orphan adoption
   preserves persisted timing for matching fixed-direction hedge entries (including the
   close-request recovery path). ID remains on state for the final trade row. No migration,
   table matching tolerance changes, history rewrites, filters, sizing or exit changes.
   Regression reproduces unreadable fill then recovery with empty in-memory pending ID;
-  verifies original time/ID survive; definite no-fill clears pending identity. 712 worker checks pass.
+  verifies original time/ID survive; no-fill coverage superseded by the late-visible-fill follow-up. 712 worker checks pass.
+  Deployed65d908e: allaccountsOFF/flatconfirmedbeforepush; newlocksverified11:10UTC,
+  priorONsettingsrestored. Historicalmismatchedrowsuntouched; noforcedblackoutlive.
 - **Worker 2 filters removed (2026-10-02 user request):** both hedge configs now set
   environment_entry_gate_enabled=False. ER15/Vol10 readings and minute checkpoints remain
   active for research, but never block new paired cycles, including red/missing/stale readings.

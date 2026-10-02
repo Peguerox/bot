@@ -3605,9 +3605,14 @@ async def t_after_blackout_the_real_fill_is_adopted():
     nofill.place_order = no_order_fill
     nofill.confirm_fill = confirmed_flat
     await nofill.try_enter("long", 86000, 10, "entry", 0, dict(nofill.state_row), 20)
-    check("definite no-fill clears persisted cycle", nofill.state_row.get("cycle_id") is None)
-    check("definite no-fill clears persisted entry time", nofill.state_row.get("first_entry_time") is None)
-    check("definite no-fill clears pending ID", nofill._pending_cycle_id is None)
+    check("not-yet-visible fill keeps persisted cycle", nofill.state_row.get("cycle_id") == "unfilled-cycle")
+    check("not-yet-visible fill keeps original attempt time", nofill.state_row.get("first_entry_time") is not None)
+    check("not-yet-visible fill releases in-memory pending ID", nofill._pending_cycle_id is None)
+    original_attempt = nofill.state_row["first_entry_time"]
+    check("late adoption uses retained no-fill time", nofill._recovered_entry_time(nofill.state_row, "long") == original_attempt)
+    nofill._pending_cycle_id = "next-attempt-cycle"
+    await nofill.try_enter("long", 86000, 10, "entry", 0, dict(nofill.state_row), 20)
+    check("new attempt replaces old no-fill identity", nofill.state_row.get("cycle_id") == "next-attempt-cycle")
 
 
 async def t_close_button_works_on_an_orphan_the_row_does_not_know_about():

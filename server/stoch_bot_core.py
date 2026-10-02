@@ -3118,7 +3118,9 @@ class StochBot:
             return False
         if not confirmed:
             if cfg.schema_has_cycle_id:
-                await self.update_state({"cycle_id": None, "first_entry_time": None})
+                # "No fill" only means not visible during confirmation retries. A later
+                # read can reveal it (observed live 2026-10-02). Retain durable identity
+                # for adoption; the next actual entry attempt overwrites it atomically.
                 self._pending_cycle_id = None
             await self.log_run("enter_no_fill", {"signal": signal, "via": via,
                                                  "error": str(err)[:200] if err else None,
