@@ -4834,6 +4834,128 @@ async def t_environment_restart_checkpoint():
         core.compute_er_and_direction=original
 
 
+def _flip_candles(colors, base=86000.0, size=50.0, vol=10.0):
+    """One closed candle per entry in `colors` (1=green, -1=red, 0=doji), each `size` wide and
+    `vol` BTC traded, plus one trailing live candle (closed-only readers never see it). Prices
+    chain close-to-open so the sequence is a continuous path, matching real candle data."""
+    t0 = 1700000000000
+    c = []
+    price = base
+    for i, col in enumerate(colors):
+        o = price
+        cl = price + size if col == 1 else (price - size if col == -1 else price)
+        h, l = max(o, cl) + 5, min(o, cl) - 5
+        c.append({"t": t0 + i * 60000, "o": o, "h": h, "l": l, "c": cl, "v": vol})
+        price = cl
+    c.append({"t": t0 + len(colors) * 60000, "o": price, "h": price, "l": price, "c": price, "v": vol})
+    return c
+
+
+async def t_compute_candle_volume_avg_basic():
+    print("\n[compute_candle_volume_avg: hand-computed mean of trailing 10 closed v's]")
+    candles = _flip_candles([1] * 10, vol=3.0)
+    v = core.compute_candle_volume_avg(candles, window=10)
+    check("mean of ten 3.0-BTC candles is 3.0", v is not None and abs(v - 3.0) < 1e-9, v)
+    short = _flip_candles([1] * 5, vol=3.0)
+    check("too few candles -> None", core.compute_candle_volume_avg(short, window=10) is None)
+
+
+async def t_flip_signal_fires_after_long_enough_trend():
+    print("\n[compute_flip_signal: fires in the flip direction once the prior streak is long enough]")
+    candles = _flip_candles([-1, -1, -1, 1])  # 3 reds then a green flip
+    sig, rev, ts = core.compute_flip_signal(candles, min_trend_len=3)
+    check("enters long on red->green flip after a 3-bar red streak", sig == "long", sig)
+    check("reversal_signal is always None for the flip signal", rev is None, rev)
+    check("candle_ts is the flip candle's own timestamp", ts == candles[-2]["t"], (ts, candles[-2]["t"]))
+
+
+async def t_flip_signal_short_direction():
+    print("\n[compute_flip_signal: green->red flip enters short]")
+    candles = _flip_candles([1, 1, 1, -1])
+    sig, _, _ = core.compute_flip_signal(candles, min_trend_len=3)
+    check("enters short on green->red flip", sig == "short", sig)
+
+
+async def t_flip_signal_blocks_short_trend():
+    print("\n[compute_flip_signal: streak shorter than min_trend_len does not fire]")
+    candles = _flip_candles([-1, -1, 1])  # only a 2-bar red streak before the flip
+    sig, _, _ = core.compute_flip_signal(candles, min_trend_len=3)
+    check("blocked -- streak is only 2 bars", sig is None, sig)
+
+
+async def t_flip_signal_requires_an_actual_flip():
+    print("\n[compute_flip_signal: no flip (same color, or a doji) never fires]")
+    same = _flip_candles([1, 1, 1, 1])
+    check("same color throughout -> None", core.compute_flip_signal(same, min_trend_len=3)[0] is None)
+    doji = _flip_candles([0, 1, 1, 1])
+    check("doji prior candle -> None", core.compute_flip_signal(doji, min_trend_len=3)[0] is None)
+
+
+async def t_flip_signal_size_filter():
+    print("\n[compute_flip_signal: optional min_size_pct floor, off by default]")
+    small = _flip_candles([-1, -1, -1, 1], size=1.0)     # ~0.0012% range -- tiny
+    big = _flip_candles([-1, -1, -1, 1], size=2000.0)    # ~2.3% range -- clears a 1% floor
+    check("off by default -- small candles still fire", core.compute_flip_signal(small, min_trend_len=3)[0] == "long")
+    check("size floor blocks the small-candle streak",
+          core.compute_flip_signal(small, min_trend_len=3, min_size_pct=1.0)[0] is None)
+    check("size floor lets the wide-candle streak through",
+          core.compute_flip_signal(big, min_trend_len=3, min_size_pct=1.0)[0] == "long")
+
+
+async def _volume_switch_case(candle_volume, threshold=2.0):
+    """Stochastic signal here says 'long' (K=0 via make_dispersion_candles) and the zebra band
+    is set to BLOCK it outright -- so if the regime switch is working, the only way this bot
+    can still enter is by actually using the mocked flip signal ('short'), proving the override
+    genuinely replaces the signal and bypasses the gate, not just coincidentally produces the
+    same side."""
+    ex = FakeExchange()
+    bot = make_bot(ex, candles_kind="mid",
+                   zebra_index_min=600.0, zebra_index_max=1000.0,
+                   volume_regime_switch_threshold=threshold, flip_signal_min_trend_len=3)
+    bot.candles = make_dispersion_candles([150, 150, 150, 150, 0])  # fresh long signal (K=0)
+    orig_vol = core.compute_candle_volume_avg
+    orig_zebra = core.compute_zebra_size_index
+    orig_flip = core.compute_flip_signal
+    core.compute_candle_volume_avg = lambda c, w=10: candle_volume
+    core.compute_zebra_size_index = lambda c, w=5: 5000.0        # out of band -- would block
+    core.compute_flip_signal = lambda c, min_trend_len, min_size_pct: ("short", None, c[-2]["t"])
+    try:
+        await bot.tick()
+    finally:
+        core.compute_candle_volume_avg = orig_vol
+        core.compute_zebra_size_index = orig_zebra
+        core.compute_flip_signal = orig_flip
+    return bot.state_row["side"]
+
+
+async def t_volume_switch_uses_flip_above_threshold():
+    print("\n[volume regime switch: at/above threshold, flip signal wins and gates are bypassed]")
+    side = await _volume_switch_case(candle_volume=5.0, threshold=2.0)
+    check("entered short -- the flip signal's side, not the blocked stochastic long", side == "short", side)
+
+
+async def t_volume_switch_keeps_normal_path_below_threshold():
+    print("\n[volume regime switch: below threshold, normal stochastic+zebra path is unchanged]")
+    side = await _volume_switch_case(candle_volume=1.0, threshold=2.0)
+    check("blocked -- zebra band still gates the ordinary stochastic signal", side is None, side)
+
+
+async def t_volume_switch_off_by_default():
+    print("\n[volume regime switch: no threshold configured -> never active]")
+    ex = FakeExchange()
+    bot = make_bot(ex, candles_kind="mid",
+                   zebra_index_min=600.0, zebra_index_max=1000.0)
+    bot.candles = make_dispersion_candles([150, 150, 150, 150, 0])
+    orig_vol = core.compute_candle_volume_avg
+    core.compute_candle_volume_avg = lambda c, w=10: 999.0  # would be "high volume" if it mattered
+    try:
+        await bot.tick()
+    finally:
+        core.compute_candle_volume_avg = orig_vol
+    check("blocked -- zebra gate still applies, flip path never consulted", bot.state_row["side"] is None,
+          bot.state_row["side"])
+
+
 async def main():
     for t in (t_environment_two_binary_switches,
               t_environment_er_hysteresis_and_freshness,
@@ -4874,6 +4996,15 @@ async def main():
               t_entry_vol_gate_only_reevaluates_once_per_new_candle,
               t_entry_vol_gate_disabled_when_unconfigured,
               t_entry_vol_gate_persists_when_schema_enabled,
+              t_compute_candle_volume_avg_basic,
+              t_flip_signal_fires_after_long_enough_trend,
+              t_flip_signal_short_direction,
+              t_flip_signal_blocks_short_trend,
+              t_flip_signal_requires_an_actual_flip,
+              t_flip_signal_size_filter,
+              t_volume_switch_uses_flip_above_threshold,
+              t_volume_switch_keeps_normal_path_below_threshold,
+              t_volume_switch_off_by_default,
               t_entry_vol_gate_rehydrates_paused_state_after_restart,
               t_entry_vol_gate_blocks_reversal_reopen_but_not_the_close,
               t_self_lock_paper_shadow_opens_when_flat,

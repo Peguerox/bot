@@ -36,6 +36,28 @@ project with no git/Render/Vercel link -- never work there.
     Inert while self-lock is off; do not make a literal TP mandatory if it is turned back on.
   - Reset (`app/api/lighter-btc-initial-reset`) is **non-destructive**: stamps `history_reset_at`,
     rolls PnL into `seed_usd`, never deletes trades (they are the research data).
+- **Worker 1 volume regime switch (2026-10-02, direct request, untested live):** below 2 BTC
+  traded (`compute_candle_volume_avg`, mean over the trailing 10 closed candles -- NOT a
+  vol_pct/volatility reading), entry is unchanged -- stochastic + the 65-75 color-balance band
+  above. At or above 2 BTC, entry switches ENTIRELY to `compute_flip_signal`: trade the
+  direction of the last closed candle's color, but only the instant it flips versus the one
+  before it, and only when that prior candle was the tail of a same-color streak of at least
+  `flip_signal_min_trend_len=3` bars. The color-balance/zebra gates do not apply to a flip
+  entry. No size floor (`flip_signal_min_size_pct=None`) -- tried, dropped: it roughly doubled
+  the win rate in testing but also roughly halved how often the signal fires and made less
+  total money over the same window; the field is kept live, not deleted, specifically to
+  re-enable if the plain flip stops working. Same SL 0.06 / TP 0.10 / profit-lock-trigger 0.06
+  / zero-give-back exits as the stochastic side -- this only changes entries. The 2 BTC cutoff
+  is the user's own choice, not the backtest sweep's optimum (which favored a much higher,
+  ~90th-percentile cutoff) -- he chose to hand off earlier because the stochastic's edge
+  on this day's 35 live trades was already statistically indistinguishable from a coin flip
+  well before that (z<1 on 600+ historical trades too). This has never run live; the dollar
+  amounts in testing are backtest-only and were explicitly flagged as inflated by signal-
+  frequency (far more flip signals fire than the bot could actually execute one-at-a-time).
+  729 worker checks pass (`compute_candle_volume_avg`, `compute_flip_signal`, and the regime
+  switch itself, including that it correctly bypasses the zebra/balance gates only when
+  active). See `compute_flip_signal`'s docstring in `stoch_bot_core.py` for the full
+  reasoning.
 - **Late-visible fill follow-up (2026-10-02):** previous recovery fix missed successful
   position reads that temporarily report flat. At13:57:54UTC long logged enter_no_fill;
   at13:57:57 its fill became visible, after earlier code erased identity. Retain durable
@@ -44,6 +66,7 @@ project with no git/Render/Vercel link -- never work there.
   714workerchecks pass. Other12:30unmatchedcycles logged actual enter_no_fill on one leg
   with no matching closed partner: do not invent pairs or hide genuine entry failures.
   Historicalrows remain untouched; no change to retry policy, matching tolerance or exits.
+  Deployed7771150afterallaccountsOFF/flat. Newlocksverified14:45UTC; priorONstatesrestored.
 - **Hedge interrupted-entry identity fix (2026-10-02):** persist the cycle ID and
   original order-attempt time in existing state columns BEFORE submitting a hedge entry.
   Unreadable confirmation retains them; see late-visible-fill follow-up for no-fill retention. Orphan adoption

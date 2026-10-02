@@ -304,6 +304,22 @@ class BotConfig:
     # Requires color_balance_index_min and/or color_balance_index_max to be set; a no-op
     # otherwise. Reason logged as INDEX_EXIT. False = off (default).
     index_exit_on_green: bool = False
+    # Volume regime switch (2026-10-02, direct request): below this traded-volume threshold
+    # (compute_candle_volume_avg, BTC size -- not a vol_pct/volatility reading), run the normal
+    # signal configured above (stochastic, with whatever zebra/color-balance band gates it)
+    # completely unchanged. At or above it, switch ENTIRELY to compute_flip_signal() instead,
+    # and skip the zebra/color-balance gates for that entry -- they were tuned for the
+    # stochastic signal, not this one. Direct motivation: live and backtested evidence that the
+    # stochastic+zebra combo's edge is real at low/normal volume but is statistically
+    # indistinguishable from a coin flip (z<1 on 600+ trades) well before that, and provably
+    # bad at the extreme top of the traded-volume range. None = off (default, no other bot
+    # affected -- every other BotConfig field below is a no-op without this one set).
+    volume_regime_switch_threshold: Optional[float] = None
+    volume_regime_switch_window: int = 10
+    flip_signal_min_trend_len: int = 3
+    # Off by default -- see compute_flip_signal's docstring. Kept live, not deleted: re-enable
+    # (and re-measure) if the plain flip signal stops working, rather than starting over.
+    flip_signal_min_size_pct: Optional[float] = None
     # Low-volatility entry gate (2026-09-29, direct request): the OPPOSITE direction from the
     # pair above -- blocks new entries (and a reversal's reopen leg, never TP/SL/exits) when
     # the market is TOO QUIET rather than too spiky. Built to test a real finding from 844 real
@@ -1136,6 +1152,80 @@ def compute_color_weighted_balance_index(candles, window=5):
     if den <= 0:
         return None
     return (1 - abs(num / den)) * 100
+
+
+def compute_candle_volume_avg(candles, window=10):
+    """Mean TRADED volume (candle "v", BTC size, not price range) over the trailing `window`
+    CLOSED candles. Distinct from every vol_pct/volatility measure elsewhere in this file --
+    those measure how big a candle's own swing is, this measures how much actually traded.
+    See BotConfig.volume_regime_switch_threshold. None if too few candles."""
+    closed = candles[:-1]
+    if len(closed) < window:
+        return None
+    bars = closed[-window:]
+    return sum(c["v"] for c in bars) / len(bars)
+
+
+def compute_flip_signal(candles, min_trend_len=3, min_size_pct=None, trend_lookback=20):
+    """"Flip" entry (2026-10-02, direct request): trade in the direction of the last CLOSED
+    candle's color, but only immediately after that candle actually flipped color versus the
+    one before it, and only when that prior candle was itself the tail end of a same-color
+    streak at least `min_trend_len` bars long. Built as the high-volume counterpart to
+    compute_stoch_signal() -- see BotConfig.volume_regime_switch_threshold; the stochastic
+    signal's edge collapses (empirically, not just a coin flip at the extreme top of the
+    traded-volume range) once volume gets high enough, and this is what the live bot switches
+    to instead.
+
+    `min_size_pct`, if set, additionally requires the streak's average (high-low)/close% to
+    clear that floor. Research (642-trade/7026-signal sweep, 2026-10-02) found a size floor
+    roughly DOUBLES the win rate (64% vs 60% at the 90th-percentile volume tier) but also
+    roughly HALVES how often the signal fires and nets fewer total dollars over the same
+    window -- defaults off for that reason. Kept as a live option, not deleted: if the plain
+    flip signal stops working, re-enable this and re-measure before concluding the whole idea
+    is dead, rather than re-deriving the formula from scratch.
+
+    Same (entry_signal, reversal_signal, candle_ts) contract as the other compute_*_signal
+    methods. reversal_signal is always None -- unlike the stochastic signal, there is no
+    natural "reversal" threshold for a flip; every backtest of this signal used SL/TP/profit-lock
+    as the only exits, so that's what live trading gets too."""
+    closed = candles[:-1]
+    if len(closed) < 2:
+        return None, None, None
+    cur, prev = closed[-1], closed[-2]
+    ts = cur["t"]
+
+    def _color(c):
+        if c["c"] > c["o"]:
+            return 1
+        if c["c"] < c["o"]:
+            return -1
+        return 0
+
+    cur_color, prev_color = _color(cur), _color(prev)
+    if cur_color == 0 or prev_color == 0 or cur_color == prev_color:
+        return None, None, ts  # no flip this candle
+
+    trend_len = 1
+    for k in range(1, trend_lookback):
+        idx = len(closed) - 2 - k
+        if idx < 0:
+            break
+        if _color(closed[idx]) != prev_color:
+            break
+        trend_len += 1
+
+    if trend_len < min_trend_len:
+        return None, None, ts
+
+    if min_size_pct is not None:
+        n = min(trend_len, 10)
+        size_bars = closed[-(n + 1):-1]
+        avg_size = sum((b["h"] - b["l"]) / b["c"] * 100 for b in size_bars) / len(size_bars)
+        if avg_size < min_size_pct:
+            return None, None, ts
+
+    direction = "long" if cur_color == 1 else "short"
+    return direction, None, ts
 
 
 def compute_rsi_stoch_confirmed_signal(candles, rsi_period=5, stoch_period=14, require_confirmation=True, lo=20, hi=80):
@@ -1997,6 +2087,14 @@ class StochBot:
                     self.candles, stoch_period=cfg.stoch_window,
                     require_confirmation=cfg.rsi_paper_require_confirmation,
                     lo=cfg.entry_lo, hi=cfg.entry_hi)
+            elif (cfg.volume_regime_switch_threshold is not None
+                  and (compute_candle_volume_avg(self.candles, cfg.volume_regime_switch_window) or -1)
+                  >= cfg.volume_regime_switch_threshold):
+                # Mirrors the regime switch in tick() -- what would have fired one candle
+                # earlier is judged by whichever signal WOULD have been active then, not
+                # always the stochastic one.
+                sig, _, _ = compute_flip_signal(
+                    self.candles, cfg.flip_signal_min_trend_len, cfg.flip_signal_min_size_pct)
             else:
                 sig, _, _ = self.compute_stoch_signal()
         finally:
@@ -4193,6 +4291,15 @@ class StochBot:
             entry_signal, reversal_signal, candle_ts = self.compute_zscore_signal()
         else:
             entry_signal, reversal_signal, candle_ts = self.compute_stoch_signal()
+        # See BotConfig.volume_regime_switch_threshold -- a full override, not an extra gate:
+        # at/above the threshold this REPLACES whatever the block above just computed.
+        flip_regime_active = False
+        if cfg.volume_regime_switch_threshold is not None:
+            candle_volume_now = compute_candle_volume_avg(self.candles, cfg.volume_regime_switch_window)
+            if candle_volume_now is not None and candle_volume_now >= cfg.volume_regime_switch_threshold:
+                flip_regime_active = True
+                entry_signal, reversal_signal, candle_ts = compute_flip_signal(
+                    self.candles, cfg.flip_signal_min_trend_len, cfg.flip_signal_min_size_pct)
         vol_pct_now = (self._measure_vol_pct(cfg.min_vol_pct_lookback)
                        if cfg.min_vol_pct_to_trade is not None else None)
         low_vol_blocked = (cfg.min_vol_pct_to_trade is not None
@@ -4425,9 +4532,10 @@ class StochBot:
                 entry_signal = None
 
         # Stateless, recomputed every tick -- see BotConfig.zebra_index_min. Out of band (or no
-        # reading yet) blocks new entries and a reversal's reopen leg, never an exit.
+        # reading yet) blocks new entries and a reversal's reopen leg, never an exit. Skipped
+        # entirely in flip_regime_active -- this gate is tuned for the stochastic signal.
         zebra_blocked = False
-        if cfg.zebra_index_min is not None or cfg.zebra_index_max is not None:
+        if not flip_regime_active and (cfg.zebra_index_min is not None or cfg.zebra_index_max is not None):
             zi = compute_zebra_size_index(self.candles, cfg.zebra_index_window)
             zebra_blocked = (zi is None
                              or (cfg.zebra_index_min is not None and zi < cfg.zebra_index_min)
@@ -4436,9 +4544,10 @@ class StochBot:
                 entry_signal = None
 
         # Stateless, recomputed every tick -- see BotConfig.color_balance_index_min. Same shape
-        # as the zebra gate above; a bot normally configures one or the other, not both.
+        # as the zebra gate above; a bot normally configures one or the other, not both. Also
+        # skipped in flip_regime_active, same reasoning as the zebra gate just above.
         balance_blocked = False
-        if cfg.color_balance_index_min is not None or cfg.color_balance_index_max is not None:
+        if not flip_regime_active and (cfg.color_balance_index_min is not None or cfg.color_balance_index_max is not None):
             cwi = compute_color_weighted_balance_index(self.candles, cfg.color_balance_index_window)
             if cfg.color_balance_index_invert:
                 # Blocked INSIDE the band, allowed OUTSIDE it (needs both bounds set -- with

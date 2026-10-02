@@ -328,6 +328,27 @@ CONFIG = BotConfig(
     # BotConfig.index_exit_on_green.
     # User requested INDEX_EXIT removed on both LONG and SHORT positions.
     index_exit_on_green=False,
+    # Volume regime switch (2026-10-02, direct request): below 2 BTC traded (mean over the
+    # trailing 10 closed candles), everything above is unchanged -- stochastic + the 65-75
+    # color-balance band. At or above 2 BTC, switch entirely to the flip signal instead (and
+    # the color-balance band above stops applying to that entry -- see
+    # BotConfig.volume_regime_switch_threshold). Direct motivation: the live bot's own 35
+    # trades on 2026-10-02 went 74% win / +$0.08 net from 00:44-10:58, then 30% win / -$0.29
+    # net from 11:04 onward the same day, and a 642-trade/7026-signal sweep the same day found
+    # the stochastic+zebra combo's edge is statistically indistinguishable from a coin flip
+    # (z<1) well below 2 BTC, and provably bad (z=-2.12) at the extreme top of the traded-
+    # volume range -- this is the user's own call on where to draw the line, not the sweep's
+    # optimum (which the sweep put closer to the 90th percentile of traded volume); he chose
+    # to switch earlier because the stochastic's edge is unproven that early anyway.
+    # trend_len>=3 is the sweep's own finding (2 was too loose, 5+ too thin a sample). No size
+    # floor -- explicitly tried and dropped: it roughly doubled the win rate (64% vs 60%) but
+    # also roughly halved how often the signal fires and made LESS total money over the same
+    # window (+$2.56 vs +$3.24) in the sweep. flip_signal_min_size_pct is kept available
+    # (not deleted) specifically to re-enable if the plain flip stops working live.
+    volume_regime_switch_threshold=2.0,
+    volume_regime_switch_window=10,
+    flip_signal_min_trend_len=3,
+    flip_signal_min_size_pct=None,
     profit_lock_trail_pct=0.0,
     # 2026-09-29: briefly disabled fleet-wide during a Supabase statement-timeout incident
     # (database itself started canceling queries under cumulative write load, confirmed in
