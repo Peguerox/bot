@@ -2410,11 +2410,6 @@ function HedgeDualLegPanel({
 
   return (
     <div className="bg-gray-900 rounded-xl p-4 space-y-3">
-      <div className={`rounded-lg p-2 text-xs ${environmentGreen ? "bg-green-500/10 text-green-400" : "bg-red-500/10 text-red-400"}`}>
-        <span className="font-bold">Environment: {environmentGreen ? "GREEN · Trading allowed" : "RED · New pairs paused"}</span>
-        <span className="ml-2">ER15 {environmentFresh && typeof environment?.er === "number" ? environment.er.toFixed(3) : "—"}</span>
-        <p className="text-[10px] mt-1">{!environmentFresh || environment?.er == null ? "Waiting for fresh market data." : "Pause below 0.15 · Resume at 0.25 · Hold status between them."} Existing trades keep their stops and exits.</p>
-      </div>
       {/* Title + description get the FULL panel width, controls sit on their own row beneath.
           Side-by-side squeezed this (long) description into a narrow column many lines tall with
           the buttons floating in the middle of it. */}
@@ -2498,6 +2493,12 @@ function HedgeDualLegPanel({
                 <span className="text-[10px] font-normal text-gray-500 ml-1.5">
                   {liveBalanceIdx == null ? "no reading yet"
                     : "entry filter off"}
+                </span>
+              </p>
+              <p className="text-[10px] tabular-nums mt-1" title="ER15 environment: pause below 0.15, resume at 0.25; hold status between them.">
+                <span className="text-gray-500 mr-1">ER15</span>
+                <span className={environmentGreen ? "text-green-400" : "text-red-400"}>
+                  {environmentFresh && typeof environment?.er === "number" ? environment.er.toFixed(3) : "—"}
                 </span>
               </p>
             </div>
