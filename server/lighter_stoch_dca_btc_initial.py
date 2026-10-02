@@ -287,9 +287,13 @@ CONFIG = BotConfig(
     # you come out," zero give-back once armed, by design. Can only fire earlier than or instead
     # of the fixed TP/SL, never blocks them.
     profit_lock_enabled=True,
-    # 2026-10-01, direct request: back to 0.05 ("0.05 would be ok"). At 0.02 with zero give-back
-    # it banked ~+$0.013 per lock against a ~-$0.11 SL -- one SL erased ~8 locks.
-    profit_lock_trigger_pct=0.05,
+    # 2026-10-01: back to 0.05 ("0.05 would be ok"), then to 0.06 the same day after a
+    # trigger/trail sweep against real data (both a 27-trade recent window and the full
+    # 632-trade history): 0.06/zero-give-back beat 0.05 in both (+$0.47 vs +$0.38 recent,
+    # +$1.88 vs +$1.63 full history), and every trail value tried (0.01-0.04) was worse than
+    # zero give-back at every trigger tested -- TP still rarely fires either way, but the
+    # configs that let it fire more (via trail) lost money, so that's not a flaw to chase.
+    profit_lock_trigger_pct=0.06,
     # 2026-10-01: zebra index (color-SWITCH counting) turned OFF, replaced by the
     # color-weighted-balance index below -- real trade caught live at 16:55 UTC showed the switch
     # count's blind spot: R R G R R (clearly a downtrend, 4 of 5 red) scored 50% zebra because one

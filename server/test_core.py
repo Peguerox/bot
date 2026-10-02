@@ -4028,9 +4028,9 @@ async def t_live_configs_match_their_stated_rules():
           (w1.color_balance_index_min, w1.color_balance_index_max, w1.color_balance_index_window)
           == (65.0, 75.0, 5),
           (w1.color_balance_index_min, w1.color_balance_index_max, w1.color_balance_index_window))
-    check("Worker 1: SL 0.10 / TP 0.10 / profit lock 0.05, saving lock off",
+    check("Worker 1: SL 0.10 / TP 0.10 / profit lock 0.06, saving lock off",
           (w1.sl_pct, w1.tp_pct, w1.profit_lock_trigger_pct, w1.saving_lock_arm_frac_of_sl)
-          == (0.10, 0.10, 0.05, None),
+          == (0.10, 0.10, 0.06, None),
           (w1.sl_pct, w1.tp_pct, w1.profit_lock_trigger_pct, w1.saving_lock_arm_frac_of_sl))
     check("Worker 1: 2-minute post-reversal cooldown on",
           w1.post_reversal_cooldown_seconds == 120.0, w1.post_reversal_cooldown_seconds)
