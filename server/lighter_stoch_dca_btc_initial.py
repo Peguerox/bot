@@ -300,7 +300,19 @@ CONFIG = BotConfig(
     # +$1.88 vs +$1.63 full history), and every trail value tried (0.01-0.04) was worse than
     # zero give-back at every trigger tested -- TP still rarely fires either way, but the
     # configs that let it fire more (via trail) lost money, so that's not a flaw to chase.
-    profit_lock_trigger_pct=0.06,
+    # REVISED 2026-10-02, direct request, under the flip-signal regime specifically: a real
+    # live trade peaked at +0.04% and gave it all back to a -0.06% SL loss with zero give-back
+    # armed only at 0.06% (never reached). User's fix: trigger DOWN to 0.03% (arm sooner) with
+    # trail 0.03% (give back room instead of zero) -- NOT trigger 0, which was tried and
+    # rejected first: arming right at breakeven means the peak tracker starts fighting plain
+    # noise before any real move exists. This directly contradicts the 2026-10-01 sweep above
+    # (which found trail always worse than zero give-back) -- that sweep ran under the OLD
+    # stochastic+zebra regime; this is an explicit live test under the NEW flip regime
+    # specifically, not a re-validated finding. sl_pct (0.06, unchanged) is the backstop for a
+    # trade that never reaches breakeven at all -- the trail cannot protect that case, since it
+    # never arms. disable_literal_tp=True below removes the fixed +0.10% cap entirely; the
+    # trail alone now decides when a winner is done.
+    profit_lock_trigger_pct=0.03,
     # 2026-10-01: zebra index (color-SWITCH counting) turned OFF, replaced by the
     # color-weighted-balance index below -- real trade caught live at 16:55 UTC showed the switch
     # count's blind spot: R R G R R (clearly a downtrend, 4 of 5 red) scored 50% zebra because one
@@ -356,7 +368,24 @@ CONFIG = BotConfig(
     volume_regime_switch_window=10,
     flip_signal_min_trend_len=3,
     flip_signal_min_size_pct=None,
-    profit_lock_trail_pct=0.0,
+    # Direct request, 2026-10-02: a real live SL loss (trade 1679) flipped on a candle with an
+    # $0.80 body on an $84,314 price (0.00095%) -- barely a doji. Checked against 1,768
+    # historical flip signals (revised direction rule): unfiltered win rate 58%/+$0.0150avg;
+    # requiring >=0.005% body keeps 86% of signals and raises that to 60%/+$0.0179avg.
+    # REVISED same day, direct request, after checking it against the real last 4 live trades
+    # specifically: 0.01% (the first pick) discarded 2 of those 4 (both the near-doji loss AND
+    # a second, legitimately-sized loss); 0.005% discards only the near-doji one and keeps the
+    # other 3 (the win plus two losses the user judged were a timing/exit problem, not a bad
+    # entry) -- explicitly prioritizing catching fewer real signals over chasing the highest
+    # win-rate cutoff (0.02%, the median, reaches 67%/+$0.0286 but keeps only 56% of signals).
+    flip_signal_min_body_pct=0.005,
+    # See profit_lock_trigger_pct above for the full reasoning -- trigger 0.03/trail 0.03 is an
+    # explicit live test under the flip regime, replacing the old zero-give-back default.
+    profit_lock_trail_pct=0.03,
+    # Direct request, 2026-10-02: removes the fixed +0.10% TP cap entirely -- the profit-lock
+    # trail above is now the ONLY thing that decides when a winner closes, so it isn't fighting
+    # a hard ceiling anymore. Already used by the hedge; no new code needed.
+    disable_literal_tp=True,
     # 2026-09-29: briefly disabled fleet-wide during a Supabase statement-timeout incident
     # (database itself started canceling queries under cumulative write load, confirmed in
     # Postgres logs, on top of a prior Disk-IO-budget warning email). Root cause identified as

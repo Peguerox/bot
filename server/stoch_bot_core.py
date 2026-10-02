@@ -320,6 +320,10 @@ class BotConfig:
     # Off by default -- see compute_flip_signal's docstring. Kept live, not deleted: re-enable
     # (and re-measure) if the plain flip signal stops working, rather than starting over.
     flip_signal_min_size_pct: Optional[float] = None
+    # Direct request, 2026-10-02, after a real live loss flipped on a near-doji ($0.80 body on
+    # an $84,314 price). Requires the INTERRUPTING candle's own body -- not the streak -- to
+    # clear this floor. See compute_flip_signal's docstring for the moderate-cutoff reasoning.
+    flip_signal_min_body_pct: Optional[float] = None
     # Low-volatility entry gate (2026-09-29, direct request): the OPPOSITE direction from the
     # pair above -- blocks new entries (and a reversal's reopen leg, never TP/SL/exits) when
     # the market is TOO QUIET rather than too spiky. Built to test a real finding from 844 real
@@ -1205,7 +1209,7 @@ def compute_live_flip_streak(candles, lookback=20):
     return ("long" if last_color == 1 else "short"), length
 
 
-def compute_flip_signal(candles, min_trend_len=3, min_size_pct=None, trend_lookback=20):
+def compute_flip_signal(candles, min_trend_len=3, min_size_pct=None, min_body_pct=None, trend_lookback=20):
     """"Flip" entry -- REVISED 2026-10-02, direct request, after this bot's own first 5 live
     trades under the original version went 1-4: trade in the direction of the TREND that was
     running BEFORE the last closed candle interrupted it, betting that one opposite-color
@@ -1233,6 +1237,16 @@ def compute_flip_signal(candles, min_trend_len=3, min_size_pct=None, trend_lookb
     let them through) -- the exact opposite of what the floor assumed. Kept available, not
     deleted, but do not re-enable it on the strength of the old research alone.
 
+    `min_body_pct`, if set, requires the INTERRUPTING candle's own body -- |close-open|/close%,
+    NOT the streak's size -- to clear that floor too. Direct motivation, 2026-10-02: a real
+    live loss (trade 1679) flipped on a candle whose body was $0.80 on an $84,314 price
+    (0.00095%), barely distinguishable from a doji. Checked against 1,768 historical flip
+    signals under the revised (trend-direction) rule: unfiltered win rate is 58%
+    (avg +$0.0150); requiring >=0.01% body keeps 75% of signals and raises that to 62%
+    (avg +$0.0207) -- a deliberately moderate cutoff, not the point of maximum edge (median
+    body, ~0.02%, reaches 67%/+$0.0286 but only keeps 56% of signals), picked specifically to
+    not give up too much signal frequency.
+
     Same (entry_signal, reversal_signal, candle_ts) contract as the other compute_*_signal
     methods. reversal_signal is always None -- unlike the stochastic signal, there is no
     natural "reversal" threshold for a flip; every backtest of this signal used SL/TP/profit-lock
@@ -1253,6 +1267,11 @@ def compute_flip_signal(candles, min_trend_len=3, min_size_pct=None, trend_lookb
     cur_color, prev_color = _color(cur), _color(prev)
     if cur_color == 0 or prev_color == 0 or cur_color == prev_color:
         return None, None, ts  # no flip this candle
+
+    if min_body_pct is not None:
+        body_pct = abs(cur["c"] - cur["o"]) / cur["c"] * 100
+        if body_pct < min_body_pct:
+            return None, None, ts  # the "flip" is noise-sized, not a real interruption
 
     trend_len = 1
     for k in range(1, trend_lookback):
@@ -2145,7 +2164,8 @@ class StochBot:
                 # earlier is judged by whichever signal WOULD have been active then, not
                 # always the stochastic one.
                 sig, _, _ = compute_flip_signal(
-                    self.candles, cfg.flip_signal_min_trend_len, cfg.flip_signal_min_size_pct)
+                    self.candles, cfg.flip_signal_min_trend_len, cfg.flip_signal_min_size_pct,
+                    cfg.flip_signal_min_body_pct)
             else:
                 sig, _, _ = self.compute_stoch_signal()
         finally:
@@ -4350,7 +4370,8 @@ class StochBot:
             if candle_volume_now is not None and candle_volume_now >= cfg.volume_regime_switch_threshold:
                 flip_regime_active = True
                 entry_signal, reversal_signal, candle_ts = compute_flip_signal(
-                    self.candles, cfg.flip_signal_min_trend_len, cfg.flip_signal_min_size_pct)
+                    self.candles, cfg.flip_signal_min_trend_len, cfg.flip_signal_min_size_pct,
+                    cfg.flip_signal_min_body_pct)
         vol_pct_now = (self._measure_vol_pct(cfg.min_vol_pct_lookback)
                        if cfg.min_vol_pct_to_trade is not None else None)
         low_vol_blocked = (cfg.min_vol_pct_to_trade is not None

@@ -40,27 +40,40 @@ project with no git/Render/Vercel link -- never work there.
   (`compute_candle_volume_avg`, mean over the trailing 10 closed candles -- NOT a
   vol_pct/volatility reading), entry is unchanged -- stochastic + the 65-75 color-balance band
   above. At or above 2 BTC, entry switches ENTIRELY to `compute_flip_signal`, and the
-  color-balance/zebra gates do not apply to that entry. Same SL 0.06 / TP 0.10 /
-  profit-lock-trigger 0.06 / zero-give-back exits as the stochastic side either way -- this
-  only changes entries. The 2 BTC cutoff is the user's own choice, not the backtest sweep's
-  optimum (which favored a much higher, ~90th-percentile cutoff).
-  - **Flip signal direction, REVISED same day after 5 live trades:** a same-color streak of
+  color-balance/zebra gates do not apply to that entry. This only changes entries -- exits
+  below are shared by both regimes. The 2 BTC cutoff is the user's own choice, not the
+  backtest sweep's optimum (which favored a much higher, ~90th-percentile cutoff).
+  - **Flip signal direction, REVISED after the first 5 live trades:** a same-color streak of
     at least `flip_signal_min_trend_len=3` bars, interrupted by exactly one opposite-color
     candle -- enter in the ORIGINAL STREAK's direction (betting the interrupting candle was a
     blip), NOT the interrupting candle's own direction. The first version did the latter and
     went 1-4 live; checked against real tick data for all 5 of those trades, the reversed
-    direction would have gone 4-1. Still only 5 trades -- a live hypothesis, not a proven
-    edge. No size floor (`flip_signal_min_size_pct=None`) -- the pre-revision research
-    behind that floor doesn't clearly apply anymore now that direction has flipped (the one
-    real win had a SMALL streak, all 4 real losses had LARGE ones -- backwards from what the
-    floor assumed); kept available, not deleted, but don't re-enable it on the old research
-    alone.
-  - **Live readout:** `live_candle_volume` on the state row (needs
-    `lighter_btc_initial_live_candle_volume.sql`, not yet confirmed run) shows the current
-    reading and which signal governs entries, on the dashboard panel.
-  - 729 worker checks pass. See `compute_flip_signal`'s docstring in `stoch_bot_core.py` for
-    the full reasoning. This has had 5 live trades total as of this revision (1 win under the
-    old direction, before the flip); the revised direction itself is still unconfirmed live.
+    direction would have gone 4-1. No size floor (`flip_signal_min_size_pct=None`) -- the
+    pre-revision research behind that floor doesn't clearly apply anymore now that direction
+    has flipped; kept available, not deleted.
+  - **Flip-candle body floor (added after trade 1679):** `flip_signal_min_body_pct=0.005` --
+    the INTERRUPTING candle's own body (not the streak) must be >=0.005% of price. Trade 1679
+    flipped on an $0.80 body on an $84,314 price (0.00095%), barely a doji, and lost. 0.005%
+    was picked over the first choice (0.01%) after checking against the real last 4 live
+    trades: 0.01% discarded 2 of those 4 (including a trade the user judged was a timing
+    problem, not a bad entry); 0.005% discards only the near-doji one.
+  - **Exits, REVISED same day:** a real live trade peaked at +0.04% and gave it all back to
+    the old zero-give-back SL (armed only at 0.06%, never reached). `sl_pct` stays 0.06
+    (unchanged -- the backstop for a trade that never reaches breakeven at all; the trail
+    below cannot protect that case since it never arms). `profit_lock_trigger_pct`: 0.06 ->
+    0.03 (arm sooner). `profit_lock_trail_pct`: 0 -> 0.03 (give back room instead of zero;
+    trigger==trail is intentional and the settings-API route was relaxed to allow it).
+    `disable_literal_tp=True` (new) -- the fixed +0.10% TP is gone; the trail alone decides
+    when a winner closes. This directly contradicts an earlier (2026-10-01) sweep that found
+    trail always worse than zero give-back -- that sweep ran under the OLD stochastic+zebra
+    regime; this is an explicit live test under the NEW flip regime, not a re-validated
+    finding. Dashboard overrides updated to match (0.06 / 0.03 / 0.03).
+  - **Live readouts:** `live_candle_volume` and `live_flip_streak_dir/len` on the state row
+    (need their migrations run) show the current volume, the live streak count, and which
+    signal governs entries, on the dashboard panel.
+  - 735 worker checks pass. See `compute_flip_signal`'s docstring in `stoch_bot_core.py` for
+    the full reasoning. All of this is still a live hypothesis on a handful of real trades,
+    not a proven edge -- keep watching it.
 - **Late-visible fill follow-up (2026-10-02):** previous recovery fix missed successful
   position reads that temporarily report flat. At13:57:54UTC long logged enter_no_fill;
   at13:57:57 its fill became visible, after earlier code erased identity. Retain durable

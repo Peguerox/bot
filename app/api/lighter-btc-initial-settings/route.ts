@@ -5,8 +5,9 @@ import { getSupabaseAdmin } from "@/lib/supabase-admin";
 // lighter-hedge-settings, one row instead of two. The worker reads these every tick
 // (schema_has_exit_overrides), so a change applies at once, including to an open position.
 //
-// Bounds are sanity rails against typos on real money. Trail may be 0 here, unlike the hedge:
-// Worker 1's profit lock has always run with zero give-back (exit on the first tick down).
+// Bounds are sanity rails against typos on real money. Trail may be 0 or equal to the trigger
+// here. Worker 1 ran zero give-back (exit on the first tick down) until 2026-10-02, when a
+// real trade peaked at +0.04% and gave it all back to the SL -- trigger/trail moved to 0.03/0.03.
 const LIMITS = {
   sl: { min: 0.01, max: 0.5, label: "stop-loss" },
   trigger: { min: 0.01, max: 1.0, label: "profit-lock trigger" },
@@ -55,9 +56,13 @@ export async function POST(req: NextRequest) {
   }
   const trig = out["override_profit_lock_trigger"] ?? cur?.override_profit_lock_trigger;
   const trail = out["override_profit_lock_trail"] ?? cur?.override_profit_lock_trail;
-  if (trig != null && trail != null && trail >= trig) {
+  // trail == trigger is valid (2026-10-02, direct request: trigger 0.03 / trail 0.03) -- once
+  // armed at the trigger level, the exit only fires after giving back a further `trail`, which
+  // is well-defined even when the two numbers match (nothing fires on the arming tick itself).
+  // Only trail > trigger is rejected, not trail == trigger.
+  if (trig != null && trail != null && trail > trig) {
     return NextResponse.json(
-      { error: `Trail (${trail}%) must be smaller than the trigger (${trig}%).` },
+      { error: `Trail (${trail}%) must not be larger than the trigger (${trig}%).` },
       { status: 400 }
     );
   }

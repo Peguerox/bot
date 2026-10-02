@@ -4029,8 +4029,10 @@ async def t_live_configs_match_their_stated_rules():
           w1.native_stop_loss_enabled is True, w1.native_stop_loss_enabled)
     check("Worker 1: native take-profit on",
           w1.native_take_profit_enabled is True, w1.native_take_profit_enabled)
-    check("Worker 1: literal TP is actually active (native TP would be a no-op otherwise)",
-          w1.disable_literal_tp is False, w1.disable_literal_tp)
+    # REVISED 2026-10-02, direct request: literal TP removed entirely -- the profit-lock
+    # trail (now 0.03%, see below) is the only thing that decides when a winner closes.
+    check("Worker 1: literal TP disabled (the profit-lock trail governs winners instead)",
+          w1.disable_literal_tp is True, w1.disable_literal_tp)
     # 2026-10-01: the z-score signal was briefly wired to Worker 1, then corrected -- "worker 2"
     # was the intended target. Worker 1 stays on the plain stochastic. Pinned here so that
     # mix-up can't silently repeat.
@@ -4057,10 +4059,20 @@ async def t_live_configs_match_their_stated_rules():
           (w1.color_balance_index_min, w1.color_balance_index_max, w1.color_balance_index_window)
           == (65.0, 75.0, 5),
           (w1.color_balance_index_min, w1.color_balance_index_max, w1.color_balance_index_window))
-    check("Worker 1: SL 0.06 / TP 0.10 / profit lock 0.06, saving lock off",
+    # REVISED 2026-10-02, direct request, under the flip-signal regime: a real live trade
+    # peaked at +0.04% and gave it all back to a -0.06% SL loss (zero give-back, armed only at
+    # 0.06%, never reached). Trigger moved down to 0.03% and trail up from 0 to 0.03% so a
+    # trade that reaches +0.03%+ locks in some of it instead of riding back to the SL. tp_pct
+    # stays 0.10 in the file but is now INERT (disable_literal_tp=True, checked above) -- sl_pct
+    # (0.06, unchanged) remains the only protection for a trade that never reaches breakeven.
+    check("Worker 1: SL 0.06 / TP 0.10 (inert) / profit-lock trigger 0.03, saving lock off",
           (w1.sl_pct, w1.tp_pct, w1.profit_lock_trigger_pct, w1.saving_lock_arm_frac_of_sl)
-          == (0.06, 0.10, 0.06, None),
+          == (0.06, 0.10, 0.03, None),
           (w1.sl_pct, w1.tp_pct, w1.profit_lock_trigger_pct, w1.saving_lock_arm_frac_of_sl))
+    check("Worker 1: profit-lock trail 0.03% (was zero give-back)",
+          w1.profit_lock_trail_pct == 0.03, w1.profit_lock_trail_pct)
+    check("Worker 1: flip-signal min body 0.005% (filters near-doji flip candles)",
+          w1.flip_signal_min_body_pct == 0.005, w1.flip_signal_min_body_pct)
     check("Worker 1: 2-minute post-reversal cooldown on",
           w1.post_reversal_cooldown_seconds == 120.0, w1.post_reversal_cooldown_seconds)
     check("Worker 1: index-exit-on-green off for both directions",
@@ -4834,16 +4846,19 @@ async def t_environment_restart_checkpoint():
         core.compute_er_and_direction=original
 
 
-def _flip_candles(colors, base=86000.0, size=50.0, vol=10.0):
+def _flip_candles(colors, base=86000.0, size=50.0, vol=10.0, sizes=None):
     """One closed candle per entry in `colors` (1=green, -1=red, 0=doji), each `size` wide and
     `vol` BTC traded, plus one trailing live candle (closed-only readers never see it). Prices
-    chain close-to-open so the sequence is a continuous path, matching real candle data."""
+    chain close-to-open so the sequence is a continuous path, matching real candle data.
+    `sizes`, if given, is a per-candle list overriding the uniform `size` (for testing the
+    interrupting candle's own body independent of the streak's own size)."""
     t0 = 1700000000000
     c = []
     price = base
     for i, col in enumerate(colors):
         o = price
-        cl = price + size if col == 1 else (price - size if col == -1 else price)
+        sz = sizes[i] if sizes is not None else size
+        cl = price + sz if col == 1 else (price - sz if col == -1 else price)
         h, l = max(o, cl) + 5, min(o, cl) - 5
         c.append({"t": t0 + i * 60000, "o": o, "h": h, "l": l, "c": cl, "v": vol})
         price = cl
@@ -4902,6 +4917,22 @@ async def t_flip_signal_size_filter():
           core.compute_flip_signal(big, min_trend_len=3, min_size_pct=1.0)[0] == "short")
 
 
+async def t_flip_signal_min_body_pct_filter():
+    print("\n[compute_flip_signal: min_body_pct filters the INTERRUPTING candle's own body, not the streak]")
+    # 3 normal-sized red bars, then a tiny near-doji green flip -- real trade shape (1679).
+    near_doji = _flip_candles([-1, -1, -1, 1], sizes=[50.0, 50.0, 50.0, 0.8])
+    # same streak, but a real-sized flip candle.
+    real_flip = _flip_candles([-1, -1, -1, 1], sizes=[50.0, 50.0, 50.0, 50.0])
+    check("off by default -- the near-doji flip still fires",
+          core.compute_flip_signal(near_doji, min_trend_len=3)[0] == "short")
+    check("body floor blocks the near-doji flip (0.8 on ~86000 is well under 0.01%)",
+          core.compute_flip_signal(near_doji, min_trend_len=3, min_body_pct=0.01)[0] is None)
+    check("body floor lets a real-sized flip candle through",
+          core.compute_flip_signal(real_flip, min_trend_len=3, min_body_pct=0.01)[0] == "short")
+    check("body floor never looks at the STREAK bars' own size (those are large here either way)",
+          core.compute_flip_signal(near_doji, min_trend_len=3, min_size_pct=0.01)[0] == "short")
+
+
 async def _volume_switch_case(candle_volume, threshold=2.0):
     """Stochastic signal here says 'long' (K=0 via make_dispersion_candles) and the zebra band
     is set to BLOCK it outright -- so if the regime switch is working, the only way this bot
@@ -4918,7 +4949,7 @@ async def _volume_switch_case(candle_volume, threshold=2.0):
     orig_flip = core.compute_flip_signal
     core.compute_candle_volume_avg = lambda c, w=10: candle_volume
     core.compute_zebra_size_index = lambda c, w=5: 5000.0        # out of band -- would block
-    core.compute_flip_signal = lambda c, min_trend_len, min_size_pct: ("short", None, c[-2]["t"])
+    core.compute_flip_signal = lambda c, min_trend_len, min_size_pct, min_body_pct: ("short", None, c[-2]["t"])
     try:
         await bot.tick()
     finally:
@@ -5002,6 +5033,7 @@ async def main():
               t_flip_signal_blocks_short_trend,
               t_flip_signal_requires_an_actual_flip,
               t_flip_signal_size_filter,
+              t_flip_signal_min_body_pct_filter,
               t_volume_switch_uses_flip_above_threshold,
               t_volume_switch_keeps_normal_path_below_threshold,
               t_volume_switch_off_by_default,
