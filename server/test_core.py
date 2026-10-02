@@ -4722,7 +4722,7 @@ async def t_environment_shared_clearance_and_scope():
     import lighter_hedge_dual_leg as hedge
     import lighter_stoch_dca_btc_initial as initial
     check("ER only hedge enabled", initial.CONFIG.environment_er_pause_below is None)
-    check("hedge exact ER thresholds both sides", all((c.environment_er_pause_below,c.environment_er_resume_at,c.environment_er_window)==(0.15,0.25,15) for c in [hedge.LONG_CONFIG,hedge.SHORT_CONFIG]))
+    check("hedge exact ER thresholds both sides", all((c.environment_er_pause_below,c.environment_er_resume_at,c.environment_er_window)==(0.15,0.15,15) for c in [hedge.LONG_CONFIG,hedge.SHORT_CONFIG]))
     check("hedge only long computes environment", hedge.LONG_CONFIG.environment_signal_owner and not hedge.SHORT_CONFIG.environment_signal_owner)
     check("hedge still no stochastic entry filter", not hedge.LONG_CONFIG.require_pressure_to_enter and not hedge.SHORT_CONFIG.require_pressure_to_enter)
 
@@ -4735,6 +4735,46 @@ async def t_environment_paused_exits_still_run():
     await bot.tick()
     check("ER paused position still stops out", bot.state_row["side"] is None)
     check("ER paused stop sends reduce only", any(o["reduce_only"] for o in ex.orders))
+
+
+async def t_environment_two_binary_switches():
+    bot = _hedge_leg(environment_er_pause_below=0.15, environment_er_resume_at=0.15,
+                     environment_vol_max_pct=0.045)
+    bot._environment_restored = True
+    now = time.time(); base_t = (int(now // 60) - 16) * 60000
+    bot.candles = [{"t":base_t+i*60000,"c":100.0,"h":0.045,"l":0.0} for i in range(17)]
+    bot.candles_updated_at = now
+    er = [0.15]
+    original = core.compute_er_and_direction
+    core.compute_er_and_direction = lambda candles,window:(er[0], "short")
+    try:
+        await bot._refresh_environment(True)
+        check("binary ER green at exactly .15", bot._environment_reading["er_allowed"])
+        check("vol green at .045 boundary", bot._environment_reading["vol_allowed"])
+        check("both switches green allow cycle", bot._wants_new_cycle())
+        er[0]=0.149
+        await bot._refresh_environment(True)
+        check("ER red alone pauses new cycles", not bot._wants_new_cycle() and bot._environment_reading["vol_allowed"])
+        er[0]=0.15
+        await bot._refresh_environment(True)
+        check("ER resumes at .15 immediately without .25 hysteresis", bot._wants_new_cycle())
+        for b in bot.candles:b["h"]=0.0451
+        await bot._refresh_environment(True)
+        check("vol red alone pauses even when ER green", not bot._wants_new_cycle() and bot._environment_reading["er_allowed"])
+        for b in bot.candles:b["h"]=0.04
+        await bot._refresh_environment(True)
+        check("vol resumes immediately when both green", bot._wants_new_cycle())
+        bot.candles[-2]["h"]=float("nan")
+        await bot._refresh_environment(True)
+        check("missing valid volatility pauses new pairs", not bot._wants_new_cycle())
+        bot.candles[-2]["h"]=0.04
+        bot.candles[-1]["h"]=500
+        await bot._refresh_environment(True)
+        check("unfinished candle does not affect volatility", bot._wants_new_cycle())
+        import lighter_hedge_dual_leg as hedge
+        check("hedge both use identical vol ceiling and window", all((c.environment_vol_max_pct,c.environment_vol_window)==(0.045,10) for c in [hedge.LONG_CONFIG,hedge.SHORT_CONFIG]))
+    finally:
+        core.compute_er_and_direction=original
 
 
 async def t_environment_restart_checkpoint():
@@ -4762,7 +4802,8 @@ async def t_environment_restart_checkpoint():
 
 
 async def main():
-    for t in (t_environment_er_hysteresis_and_freshness,
+    for t in (t_environment_two_binary_switches,
+              t_environment_er_hysteresis_and_freshness,
               t_environment_shared_clearance_and_scope,
               t_environment_paused_exits_still_run,
               t_environment_restart_checkpoint,t_normal_entry, t_phantom_double_fill, t_nonce_error_but_filled,

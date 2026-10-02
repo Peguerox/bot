@@ -581,6 +581,8 @@ class BotConfig:
     environment_er_resume_at: float = 0.25
     environment_er_window: int = 15
     environment_signal_owner: bool = True
+    environment_vol_max_pct: Optional[float] = None
+    environment_vol_window: int = 10
     breakeven_floor_enabled: bool = False
     # Optional fixed winning-leg profit floor, in percentage points from its entry.
     # None keeps the partner-loss-derived breakeven floor. A fixed level may leave
@@ -2404,6 +2406,7 @@ class StochBot:
                 if (d.get("window") == cfg.environment_er_window
                         and d.get("pause_below") == cfg.environment_er_pause_below
                         and d.get("resume_at") == cfg.environment_er_resume_at
+                        and d.get("vol_max_pct") == cfg.environment_vol_max_pct
                         and 0 <= now - d.get("checked_at", 0) <= 90):
                     reading.update(d)
             except Exception:
@@ -2416,18 +2419,32 @@ class StochBot:
                      and 0 <= now - (bars[-1]["t"] / 1000 + 60) <= 90
                      and all(math.isfinite(b["c"]) and b["c"] > 0 for b in bars))
         er = compute_er_and_direction(self.candles, cfg.environment_er_window)[0] if valid else None
-        allowed = bool(reading.get("allowed", False))
+        er_allowed = bool(reading.get("er_allowed", reading.get("allowed", False)))
         if er is None or er < cfg.environment_er_pause_below:
-            allowed = False
+            er_allowed = False
         elif er >= cfg.environment_er_resume_at:
-            allowed = True
+            er_allowed = True
+        vol_pct = None
+        vol_allowed = True
+        if cfg.environment_vol_max_pct is not None:
+            vol_bars = self.candles[:-1][-cfg.environment_vol_window:]
+            vol_valid = (valid and len(vol_bars) == cfg.environment_vol_window
+                         and all(math.isfinite(b["h"]) and math.isfinite(b["l"])
+                                 and b["h"] >= b["l"] for b in vol_bars))
+            if vol_valid:
+                vol_pct = sum(100 * (b["h"] - b["l"]) / b["c"] for b in vol_bars) / len(vol_bars)
+            vol_allowed = vol_pct is not None and vol_pct <= cfg.environment_vol_max_pct
+        allowed = er_allowed and vol_allowed
         candle_t = bars[-1]["t"] if bars else None
         snapshot = {"allowed": allowed, "er": er, "candle_t": candle_t,
                     "checked_at": now, "window": cfg.environment_er_window,
                     "pause_below": cfg.environment_er_pause_below,
-                    "resume_at": cfg.environment_er_resume_at}
+                    "resume_at": cfg.environment_er_resume_at,
+                    "er_allowed": er_allowed, "vol_pct": vol_pct,
+                    "vol_allowed": vol_allowed, "vol_max_pct": cfg.environment_vol_max_pct,
+                    "vol_window": cfg.environment_vol_window}
         reading.update(snapshot)
-        key = (candle_t, allowed, er is not None)
+        key = (candle_t, allowed, er_allowed, vol_allowed, er is not None)
         if key != self._environment_logged_key:
             try:
                 await self.log_run("environment_er", snapshot)

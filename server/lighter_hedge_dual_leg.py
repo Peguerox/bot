@@ -187,7 +187,9 @@ LONG_CONFIG = BotConfig(
     # User-authorized experimental market environment monitor, 2026-10-02.
     # No stochastic entry gate: green permits the original always-paired strategy.
     environment_er_pause_below=0.15,
-    environment_er_resume_at=0.25,
+    environment_er_resume_at=0.15,  # User requested one ER switch; no hysteresis.
+    environment_vol_max_pct=0.045,
+    environment_vol_window=10,
     environment_er_window=15,
     environment_signal_owner=True,
     # 2026-10-01, direct request ("give it another try... let's get the same settings"): FULL
@@ -259,7 +261,9 @@ SHORT_CONFIG = BotConfig(
     stoch_window=5, entry_lo=25, entry_hi=75, reversal_lo=25, reversal_hi=75,
     fixed_direction="short",
     environment_er_pause_below=0.15,
-    environment_er_resume_at=0.25,
+    environment_er_resume_at=0.15,  # User requested one ER switch; no hysteresis.
+    environment_vol_max_pct=0.045,
+    environment_vol_window=10,
     environment_er_window=15,
     environment_signal_owner=False,  # Both legs use the long owner's single reading.
     # See LONG_CONFIG's docstring -- full revert to the 2026-09-29 original, infra/correctness

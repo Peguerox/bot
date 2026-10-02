@@ -2116,9 +2116,11 @@ function HedgeDualLegPanel({
   const environment = environmentRun?.detail;
   const environmentAge = Math.max(now, Date.now()) / 1000 - (environment?.checked_at ?? 0);
   const environmentFresh = environment?.window === 15 && environment?.pause_below === 0.15
-    && environment?.resume_at === 0.25 && environmentAge >= 0 && environmentAge <= 90;
-  const environmentGreen = environmentFresh && environment?.allowed === true;
-  const liveVol: number | null = longState?.live_vol_pct ?? null;
+    && environment?.resume_at === 0.15 && environment?.vol_max_pct === 0.045
+    && environment?.vol_window === 10 && environmentAge >= 0 && environmentAge <= 90;
+  const environmentGreen = environmentFresh && environment?.er_allowed === true;
+  const volatilityGreen = environmentFresh && environment?.vol_allowed === true;
+  const liveVol: number | null = environmentFresh ? environment?.vol_pct ?? null : null;
   const curSl = longState?.override_sl_pct ?? null;
   const curTrig = longState?.override_profit_lock_trigger ?? null;
   const curTrail = longState?.override_profit_lock_trail ?? null;
@@ -2417,7 +2419,7 @@ function HedgeDualLegPanel({
         <div>
           <h3 className="text-white font-bold text-sm">Worker 2 · Hedge Strategy (2 legs)</h3>
           <p className="text-gray-500 text-[11px] leading-relaxed">
-            Both legs open together whenever both accounts are flat and the environment is green: Worker 2 LONG, Worker 3 SHORT, $10 per leg. No stochastic or balance entry filter. SL 0.03%; profit lock arms at +0.05% and trails 0.01% (dashboard overrides apply). ER15 pauses new pairs below 0.15 and resumes at 0.25 or higher; between those levels it holds its previous status. Existing stops and exits stay active while paused. These environment thresholds are experimental.
+            Both legs open together whenever both accounts are flat and the environment is green: Worker 2 LONG, Worker 3 SHORT, $10 per leg. No stochastic or balance entry filter. SL 0.03%; profit lock arms at +0.05% and trails 0.01% (dashboard overrides apply). New pairs require BOTH ER15 at least 0.15 AND volatility (10 closed one-minute candles) at most 0.045%. Either red pauses new pairs; both green resume. Existing stops and exits stay active while paused. These environment thresholds are experimental.
           </p>
         </div>
         <div className="flex items-center gap-1.5 flex-wrap">
@@ -2495,7 +2497,7 @@ function HedgeDualLegPanel({
                     : "entry filter off"}
                 </span>
               </p>
-              <p className="text-[10px] tabular-nums mt-1" title="ER15 environment: pause below 0.15, resume at 0.25; hold status between them.">
+              <p className="text-[10px] tabular-nums mt-1" title="ER15: green at 0.15 or above, red below. Both ER15 and volatility must be green.">
                 <span className="text-gray-500 mr-1">ER15</span>
                 <span className={environmentGreen ? "text-green-400" : "text-red-400"}>
                   {environmentFresh && typeof environment?.er === "number" ? environment.er.toFixed(3) : "—"}
@@ -2525,14 +2527,12 @@ function HedgeDualLegPanel({
             <div className="flex items-baseline justify-between">
               <p className="text-gray-500 text-[10px] uppercase">Volatility (1-min range, 10m)</p>
               <p className="font-bold text-sm tabular-nums">
-                <span className={liveVol == null ? "text-gray-500"
-                  : liveVol >= 0.10 ? "text-red-400"
-                  : liveVol >= 0.06 ? "text-amber-400" : "text-green-400"}>
+                <span className={volatilityGreen ? "text-green-400" : "text-red-400"}
+                      title="Volatility: green at 0.045% or below, red above. Both signals must be green.">
                   {liveVol != null ? liveVol.toFixed(4) + "%" : "—"}
                 </span>
                 <span className="text-[10px] font-normal text-gray-500 ml-1.5">
-                  {liveVol == null ? "" : liveVol >= 0.10 ? "HIGH — widen exits"
-                    : liveVol >= 0.06 ? "elevated" : "calm"}
+                  {liveVol == null ? "waiting for data" : volatilityGreen ? "green" : "red"}
                 </span>
               </p>
             </div>

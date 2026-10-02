@@ -36,20 +36,22 @@ project with no git/Render/Vercel link -- never work there.
     Inert while self-lock is off; do not make a literal TP mandatory if it is turned back on.
   - Reset (`app/api/lighter-btc-initial-reset`) is **non-destructive**: stamps `history_reset_at`,
     rolls PnL into `seed_usd`, never deletes trades (they are the research data).
-- **Worker 2 environment monitor (prepared 2026-10-02, verify deployment below):** user
-  explicitly authorized ER15-only environment permission, keeping the always-paired entry
-  strategy. Both legs share one reading computed by the LONG owner from 16 closed closes
-  (15 one-minute moves). ER < 0.15 pauses NEW cycles; ER >= 0.25 resumes; the middle holds
-  the previous status. Starts paused unless a fresh matching checkpoint restores its status.
-  Missing/stale/discontinuous candles pause new cycles. All open-position exits remain active,
-  and already-granted pair clearances are honored so a regime change cannot strand one leg.
-  Current original exits remain SL 0.03%, trigger 0.05%, trail 0.01%, equal $10 legs, with
-  stochastic/balance entry gates and breakeven protection OFF. Overrides still win.
-  Minute checkpoints use existing `lighter_btc_optimal_runs` JSON (`environment_er`), so
-  no SQL migration is required. Dashboard displays the latest checkpoint separately from
-  the capped recent run list, and marks data older than 90s paused. Worker 1 is unaffected.
-  These are experimental thresholds calibrated after inspecting only 15 recent pairs;
-  they have no independent validation and do not prevent all double-stop losses.
+- **Worker 2 environment monitor (2026-10-02, two-switch update prepared):** user explicitly
+  requested TWO binary environment switches, replacing the former ER-only hysteresis.
+  ER15 >=0.15 is green, below0.15 red. Vol10 <=0.045% is green, above red. BOTH must be
+  green to allow NEW paired cycles; either red pauses and both green resume immediately
+  on the next decision. No0.25resume threshold or middle-bandmemory for the hedge.
+  ER uses15closedclose-to-close moves; Vol10 is mean(high-low)/close*100 over10closed bars.
+  One LONG-owned reading is shared with SHORT; stale/missing/discontinuousdata pauses.
+  Existing exits stay active, and already-granted pair clearances are honored.
+  The original always-pairedstrategy stays equal$10 legs,SL0.03%,trigger0.05%,trail0.01%,
+  no stochastic/balanceentry gates orbreakevenfloor. Dashboardoverrides stillwin.
+  Existing optimal_runs `environment_er` JSON stores separate `er_allowed`, `vol_allowed`,
+  combined `allowed`, and numeric `er`/`vol_pct`. No SQL migration needed. Dashboard ER
+  number stays insidecolorbalancepill; volatilitynumber stays inits existingpill, each
+  red/green independently. Onlybothgreenpermits newcycles; OFF remains a manualoverride.
+  Research was small and retrospective. The user's ER>=0.15 binary rule differs from
+  the tested hysteresis candidate; do notclaim the9simulatedcycles validate this newrule.
 - **Worker 2**: `server/lighter_hedge_dual_leg.py` — LIVE real money, and the one process that
   drives **two** sub-accounts. It runs two `StochBot` instances under one `asyncio.gather`: a LONG
   leg on Worker 2's account (`lighter_btc_optimal_*` tables) and a SHORT leg on Worker 3's account
