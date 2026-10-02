@@ -364,7 +364,11 @@ CONFIG = BotConfig(
     # direction would have gone 4-1 instead of 1-4. Still only 5 trades. See
     # compute_flip_signal's docstring for the full reasoning, including why the (still unused)
     # size floor's own research no longer clearly applies now that direction has flipped.
-    volume_regime_switch_threshold=2.0,
+    # REVISED 2026-10-02, direct request, after watching live trades in the 2-4 BTC band:
+    # user's judgment call that stochastic+zebra handles this specific range better than the
+    # flip signal does. Raised 2 -> 4; not re-validated against a fresh sweep at this exact
+    # cutoff -- a live judgment call, same as the original 2 BTC pick.
+    volume_regime_switch_threshold=4.0,
     volume_regime_switch_window=10,
     flip_signal_min_trend_len=3,
     flip_signal_min_size_pct=None,
