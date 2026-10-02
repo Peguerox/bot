@@ -345,6 +345,13 @@ CONFIG = BotConfig(
     # also roughly halved how often the signal fires and made LESS total money over the same
     # window (+$2.56 vs +$3.24) in the sweep. flip_signal_min_size_pct is kept available
     # (not deleted) specifically to re-enable if the plain flip stops working live.
+    # REVISED same day, after the first 5 live trades under this went 1-4: compute_flip_signal
+    # now enters in the ORIGINAL trend's direction (the 3+ bar streak), not the interrupting
+    # candle's direction -- betting that one opposite-color candle was a blip, not a genuine
+    # reversal. Checked against real tick data for all 5 of those live trades: this reversed
+    # direction would have gone 4-1 instead of 1-4. Still only 5 trades. See
+    # compute_flip_signal's docstring for the full reasoning, including why the (still unused)
+    # size floor's own research no longer clearly applies now that direction has flipped.
     volume_regime_switch_threshold=2.0,
     volume_regime_switch_window=10,
     flip_signal_min_trend_len=3,

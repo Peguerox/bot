@@ -36,28 +36,31 @@ project with no git/Render/Vercel link -- never work there.
     Inert while self-lock is off; do not make a literal TP mandatory if it is turned back on.
   - Reset (`app/api/lighter-btc-initial-reset`) is **non-destructive**: stamps `history_reset_at`,
     rolls PnL into `seed_usd`, never deletes trades (they are the research data).
-- **Worker 1 volume regime switch (2026-10-02, direct request, untested live):** below 2 BTC
-  traded (`compute_candle_volume_avg`, mean over the trailing 10 closed candles -- NOT a
+- **Worker 1 volume regime switch (2026-10-02, direct request):** below 2 BTC traded
+  (`compute_candle_volume_avg`, mean over the trailing 10 closed candles -- NOT a
   vol_pct/volatility reading), entry is unchanged -- stochastic + the 65-75 color-balance band
-  above. At or above 2 BTC, entry switches ENTIRELY to `compute_flip_signal`: trade the
-  direction of the last closed candle's color, but only the instant it flips versus the one
-  before it, and only when that prior candle was the tail of a same-color streak of at least
-  `flip_signal_min_trend_len=3` bars. The color-balance/zebra gates do not apply to a flip
-  entry. No size floor (`flip_signal_min_size_pct=None`) -- tried, dropped: it roughly doubled
-  the win rate in testing but also roughly halved how often the signal fires and made less
-  total money over the same window; the field is kept live, not deleted, specifically to
-  re-enable if the plain flip stops working. Same SL 0.06 / TP 0.10 / profit-lock-trigger 0.06
-  / zero-give-back exits as the stochastic side -- this only changes entries. The 2 BTC cutoff
-  is the user's own choice, not the backtest sweep's optimum (which favored a much higher,
-  ~90th-percentile cutoff) -- he chose to hand off earlier because the stochastic's edge
-  on this day's 35 live trades was already statistically indistinguishable from a coin flip
-  well before that (z<1 on 600+ historical trades too). This has never run live; the dollar
-  amounts in testing are backtest-only and were explicitly flagged as inflated by signal-
-  frequency (far more flip signals fire than the bot could actually execute one-at-a-time).
-  729 worker checks pass (`compute_candle_volume_avg`, `compute_flip_signal`, and the regime
-  switch itself, including that it correctly bypasses the zebra/balance gates only when
-  active). See `compute_flip_signal`'s docstring in `stoch_bot_core.py` for the full
-  reasoning.
+  above. At or above 2 BTC, entry switches ENTIRELY to `compute_flip_signal`, and the
+  color-balance/zebra gates do not apply to that entry. Same SL 0.06 / TP 0.10 /
+  profit-lock-trigger 0.06 / zero-give-back exits as the stochastic side either way -- this
+  only changes entries. The 2 BTC cutoff is the user's own choice, not the backtest sweep's
+  optimum (which favored a much higher, ~90th-percentile cutoff).
+  - **Flip signal direction, REVISED same day after 5 live trades:** a same-color streak of
+    at least `flip_signal_min_trend_len=3` bars, interrupted by exactly one opposite-color
+    candle -- enter in the ORIGINAL STREAK's direction (betting the interrupting candle was a
+    blip), NOT the interrupting candle's own direction. The first version did the latter and
+    went 1-4 live; checked against real tick data for all 5 of those trades, the reversed
+    direction would have gone 4-1. Still only 5 trades -- a live hypothesis, not a proven
+    edge. No size floor (`flip_signal_min_size_pct=None`) -- the pre-revision research
+    behind that floor doesn't clearly apply anymore now that direction has flipped (the one
+    real win had a SMALL streak, all 4 real losses had LARGE ones -- backwards from what the
+    floor assumed); kept available, not deleted, but don't re-enable it on the old research
+    alone.
+  - **Live readout:** `live_candle_volume` on the state row (needs
+    `lighter_btc_initial_live_candle_volume.sql`, not yet confirmed run) shows the current
+    reading and which signal governs entries, on the dashboard panel.
+  - 729 worker checks pass. See `compute_flip_signal`'s docstring in `stoch_bot_core.py` for
+    the full reasoning. This has had 5 live trades total as of this revision (1 win under the
+    old direction, before the flip); the revised direction itself is still unconfirmed live.
 - **Late-visible fill follow-up (2026-10-02):** previous recovery fix missed successful
   position reads that temporarily report flat. At13:57:54UTC long logged enter_no_fill;
   at13:57:57 its fill became visible, after earlier code erased identity. Retain durable

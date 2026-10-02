@@ -1167,22 +1167,32 @@ def compute_candle_volume_avg(candles, window=10):
 
 
 def compute_flip_signal(candles, min_trend_len=3, min_size_pct=None, trend_lookback=20):
-    """"Flip" entry (2026-10-02, direct request): trade in the direction of the last CLOSED
-    candle's color, but only immediately after that candle actually flipped color versus the
-    one before it, and only when that prior candle was itself the tail end of a same-color
-    streak at least `min_trend_len` bars long. Built as the high-volume counterpart to
-    compute_stoch_signal() -- see BotConfig.volume_regime_switch_threshold; the stochastic
-    signal's edge collapses (empirically, not just a coin flip at the extreme top of the
-    traded-volume range) once volume gets high enough, and this is what the live bot switches
-    to instead.
+    """"Flip" entry -- REVISED 2026-10-02, direct request, after this bot's own first 5 live
+    trades under the original version went 1-4: trade in the direction of the TREND that was
+    running BEFORE the last closed candle interrupted it, betting that one opposite-color
+    candle was a blip, not a genuine reversal -- the next bar resumes the original direction.
+    Fires only the instant that interrupting candle closes (one bar, opposite color to what
+    came before, versus a same-color streak at least `min_trend_len` bars long underneath it).
+
+    The FIRST version of this signal (live for ~5 trades, 2026-10-02) instead entered in the
+    direction of that interrupting candle itself -- i.e. the opposite of what this version
+    does. Checked against real tick data for all 5 of those live trades: the reversed
+    direction would have gone 4-1 instead of 1-4, consistently, not by one lucky trade --
+    strong enough that the user asked for this entry to flip rather than wait for more live
+    trades. Still only 5 trades; this is a live hypothesis, not a proven edge.
+
+    Built as the high-volume counterpart to compute_stoch_signal() -- see
+    BotConfig.volume_regime_switch_threshold; the stochastic signal's edge collapses
+    (empirically, not just a coin flip at the extreme top of the traded-volume range) once
+    volume gets high enough, and this is what the live bot switches to instead.
 
     `min_size_pct`, if set, additionally requires the streak's average (high-low)/close% to
-    clear that floor. Research (642-trade/7026-signal sweep, 2026-10-02) found a size floor
-    roughly DOUBLES the win rate (64% vs 60% at the 90th-percentile volume tier) but also
-    roughly HALVES how often the signal fires and nets fewer total dollars over the same
-    window -- defaults off for that reason. Kept as a live option, not deleted: if the plain
-    flip signal stops working, re-enable this and re-measure before concluding the whole idea
-    is dead, rather than re-deriving the formula from scratch.
+    clear that floor. Off by default -- the pre-revision research that floor was based on
+    does not necessarily still apply now that the entry direction itself has flipped; in fact
+    the one real live WIN under the old direction had a SMALL pre-flip streak (this floor
+    would have blocked it) while all 4 real losses had LARGE streaks (this floor would have
+    let them through) -- the exact opposite of what the floor assumed. Kept available, not
+    deleted, but do not re-enable it on the strength of the old research alone.
 
     Same (entry_signal, reversal_signal, candle_ts) contract as the other compute_*_signal
     methods. reversal_signal is always None -- unlike the stochastic signal, there is no
@@ -1224,7 +1234,9 @@ def compute_flip_signal(candles, min_trend_len=3, min_size_pct=None, trend_lookb
         if avg_size < min_size_pct:
             return None, None, ts
 
-    direction = "long" if cur_color == 1 else "short"
+    # Direction follows the ORIGINAL trend (prev_color), not the interrupting candle
+    # (cur_color) that just broke it -- see this function's docstring for why this flipped.
+    direction = "long" if prev_color == 1 else "short"
     return direction, None, ts
 
 

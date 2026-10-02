@@ -4861,19 +4861,19 @@ async def t_compute_candle_volume_avg_basic():
 
 
 async def t_flip_signal_fires_after_long_enough_trend():
-    print("\n[compute_flip_signal: fires in the flip direction once the prior streak is long enough]")
-    candles = _flip_candles([-1, -1, -1, 1])  # 3 reds then a green flip
+    print("\n[compute_flip_signal: fires in the ORIGINAL trend's direction once the streak is long enough]")
+    candles = _flip_candles([-1, -1, -1, 1])  # 3 reds then a green flip -- bet on more red
     sig, rev, ts = core.compute_flip_signal(candles, min_trend_len=3)
-    check("enters long on red->green flip after a 3-bar red streak", sig == "long", sig)
+    check("enters SHORT -- the 3-bar red trend, not the green flip candle", sig == "short", sig)
     check("reversal_signal is always None for the flip signal", rev is None, rev)
     check("candle_ts is the flip candle's own timestamp", ts == candles[-2]["t"], (ts, candles[-2]["t"]))
 
 
 async def t_flip_signal_short_direction():
-    print("\n[compute_flip_signal: green->red flip enters short]")
+    print("\n[compute_flip_signal: green trend interrupted by one red candle enters long]")
     candles = _flip_candles([1, 1, 1, -1])
     sig, _, _ = core.compute_flip_signal(candles, min_trend_len=3)
-    check("enters short on green->red flip", sig == "short", sig)
+    check("enters LONG -- the 3-bar green trend, not the red flip candle", sig == "long", sig)
 
 
 async def t_flip_signal_blocks_short_trend():
@@ -4895,11 +4895,11 @@ async def t_flip_signal_size_filter():
     print("\n[compute_flip_signal: optional min_size_pct floor, off by default]")
     small = _flip_candles([-1, -1, -1, 1], size=1.0)     # ~0.0012% range -- tiny
     big = _flip_candles([-1, -1, -1, 1], size=2000.0)    # ~2.3% range -- clears a 1% floor
-    check("off by default -- small candles still fire", core.compute_flip_signal(small, min_trend_len=3)[0] == "long")
+    check("off by default -- small candles still fire", core.compute_flip_signal(small, min_trend_len=3)[0] == "short")
     check("size floor blocks the small-candle streak",
           core.compute_flip_signal(small, min_trend_len=3, min_size_pct=1.0)[0] is None)
     check("size floor lets the wide-candle streak through",
-          core.compute_flip_signal(big, min_trend_len=3, min_size_pct=1.0)[0] == "long")
+          core.compute_flip_signal(big, min_trend_len=3, min_size_pct=1.0)[0] == "short")
 
 
 async def _volume_switch_case(candle_volume, threshold=2.0):
