@@ -5099,6 +5099,46 @@ async def t_volume_jump_guard_paused_until_none_when_calm():
           bot._volume_jump_paused_until)
 
 
+async def t_volume_jump_clear_marker_forgives_an_old_pause():
+    print("\n[volume-jump guard: override_volume_jump_cleared_at forgives a past spike]")
+    ex = FakeExchange()
+    bot = make_bot(ex, candles_kind="mid", volume_jump_ratio=3.0, volume_jump_lookback=10,
+                    volume_jump_pause_seconds=1800.0, schema_has_regime_overrides=True)
+    bot.candles = _jump_candles([1.0] * 11)  # flat on this call -- testing the marker, not a new spike
+    fixed_jump_at = time.time() - 60  # a spike that "armed" a minute ago, well inside 1800s
+    bot._last_volume_jump_at = fixed_jump_at
+    bot.state_row["override_volume_jump_cleared_at"] = datetime.fromtimestamp(
+        fixed_jump_at + 1, tz=timezone.utc).isoformat()
+    active = bot._update_volume_jump_guard(bot.state_row)
+    check("pause forgiven -- cleared_at is after the spike", active is False, active)
+
+
+async def t_volume_jump_clear_marker_does_not_block_a_new_spike():
+    print("\n[volume-jump guard: clearing an old spike does not disable a later one]")
+    ex = FakeExchange()
+    bot = make_bot(ex, candles_kind="mid", volume_jump_ratio=3.0, volume_jump_lookback=10,
+                    volume_jump_pause_seconds=1800.0, schema_has_regime_overrides=True)
+    bot.candles = _jump_candles([1.0] * 10 + [5.0])  # a real, fresh spike on this call
+    bot.state_row["override_volume_jump_cleared_at"] = datetime.fromtimestamp(
+        time.time() - 3600, tz=timezone.utc).isoformat()  # a stale clear, long before this spike
+    active = bot._update_volume_jump_guard(bot.state_row)
+    check("new spike still arms -- the clear marker predates it", active is True, active)
+
+
+async def t_volume_jump_clear_marker_off_by_default_schema_flag():
+    print("\n[volume-jump guard: schema_has_regime_overrides=False ignores the clear marker]")
+    ex = FakeExchange()
+    bot = make_bot(ex, candles_kind="mid", volume_jump_ratio=3.0, volume_jump_lookback=10,
+                    volume_jump_pause_seconds=1800.0, schema_has_regime_overrides=False)
+    bot.candles = _jump_candles([1.0] * 11)
+    fixed_jump_at = time.time() - 60
+    bot._last_volume_jump_at = fixed_jump_at
+    bot.state_row["override_volume_jump_cleared_at"] = datetime.fromtimestamp(
+        fixed_jump_at + 1, tz=timezone.utc).isoformat()
+    active = bot._update_volume_jump_guard(bot.state_row)
+    check("still paused -- clear marker present but the schema flag is off", active is True, active)
+
+
 async def t_regime_toggle_stochastic_off_blocks_low_volume_entry():
     print("\n[regime toggle: override_stochastic_enabled=False blocks the low-volume regime]")
     side = await _regime_toggle_case({"override_stochastic_enabled": False}, zebra_band=False)
@@ -5316,6 +5356,9 @@ async def main():
               t_volume_jump_guard_off_by_default_schema_flag,
               t_volume_jump_guard_tracks_paused_until,
               t_volume_jump_guard_paused_until_none_when_calm,
+              t_volume_jump_clear_marker_forgives_an_old_pause,
+              t_volume_jump_clear_marker_does_not_block_a_new_spike,
+              t_volume_jump_clear_marker_off_by_default_schema_flag,
               t_regime_toggle_stochastic_off_blocks_low_volume_entry,
               t_regime_toggle_stochastic_on_default,
               t_regime_toggle_zebra_off_bypasses_band,

@@ -1629,6 +1629,24 @@ function CompactStochBtcPanel({
     setSavingSignal(null);
   }
 
+  // Manual "clear pause" button (2026-10-03, direct request). Writes a marker timestamp the
+  // backend compares against the spike time -- a genuinely new spike after this still arms
+  // normally, this only forgives the pause already in progress.
+  async function handleClearVolumeJump() {
+    if (!confirm(`Clear the current volume-jump pause for ${title}? A new spike will still re-arm it normally.`)) return;
+    setSavingSignal("jumpClear");
+    const res = await fetch("/api/lighter-btc-initial-settings", {
+      method: "POST", headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ clearVolumeJump: true }),
+    });
+    if (!res.ok) {
+      const b = await res.json().catch(() => ({}));
+      alert(b.error || "Could not clear the pause.");
+    }
+    await onToggled();
+    setSavingSignal(null);
+  }
+
   async function handleToggleSignal(key: "stochastic" | "zebra" | "flip", label: string, next: boolean) {
     if (!confirm(`Turn ${label} ${next ? "ON" : "OFF"} for ${title}? Takes effect immediately.`)) return;
     setSavingSignal(key);
@@ -2244,6 +2262,15 @@ function CompactStochBtcPanel({
                 : "new entries allowed"}
             </span>
           </p>
+          {jumpPausedActive && (
+            <button
+              onClick={handleClearVolumeJump}
+              disabled={savingSignal !== null || loading}
+              className="mt-1 text-xs font-bold px-2.5 py-1 rounded bg-red-500/20 text-red-400 hover:bg-red-500/30 disabled:opacity-30"
+            >
+              {savingSignal === "jumpClear" ? "…" : "Clear pause now"}
+            </button>
+          )}
           <p className="text-[11px] text-gray-500 mt-0.5 tabular-nums">
             latest reading:{" "}
             <span className={liveJumpRatio == null ? "text-gray-500"

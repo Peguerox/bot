@@ -27,7 +27,7 @@ const LIMITS = {
 
 export async function POST(req: NextRequest) {
   const body = await req.json();
-  const out: Record<string, number | boolean> = {};
+  const out: Record<string, number | boolean | string> = {};
 
   for (const [key, col] of [
     ["sl", "override_sl_pct"],
@@ -70,6 +70,14 @@ export async function POST(req: NextRequest) {
       return NextResponse.json({ error: `${key} must be true or false.` }, { status: 400 });
     }
     out[col] = raw;
+  }
+
+  // Manual "clear pause" button (2026-10-03, direct request) -- writes a timestamp, not the
+  // literal `true` sent by the client; see override_volume_jump_cleared_at's docstring
+  // (StochBot._update_volume_jump_guard) for why this is a marker compared against the spike
+  // time, not just blanking the pause out directly.
+  if (body.clearVolumeJump === true) {
+    out["override_volume_jump_cleared_at"] = new Date().toISOString();
   }
 
   if (Object.keys(out).length === 0) {

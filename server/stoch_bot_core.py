@@ -2766,18 +2766,36 @@ class StochBot:
         watching the dashboard otherwise sees a calm current ratio and no way to tell the gate
         is still active from an earlier spike within its pause window.
 
-        Resolves the threshold/pause overrides and bails out BEFORE computing the ratio when
-        the guard isn't configured at all -- not just for efficiency, but so a bot that never
-        enabled this feature never calls compute_volume_jump_ratio on candle data that might
-        not even carry a "v" field."""
+        override_volume_jump_cleared_at (2026-10-03, direct request: "give me a button to
+        unpause"): a manual-clear timestamp -- if the last-armed spike is AT OR BEFORE this
+        marker, the pause reads inactive, regardless of pause_seconds. Deliberately NOT
+        implemented as a temporary tiny pause_seconds override (tried first, live, and found
+        broken): shrinking the window only LOOKS cleared -- self._last_volume_jump_at never
+        actually moves, so restoring the real pause_seconds afterward recomputes the exact
+        same future paused_until and silently re-arms. The cleared_at marker is compared
+        against the spike timestamp directly, so a GENUINELY NEW spike after the clear (which
+        sets a fresh self._last_volume_jump_at, necessarily later than cleared_at) still arms
+        normally -- clearing only forgives the past, it never disables the guard going forward.
+
+        Resolves the threshold/pause/cleared-at overrides and bails out BEFORE computing the
+        ratio when the guard isn't configured at all -- not just for efficiency, but so a bot
+        that never enabled this feature never calls compute_volume_jump_ratio on candle data
+        that might not even carry a "v" field."""
         cfg = self.cfg
         ratio_threshold = cfg.volume_jump_ratio
         pause_seconds = cfg.volume_jump_pause_seconds
+        cleared_at = None
         if cfg.schema_has_regime_overrides:
             o = state.get("override_volume_jump_ratio")
             if o is not None: ratio_threshold = float(o)
             o = state.get("override_volume_jump_pause_seconds")
             if o is not None: pause_seconds = float(o)
+            o = state.get("override_volume_jump_cleared_at")
+            if o is not None:
+                try:
+                    cleared_at = parse_iso(o).timestamp()
+                except (ValueError, TypeError):
+                    cleared_at = None
         if ratio_threshold is None:
             self._volume_jump_paused_until = None
             return False
@@ -2786,6 +2804,9 @@ class StochBot:
         if ratio is not None and ratio >= ratio_threshold:
             self._last_volume_jump_at = now_s
         if self._last_volume_jump_at is None:
+            self._volume_jump_paused_until = None
+            return False
+        if cleared_at is not None and self._last_volume_jump_at <= cleared_at:
             self._volume_jump_paused_until = None
             return False
         paused_until = self._last_volume_jump_at + pause_seconds
