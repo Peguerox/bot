@@ -9,15 +9,18 @@ import { getSupabaseAdmin } from "@/lib/supabase-admin";
 // here. Worker 1 ran zero give-back (exit on the first tick down) until 2026-10-02, when a
 // real trade peaked at +0.04% and gave it all back to the SL -- trigger/trail moved to 0.03/0.03.
 //
-// bandLo/bandHi (2026-10-02, direct request) override the stochastic's own 25/75 K band -- ONE
-// shared pair applied to both the entry signal and the reversal exit together, not independently.
+// bandLo/bandHi and reversalLo/reversalHi (2026-10-02, direct request) override the
+// stochastic's own 25/75 K band -- entry and reversal independently, not a shared pair
+// (first version tied them together; revised same day on direct follow-up request).
 const LIMITS = {
   sl: { min: 0.01, max: 0.5, label: "stop-loss" },
   trigger: { min: 0.01, max: 1.0, label: "profit-lock trigger" },
   trail: { min: 0, max: 0.5, label: "profit-lock trail" },
   volThreshold: { min: 0, max: 100, label: "volume switch threshold" },
-  bandLo: { min: 0, max: 49, label: "stochastic band low (K)" },
-  bandHi: { min: 51, max: 100, label: "stochastic band high (K)" },
+  bandLo: { min: 0, max: 49, label: "entry band low (K)" },
+  bandHi: { min: 51, max: 100, label: "entry band high (K)" },
+  reversalLo: { min: 0, max: 49, label: "reversal band low (K)" },
+  reversalHi: { min: 51, max: 100, label: "reversal band high (K)" },
 };
 
 export async function POST(req: NextRequest) {
@@ -31,6 +34,8 @@ export async function POST(req: NextRequest) {
     ["volThreshold", "override_volume_switch_threshold"],
     ["bandLo", "override_stoch_band_lo"],
     ["bandHi", "override_stoch_band_hi"],
+    ["reversalLo", "override_stoch_reversal_lo"],
+    ["reversalHi", "override_stoch_reversal_hi"],
   ] as const) {
     const raw = body[key];
     if (raw === undefined || raw === null || raw === "") continue;
@@ -70,9 +75,15 @@ export async function POST(req: NextRequest) {
   const sb = getSupabaseAdmin();
   // The trail must sit below the trigger or the profit lock fires the instant it arms. Checked
   // against the value that will actually be live, so changing only one of the two is validated too.
+  // select("*") rather than naming columns: a column this route knows about but whose
+  // migration hasn't run yet (e.g. override_stoch_reversal_lo/hi before
+  // lighter_btc_initial_stoch_reversal_band_override.sql) must never break every OTHER
+  // control on this same panel -- naming it explicitly made PostgREST error the whole
+  // request on a missing column; "*" just omits it from the result (reads as undefined,
+  // same as null for every `??` below) until the migration runs.
   const { data: cur, error: readError } = await sb
     .from("lighter_btc_initial_state")
-    .select("override_profit_lock_trigger, override_profit_lock_trail, override_stoch_band_lo, override_stoch_band_hi")
+    .select("*")
     .eq("id", 1)
     .single();
   if (readError) {
@@ -94,7 +105,15 @@ export async function POST(req: NextRequest) {
   const bandHi = (out["override_stoch_band_hi"] as number | undefined) ?? cur?.override_stoch_band_hi;
   if (bandLo != null && bandHi != null && bandLo >= bandHi) {
     return NextResponse.json(
-      { error: `Band low (${bandLo}) must be less than band high (${bandHi}).` },
+      { error: `Entry band low (${bandLo}) must be less than entry band high (${bandHi}).` },
+      { status: 400 }
+    );
+  }
+  const reversalLo = (out["override_stoch_reversal_lo"] as number | undefined) ?? cur?.override_stoch_reversal_lo;
+  const reversalHi = (out["override_stoch_reversal_hi"] as number | undefined) ?? cur?.override_stoch_reversal_hi;
+  if (reversalLo != null && reversalHi != null && reversalLo >= reversalHi) {
+    return NextResponse.json(
+      { error: `Reversal band low (${reversalLo}) must be less than reversal band high (${reversalHi}).` },
       { status: 400 }
     );
   }

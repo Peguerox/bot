@@ -5098,6 +5098,24 @@ async def t_stoch_band_control_off_by_default_schema_flag():
     check("entered short -- override present on the row but the schema flag is off", side == "short", side)
 
 
+async def t_stoch_signal_entry_and_reversal_independently_overridable():
+    print("\n[compute_stoch_signal: entry and reversal bands move independently, not as a pair]")
+    candles = _band_k80_candles()
+    ex = FakeExchange()
+    bot = make_bot(ex, candles_kind="mid")
+    bot.candles = candles
+    # entry band widened to exclude K=80; reversal band left at the default 75 ceiling.
+    sig, rev, _ = bot.compute_stoch_signal(25, 85, 25, 75)
+    check("entry blocked by its own wider band", sig is None, sig)
+    check("reversal UNAFFECTED by the entry override -- still fires on the default 75", rev == "short", rev)
+
+
+async def t_stoch_band_control_reversal_override_does_not_touch_entry():
+    print("\n[stoch band control: overriding ONLY the reversal band leaves entry on the default]")
+    side = await _stoch_band_case({"override_stoch_reversal_lo": 25.0, "override_stoch_reversal_hi": 85.0})
+    check("entered short -- entry band untouched by a reversal-only override", side == "short", side)
+
+
 async def t_volume_switch_uses_flip_above_threshold():
     print("\n[volume regime switch: at/above threshold, flip signal wins and gates are bypassed]")
     side = await _volume_switch_case(candle_volume=5.0, threshold=2.0)
@@ -5189,6 +5207,8 @@ async def main():
               t_stoch_band_control_blocks_entry_via_tick,
               t_stoch_band_control_default_unchanged,
               t_stoch_band_control_off_by_default_schema_flag,
+              t_stoch_signal_entry_and_reversal_independently_overridable,
+              t_stoch_band_control_reversal_override_does_not_touch_entry,
               t_entry_vol_gate_rehydrates_paused_state_after_restart,
               t_entry_vol_gate_blocks_reversal_reopen_but_not_the_close,
               t_self_lock_paper_shadow_opens_when_flat,

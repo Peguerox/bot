@@ -2097,19 +2097,25 @@ class StochBot:
 
     def _stoch_band_controls(self, state):
         """(entry_lo, entry_hi, reversal_lo, reversal_hi) for this tick -- direct request,
-        2026-10-02 ("can we change [reversal] to 85/15... along with the stochastic signal").
-        A single shared band override, when set, applies to BOTH entry and reversal together
-        (they're tied by request, not independently overridable) -- NULL means 'use the
-        compiled defaults', independently for entry vs reversal as normal. Same override shape
-        and schema flag as _regime_controls (BotConfig.schema_has_regime_overrides)."""
+        2026-10-02. FIRST version tied entry and reversal to one shared band; REVISED same day
+        ("i wanted to be able to put a number for the reversal and a number for the entry
+        signal") -- independently overridable now. override_stoch_band_lo/hi control the ENTRY
+        band only (kept under their original column names); override_stoch_reversal_lo/hi are
+        new, for the reversal band specifically. NULL on either means 'use the compiled
+        default' for that one, independently. Same override shape and schema flag as
+        _regime_controls (BotConfig.schema_has_regime_overrides)."""
         cfg = self.cfg
         entry_lo, entry_hi = cfg.entry_lo, cfg.entry_hi
         reversal_lo, reversal_hi = cfg.reversal_lo, cfg.reversal_hi
         if cfg.schema_has_regime_overrides:
             o = state.get("override_stoch_band_lo")
-            if o is not None: entry_lo = reversal_lo = float(o)
+            if o is not None: entry_lo = float(o)
             o = state.get("override_stoch_band_hi")
-            if o is not None: entry_hi = reversal_hi = float(o)
+            if o is not None: entry_hi = float(o)
+            o = state.get("override_stoch_reversal_lo")
+            if o is not None: reversal_lo = float(o)
+            o = state.get("override_stoch_reversal_hi")
+            if o is not None: reversal_hi = float(o)
         return entry_lo, entry_hi, reversal_lo, reversal_hi
 
     def _exit_params(self, state):

@@ -1552,19 +1552,30 @@ function CompactStochBtcPanel({
   const curVolThreshold: number = state?.override_volume_switch_threshold ?? 4;
   const [volThresholdIn, setVolThresholdIn] = useState("");
   const [savingSignal, setSavingSignal] = useState<string | null>(null);
-  // Must match entry_lo/entry_hi (== reversal_lo/reversal_hi) in lighter_stoch_dca_btc_initial.py.
-  const curBandLo: number = state?.override_stoch_band_lo ?? 25;
-  const curBandHi: number = state?.override_stoch_band_hi ?? 75;
-  const [bandLoIn, setBandLoIn] = useState("");
-  const [bandHiIn, setBandHiIn] = useState("");
+  // Must match entry_lo/entry_hi and reversal_lo/reversal_hi in lighter_stoch_dca_btc_initial.py.
+  // Independently overridable (2026-10-02, direct request: "a number for the reversal and a
+  // number for the entry signal" -- an earlier version tied these together, revised same day).
+  const curEntryLo: number = state?.override_stoch_band_lo ?? 25;
+  const curEntryHi: number = state?.override_stoch_band_hi ?? 75;
+  const curReversalLo: number = state?.override_stoch_reversal_lo ?? 25;
+  const curReversalHi: number = state?.override_stoch_reversal_hi ?? 75;
+  const [entryLoIn, setEntryLoIn] = useState("");
+  const [entryHiIn, setEntryHiIn] = useState("");
+  const [reversalLoIn, setReversalLoIn] = useState("");
+  const [reversalHiIn, setReversalHiIn] = useState("");
 
-  async function handleApplyBand() {
-    if (!bandLoIn.trim() && !bandHiIn.trim()) return;
-    if (!confirm(`Set the stochastic band to ${bandLoIn.trim() || curBandLo} / ${bandHiIn.trim() || curBandHi} for ${title}? Applies to BOTH entry and reversal. Takes effect immediately.`)) return;
-    setSavingSignal("band");
+  async function handleApplyBand(kind: "entry" | "reversal") {
+    const [loIn, hiIn, curLo, curHi] = kind === "entry"
+      ? [entryLoIn, entryHiIn, curEntryLo, curEntryHi]
+      : [reversalLoIn, reversalHiIn, curReversalLo, curReversalHi];
+    if (!loIn.trim() && !hiIn.trim()) return;
+    if (!confirm(`Set the ${kind} band to ${loIn.trim() || curLo} / ${hiIn.trim() || curHi} for ${title}? Takes effect immediately.`)) return;
+    setSavingSignal(kind);
     const payload: Record<string, string> = {};
-    if (bandLoIn.trim()) payload.bandLo = bandLoIn.trim();
-    if (bandHiIn.trim()) payload.bandHi = bandHiIn.trim();
+    const loKey = kind === "entry" ? "bandLo" : "reversalLo";
+    const hiKey = kind === "entry" ? "bandHi" : "reversalHi";
+    if (loIn.trim()) payload[loKey] = loIn.trim();
+    if (hiIn.trim()) payload[hiKey] = hiIn.trim();
     const res = await fetch("/api/lighter-btc-initial-settings", {
       method: "POST", headers: { "Content-Type": "application/json" },
       body: JSON.stringify(payload),
@@ -1572,8 +1583,10 @@ function CompactStochBtcPanel({
     if (!res.ok) {
       const b = await res.json().catch(() => ({}));
       alert(b.error || "Could not apply the change.");
+    } else if (kind === "entry") {
+      setEntryLoIn(""); setEntryHiIn("");
     } else {
-      setBandLoIn(""); setBandHiIn("");
+      setReversalLoIn(""); setReversalHiIn("");
     }
     await onToggled();
     setSavingSignal(null);
@@ -2137,39 +2150,44 @@ function CompactStochBtcPanel({
             lets the raw stochastic signal trade without the 65-75 band. Turning a regime OFF
             only blocks new entries there -- never closes a position already open.
           </p>
-          <div className="pt-1">
-            <p className="text-gray-500 text-[9px] uppercase">
-              Stochastic band (K) <span className="text-gray-600">now {curBandLo} / {curBandHi} -- entry AND reversal</span>
-            </p>
-            <div className="flex items-end gap-1.5 mt-1">
-              <input
-                value={bandLoIn}
-                onChange={(e) => setBandLoIn(e.target.value)}
-                placeholder={String(curBandLo)}
-                inputMode="decimal"
-                className="w-full bg-gray-900 border border-gray-700 rounded px-1.5 py-1 text-xs text-white tabular-nums focus:outline-none focus:border-blue-500"
-              />
-              <span className="text-gray-600 text-xs pb-1">/</span>
-              <input
-                value={bandHiIn}
-                onChange={(e) => setBandHiIn(e.target.value)}
-                placeholder={String(curBandHi)}
-                inputMode="decimal"
-                className="w-full bg-gray-900 border border-gray-700 rounded px-1.5 py-1 text-xs text-white tabular-nums focus:outline-none focus:border-blue-500"
-              />
-              <button
-                onClick={handleApplyBand}
-                disabled={savingSignal !== null || loading || (!bandLoIn.trim() && !bandHiIn.trim())}
-                className="text-xs font-bold px-2.5 py-1 rounded bg-blue-500/20 text-blue-400 hover:bg-blue-500/30 disabled:opacity-30 whitespace-nowrap"
-              >
-                {savingSignal === "band" ? "…" : "Set"}
-              </button>
+          {([
+            ["entry", "Entry band (K)", entryLoIn, setEntryLoIn, entryHiIn, setEntryHiIn, curEntryLo, curEntryHi],
+            ["reversal", "Reversal band (K)", reversalLoIn, setReversalLoIn, reversalHiIn, setReversalHiIn, curReversalLo, curReversalHi],
+          ] as const).map(([kind, label, loIn, setLoIn, hiIn, setHiIn, curLo, curHi]) => (
+            <div className="pt-1" key={kind}>
+              <p className="text-gray-500 text-[9px] uppercase">
+                {label} <span className="text-gray-600">now {curLo} / {curHi}</span>
+              </p>
+              <div className="flex items-end gap-1.5 mt-1">
+                <input
+                  value={loIn}
+                  onChange={(e) => setLoIn(e.target.value)}
+                  placeholder={String(curLo)}
+                  inputMode="decimal"
+                  className="w-full bg-gray-900 border border-gray-700 rounded px-1.5 py-1 text-xs text-white tabular-nums focus:outline-none focus:border-blue-500"
+                />
+                <span className="text-gray-600 text-xs pb-1">/</span>
+                <input
+                  value={hiIn}
+                  onChange={(e) => setHiIn(e.target.value)}
+                  placeholder={String(curHi)}
+                  inputMode="decimal"
+                  className="w-full bg-gray-900 border border-gray-700 rounded px-1.5 py-1 text-xs text-white tabular-nums focus:outline-none focus:border-blue-500"
+                />
+                <button
+                  onClick={() => handleApplyBand(kind)}
+                  disabled={savingSignal !== null || loading || (!loIn.trim() && !hiIn.trim())}
+                  className="text-xs font-bold px-2.5 py-1 rounded bg-blue-500/20 text-blue-400 hover:bg-blue-500/30 disabled:opacity-30 whitespace-nowrap"
+                >
+                  {savingSignal === kind ? "…" : "Set"}
+                </button>
+              </div>
             </div>
-            <p className="text-gray-600 text-[9px] leading-snug mt-1">
-              Wider (e.g. 15/85) means fewer, more extreme signals -- both the entry trigger and
-              the reversal exit move together.
-            </p>
-          </div>
+          ))}
+          <p className="text-gray-600 text-[9px] leading-snug mt-1">
+            Entry and reversal bands are independent -- set one without affecting the other.
+            Wider (e.g. 15/85) means fewer, more extreme signals.
+          </p>
         </div>
       )}
       {showLevers && liveCandleVolume != null && liveCandleVolume >= curVolThreshold && !loading && (() => {
