@@ -5070,6 +5070,35 @@ async def t_volume_jump_guard_off_by_default_schema_flag():
     check("blocked -- override present on the row but the schema flag is off", side is None, side)
 
 
+async def t_volume_jump_guard_tracks_paused_until():
+    print("\n[volume-jump guard: _volume_jump_paused_until reflects the actual pause window]")
+    ex = FakeExchange()
+    before = time.time()
+    candles = _jump_candles([1.0] * 10 + [5.0])  # 5.0x -- over the 3.0 default
+    bot = make_bot(ex, candles_kind="mid", volume_jump_ratio=3.0, volume_jump_lookback=10,
+                    volume_jump_pause_seconds=120.0, schema_has_regime_overrides=True)
+    bot.candles = candles
+    await bot.tick()
+    check("paused_until is set after a real spike", bot._volume_jump_paused_until is not None,
+          bot._volume_jump_paused_until)
+    if bot._volume_jump_paused_until is not None:
+        check("paused_until is roughly now + 120s",
+              before + 115 <= bot._volume_jump_paused_until <= time.time() + 121,
+              bot._volume_jump_paused_until - before)
+
+
+async def t_volume_jump_guard_paused_until_none_when_calm():
+    print("\n[volume-jump guard: _volume_jump_paused_until stays None without a spike]")
+    ex = FakeExchange()
+    candles = _jump_candles([1.0] * 11)  # flat -- no spike
+    bot = make_bot(ex, candles_kind="mid", volume_jump_ratio=3.0, volume_jump_lookback=10,
+                    volume_jump_pause_seconds=120.0, schema_has_regime_overrides=True)
+    bot.candles = candles
+    await bot.tick()
+    check("paused_until stays None -- no spike happened", bot._volume_jump_paused_until is None,
+          bot._volume_jump_paused_until)
+
+
 async def t_regime_toggle_stochastic_off_blocks_low_volume_entry():
     print("\n[regime toggle: override_stochastic_enabled=False blocks the low-volume regime]")
     side = await _regime_toggle_case({"override_stochastic_enabled": False}, zebra_band=False)
@@ -5285,6 +5314,8 @@ async def main():
               t_volume_jump_guard_off_by_default,
               t_volume_jump_guard_live_override_ratio,
               t_volume_jump_guard_off_by_default_schema_flag,
+              t_volume_jump_guard_tracks_paused_until,
+              t_volume_jump_guard_paused_until_none_when_calm,
               t_regime_toggle_stochastic_off_blocks_low_volume_entry,
               t_regime_toggle_stochastic_on_default,
               t_regime_toggle_zebra_off_bypasses_band,

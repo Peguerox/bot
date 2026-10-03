@@ -1645,6 +1645,7 @@ class StochBot:
         self._stoch_band_reversal_hi = self.cfg.reversal_hi
         # See BotConfig.volume_jump_ratio / _update_volume_jump_guard.
         self._last_volume_jump_at = None
+        self._volume_jump_paused_until = None
         # See BotConfig.profit_lock_burn_k_gate's docstring. _burned_signal_via distinguishes a
         # profit-lock-sourced burn (eligible for the K-reclaim early-clear) from a loss-sourced
         # one (always needs the ordinary full signal reset). _position_entry_k is the real
@@ -2759,7 +2760,11 @@ class StochBot:
         threshold, and returns whether a pause is currently active. See
         BotConfig.volume_jump_ratio for the full reasoning. The live_volume_jump_ratio dashboard
         readout is a SEPARATE write elsewhere (near live_candle_volume) -- this method only
-        gates entries, it does not persist anything.
+        gates entries, it does not persist anything itself, but DOES set
+        self._volume_jump_paused_until (epoch seconds, or None) as a side effect so that write
+        can show WHEN the pause actually clears, not just the instant ratio reading -- a user
+        watching the dashboard otherwise sees a calm current ratio and no way to tell the gate
+        is still active from an earlier spike within its pause window.
 
         Resolves the threshold/pause overrides and bails out BEFORE computing the ratio when
         the guard isn't configured at all -- not just for efficiency, but so a bot that never
@@ -2774,14 +2779,19 @@ class StochBot:
             o = state.get("override_volume_jump_pause_seconds")
             if o is not None: pause_seconds = float(o)
         if ratio_threshold is None:
+            self._volume_jump_paused_until = None
             return False
         ratio = compute_volume_jump_ratio(self.candles, cfg.volume_jump_lookback)
         now_s = time.time()
         if ratio is not None and ratio >= ratio_threshold:
             self._last_volume_jump_at = now_s
         if self._last_volume_jump_at is None:
+            self._volume_jump_paused_until = None
             return False
-        return (now_s - self._last_volume_jump_at) < pause_seconds
+        paused_until = self._last_volume_jump_at + pause_seconds
+        active = now_s < paused_until
+        self._volume_jump_paused_until = paused_until if active else None
+        return active
 
     def _cycle_gap_elapsed(self):
         """True if enough time has passed since THIS leg went flat -- see
@@ -4647,6 +4657,18 @@ class StochBot:
                             await self.update_state({"live_volume_jump_ratio": jr})
                         except Exception:
                             pass
+                    # Separate write (2026-10-03, direct request: "it does not tell me if
+                    # armed not armed") -- the instant ratio reading above can read calm while
+                    # an EARLIER spike's pause is still active, which left no way to tell from
+                    # the dashboard alone. self._volume_jump_paused_until is set as a side
+                    # effect of _update_volume_jump_guard (gate check, elsewhere in this same
+                    # tick) -- may be one tick stale here, negligible against the 10s cadence.
+                    paused_until_iso = (datetime.fromtimestamp(self._volume_jump_paused_until, tz=timezone.utc).isoformat()
+                                         if self._volume_jump_paused_until is not None else None)
+                    try:
+                        await self.update_state({"live_volume_jump_paused_until": paused_until_iso})
+                    except Exception:
+                        pass
                 if cfg.color_balance_index_min is not None or cfg.color_balance_index_max is not None:
                     # Isolated best-effort write (2026-10-01) so the dashboard can show the live
                     # color-weighted balance index the entry gate is reading. Written into the

@@ -1598,6 +1598,13 @@ function CompactStochBtcPanel({
   const liveJumpRatio: number | null = state?.live_volume_jump_ratio ?? null;
   const curJumpRatio: number = state?.override_volume_jump_ratio ?? 3.0;
   const curJumpPause: number = state?.override_volume_jump_pause_seconds ?? 1800;
+  // Explicit pause-until readout (2026-10-03, direct request: "it does not tell me if armed
+  // not armed") -- the instant ratio above can read calm while an earlier spike's pause is
+  // still active; this is the actual gate state, not just the current reading.
+  const jumpPausedUntil: Date | null = state?.live_volume_jump_paused_until
+    ? new Date(state.live_volume_jump_paused_until) : null;
+  const jumpPausedActive = jumpPausedUntil != null && jumpPausedUntil.getTime() > nowTick;
+  const jumpSecondsLeft = jumpPausedActive ? Math.max(0, Math.round((jumpPausedUntil!.getTime() - nowTick) / 1000)) : 0;
   const [jumpRatioIn, setJumpRatioIn] = useState("");
   const [jumpPauseIn, setJumpPauseIn] = useState("");
 
@@ -2228,15 +2235,23 @@ function CompactStochBtcPanel({
               this many times its own trailing baseline. */}
           <p className="text-gray-500 text-[10px] uppercase">Volume-jump guard</p>
           <p className="font-bold text-sm tabular-nums">
-            <span className={liveJumpRatio == null ? "text-gray-500"
-              : liveJumpRatio >= curJumpRatio ? "text-red-400" : "text-green-400"}>
-              {liveJumpRatio != null ? liveJumpRatio.toFixed(2) + "x" : "—"}
+            <span className={jumpPausedActive ? "text-red-400" : "text-green-400"}>
+              {jumpPausedActive ? "PAUSED" : "ARMED, not paused"}
             </span>
             <span className="text-[10px] font-normal text-gray-500 ml-1.5">
-              {liveJumpRatio == null ? "no reading yet"
-                : liveJumpRatio >= curJumpRatio ? "SPIKE -- new entries paused"
-                : "normal"}
+              {jumpPausedActive
+                ? `new entries blocked -- clears in ${Math.floor(jumpSecondsLeft / 60)}:${String(jumpSecondsLeft % 60).padStart(2, "0")}`
+                : "new entries allowed"}
             </span>
+          </p>
+          <p className="text-[11px] text-gray-500 mt-0.5 tabular-nums">
+            latest reading:{" "}
+            <span className={liveJumpRatio == null ? "text-gray-500"
+              : liveJumpRatio >= curJumpRatio ? "text-amber-400" : "text-gray-400"}>
+              {liveJumpRatio != null ? liveJumpRatio.toFixed(2) + "x" : "—"}
+            </span>
+            {liveJumpRatio != null && liveJumpRatio >= curJumpRatio && !jumpPausedActive
+              ? " (spiking now -- about to arm)" : ""}
           </p>
           <div className="flex items-end gap-1.5 mt-1.5">
             <div className="flex-1">
