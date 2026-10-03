@@ -343,6 +343,17 @@ class BotConfig:
     volume_jump_ratio: Optional[float] = None
     volume_jump_lookback: int = 10
     volume_jump_pause_seconds: float = 120.0
+    # Early-release arm (2026-10-03, direct request: "build them both... which one is
+    # controlling? either volume, wiggle, or rate"). None (default) keeps pause_seconds a plain
+    # fixed timer, unchanged behavior. "volume" / "wiggle" / "rate" lets the pause end EARLY --
+    # never late, pause_seconds stays the hard cap either way -- once that one metric has
+    # decayed to half or less of its own peak since the spike armed. See
+    # _update_volume_jump_guard's docstring for the full reasoning and research/wiggle-2026-10-03
+    # for the real-data comparison (wiggle and volume revert at roughly the same real-world
+    # speed; neither is clearly better, which is why the user wanted all three built and
+    # selectable rather than picking one blind).
+    volume_jump_release_mode: Optional[str] = None
+    wiggle_window: int = 5
     # Low-volatility entry gate (2026-09-29, direct request): the OPPOSITE direction from the
     # pair above -- blocks new entries (and a reversal's reopen leg, never TP/SL/exits) when
     # the market is TOO QUIET rather than too spiky. Built to test a real finding from 844 real
@@ -1661,6 +1672,15 @@ class StochBot:
         # See BotConfig.volume_jump_ratio / _update_volume_jump_guard.
         self._last_volume_jump_at = None
         self._volume_jump_paused_until = None
+        # See BotConfig.volume_jump_release_mode / _update_volume_jump_guard. Peaks track the
+        # crest of each metric since the current spike armed; the _last_* trio are always-fresh
+        # readouts for the dashboard regardless of mode.
+        self._volume_jump_peak_volume = None
+        self._volume_jump_peak_wiggle = None
+        self._volume_jump_peak_rate = None
+        self._last_wiggle = None
+        self._last_volume_jump_volume = None
+        self._last_volume_jump_rate = None
         # See BotConfig.profit_lock_burn_k_gate's docstring. _burned_signal_via distinguishes a
         # profit-lock-sourced burn (eligible for the K-reclaim early-clear) from a loss-sourced
         # one (always needs the ordinary full signal reset). _position_entry_k is the real
@@ -2812,11 +2832,40 @@ class StochBot:
         Resolves the threshold/pause/cleared-at overrides and bails out BEFORE computing the
         ratio when the guard isn't configured at all -- not just for efficiency, but so a bot
         that never enabled this feature never calls compute_volume_jump_ratio on candle data
-        that might not even carry a "v" field."""
+        that might not even carry a "v" field.
+
+        volume_jump_release_mode (2026-10-03, direct request: "build them both... which one is
+        controlling? either volume, wiggle, or rate"): an EARLY release on top of the fixed
+        pause_seconds cap, not a replacement for it -- pause_seconds always stays the hard
+        ceiling, matching the earlier rejected open-ended volume-recovery design's lesson (real
+        data: elevated windows can run up to ~78 minutes in the extreme, see
+        research/wiggle-2026-10-03). Exactly one of three metrics can drive the release, chosen
+        live, never more than one at a time:
+          - "volume": compute_candle_volume_avg -- the same traded-size reading the ratio itself
+            is built from.
+          - "wiggle": compute_intrabar_dispersion -- price-LEVEL dispersion over wiggle_window
+            closed candles, raw dollars (same metric already proven on 575 real Worker 1 trades
+            for a different purpose, the entry-side dispersion gate).
+          - "rate": abs(compute_candle_volume_rate) -- magnitude of volume's own candle-to-candle
+            change, matching the earlier session finding that a violently CHANGING volume level
+            is the dangerous case, not a high-but-stable one; sign is dropped because a crash
+            back down is exactly as disruptive as the spike up.
+        All three are computed and cached on self (_last_wiggle / _last_volume_jump_volume /
+        _last_volume_jump_rate, signed) every call regardless of mode, purely for the dashboard
+        readout -- so a user can watch all three side by side before picking one to drive
+        release, or with the guard off entirely.
+
+        Release rule (direct request, keep it simple first): track each metric's PEAK since the
+        spike last armed (a real crest can land a candle or two after the candle that tripped
+        the ratio, so peak-tracking continues every tick the pause stays active, not just at the
+        arming instant), then release once the SELECTED metric has fallen to half or less of
+        its own peak. A genuinely new spike (ratio re-crosses threshold) resets all three peaks,
+        same "forgive the past, not the future" philosophy as the clear marker."""
         cfg = self.cfg
         ratio_threshold = cfg.volume_jump_ratio
         pause_seconds = cfg.volume_jump_pause_seconds
         cleared_at = None
+        release_mode = cfg.volume_jump_release_mode
         if cfg.schema_has_regime_overrides:
             o = state.get("override_volume_jump_ratio")
             if o is not None: ratio_threshold = float(o)
@@ -2828,21 +2877,59 @@ class StochBot:
                     cleared_at = parse_iso(o).timestamp()
                 except (ValueError, TypeError):
                     cleared_at = None
+            o = state.get("override_volume_jump_release_mode")
+            if o is not None:
+                release_mode = o or None  # "" clears back to the fixed-timer-only default
+
+        # Always compute and cache the three comparison readings -- even with the guard
+        # unconfigured or release_mode off -- so the dashboard can show all three for the user
+        # to compare before choosing one. volume_jump_lookback doubles as the rate's window
+        # (same candle-average the rate is a delta of); wiggle gets its own window since it is a
+        # different metric (price dispersion, not volume) with no reason to share one.
+        wiggle = compute_intrabar_dispersion(self.candles, cfg.wiggle_window)
+        volume_now = compute_candle_volume_avg(self.candles, cfg.volume_jump_lookback)
+        rate_now = compute_candle_volume_rate(self.candles, cfg.volume_jump_lookback)
+        rate_mag = abs(rate_now) if rate_now is not None else None
+        self._last_wiggle = wiggle
+        self._last_volume_jump_volume = volume_now
+        self._last_volume_jump_rate = rate_now
+
         if ratio_threshold is None:
             self._volume_jump_paused_until = None
             return False
         ratio = compute_volume_jump_ratio(self.candles, cfg.volume_jump_lookback)
         now_s = time.time()
-        if ratio is not None and ratio >= ratio_threshold:
+        is_new_spike = ratio is not None and ratio >= ratio_threshold
+        if is_new_spike:
             self._last_volume_jump_at = now_s
+            self._volume_jump_peak_volume = volume_now
+            self._volume_jump_peak_wiggle = wiggle
+            self._volume_jump_peak_rate = rate_mag
+        elif self._last_volume_jump_at is not None:
+            # Still inside an armed window even though THIS tick didn't itself cross the ratio
+            # -- keep tracking each peak, since the real crest can land a candle or two after
+            # the one that first tripped it.
+            if volume_now is not None:
+                self._volume_jump_peak_volume = max(self._volume_jump_peak_volume or 0.0, volume_now)
+            if wiggle is not None:
+                self._volume_jump_peak_wiggle = max(self._volume_jump_peak_wiggle or 0.0, wiggle)
+            if rate_mag is not None:
+                self._volume_jump_peak_rate = max(self._volume_jump_peak_rate or 0.0, rate_mag)
         if self._last_volume_jump_at is None:
             self._volume_jump_paused_until = None
             return False
         if cleared_at is not None and self._last_volume_jump_at <= cleared_at:
             self._volume_jump_paused_until = None
             return False
-        paused_until = self._last_volume_jump_at + pause_seconds
-        active = now_s < paused_until
+        paused_until = self._last_volume_jump_at + pause_seconds  # hard cap regardless of mode
+        released_early = False
+        if release_mode == "volume" and self._volume_jump_peak_volume and volume_now is not None:
+            released_early = volume_now <= 0.5 * self._volume_jump_peak_volume
+        elif release_mode == "wiggle" and self._volume_jump_peak_wiggle and wiggle is not None:
+            released_early = wiggle <= 0.5 * self._volume_jump_peak_wiggle
+        elif release_mode == "rate" and self._volume_jump_peak_rate and rate_mag is not None:
+            released_early = rate_mag <= 0.5 * self._volume_jump_peak_rate
+        active = (now_s < paused_until) and not released_early
         self._volume_jump_paused_until = paused_until if active else None
         return active
 
@@ -4730,6 +4817,23 @@ class StochBot:
                         await self.update_state({"live_volume_jump_paused_until": paused_until_iso})
                     except Exception:
                         pass
+                    # Two more isolated writes (2026-10-03, "build them both... show the three
+                    # numbers") -- the other two release-arm candidates, read from the cache
+                    # _update_volume_jump_guard already set earlier this same tick rather than
+                    # recomputed here, same reasoning as paused_until_iso just above. Shown
+                    # regardless of volume_jump_release_mode, same "watch before choosing" intent
+                    # as live_volume_jump_ratio. Requires lighter_btc_initial_wiggle_release.sql
+                    # (or the hedge-leg equivalent).
+                    if self._last_wiggle is not None:
+                        try:
+                            await self.update_state({"live_wiggle": self._last_wiggle})
+                        except Exception:
+                            pass
+                    if self._last_volume_jump_rate is not None:
+                        try:
+                            await self.update_state({"live_volume_jump_rate": self._last_volume_jump_rate})
+                        except Exception:
+                            pass
                 if cfg.color_balance_index_min is not None or cfg.color_balance_index_max is not None:
                     # Isolated best-effort write (2026-10-01) so the dashboard can show the live
                     # color-weighted balance index the entry gate is reading. Written into the

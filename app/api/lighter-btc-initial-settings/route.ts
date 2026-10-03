@@ -27,7 +27,7 @@ const LIMITS = {
 
 export async function POST(req: NextRequest) {
   const body = await req.json();
-  const out: Record<string, number | boolean | string> = {};
+  const out: Record<string, number | boolean | string | null> = {};
 
   for (const [key, col] of [
     ["sl", "override_sl_pct"],
@@ -78,6 +78,19 @@ export async function POST(req: NextRequest) {
   // time, not just blanking the pause out directly.
   if (body.clearVolumeJump === true) {
     out["override_volume_jump_cleared_at"] = new Date().toISOString();
+  }
+
+  // Release-arm selector (2026-10-03, direct request: "build them both... which one is
+  // controlling?"): exactly one of volume/wiggle/rate can drive an EARLY release, or "off" for
+  // the plain fixed-timer pause (the only behavior that existed before this). "off" writes null,
+  // not the string "off" -- _update_volume_jump_guard treats a falsy override as "use the
+  // compiled default", and the compiled default is already None/off.
+  if (body.releaseMode !== undefined) {
+    const rm = body.releaseMode;
+    if (rm !== "off" && rm !== "volume" && rm !== "wiggle" && rm !== "rate") {
+      return NextResponse.json({ error: `releaseMode must be off/volume/wiggle/rate (got "${rm}").` }, { status: 400 });
+    }
+    out["override_volume_jump_release_mode"] = rm === "off" ? null : rm;
   }
 
   if (Object.keys(out).length === 0) {

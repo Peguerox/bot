@@ -1598,6 +1598,29 @@ function CompactStochBtcPanel({
   const liveJumpRatio: number | null = state?.live_volume_jump_ratio ?? null;
   const curJumpRatio: number = state?.override_volume_jump_ratio ?? 3.0;
   const curJumpPause: number = state?.override_volume_jump_pause_seconds ?? 1800;
+  // 3-arm early release (2026-10-03, direct request: "build them both... volume, wiggle, or
+  // rate"). All three readings always show, regardless of which (if any) is selected as the
+  // controlling arm -- "off" (default) is the plain fixed-timer pause, unchanged from before.
+  const liveWiggle: number | null = state?.live_wiggle ?? null;
+  const liveJumpRate: number | null = state?.live_volume_jump_rate ?? null;
+  const curReleaseMode: string = state?.override_volume_jump_release_mode ?? "off";
+  const [savingRelease, setSavingRelease] = useState(false);
+
+  async function handleSetReleaseMode(mode: "off" | "volume" | "wiggle" | "rate") {
+    if (mode === curReleaseMode) return;
+    if (!confirm(`Set the volume-jump pause's early release to "${mode}" for ${title}? Takes effect immediately.`)) return;
+    setSavingRelease(true);
+    const res = await fetch("/api/lighter-btc-initial-settings", {
+      method: "POST", headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ releaseMode: mode }),
+    });
+    if (!res.ok) {
+      const b = await res.json().catch(() => ({}));
+      alert(b.error || "Could not apply the change.");
+    }
+    await onToggled();
+    setSavingRelease(false);
+  }
   // Explicit pause-until readout (2026-10-03, direct request: "it does not tell me if armed
   // not armed") -- the instant ratio above can read calm while an earlier spike's pause is
   // still active; this is the actual gate state, not just the current reading.
@@ -2293,6 +2316,43 @@ function CompactStochBtcPanel({
             {liveJumpRatio != null && liveJumpRatio >= curJumpRatio && !jumpPausedActive
               ? " (spiking now -- about to arm)" : ""}
           </p>
+          <div className="mt-1.5">
+            <p className="text-gray-500 text-[9px] uppercase">
+              Release arm <span className="text-gray-600">now {curReleaseMode}</span>
+            </p>
+            <div className="grid grid-cols-4 gap-1 mt-1">
+              {(["off", "volume", "wiggle", "rate"] as const).map((mode) => (
+                <button
+                  key={mode}
+                  onClick={() => handleSetReleaseMode(mode)}
+                  disabled={savingRelease || loading}
+                  className={`text-[10px] font-bold px-1.5 py-1 rounded capitalize disabled:opacity-30 ${
+                    curReleaseMode === mode ? "bg-blue-500/30 text-blue-300" : "bg-gray-700/50 text-gray-500 hover:bg-gray-700"
+                  }`}
+                >
+                  {mode}
+                </button>
+              ))}
+            </div>
+            <p className="text-[10px] text-gray-500 mt-1 leading-snug">
+              Pauses still hard-cap at the window below. "off" is the plain fixed timer; pick
+              one arm to end the pause early once that reading has halved from its post-spike peak.
+            </p>
+            <div className="grid grid-cols-3 gap-1 mt-1.5 text-[10px] tabular-nums">
+              <div className={curReleaseMode === "volume" ? "text-blue-300" : "text-gray-400"}>
+                <p className="text-gray-500 text-[9px] uppercase">Volume</p>
+                {liveCandleVolume != null ? liveCandleVolume.toFixed(2) + " BTC" : "—"}
+              </div>
+              <div className={curReleaseMode === "wiggle" ? "text-blue-300" : "text-gray-400"}>
+                <p className="text-gray-500 text-[9px] uppercase">Wiggle</p>
+                {liveWiggle != null ? "$" + liveWiggle.toFixed(2) : "—"}
+              </div>
+              <div className={curReleaseMode === "rate" ? "text-blue-300" : "text-gray-400"}>
+                <p className="text-gray-500 text-[9px] uppercase">Rate</p>
+                {liveJumpRate != null ? (liveJumpRate >= 0 ? "+" : "") + liveJumpRate.toFixed(2) + "/min" : "—"}
+              </div>
+            </div>
+          </div>
           <div className="flex items-end gap-1.5 mt-1.5">
             <div className="flex-1">
               <p className="text-gray-500 text-[9px] uppercase">
@@ -2493,6 +2553,28 @@ function HedgeDualLegPanel({
   const liveJumpRatio: number | null = longState?.live_volume_jump_ratio ?? null;
   const curJumpRatio: number = longState?.override_volume_jump_ratio ?? 3.0;
   const curJumpPause: number = longState?.override_volume_jump_pause_seconds ?? 1800;
+  // 3-arm early release -- see Worker 1's panel for the full reasoning. "Volume" reuses the
+  // existing liveTradedVolume/liveTradedVolumeRate readout above rather than new columns; only
+  // wiggle is genuinely new here.
+  const liveWiggle: number | null = longState?.live_wiggle ?? null;
+  const curReleaseMode: string = longState?.override_volume_jump_release_mode ?? "off";
+  const [savingRelease, setSavingRelease] = useState(false);
+
+  async function handleSetReleaseMode(mode: "off" | "volume" | "wiggle" | "rate") {
+    if (mode === curReleaseMode) return;
+    if (!confirm(`Set the volume-jump pause's early release to "${mode}" for both hedge legs? Takes effect immediately.`)) return;
+    setSavingRelease(true);
+    const res = await fetch("/api/lighter-hedge-settings", {
+      method: "POST", headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ releaseMode: mode }),
+    });
+    if (!res.ok) {
+      const b = await res.json().catch(() => ({}));
+      alert(b.error || "Could not apply the change.");
+    }
+    await onToggled();
+    setSavingRelease(false);
+  }
   const jumpPausedUntil: Date | null = longState?.live_volume_jump_paused_until
     ? new Date(longState.live_volume_jump_paused_until) : null;
   // Optimistic clear (2026-10-03, direct report: "it does not clear") -- same fix as Worker
@@ -2998,6 +3080,43 @@ function HedgeDualLegPanel({
                 {liveJumpRatio != null && liveJumpRatio >= curJumpRatio && !jumpPausedActive
                   ? " (spiking now -- about to arm)" : ""}
               </p>
+              <div className="mt-1.5">
+                <p className="text-gray-500 text-[9px] uppercase">
+                  Release arm <span className="text-gray-600">now {curReleaseMode}</span>
+                </p>
+                <div className="grid grid-cols-4 gap-1 mt-1">
+                  {(["off", "volume", "wiggle", "rate"] as const).map((mode) => (
+                    <button
+                      key={mode}
+                      onClick={() => handleSetReleaseMode(mode)}
+                      disabled={savingRelease || loading}
+                      className={`text-[10px] font-bold px-1.5 py-1 rounded capitalize disabled:opacity-30 ${
+                        curReleaseMode === mode ? "bg-blue-500/30 text-blue-300" : "bg-gray-700/50 text-gray-500 hover:bg-gray-700"
+                      }`}
+                    >
+                      {mode}
+                    </button>
+                  ))}
+                </div>
+                <p className="text-[10px] text-gray-500 mt-1 leading-snug">
+                  Pauses still hard-cap at the window below. "off" is the plain fixed timer; pick
+                  one arm to end the pause early once that reading has halved from its post-spike peak.
+                </p>
+                <div className="grid grid-cols-3 gap-1 mt-1.5 text-[10px] tabular-nums">
+                  <div className={curReleaseMode === "volume" ? "text-blue-300" : "text-gray-400"}>
+                    <p className="text-gray-500 text-[9px] uppercase">Volume</p>
+                    {liveTradedVolume != null ? liveTradedVolume.toFixed(2) + " BTC" : "—"}
+                  </div>
+                  <div className={curReleaseMode === "wiggle" ? "text-blue-300" : "text-gray-400"}>
+                    <p className="text-gray-500 text-[9px] uppercase">Wiggle</p>
+                    {liveWiggle != null ? "$" + liveWiggle.toFixed(2) : "—"}
+                  </div>
+                  <div className={curReleaseMode === "rate" ? "text-blue-300" : "text-gray-400"}>
+                    <p className="text-gray-500 text-[9px] uppercase">Rate</p>
+                    {liveTradedVolumeRate != null ? (liveTradedVolumeRate >= 0 ? "+" : "") + liveTradedVolumeRate.toFixed(2) + "/min" : "—"}
+                  </div>
+                </div>
+              </div>
               <div className="flex items-end gap-1.5 mt-1.5">
                 <div className="flex-1">
                   <p className="text-gray-500 text-[9px] uppercase">

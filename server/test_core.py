@@ -4999,6 +4999,18 @@ def _jump_candles(volumes, base=86000.0):
     return c
 
 
+def _wiggle_candles(mids, v=1.0):
+    """One closed candle per entry in `mids` (controllable midpoint, for
+    compute_intrabar_dispersion), constant volume, plus one trailing live candle."""
+    t0 = 1700000000000
+    c = [{"t": t0 + i * 60000, "o": m, "h": m + 0.5, "l": m - 0.5, "c": m, "v": v}
+         for i, m in enumerate(mids)]
+    last_m = mids[-1] if mids else 86000.0
+    c.append({"t": t0 + len(mids) * 60000, "o": last_m, "h": last_m + 0.5, "l": last_m - 0.5,
+              "c": last_m, "v": v})
+    return c
+
+
 async def t_volume_jump_ratio_basic():
     print("\n[compute_volume_jump_ratio: hand-computed example]")
     candles = _jump_candles([1.0] * 10 + [5.0])
@@ -5158,6 +5170,129 @@ async def t_volume_jump_guard_calm_does_not_block_hedge_style_cycle():
     active = bot._update_volume_jump_guard(bot.state_row)
     check("guard not armed -- no spike", active is False, active)
     check("fixed_direction leg still wants a cycle", bot._wants_new_cycle() is True)
+
+
+def _release_bot(**kw):
+    base = dict(candles_kind="mid", volume_jump_ratio=3.0, volume_jump_lookback=10,
+                volume_jump_pause_seconds=1800.0, schema_has_regime_overrides=True)
+    base.update(kw)
+    return make_bot(FakeExchange(), **base)
+
+
+async def t_volume_jump_release_mode_off_never_releases_early():
+    print("\n[volume-jump release: mode off (default) never releases before the hard cap]")
+    bot = _release_bot()  # release_mode defaults to None
+    bot.candles = _jump_candles([1.0] * 11)
+    bot._last_volume_jump_at = time.time() - 60
+    bot._volume_jump_peak_volume = 100.0  # huge peak -- would release instantly under "volume" mode
+    active = bot._update_volume_jump_guard(bot.state_row)
+    check("still paused -- release_mode is off by default", active is True, active)
+
+
+async def t_volume_jump_release_volume_mode_releases_at_half_peak():
+    print("\n[volume-jump release: volume mode releases once current volume <= 50% of its peak]")
+    bot = _release_bot(volume_jump_release_mode="volume")
+    bot.candles = _jump_candles([1.0] * 11)  # flat -- volume_now reads 1.0
+    bot._last_volume_jump_at = time.time() - 60
+    bot._volume_jump_peak_volume = 2.0  # current (1.0) is exactly half the peak
+    active = bot._update_volume_jump_guard(bot.state_row)
+    check("released -- current volume at 50% of peak", active is False, active)
+
+
+async def t_volume_jump_release_volume_mode_stays_active_above_half():
+    print("\n[volume-jump release: volume mode stays paused while current volume is still > 50% of peak]")
+    bot = _release_bot(volume_jump_release_mode="volume")
+    bot.candles = _jump_candles([1.0] * 11)  # flat -- volume_now reads 1.0
+    bot._last_volume_jump_at = time.time() - 60
+    bot._volume_jump_peak_volume = 1.5  # current (1.0) is 2/3 of peak -- still above half
+    active = bot._update_volume_jump_guard(bot.state_row)
+    check("still paused -- current volume above 50% of peak", active is True, active)
+
+
+async def t_volume_jump_release_wiggle_mode_releases_at_half_peak():
+    print("\n[volume-jump release: wiggle mode releases once current dispersion <= 50% of its peak]")
+    bot = _release_bot(volume_jump_release_mode="wiggle", wiggle_window=5)
+    bot.candles = _wiggle_candles([86000.0] * 11)  # flat -- dispersion reads 0
+    bot._last_volume_jump_at = time.time() - 60
+    bot._volume_jump_peak_wiggle = 10.0  # any positive peak -- 0 is at/below half of it
+    active = bot._update_volume_jump_guard(bot.state_row)
+    check("released -- current dispersion (0) at/below 50% of peak", active is False, active)
+
+
+async def t_volume_jump_release_wiggle_mode_stays_active_above_half():
+    print("\n[volume-jump release: wiggle mode stays paused while current dispersion is still > 50% of peak]")
+    bot = _release_bot(volume_jump_release_mode="wiggle", wiggle_window=5)
+    bot.candles = _wiggle_candles([86000, 86100, 85900, 86050, 85950, 86000, 86000])
+    current_wiggle = core.compute_intrabar_dispersion(bot.candles, 5)
+    bot._last_volume_jump_at = time.time() - 60
+    bot._volume_jump_peak_wiggle = current_wiggle * 1.5  # current is 2/3 of peak -- above half
+    active = bot._update_volume_jump_guard(bot.state_row)
+    check("still paused -- current dispersion above 50% of peak", active is True, active)
+
+
+async def t_volume_jump_release_rate_mode_releases_at_half_peak():
+    print("\n[volume-jump release: rate mode releases once |current rate| <= 50% of its peak]")
+    bot = _release_bot(volume_jump_release_mode="rate")
+    bot.candles = _jump_candles([1.0] * 11)  # flat volume -- rate reads 0
+    bot._last_volume_jump_at = time.time() - 60
+    bot._volume_jump_peak_rate = 5.0
+    active = bot._update_volume_jump_guard(bot.state_row)
+    check("released -- |rate| (0) at/below 50% of peak", active is False, active)
+
+
+async def t_volume_jump_release_rate_mode_stays_active_above_half():
+    print("\n[volume-jump release: rate mode stays paused while |current rate| is still > 50% of peak]")
+    bot = _release_bot(volume_jump_release_mode="rate")
+    bot.candles = _jump_candles([1.0] * 9 + [5.0, 5.0])  # elevated, still-rising average -- nonzero rate
+    current_rate = core.compute_candle_volume_rate(bot.candles, 10)
+    bot._last_volume_jump_at = time.time() - 60
+    bot._volume_jump_peak_rate = abs(current_rate) * 1.5 if current_rate else 1.0
+    active = bot._update_volume_jump_guard(bot.state_row)
+    check("still paused -- |rate| above 50% of peak", active is True, active)
+
+
+async def t_volume_jump_release_peak_resets_on_a_new_spike():
+    print("\n[volume-jump release: a genuinely new spike resets the tracked peak]")
+    bot = _release_bot(volume_jump_release_mode="volume")
+    bot.candles = _jump_candles([1.0] * 10 + [5.0])  # a real, fresh 5x spike
+    bot._volume_jump_peak_volume = 999.0  # a stale peak left over from an earlier, unrelated spike
+    active = bot._update_volume_jump_guard(bot.state_row)
+    check("armed", active is True, active)
+    check("peak reset to this spike's own reading, not the stale 999",
+          bot._volume_jump_peak_volume is not None and bot._volume_jump_peak_volume < 999.0,
+          bot._volume_jump_peak_volume)
+
+
+async def t_volume_jump_release_mode_live_override():
+    print("\n[volume-jump release: override_volume_jump_release_mode picks the arm live]")
+    bot = _release_bot()  # compiled default is off
+    bot.candles = _jump_candles([1.0] * 11)
+    bot._last_volume_jump_at = time.time() - 60
+    bot._volume_jump_peak_volume = 2.0
+    bot.state_row["override_volume_jump_release_mode"] = "volume"
+    active = bot._update_volume_jump_guard(bot.state_row)
+    check("released -- live override selected volume mode", active is False, active)
+
+
+async def t_volume_jump_release_mode_override_off_by_default_schema_flag():
+    print("\n[volume-jump release: schema_has_regime_overrides=False ignores the release-mode override]")
+    bot = _release_bot(schema_has_regime_overrides=False)
+    bot.candles = _jump_candles([1.0] * 11)
+    bot._last_volume_jump_at = time.time() - 60
+    bot._volume_jump_peak_volume = 2.0
+    bot.state_row["override_volume_jump_release_mode"] = "volume"
+    active = bot._update_volume_jump_guard(bot.state_row)
+    check("still paused -- override present but the schema flag is off", active is True, active)
+
+
+async def t_volume_jump_release_respects_hard_cap_when_metric_never_decays():
+    print("\n[volume-jump release: pause_seconds stays the hard cap even if the metric never halves]")
+    bot = _release_bot(volume_jump_pause_seconds=60.0, volume_jump_release_mode="volume")
+    bot.candles = _jump_candles([1.0] * 11)  # current volume stays 1.0 -- never decays
+    bot._last_volume_jump_at = time.time() - 61  # just past the 60s cap
+    bot._volume_jump_peak_volume = 1.0  # peak == current -- never crossed the 50% line
+    active = bot._update_volume_jump_guard(bot.state_row)
+    check("released by the hard cap, not by the metric decaying", active is False, active)
 
 
 async def t_regime_toggle_stochastic_off_blocks_low_volume_entry():
@@ -5382,6 +5517,17 @@ async def main():
               t_volume_jump_clear_marker_off_by_default_schema_flag,
               t_volume_jump_guard_blocks_a_hedge_style_cycle,
               t_volume_jump_guard_calm_does_not_block_hedge_style_cycle,
+              t_volume_jump_release_mode_off_never_releases_early,
+              t_volume_jump_release_volume_mode_releases_at_half_peak,
+              t_volume_jump_release_volume_mode_stays_active_above_half,
+              t_volume_jump_release_wiggle_mode_releases_at_half_peak,
+              t_volume_jump_release_wiggle_mode_stays_active_above_half,
+              t_volume_jump_release_rate_mode_releases_at_half_peak,
+              t_volume_jump_release_rate_mode_stays_active_above_half,
+              t_volume_jump_release_peak_resets_on_a_new_spike,
+              t_volume_jump_release_mode_live_override,
+              t_volume_jump_release_mode_override_off_by_default_schema_flag,
+              t_volume_jump_release_respects_hard_cap_when_metric_never_decays,
               t_regime_toggle_stochastic_off_blocks_low_volume_entry,
               t_regime_toggle_stochastic_on_default,
               t_regime_toggle_zebra_off_bypasses_band,

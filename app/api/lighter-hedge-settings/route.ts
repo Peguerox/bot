@@ -25,7 +25,7 @@ const LIMITS = {
 
 export async function POST(req: NextRequest) {
   const body = await req.json();
-  const out: Record<string, number | string> = {};
+  const out: Record<string, number | string | null> = {};
 
   for (const [key, col] of [
     ["sl", "override_sl_pct"],
@@ -55,6 +55,17 @@ export async function POST(req: NextRequest) {
   // this forgives only the pause already in progress, not future spikes.
   if (body.clearVolumeJump === true) {
     out["override_volume_jump_cleared_at"] = new Date().toISOString();
+  }
+
+  // Release-arm selector -- see lighter-btc-initial-settings for the full reasoning. "off"
+  // writes null (compiled default is already off); both legs get the same mode, same reason
+  // as every other override here.
+  if (body.releaseMode !== undefined) {
+    const rm = body.releaseMode;
+    if (rm !== "off" && rm !== "volume" && rm !== "wiggle" && rm !== "rate") {
+      return NextResponse.json({ error: `releaseMode must be off/volume/wiggle/rate (got "${rm}").` }, { status: 400 });
+    }
+    out["override_volume_jump_release_mode"] = rm === "off" ? null : rm;
   }
 
   if (Object.keys(out).length === 0) {
