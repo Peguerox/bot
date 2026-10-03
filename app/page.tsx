@@ -2531,7 +2531,9 @@ function HedgeDualLegPanel({
   const [slIn, setSlIn] = useState("");
   const [trigIn, setTrigIn] = useState("");
   const [trailIn, setTrailIn] = useState("");
+  const [tpIn, setTpIn] = useState("");
   const [savingSettings, setSavingSettings] = useState(false);
+  const [savingExitMode, setSavingExitMode] = useState(false);
   const environment = environmentRun?.detail;
   const environmentAge = Math.max(now, Date.now()) / 1000 - (environment?.checked_at ?? 0);
   const environmentFresh = environment?.window === 15 && environment?.pause_below === 0.15
@@ -2630,19 +2632,49 @@ function HedgeDualLegPanel({
   const curSl = longState?.override_sl_pct ?? null;
   const curTrig = longState?.override_profit_lock_trigger ?? null;
   const curTrail = longState?.override_profit_lock_trail ?? null;
+  // Exit mode (2026-10-03, direct request after WORKER_2_HANDOFF.md research: "a panel where i
+  // can change between trail and TP so i can test multiple strategies"). "trail" (default)
+  // reproduces whatever disable_literal_tp/profit_lock_enabled were already compiled to -- SL
+  // is the one protection that's active either way, never touched by this switch. "tp" is the
+  // research-recommended controlled comparison: a literal TP (at curTp) becomes the only
+  // winner exit and the trail is suppressed. See StochBot._exit_params's docstring.
+  const curTp = longState?.override_tp_pct ?? null;
+  const curExitMode: string = longState?.override_exit_mode ?? "trail";
+
+  async function handleSetExitMode(mode: "trail" | "tp") {
+    if (mode === curExitMode) return;
+    if (!confirm(
+      mode === "tp"
+        ? `Switch BOTH legs to fixed-TP mode? The profit-lock trail is suppressed; only SL and the TP level close a winner. Takes effect immediately, including on an open position.`
+        : `Switch BOTH legs back to trail mode? Literal TP is disabled again; the profit-lock trail governs winners, same as before. Takes effect immediately, including on an open position.`
+    )) return;
+    setSavingExitMode(true);
+    const res = await fetch("/api/lighter-hedge-settings", {
+      method: "POST", headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ exitMode: mode }),
+    });
+    if (!res.ok) {
+      const b = await res.json().catch(() => ({}));
+      alert(b.error || "Could not switch exit mode.");
+    }
+    await onToggled();
+    setSavingExitMode(false);
+  }
 
   async function handleApplySettings() {
     const payload: Record<string, string> = {};
     if (slIn.trim()) payload.sl = slIn.trim();
     if (trigIn.trim()) payload.trigger = trigIn.trim();
     if (trailIn.trim()) payload.trail = trailIn.trim();
+    if (tpIn.trim()) payload.tp = tpIn.trim();
     if (Object.keys(payload).length === 0) return;
     // The route writes BOTH legs together -- unequal exits would break the breakeven floor.
     if (!confirm(
       `Apply to BOTH legs?\n\n`
       + `SL      ${payload.sl ?? "(unchanged)"}%\n`
       + `Trigger ${payload.trigger ?? "(unchanged)"}%\n`
-      + `Trail   ${payload.trail ?? "(unchanged)"}%\n\n`
+      + `Trail   ${payload.trail ?? "(unchanged)"}%\n`
+      + `TP      ${payload.tp ?? "(unchanged)"}%\n\n`
       + `Takes effect immediately, including on an open position.`
     )) return;
     setSavingSettings(true);
@@ -2653,7 +2685,7 @@ function HedgeDualLegPanel({
     if (!res.ok) {
       const b = await res.json().catch(() => ({}));
       alert(b.error || "Could not apply settings.");
-    } else { setSlIn(""); setTrigIn(""); setTrailIn(""); }
+    } else { setSlIn(""); setTrigIn(""); setTrailIn(""); setTpIn(""); }
     await onToggled();
     setSavingSettings(false);
   }
@@ -3160,10 +3192,36 @@ function HedgeDualLegPanel({
           {/* Manual exit settings; environment readings are together above. */}
           <div className="bg-gray-800/60 rounded-lg p-2 space-y-2">
             <p className="text-gray-500 text-[10px] uppercase">Exit settings (both legs)</p>
-            <div className="grid grid-cols-3 gap-1.5">
+            <div>
+              <p className="text-gray-500 text-[9px] uppercase">
+                Exit mode <span className="text-gray-600">now {curExitMode}</span>
+              </p>
+              <div className="grid grid-cols-2 gap-1 mt-1">
+                {(["trail", "tp"] as const).map((mode) => (
+                  <button
+                    key={mode}
+                    onClick={() => handleSetExitMode(mode)}
+                    disabled={savingExitMode || loading}
+                    className={`text-[11px] font-bold px-1.5 py-1.5 rounded capitalize disabled:opacity-30 ${
+                      curExitMode === mode ? "bg-blue-500/30 text-blue-300" : "bg-gray-700/50 text-gray-500 hover:bg-gray-700"
+                    }`}
+                  >
+                    {mode === "tp" ? "Fixed TP" : "Trail"}
+                  </button>
+                ))}
+              </div>
+              <p className="text-gray-600 text-[9px] leading-snug mt-1">
+                Trail: the profit-lock trigger/trail below governs winners (current behavior).
+                Fixed TP: the trail is suppressed -- only SL and the TP level below close a
+                winner, per the WORKER_2_HANDOFF.md research candidate. SL always stays active
+                either way.
+              </p>
+            </div>
+            <div className="grid grid-cols-4 gap-1.5">
               {([["SL", slIn, setSlIn, curSl],
                  ["Trigger", trigIn, setTrigIn, curTrig],
-                 ["Trail", trailIn, setTrailIn, curTrail]] as const).map(([label, val, set, cur]) => (
+                 ["Trail", trailIn, setTrailIn, curTrail],
+                 ["TP", tpIn, setTpIn, curTp]] as const).map(([label, val, set, cur]) => (
                 <div key={label}>
                   <p className="text-gray-500 text-[9px] uppercase">
                     {label} <span className="text-gray-600">now {cur != null ? cur + "%" : "—"}</span>
@@ -3180,7 +3238,7 @@ function HedgeDualLegPanel({
             </div>
             <button
               onClick={handleApplySettings}
-              disabled={savingSettings || loading || (!slIn.trim() && !trigIn.trim() && !trailIn.trim())}
+              disabled={savingSettings || loading || (!slIn.trim() && !trigIn.trim() && !trailIn.trim() && !tpIn.trim())}
               className="w-full text-xs font-bold px-2.5 py-1 rounded bg-blue-500/20 text-blue-400 hover:bg-blue-500/30 disabled:opacity-30"
             >
               {savingSettings ? "Applying…" : "Apply to both legs"}

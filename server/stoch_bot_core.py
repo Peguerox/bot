@@ -2199,7 +2199,7 @@ class StochBot:
         return entry_lo, entry_hi, reversal_lo, reversal_hi
 
     def _exit_params(self, state):
-        """(sl_pct, profit_lock_trigger, profit_lock_trail) for this tick.
+        """(sl_pct, profit_lock_trigger, profit_lock_trail, tp_pct, exit_mode) for this tick.
 
         A non-NULL override on the state row wins over the compiled-in value; NULL means "use the
         config". Read live every tick rather than frozen at entry, so a change takes effect at
@@ -2208,9 +2208,20 @@ class StochBot:
 
         Both legs MUST carry identical values. Unequal exits between the legs break the breakeven
         floor (a leg cut at a different level cannot be offset by its partner), which is why the
-        API route always writes both rows together and never one alone."""
+        API route always writes both rows together and never one alone.
+
+        exit_mode (2026-10-03, direct request: "a panel where i can change between trail and TP
+        so i can test multiple strategies") -- "trail" is the default and reproduces whatever
+        disable_literal_tp/profit_lock_enabled were already compiled to, bit for bit, so setting
+        up this override changes no live behavior until the panel is actually used. "tp" is the
+        other state: a literal TP (at tp_pct, itself overridable via override_tp_pct) becomes the
+        winner's only exit and the profit-lock trail is suppressed -- this directly matches the
+        WORKER_2_HANDOFF.md research recommendation (SL .05 / fixed TP .10 / trailing OFF) rather
+        than letting the two winner-exit styles run partially mixed. SL is untouched by this
+        either way -- the one protection that always stays active regardless of exit_mode."""
         cfg = self.cfg
-        sl, trig, trail = cfg.sl_pct, cfg.profit_lock_trigger_pct, cfg.profit_lock_trail_pct
+        sl, trig, trail, tp = cfg.sl_pct, cfg.profit_lock_trigger_pct, cfg.profit_lock_trail_pct, cfg.tp_pct
+        exit_mode = "trail"
         if cfg.schema_has_exit_overrides:
             o = state.get("override_sl_pct")
             if o is not None: sl = float(o)
@@ -2218,7 +2229,11 @@ class StochBot:
             if o is not None: trig = float(o)
             o = state.get("override_profit_lock_trail")
             if o is not None: trail = float(o)
-        return sl, trig, trail
+            o = state.get("override_tp_pct")
+            if o is not None: tp = float(o)
+            o = state.get("override_exit_mode")
+            if o in ("trail", "tp"): exit_mode = o
+        return sl, trig, trail, tp, exit_mode
 
     def _measure_vol_pct(self, lookback):
         """Mean 1-min (high-low)/close%, trailing `lookback` CLOSED candles -- the same
@@ -5233,8 +5248,17 @@ class StochBot:
             pos_tp = state.get("position_tp_pct") if bands else None
             pos_sl = state.get("position_sl_pct") if bands else None
             # Manual exit levers win over both the recorded band and the compiled-in default.
-            ov_sl, ov_trig, ov_trail = self._exit_params(state)
-            pos_tp = pos_tp if pos_tp is not None else cfg.tp_pct
+            ov_sl, ov_trig, ov_trail, ov_tp, exit_mode = self._exit_params(state)
+            # exit_mode (2026-10-03, direct request: "a panel where i can change between trail
+            # and TP so i can test multiple strategies") -- "trail" (default) is unchanged
+            # behavior: disable_literal_tp / profit_lock_enabled exactly as compiled. "tp" flips
+            # BOTH together, matching the research handoff's recommended controlled comparison
+            # (a literal TP and the profit-lock trail are alternate winner-exit styles, not
+            # meant to run partially mixed). SL is NEVER touched by exit_mode -- it is the one
+            # protection that stays in place regardless of which winner-exit style is active.
+            tp_enabled = (not cfg.disable_literal_tp) if exit_mode == "trail" else (exit_mode == "tp")
+            trail_enabled = cfg.profit_lock_enabled if exit_mode == "trail" else False
+            pos_tp = pos_tp if pos_tp is not None else ov_tp
             pos_sl = pos_sl if pos_sl is not None else ov_sl
             if cfg.schema_has_exit_overrides and state.get("override_sl_pct") is not None:
                 pos_sl = ov_sl
@@ -5252,12 +5276,12 @@ class StochBot:
             if side == "long":
                 if check_price <= sl:
                     gap_hit = "SL"
-                elif not cfg.disable_literal_tp and check_price >= tp:
+                elif tp_enabled and check_price >= tp:
                     gap_hit = "TP"
             else:
                 if check_price >= sl:
                     gap_hit = "SL"
-                elif not cfg.disable_literal_tp and check_price <= tp:
+                elif tp_enabled and check_price <= tp:
                     gap_hit = "TP"
 
             if gap_hit is None and cfg.saving_lock_arm_frac_of_sl is not None and ae:
@@ -5285,7 +5309,7 @@ class StochBot:
                     if out_of_band:
                         gap_hit = "INDEX_EXIT"
 
-            if gap_hit is None and cfg.profit_lock_enabled and ae:
+            if gap_hit is None and trail_enabled and ae:
                 # Restore from the DB once per boot if a prior run persisted a peak (only
                 # possible once the profit_lock_peak_pct migration has actually been run) --
                 # safe to read even if the column doesn't exist yet (state.get just returns

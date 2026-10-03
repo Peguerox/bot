@@ -19,6 +19,7 @@ const LIMITS = {
   sl: { min: 0.01, max: 0.5, label: "stop-loss" },
   trigger: { min: 0.01, max: 1.0, label: "profit-lock trigger" },
   trail: { min: 0.005, max: 0.5, label: "profit-lock trail" },
+  tp: { min: 0.01, max: 1.0, label: "take-profit" },
   jumpRatio: { min: 1.1, max: 20, label: "volume-jump ratio" },
   jumpPause: { min: 0, max: 1800, label: "volume-jump pause (seconds)" },
 };
@@ -31,6 +32,7 @@ export async function POST(req: NextRequest) {
     ["sl", "override_sl_pct"],
     ["trigger", "override_profit_lock_trigger"],
     ["trail", "override_profit_lock_trail"],
+    ["tp", "override_tp_pct"],
     ["jumpRatio", "override_volume_jump_ratio"],
     ["jumpPause", "override_volume_jump_pause_seconds"],
   ] as const) {
@@ -66,6 +68,19 @@ export async function POST(req: NextRequest) {
       return NextResponse.json({ error: `releaseMode must be off/volume/wiggle/rate (got "${rm}").` }, { status: 400 });
     }
     out["override_volume_jump_release_mode"] = rm === "off" ? null : rm;
+  }
+
+  // Exit-style selector (2026-10-03, direct request after WORKER_2_HANDOFF.md research: "a
+  // panel where i can change between trail and TP so i can test multiple strategies"). "trail"
+  // is the default/current behavior; "tp" is the research-recommended controlled comparison
+  // (literal TP at override_tp_pct, trail suppressed). SL is never touched by this -- see
+  // StochBot._exit_params's docstring for the full reasoning.
+  if (body.exitMode !== undefined) {
+    const em = body.exitMode;
+    if (em !== "trail" && em !== "tp") {
+      return NextResponse.json({ error: `exitMode must be trail/tp (got "${em}").` }, { status: 400 });
+    }
+    out["override_exit_mode"] = em;
   }
 
   if (Object.keys(out).length === 0) {

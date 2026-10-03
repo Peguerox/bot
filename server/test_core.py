@@ -2315,6 +2315,98 @@ async def t_profit_lock_trail_still_wins_above_the_trigger():
           [(a, d.get("reason")) for a, d in bot.runs if a == "closed"])
 
 
+async def t_exit_mode_trail_default_preserves_disabled_literal_tp():
+    print("\n[exit_mode: default 'trail' reproduces disable_literal_tp=True exactly -- no override set]")
+    entry = 86000.0
+    ex = FakeExchange(position=round(10.0 / entry, 5), collateral=10.0)
+    partner = {"side": None, "realized_pnl_usd": 0.0}
+    bot = _breakeven_bot(ex, _breakeven_state(entry, 10.0), partner,
+                          breakeven_floor_enabled=False, schema_has_exit_overrides=True)
+    await _tick_at(bot, entry * (1 + 0.10 / 100))  # at the compiled TP level
+    check("still open -- literal TP stays disabled, same as before this feature",
+          bot.state_row["side"] == "long", bot.state_row["side"])
+
+
+async def t_exit_mode_tp_enables_literal_tp_even_when_compiled_disabled():
+    print("\n[exit_mode: override 'tp' enables a literal TP even though disable_literal_tp=True compiled]")
+    entry = 86000.0
+    ex = FakeExchange(position=round(10.0 / entry, 5), collateral=10.0)
+    partner = {"side": None, "realized_pnl_usd": 0.0}
+    state = _breakeven_state(entry, 10.0)
+    state["override_exit_mode"] = "tp"
+    bot = _breakeven_bot(ex, state, partner, breakeven_floor_enabled=False,
+                          schema_has_exit_overrides=True)
+    # +1.0 margin: round_trigger(up=True) rounds the TP price UP to the next $0.1 tick, so a
+    # check_price computed at the exact nominal target can land fractionally below it (float
+    # precision) and miss the ">=" crossing -- same margin pattern used throughout this file's
+    # SL/TP tests.
+    await _tick_at(bot, entry * (1 + 0.10 / 100) + 1.0)  # past the compiled TP level (0.10%)
+    check("closed via TP", bot.state_row["side"] is None, bot.state_row["side"])
+    check("reason is TP", any(a == "closed" and d.get("reason") == "TP" for a, d in bot.runs),
+          [(a, d.get("reason")) for a, d in bot.runs if a == "closed"])
+
+
+async def t_exit_mode_tp_suppresses_the_profit_lock_trail():
+    print("\n[exit_mode: override 'tp' suppresses the profit-lock trail even though it's compiled on]")
+    entry = 86000.0
+    ex = FakeExchange(position=round(10.0 / entry, 5), collateral=10.0)
+    partner = {"side": None, "realized_pnl_usd": 0.0}
+    state = _breakeven_state(entry, 10.0)
+    state["override_exit_mode"] = "tp"
+    bot = _breakeven_bot(ex, state, partner, breakeven_floor_enabled=False,
+                          schema_has_exit_overrides=True)
+    # Peaks well past the compiled trigger (0.05) then gives back past the compiled trail (0.01),
+    # but never reaches the compiled TP (0.10) -- the old trail would have closed this as
+    # PROFIT_LOCK; in "tp" mode nothing should fire.
+    await _tick_at(bot, entry * (1 + 0.08 / 100))
+    await _tick_at(bot, entry * (1 + 0.06 / 100))
+    check("still open -- the trail is suppressed in tp mode", bot.state_row["side"] == "long",
+          bot.state_row["side"])
+
+
+async def t_exit_mode_tp_honors_override_tp_pct():
+    print("\n[exit_mode: override_tp_pct sets the TP level used in 'tp' mode, not the compiled tp_pct]")
+    entry = 86000.0
+    ex = FakeExchange(position=round(10.0 / entry, 5), collateral=10.0)
+    partner = {"side": None, "realized_pnl_usd": 0.0}
+    state = _breakeven_state(entry, 10.0)
+    state["override_exit_mode"] = "tp"
+    state["override_tp_pct"] = 0.05
+    bot = _breakeven_bot(ex, state, partner, breakeven_floor_enabled=False,
+                          schema_has_exit_overrides=True)  # compiled tp_pct stays 0.10
+    await _tick_at(bot, entry * (1 + 0.05 / 100) + 1.0)  # past the OVERRIDE level, not the compiled 0.10
+    check("closed via TP at the override level", bot.state_row["side"] is None, bot.state_row["side"])
+
+
+async def t_exit_mode_tp_mode_sl_still_fires():
+    print("\n[exit_mode: SL still protects the position in 'tp' mode -- never suppressed]")
+    entry = 86000.0
+    ex = FakeExchange(position=round(10.0 / entry, 5), collateral=10.0 - 0.003)
+    partner = {"side": None, "realized_pnl_usd": 0.0}
+    state = _breakeven_state(entry, 10.0)
+    state["override_exit_mode"] = "tp"
+    bot = _breakeven_bot(ex, state, partner, breakeven_floor_enabled=False,
+                          schema_has_exit_overrides=True)  # compiled sl_pct stays 0.03
+    await _tick_at(bot, entry * (1 - 0.03 / 100) - 1.0)  # past the SL level (round_trigger margin)
+    check("closed via SL", bot.state_row["side"] is None, bot.state_row["side"])
+    check("reason is SL", any(a == "closed" and d.get("reason") == "SL" for a, d in bot.runs),
+          [(a, d.get("reason")) for a, d in bot.runs if a == "closed"])
+
+
+async def t_exit_mode_ignored_without_schema_flag():
+    print("\n[exit_mode: schema_has_exit_overrides=False ignores override_exit_mode/override_tp_pct]")
+    entry = 86000.0
+    ex = FakeExchange(position=round(10.0 / entry, 5), collateral=10.0)
+    partner = {"side": None, "realized_pnl_usd": 0.0}
+    state = _breakeven_state(entry, 10.0)
+    state["override_exit_mode"] = "tp"  # present on the row, but ignored
+    bot = _breakeven_bot(ex, state, partner, breakeven_floor_enabled=False,
+                          schema_has_exit_overrides=False)
+    await _tick_at(bot, entry * (1 + 0.10 / 100))
+    check("still open -- override present but the schema flag is off", bot.state_row["side"] == "long",
+          bot.state_row["side"])
+
+
 async def t_stale_position_bands_ignored_without_schema_flag():
     print("\n[stale position_sl_pct in the row is IGNORED when schema_has_position_bands=False (hedge leg)]")
     # Real 2026-09-30 incident, real money: the hedge SHORT leg runs on
@@ -5655,6 +5747,12 @@ async def main():
               t_breakeven_floor_never_forces_a_worse_exit,
               t_breakeven_floor_soft_fails_on_partner_read_error,
               t_profit_lock_trail_still_wins_above_the_trigger,
+              t_exit_mode_trail_default_preserves_disabled_literal_tp,
+              t_exit_mode_tp_enables_literal_tp_even_when_compiled_disabled,
+              t_exit_mode_tp_suppresses_the_profit_lock_trail,
+              t_exit_mode_tp_honors_override_tp_pct,
+              t_exit_mode_tp_mode_sl_still_fires,
+              t_exit_mode_ignored_without_schema_flag,
               t_instance_lock_blocks_entry_when_another_instance_holds_it,
               t_instance_lock_allows_entry_once_acquired,
               t_instance_lock_never_blocks_an_exit,
