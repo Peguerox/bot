@@ -3047,8 +3047,13 @@ function HedgeDualLegPanel({
                 </span>
               </p>
             </div>
-            <div className="bg-gray-800/60 rounded-lg p-2">
-              {/* 2026-10-03, direct request ("build the same guard for worker 2") -- same
+            <div className="bg-gray-800/60 rounded-lg p-2 col-span-2">
+              {/* col-span-2 (2026-10-03, direct report: half the panel was empty space) -- this
+                  box is the 7th item in the surrounding 2-column grid, so without it this box
+                  only filled one cell and left its row's other cell blank. Worker 1's version
+                  isn't in this problem at all -- it's a standalone full-width box outside any
+                  grid, never squeezed into a cell to begin with.
+                  2026-10-03, direct request ("build the same guard for worker 2") -- same
                   guard as Worker 1's (compute_volume_jump_ratio), same panel shape. Blocks NEW
                   paired cycles only, never an exit -- see _volume_jump_allows_cycle's docstring. */}
               <p className="text-gray-500 text-[10px] uppercase">Volume-jump guard</p>
