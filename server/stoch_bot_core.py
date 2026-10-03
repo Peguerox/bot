@@ -1689,6 +1689,7 @@ class StochBot:
         self._last_wiggle = None
         self._last_volume_jump_volume = None
         self._last_volume_jump_rate = None
+        self._last_volume_jump_ratio = None  # see _update_volume_jump_guard, _entry_settings_snapshot
         # Whichever peak the ACTIVE release_mode is tracking, for the dashboard -- direct
         # report: "I only see the timer" with no way to tell whether a wiggle/volume/rate
         # release is close or far. None when release_mode is off/unset. See
@@ -2966,8 +2967,10 @@ class StochBot:
         if ratio_threshold is None:
             self._volume_jump_paused_until = None
             self._last_release_peak = None
+            self._last_volume_jump_ratio = None
             return False
         ratio = compute_volume_jump_ratio(self.candles, cfg.volume_jump_lookback)
+        self._last_volume_jump_ratio = ratio
         now_s = time.time()
         is_new_spike = ratio is not None and ratio >= ratio_threshold
         if is_new_spike:
@@ -3011,6 +3014,35 @@ class StochBot:
         active = (now_s < paused_until) and not released_early
         self._volume_jump_paused_until = paused_until if active else None
         return active
+
+    def _entry_settings_snapshot(self, state):
+        """One small dict, logged once per trade at entry (see schema_has_entry_features),
+        answering "which settings were actually live for THIS trade" -- 2026-10-03, direct
+        request: the user has been hand-testing many exit_mode/dwell/volume-jump combinations
+        and wants the data to later work out which settings won under which conditions, without
+        it, only the CURRENT dashboard value is known, with no link back to any past trade.
+        Deliberately lean (one JSONB column, not a dozen new ones) -- just the exit levers
+        actually in effect (_exit_params) plus the volume-jump guard's settings and its live
+        ratio reading at this exact moment, not a repeat of what entry_vol_pct/entry_dispersion
+        already cover."""
+        cfg = self.cfg
+        sl, trig, trail, tp, exit_mode, dwell = self._exit_params(state)
+        jump_ratio_threshold = cfg.volume_jump_ratio
+        jump_pause_seconds = cfg.volume_jump_pause_seconds
+        jump_release_mode = cfg.volume_jump_release_mode
+        if cfg.schema_has_regime_overrides:
+            o = state.get("override_volume_jump_ratio")
+            if o is not None: jump_ratio_threshold = float(o)
+            o = state.get("override_volume_jump_pause_seconds")
+            if o is not None: jump_pause_seconds = float(o)
+            o = state.get("override_volume_jump_release_mode")
+            if o is not None: jump_release_mode = o or None
+        return {
+            "exit_mode": exit_mode, "sl_pct": sl, "tp_pct": tp,
+            "trigger_pct": trig, "trail_pct": trail, "dwell_seconds": dwell,
+            "jump_ratio_threshold": jump_ratio_threshold, "jump_pause_seconds": jump_pause_seconds,
+            "jump_release_mode": jump_release_mode, "jump_ratio_now": self._last_volume_jump_ratio,
+        }
 
     def _cycle_gap_elapsed(self):
         """True if enough time has passed since THIS leg went flat -- see
@@ -3564,7 +3596,8 @@ class StochBot:
                     ef = {"entry_k": state_before.get("entry_k"),
                           "entry_balance_index": state_before.get("entry_balance_index"),
                           "entry_vol_pct": state_before.get("entry_vol_pct"),
-                          "entry_dispersion": state_before.get("entry_dispersion")}
+                          "entry_dispersion": state_before.get("entry_dispersion"),
+                          "entry_settings_snapshot": state_before.get("entry_settings_snapshot")}
                 await self.log_trade(state_before["side"], ae, implied, qty, pnl,
                                      "EMERGENCY_FLATTEN", len(legs),
                                      ms_to_iso(state_before.get("first_entry_time")),
@@ -3759,6 +3792,15 @@ class StochBot:
                 await self.update_state(snapshot)
             except Exception as e:
                 await self.log_run("entry_features_write_failed", {"error": str(e)[:300]})
+            # Isolated write (2026-10-03, direct request: "make sure we are collecting all that
+            # data... what settings won for what conditions") -- its own migration
+            # (entry_settings_snapshot), so a missing column here must never cost the write
+            # above, which already works. See _entry_settings_snapshot's docstring.
+            try:
+                await self.update_state(
+                    {"entry_settings_snapshot": self._entry_settings_snapshot(state)})
+            except Exception as e:
+                await self.log_run("entry_settings_snapshot_write_failed", {"error": str(e)[:300]})
         if cfg.breakeven_floor_enabled and cfg.cycle_partner_table is not None:
             # Snapshot the partner's CUMULATIVE realized pnl now, so its pnl for this cycle can be
             # isolated later as (realized_now - baseline). Taken after the critical patch, and
@@ -3905,7 +3947,8 @@ class StochBot:
             ef = {"entry_k": state.get("entry_k"),
                   "entry_balance_index": state.get("entry_balance_index"),
                   "entry_vol_pct": state.get("entry_vol_pct"),
-                  "entry_dispersion": state.get("entry_dispersion")}
+                  "entry_dispersion": state.get("entry_dispersion"),
+                  "entry_settings_snapshot": state.get("entry_settings_snapshot")}
         await self.log_trade(side, ae, exit_price, qty, pnl, reason, len(legs),
                              ms_to_iso(state.get("first_entry_time")), cycle_id=cycle_id,
                              entry_features=ef)
@@ -5234,7 +5277,8 @@ class StochBot:
                 ef = {"entry_k": state.get("entry_k"),
                       "entry_balance_index": state.get("entry_balance_index"),
                       "entry_vol_pct": state.get("entry_vol_pct"),
-                      "entry_dispersion": state.get("entry_dispersion")}
+                      "entry_dispersion": state.get("entry_dispersion"),
+                      "entry_settings_snapshot": state.get("entry_settings_snapshot")}
             await self.log_trade(side, ae, implied_exit, qty, pnl, ext_reason, len(legs),
                                  ms_to_iso(state.get("first_entry_time")), cycle_id=ext_cycle_id,
                                  entry_features=ef)

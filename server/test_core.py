@@ -2407,6 +2407,52 @@ async def t_exit_mode_ignored_without_schema_flag():
           bot.state_row["side"])
 
 
+async def t_entry_settings_snapshot_captures_exit_and_jump_settings():
+    print("\n[entry settings snapshot: captures the resolved exit + volume-jump settings, lean and precise]")
+    entry = 86000.0
+    ex = FakeExchange(position=round(10.0 / entry, 5), collateral=10.0)
+    partner = {"side": None, "realized_pnl_usd": 0.0}
+    state = _breakeven_state(entry, 10.0)
+    state["override_exit_mode"] = "tp"
+    state["override_tp_pct"] = 0.08
+    state["override_dwell_seconds"] = 15.0
+    state["override_volume_jump_ratio"] = 4.0
+    state["override_volume_jump_release_mode"] = "wiggle"
+    bot = _breakeven_bot(ex, state, partner, breakeven_floor_enabled=False,
+                          schema_has_exit_overrides=True, schema_has_regime_overrides=True,
+                          volume_jump_ratio=3.0, volume_jump_lookback=10,
+                          volume_jump_pause_seconds=1800.0)
+    bot.candles = _jump_candles([1.0] * 10 + [5.0])  # a real spike -- ratio ~5.0
+    bot._update_volume_jump_guard(bot.state_row)
+    snap = bot._entry_settings_snapshot(bot.state_row)
+    check("exit_mode from the override", snap["exit_mode"] == "tp", snap["exit_mode"])
+    check("tp_pct from the override", snap["tp_pct"] == 0.08, snap["tp_pct"])
+    check("dwell_seconds from the override", snap["dwell_seconds"] == 15.0, snap["dwell_seconds"])
+    check("jump_ratio_threshold from the override", snap["jump_ratio_threshold"] == 4.0,
+          snap["jump_ratio_threshold"])
+    check("jump_release_mode from the override", snap["jump_release_mode"] == "wiggle",
+          snap["jump_release_mode"])
+    check("jump_ratio_now reflects the live reading",
+          snap["jump_ratio_now"] is not None and snap["jump_ratio_now"] > 4.0, snap["jump_ratio_now"])
+
+
+async def t_entry_settings_snapshot_falls_back_to_compiled_defaults():
+    print("\n[entry settings snapshot: no overrides set -- falls back to the compiled config]")
+    entry = 86000.0
+    ex = FakeExchange(position=round(10.0 / entry, 5), collateral=10.0)
+    partner = {"side": None, "realized_pnl_usd": 0.0}
+    bot = _breakeven_bot(ex, _breakeven_state(entry, 10.0), partner, breakeven_floor_enabled=False,
+                          schema_has_exit_overrides=True, schema_has_regime_overrides=True,
+                          sl_pct=0.03, tp_pct=0.10, volume_jump_ratio=3.0,
+                          volume_jump_pause_seconds=1800.0, volume_jump_release_mode=None)
+    snap = bot._entry_settings_snapshot(bot.state_row)
+    check("exit_mode defaults to trail", snap["exit_mode"] == "trail", snap["exit_mode"])
+    check("sl_pct matches the compiled config", snap["sl_pct"] == 0.03, snap["sl_pct"])
+    check("dwell_seconds defaults to 0", snap["dwell_seconds"] == 0.0, snap["dwell_seconds"])
+    check("jump_release_mode defaults to None (off)", snap["jump_release_mode"] is None,
+          snap["jump_release_mode"])
+
+
 async def t_dwell_ready_not_touched_resets_the_timer():
     print("\n[dwell: _dwell_ready(False, ...) always resets, even if a timer was already running]")
     bot = _breakeven_bot(FakeExchange(), _breakeven_state(86000.0, 10.0),
@@ -5965,6 +6011,8 @@ async def main():
               t_exit_mode_tp_honors_override_tp_pct,
               t_exit_mode_tp_mode_sl_still_fires,
               t_exit_mode_ignored_without_schema_flag,
+              t_entry_settings_snapshot_captures_exit_and_jump_settings,
+              t_entry_settings_snapshot_falls_back_to_compiled_defaults,
               t_dwell_ready_not_touched_resets_the_timer,
               t_dwell_ready_zero_seconds_is_instant,
               t_dwell_ready_first_touch_not_enough,

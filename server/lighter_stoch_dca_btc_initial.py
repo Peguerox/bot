@@ -439,6 +439,11 @@ CONFIG = BotConfig(
     # lighter_btc_initial_regime_overrides.sql. See BotConfig.schema_has_regime_overrides /
     # StochBot._regime_controls.
     schema_has_regime_overrides=True,
+    # 2026-10-03, direct request ("make sure we are collecting all that data... what settings
+    # won for what conditions"): Worker 1 never had entry_k/balance_index/vol_pct/dispersion
+    # snapshotting at all -- the hedge legs have had this since 2026-10-01. Purely descriptive,
+    # drives no decision. Requires lighter_btc_initial_entry_features.sql.
+    schema_has_entry_features=True,
     # 2026-10-01, direct request ("saving lock"): with the SL widened to 0.20% on the dashboard,
     # a trade that drops to half the SL (-0.10%) and then comes back to entry closes right there
     # at ~$0 instead of riding on. Tracks the live SL, so it stays "half" if the SL is retuned.
