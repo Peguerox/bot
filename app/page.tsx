@@ -2437,6 +2437,14 @@ function HedgeDualLegPanel({
   const [toggling, setToggling] = useState(false);
   const [resetting, setResetting] = useState(false);
   const [closing, setClosing] = useState(false);
+  // Own 1s ticker for the jump-guard countdown (2026-10-03) -- the `now` prop is healthTick,
+  // shared dashboard-wide and only updated every 15s, which made the countdown look frozen.
+  // Same pattern as Worker 1's panel (its own local nowTick at 1000ms).
+  const [nowTick, setNowTick] = useState(() => Date.now());
+  useEffect(() => {
+    const id = setInterval(() => setNowTick(Date.now()), 1000);
+    return () => clearInterval(id);
+  }, []);
   const enabled = longState?.enabled ?? false;
   const resetReady = longState?.side === null && shortState?.side === null
     && longState?.enabled === false && shortState?.enabled === false
@@ -2474,8 +2482,8 @@ function HedgeDualLegPanel({
   const curJumpPause: number = longState?.override_volume_jump_pause_seconds ?? 1800;
   const jumpPausedUntil: Date | null = longState?.live_volume_jump_paused_until
     ? new Date(longState.live_volume_jump_paused_until) : null;
-  const jumpPausedActive = jumpPausedUntil != null && jumpPausedUntil.getTime() > now;
-  const jumpSecondsLeft = jumpPausedActive ? Math.max(0, Math.round((jumpPausedUntil!.getTime() - now) / 1000)) : 0;
+  const jumpPausedActive = jumpPausedUntil != null && jumpPausedUntil.getTime() > nowTick;
+  const jumpSecondsLeft = jumpPausedActive ? Math.max(0, Math.round((jumpPausedUntil!.getTime() - nowTick) / 1000)) : 0;
   const [jumpRatioIn, setJumpRatioIn] = useState("");
   const [jumpPauseIn, setJumpPauseIn] = useState("");
 
