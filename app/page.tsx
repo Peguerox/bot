@@ -1603,7 +1603,18 @@ function CompactStochBtcPanel({
   // still active; this is the actual gate state, not just the current reading.
   const jumpPausedUntil: Date | null = state?.live_volume_jump_paused_until
     ? new Date(state.live_volume_jump_paused_until) : null;
-  const jumpPausedActive = jumpPausedUntil != null && jumpPausedUntil.getTime() > nowTick;
+  // Optimistic clear (2026-10-03, direct report: "it does not clear" after clicking the
+  // button while genuinely paused). The backend DOES clear it -- confirmed live both times --
+  // but live_volume_jump_paused_until is only written back to the DB on a 10s throttle
+  // (_live_signal_persist_ts), and nothing else refetches this table on a tighter cadence than
+  // that. A click's own onToggled() reload can easily land in that gap and show the stale
+  // still-paused value for up to ~10s with no visible change. Mask jumpPausedUntil for a short
+  // window after a successful click; a real NEW spike within that window will still show once
+  // the window expires and a fresh read confirms it -- this never suppresses the guard itself,
+  // only how soon the dashboard admits a new spike re-armed it.
+  const [jumpClearClickedAt, setJumpClearClickedAt] = useState<number | null>(null);
+  const jumpClearMasking = jumpClearClickedAt != null && nowTick - jumpClearClickedAt < 12000;
+  const jumpPausedActive = !jumpClearMasking && jumpPausedUntil != null && jumpPausedUntil.getTime() > nowTick;
   const jumpSecondsLeft = jumpPausedActive ? Math.max(0, Math.round((jumpPausedUntil!.getTime() - nowTick) / 1000)) : 0;
   const [jumpRatioIn, setJumpRatioIn] = useState("");
   const [jumpPauseIn, setJumpPauseIn] = useState("");
@@ -1642,6 +1653,8 @@ function CompactStochBtcPanel({
     if (!res.ok) {
       const b = await res.json().catch(() => ({}));
       alert(b.error || "Could not clear the pause.");
+    } else {
+      setJumpClearClickedAt(Date.now());
     }
     await onToggled();
     setSavingSignal(null);
@@ -2482,7 +2495,14 @@ function HedgeDualLegPanel({
   const curJumpPause: number = longState?.override_volume_jump_pause_seconds ?? 1800;
   const jumpPausedUntil: Date | null = longState?.live_volume_jump_paused_until
     ? new Date(longState.live_volume_jump_paused_until) : null;
-  const jumpPausedActive = jumpPausedUntil != null && jumpPausedUntil.getTime() > nowTick;
+  // Optimistic clear (2026-10-03, direct report: "it does not clear") -- same fix as Worker
+  // 1's panel. live_volume_jump_paused_until is written back on a 10s throttle
+  // (_live_signal_persist_ts), and this panel's onToggled() reload can easily land inside that
+  // gap, showing the stale still-paused value for up to ~10s. See Worker 1's panel for the
+  // full reasoning.
+  const [jumpClearClickedAt, setJumpClearClickedAt] = useState<number | null>(null);
+  const jumpClearMasking = jumpClearClickedAt != null && nowTick - jumpClearClickedAt < 12000;
+  const jumpPausedActive = !jumpClearMasking && jumpPausedUntil != null && jumpPausedUntil.getTime() > nowTick;
   const jumpSecondsLeft = jumpPausedActive ? Math.max(0, Math.round((jumpPausedUntil!.getTime() - nowTick) / 1000)) : 0;
   const [jumpRatioIn, setJumpRatioIn] = useState("");
   const [jumpPauseIn, setJumpPauseIn] = useState("");
@@ -2518,6 +2538,8 @@ function HedgeDualLegPanel({
     if (!res.ok) {
       const b = await res.json().catch(() => ({}));
       alert(b.error || "Could not clear the pause.");
+    } else {
+      setJumpClearClickedAt(Date.now());
     }
     await onToggled();
     setSavingJump(null);
