@@ -9,20 +9,30 @@ import { getSupabaseAdmin } from "@/lib/supabase-admin";
 //
 // Bounds are sanity rails, not opinions: they stop a typo (0.6 instead of 0.06) from placing a
 // stop ten times wider than intended on real money.
+//
+// jumpRatio/jumpPause/clearVolumeJump (2026-10-03, "build the same guard for worker 2") --
+// same mechanism as lighter-btc-initial-settings, both legs always carry IDENTICAL guard
+// settings for the same reason the exits do: each leg reads its own state row independently
+// (StochBot._update_volume_jump_guard), so a mismatched override would let one leg's cycle
+// gate disagree with its partner's.
 const LIMITS = {
   sl: { min: 0.01, max: 0.5, label: "stop-loss" },
   trigger: { min: 0.01, max: 1.0, label: "profit-lock trigger" },
   trail: { min: 0.005, max: 0.5, label: "profit-lock trail" },
+  jumpRatio: { min: 1.1, max: 20, label: "volume-jump ratio" },
+  jumpPause: { min: 0, max: 1800, label: "volume-jump pause (seconds)" },
 };
 
 export async function POST(req: NextRequest) {
   const body = await req.json();
-  const out: Record<string, number> = {};
+  const out: Record<string, number | string> = {};
 
   for (const [key, col] of [
     ["sl", "override_sl_pct"],
     ["trigger", "override_profit_lock_trigger"],
     ["trail", "override_profit_lock_trail"],
+    ["jumpRatio", "override_volume_jump_ratio"],
+    ["jumpPause", "override_volume_jump_pause_seconds"],
   ] as const) {
     const raw = body[key];
     if (raw === undefined || raw === null || raw === "") continue;
@@ -40,13 +50,20 @@ export async function POST(req: NextRequest) {
     out[col] = v;
   }
 
+  // Manual "clear pause" button -- writes a marker timestamp, not a literal flag; see
+  // override_volume_jump_cleared_at's docstring (StochBot._update_volume_jump_guard) for why
+  // this forgives only the pause already in progress, not future spikes.
+  if (body.clearVolumeJump === true) {
+    out["override_volume_jump_cleared_at"] = new Date().toISOString();
+  }
+
   if (Object.keys(out).length === 0) {
     return NextResponse.json({ error: "Nothing to change." }, { status: 400 });
   }
 
   // The trail must sit below the trigger or the profit-lock can never arm before it fires.
-  const trig = out["override_profit_lock_trigger"];
-  const trail = out["override_profit_lock_trail"];
+  const trig = out["override_profit_lock_trigger"] as number | undefined;
+  const trail = out["override_profit_lock_trail"] as number | undefined;
   if (trig !== undefined && trail !== undefined && trail >= trig) {
     return NextResponse.json(
       { error: `Trail (${trail}%) must be smaller than the trigger (${trig}%).` },

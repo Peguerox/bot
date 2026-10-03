@@ -2764,10 +2764,21 @@ class StochBot:
             except Exception:
                 pass  # Dashboard logging cannot interrupt stops/exits.
 
+    def _volume_jump_allows_cycle(self):
+        """2026-10-03, "build the same guard for worker 2": a fixed_direction bot (the hedge)
+        never looks at entry_signal, so the ordinary entry_signal=None block in tick() that
+        blocks Worker 1 has nothing to act on for these legs -- _wants_new_cycle is the actual
+        entry decision point for them. self._volume_jump_paused_until is set by
+        _update_volume_jump_guard earlier in the SAME tick (unconditional, every bot), so this
+        just reads that already-fresh result; inert (always True) for any bot that never
+        configures volume_jump_ratio, exactly like _update_volume_jump_guard's own early-out."""
+        return self._volume_jump_paused_until is None or time.time() >= self._volume_jump_paused_until
+
     def _wants_new_cycle(self):
         """Every condition for DECLARING readiness for a new cycle (or, standalone, entering)."""
         return (self._environment_allows_cycle() and self._has_entry_pressure() and self._cycle_gap_elapsed()
-                and self._has_entry_dispersion() and self._candle_unused())
+                and self._has_entry_dispersion() and self._candle_unused()
+                and self._volume_jump_allows_cycle())
 
     def _reversal_cooldown_active(self):
         """See BotConfig.post_reversal_cooldown_seconds."""
@@ -4688,11 +4699,19 @@ class StochBot:
                                                   "live_flip_streak_len": streak_len})
                     except Exception:
                         pass
+                if cfg.volume_jump_ratio is not None:
+                    # Un-nested from the volume_regime_switch_threshold block above (2026-10-03,
+                    # "build the same guard for worker 2"): that gate is Worker 1's flip-regime
+                    # switch specifically and the hedge never sets it, but the hedge DOES set
+                    # volume_jump_ratio and needs these two columns written on its own account.
+                    # Worker 1 still gets both writes -- it sets volume_jump_ratio too -- so this
+                    # is a no-op change for it, just a different condition reaching the same code.
+                    #
                     # Isolated best-effort write (2026-10-02, direct request: "lets try to
                     # detect the huge jump in volume") -- the volume-jump guard's own reading,
-                    # shown regardless of whether cfg.volume_jump_ratio is actually enabled, so
-                    # it can be watched before deciding to turn the guard on. Requires
-                    # lighter_btc_initial_volume_jump.sql.
+                    # shown regardless of whether the guard is actually gating entries, so it can
+                    # be watched before deciding to turn gating on. Requires
+                    # lighter_btc_initial_volume_jump.sql (or the hedge-leg equivalent).
                     jr = compute_volume_jump_ratio(self.candles, cfg.volume_jump_lookback)
                     if jr is not None:
                         try:

@@ -5139,6 +5139,27 @@ async def t_volume_jump_clear_marker_off_by_default_schema_flag():
     check("still paused -- clear marker present but the schema flag is off", active is True, active)
 
 
+async def t_volume_jump_guard_blocks_a_hedge_style_cycle():
+    print("\n[volume-jump guard: blocks a fixed_direction leg's _wants_new_cycle, not just entry_signal]")
+    # fixed_direction (the hedge) never reads entry_signal, so Worker 1's own mechanism --
+    # nulling entry_signal in tick() -- has nothing to act on for these legs. _wants_new_cycle
+    # is their actual entry decision point; see _volume_jump_allows_cycle's docstring.
+    bot = _hedge_leg(volume_jump_ratio=3.0, volume_jump_lookback=10, volume_jump_pause_seconds=1800.0)
+    bot.candles = _jump_candles([1.0] * 10 + [5.0])  # 5x -- over the 3.0 threshold
+    active = bot._update_volume_jump_guard(bot.state_row)
+    check("guard armed on a real spike", active is True, active)
+    check("fixed_direction leg does not want a new cycle while paused", bot._wants_new_cycle() is False)
+
+
+async def t_volume_jump_guard_calm_does_not_block_hedge_style_cycle():
+    print("\n[volume-jump guard: calm volume leaves a fixed_direction leg's cycle gate untouched]")
+    bot = _hedge_leg(volume_jump_ratio=3.0, volume_jump_lookback=10, volume_jump_pause_seconds=1800.0)
+    bot.candles = _jump_candles([1.0] * 11)  # flat -- no spike
+    active = bot._update_volume_jump_guard(bot.state_row)
+    check("guard not armed -- no spike", active is False, active)
+    check("fixed_direction leg still wants a cycle", bot._wants_new_cycle() is True)
+
+
 async def t_regime_toggle_stochastic_off_blocks_low_volume_entry():
     print("\n[regime toggle: override_stochastic_enabled=False blocks the low-volume regime]")
     side = await _regime_toggle_case({"override_stochastic_enabled": False}, zebra_band=False)
@@ -5359,6 +5380,8 @@ async def main():
               t_volume_jump_clear_marker_forgives_an_old_pause,
               t_volume_jump_clear_marker_does_not_block_a_new_spike,
               t_volume_jump_clear_marker_off_by_default_schema_flag,
+              t_volume_jump_guard_blocks_a_hedge_style_cycle,
+              t_volume_jump_guard_calm_does_not_block_hedge_style_cycle,
               t_regime_toggle_stochastic_off_blocks_low_volume_entry,
               t_regime_toggle_stochastic_on_default,
               t_regime_toggle_zebra_off_bypasses_band,

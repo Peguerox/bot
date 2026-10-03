@@ -2463,6 +2463,58 @@ function HedgeDualLegPanel({
   // no gating yet). Reuses the environment_er row rather than a new state column or migration.
   const liveTradedVolume: number | null = environmentFresh ? environment?.volume ?? null : null;
   const liveTradedVolumeRate: number | null = environmentFresh ? environment?.volume_rate ?? null : null;
+  // Volume-jump guard (2026-10-03, "build the same guard for worker 2" -- step 2, the actual
+  // gate, same panel shape as Worker 1's). LONG leg is the live-readout owner, same convention
+  // as ER15/Vol10; the override values are written identically to both legs so either leg's
+  // row would show the same current settings -- longState is used for both, matching the rest
+  // of this panel.
+  const [savingJump, setSavingJump] = useState<string | null>(null);
+  const liveJumpRatio: number | null = longState?.live_volume_jump_ratio ?? null;
+  const curJumpRatio: number = longState?.override_volume_jump_ratio ?? 3.0;
+  const curJumpPause: number = longState?.override_volume_jump_pause_seconds ?? 1800;
+  const jumpPausedUntil: Date | null = longState?.live_volume_jump_paused_until
+    ? new Date(longState.live_volume_jump_paused_until) : null;
+  const jumpPausedActive = jumpPausedUntil != null && jumpPausedUntil.getTime() > now;
+  const jumpSecondsLeft = jumpPausedActive ? Math.max(0, Math.round((jumpPausedUntil!.getTime() - now) / 1000)) : 0;
+  const [jumpRatioIn, setJumpRatioIn] = useState("");
+  const [jumpPauseIn, setJumpPauseIn] = useState("");
+
+  async function handleApplyJumpGuard() {
+    if (!jumpRatioIn.trim() && !jumpPauseIn.trim()) return;
+    if (!confirm(`Set the volume-jump guard to ratio ${jumpRatioIn.trim() || curJumpRatio}x / pause ${jumpPauseIn.trim() || curJumpPause}s for both hedge legs? Takes effect immediately.`)) return;
+    setSavingJump("jump");
+    const payload: Record<string, string> = {};
+    if (jumpRatioIn.trim()) payload.jumpRatio = jumpRatioIn.trim();
+    if (jumpPauseIn.trim()) payload.jumpPause = jumpPauseIn.trim();
+    const res = await fetch("/api/lighter-hedge-settings", {
+      method: "POST", headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(payload),
+    });
+    if (!res.ok) {
+      const b = await res.json().catch(() => ({}));
+      alert(b.error || "Could not apply the change.");
+    } else {
+      setJumpRatioIn(""); setJumpPauseIn("");
+    }
+    await onToggled();
+    setSavingJump(null);
+  }
+
+  async function handleClearVolumeJump() {
+    if (!confirm("Clear the current volume-jump pause for both hedge legs? A new spike will still re-arm it normally.")) return;
+    setSavingJump("jumpClear");
+    const res = await fetch("/api/lighter-hedge-settings", {
+      method: "POST", headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ clearVolumeJump: true }),
+    });
+    if (!res.ok) {
+      const b = await res.json().catch(() => ({}));
+      alert(b.error || "Could not clear the pause.");
+    }
+    await onToggled();
+    setSavingJump(null);
+  }
+
   const curSl = longState?.override_sl_pct ?? null;
   const curTrig = longState?.override_profit_lock_trigger ?? null;
   const curTrail = longState?.override_profit_lock_trail ?? null;
@@ -2882,6 +2934,73 @@ function HedgeDualLegPanel({
                     : "neutral — readout only, legs stay $10 / $10"}
                 </span>
               </p>
+            </div>
+            <div className="bg-gray-800/60 rounded-lg p-2">
+              {/* 2026-10-03, direct request ("build the same guard for worker 2") -- same
+                  guard as Worker 1's (compute_volume_jump_ratio), same panel shape. Blocks NEW
+                  paired cycles only, never an exit -- see _volume_jump_allows_cycle's docstring. */}
+              <p className="text-gray-500 text-[10px] uppercase">Volume-jump guard</p>
+              <p className="font-bold text-sm tabular-nums">
+                <span className={jumpPausedActive ? "text-red-400" : "text-green-400"}>
+                  {jumpPausedActive ? "PAUSED" : "ARMED, not paused"}
+                </span>
+                <span className="text-[10px] font-normal text-gray-500 ml-1.5">
+                  {jumpPausedActive
+                    ? `new cycles blocked -- clears in ${Math.floor(jumpSecondsLeft / 60)}:${String(jumpSecondsLeft % 60).padStart(2, "0")}`
+                    : "new cycles allowed"}
+                </span>
+              </p>
+              {jumpPausedActive && (
+                <button
+                  onClick={handleClearVolumeJump}
+                  disabled={savingJump !== null || loading}
+                  className="mt-1 text-xs font-bold px-2.5 py-1 rounded bg-red-500/20 text-red-400 hover:bg-red-500/30 disabled:opacity-30"
+                >
+                  {savingJump === "jumpClear" ? "…" : "Clear pause now"}
+                </button>
+              )}
+              <p className="text-[11px] text-gray-500 mt-0.5 tabular-nums">
+                latest reading:{" "}
+                <span className={liveJumpRatio == null ? "text-gray-500"
+                  : liveJumpRatio >= curJumpRatio ? "text-amber-400" : "text-gray-400"}>
+                  {liveJumpRatio != null ? liveJumpRatio.toFixed(2) + "x" : "—"}
+                </span>
+                {liveJumpRatio != null && liveJumpRatio >= curJumpRatio && !jumpPausedActive
+                  ? " (spiking now -- about to arm)" : ""}
+              </p>
+              <div className="flex items-end gap-1.5 mt-1.5">
+                <div className="flex-1">
+                  <p className="text-gray-500 text-[9px] uppercase">
+                    Trigger ratio <span className="text-gray-600">now {curJumpRatio}x</span>
+                  </p>
+                  <input
+                    value={jumpRatioIn}
+                    onChange={(e) => setJumpRatioIn(e.target.value)}
+                    placeholder={String(curJumpRatio)}
+                    inputMode="decimal"
+                    className="w-full bg-gray-900 border border-gray-700 rounded px-1.5 py-1 text-xs text-white tabular-nums focus:outline-none focus:border-blue-500"
+                  />
+                </div>
+                <div className="flex-1">
+                  <p className="text-gray-500 text-[9px] uppercase">
+                    Pause <span className="text-gray-600">now {curJumpPause}s</span>
+                  </p>
+                  <input
+                    value={jumpPauseIn}
+                    onChange={(e) => setJumpPauseIn(e.target.value)}
+                    placeholder={String(curJumpPause)}
+                    inputMode="decimal"
+                    className="w-full bg-gray-900 border border-gray-700 rounded px-1.5 py-1 text-xs text-white tabular-nums focus:outline-none focus:border-blue-500"
+                  />
+                </div>
+                <button
+                  onClick={handleApplyJumpGuard}
+                  disabled={savingJump !== null || loading || (!jumpRatioIn.trim() && !jumpPauseIn.trim())}
+                  className="text-xs font-bold px-2.5 py-1 rounded bg-blue-500/20 text-blue-400 hover:bg-blue-500/30 disabled:opacity-30"
+                >
+                  {savingJump === "jump" ? "…" : "Set"}
+                </button>
+              </div>
             </div>
           </div>
           {/* Manual exit settings; environment readings are together above. */}

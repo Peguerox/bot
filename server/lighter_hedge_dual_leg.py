@@ -251,6 +251,22 @@ LONG_CONFIG = BotConfig(
     trade_flow_log_defers_to=None,
     unified_market_data_table=None,
     schema_has_entry_features=True,  # KEPT -- hover documentation only
+    # Volume-jump guard, 2026-10-03 ("build the same guard for worker 2") -- same values, same
+    # reasoning as Worker 1's (compute_volume_jump_ratio's docstring): 3.0x is the 95th
+    # percentile of a 14,773-candle sample, picked with margin below the real incident that
+    # motivated it; 1800s (30 min) because elevated volume near funding-settlement windows can
+    # take up to an hour to fully revert, found while researching Worker 1's own incident.
+    # Blocks NEW paired cycles only via _volume_jump_allows_cycle (_wants_new_cycle), never an
+    # exit -- fixed_direction legs never consult entry_signal, so the ordinary Worker 1
+    # mechanism (nulling entry_signal) has nothing to act on here; see that method's docstring.
+    # schema_has_regime_overrides=True only enables override reads (live ratio/pause/clear --
+    # see _update_volume_jump_guard); it does NOT touch the regime-switch-threshold machinery
+    # fixed_direction bots never reach (regime_vol_threshold stays None, this config never sets
+    # volume_regime_switch_threshold and nothing writes override_volume_switch_threshold here).
+    volume_jump_ratio=3.0,
+    volume_jump_lookback=10,
+    volume_jump_pause_seconds=1800.0,
+    schema_has_regime_overrides=True,
 )
 
 SHORT_CONFIG = BotConfig(
@@ -305,6 +321,15 @@ SHORT_CONFIG = BotConfig(
     trade_flow_log_defers_to=None,
     unified_market_data_table=None,
     schema_has_entry_features=True,  # KEPT -- hover documentation only
+    # Volume-jump guard -- see LONG_CONFIG's docstring. Same values on both legs (the settings
+    # route writes overrides identically to both state tables); each leg computes its own ratio
+    # independently from its own candle feed, same as every other per-leg gate here -- the
+    # existing cycle barrier (_cycle_gate_clear_to_enter) already absorbs any timing disagreement
+    # between the two legs, same as it does for every other entry condition.
+    volume_jump_ratio=3.0,
+    volume_jump_lookback=10,
+    volume_jump_pause_seconds=1800.0,
+    schema_has_regime_overrides=True,
 )
 
 
