@@ -20,6 +20,7 @@ const LIMITS = {
   trigger: { min: 0.01, max: 1.0, label: "profit-lock trigger" },
   trail: { min: 0.005, max: 0.5, label: "profit-lock trail" },
   tp: { min: 0.01, max: 1.0, label: "take-profit" },
+  dwell: { min: 0, max: 300, label: "dwell (seconds)" },
   jumpRatio: { min: 1.1, max: 20, label: "volume-jump ratio" },
   jumpPause: { min: 0, max: 1800, label: "volume-jump pause (seconds)" },
 };
@@ -33,6 +34,7 @@ export async function POST(req: NextRequest) {
     ["trigger", "override_profit_lock_trigger"],
     ["trail", "override_profit_lock_trail"],
     ["tp", "override_tp_pct"],
+    ["dwell", "override_dwell_seconds"],
     ["jumpRatio", "override_volume_jump_ratio"],
     ["jumpPause", "override_volume_jump_pause_seconds"],
   ] as const) {

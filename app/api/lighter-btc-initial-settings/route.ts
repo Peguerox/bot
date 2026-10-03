@@ -24,6 +24,7 @@ const LIMITS = {
   jumpRatio: { min: 1.1, max: 20, label: "volume-jump ratio" },
   jumpPause: { min: 0, max: 1800, label: "volume-jump pause (seconds)" },
   tp: { min: 0.01, max: 1.0, label: "take-profit" },
+  dwell: { min: 0, max: 300, label: "dwell (seconds)" },
 };
 
 export async function POST(req: NextRequest) {
@@ -42,6 +43,7 @@ export async function POST(req: NextRequest) {
     ["jumpRatio", "override_volume_jump_ratio"],
     ["jumpPause", "override_volume_jump_pause_seconds"],
     ["tp", "override_tp_pct"],
+    ["dwell", "override_dwell_seconds"],
   ] as const) {
     const raw = body[key];
     if (raw === undefined || raw === null || raw === "") continue;

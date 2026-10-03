@@ -1551,6 +1551,11 @@ function CompactStochBtcPanel({
   const curExitMode: string = state?.override_exit_mode ?? "trail";
   const [tpIn, setTpIn] = useState("");
   const [savingExitMode, setSavingExitMode] = useState(false);
+  // Dwell (2026-10-03, direct request: "a dwell strategy... used in both fixed TP and trail").
+  // Applies to whichever winner-exit is active (TP in tp mode, the trail's pullback in trail
+  // mode) -- SL is never delayed. 0 (default) is instant, same as before this existed.
+  const curDwell: number = state?.override_dwell_seconds ?? 0;
+  const [dwellIn, setDwellIn] = useState("");
 
   async function handleSetExitMode(mode: "trail" | "tp") {
     if (mode === curExitMode) return;
@@ -1757,13 +1762,15 @@ function CompactStochBtcPanel({
     if (trigIn.trim()) payload.trigger = trigIn.trim();
     if (trailIn.trim()) payload.trail = trailIn.trim();
     if (tpIn.trim()) payload.tp = tpIn.trim();
+    if (dwellIn.trim()) payload.dwell = dwellIn.trim();
     if (Object.keys(payload).length === 0) return;
     if (!confirm(
       `Apply to ${title}?\n\n`
       + `SL      ${payload.sl ?? "(unchanged)"}%\n`
       + `Trigger ${payload.trigger ?? "(unchanged)"}%\n`
       + `Trail   ${payload.trail ?? "(unchanged)"}%\n`
-      + `TP      ${payload.tp ?? "(unchanged)"}%\n\n`
+      + `TP      ${payload.tp ?? "(unchanged)"}%\n`
+      + `Dwell   ${payload.dwell ?? "(unchanged)"}s\n\n`
       + `Takes effect immediately, including on an open position.`
     )) return;
     setSavingSettings(true);
@@ -1774,7 +1781,7 @@ function CompactStochBtcPanel({
     if (!res.ok) {
       const b = await res.json().catch(() => ({}));
       alert(b.error || "Could not apply settings.");
-    } else { setSlIn(""); setTrigIn(""); setTrailIn(""); setTpIn(""); }
+    } else { setSlIn(""); setTrigIn(""); setTrailIn(""); setTpIn(""); setDwellIn(""); }
     await onToggled();
     setSavingSettings(false);
   }
@@ -2500,14 +2507,15 @@ function CompactStochBtcPanel({
               winner. SL always stays active either way.
             </p>
           </div>
-          <div className="grid grid-cols-4 gap-1.5">
-            {([["SL", slIn, setSlIn, curSl],
-               ["Trigger", trigIn, setTrigIn, curTrig],
-               ["Trail", trailIn, setTrailIn, curTrail],
-               ["TP", tpIn, setTpIn, curTp]] as const).map(([label, val, set, cur]) => (
+          <div className="grid grid-cols-5 gap-1.5">
+            {([["SL", slIn, setSlIn, curSl, "%"],
+               ["Trigger", trigIn, setTrigIn, curTrig, "%"],
+               ["Trail", trailIn, setTrailIn, curTrail, "%"],
+               ["TP", tpIn, setTpIn, curTp, "%"],
+               ["Dwell", dwellIn, setDwellIn, curDwell, "s"]] as const).map(([label, val, set, cur, unit]) => (
               <div key={label}>
                 <p className="text-gray-500 text-[9px] uppercase">
-                  {label} <span className="text-gray-600">now {cur != null ? cur + "%" : "—"}</span>
+                  {label} <span className="text-gray-600">now {cur != null ? cur + unit : "—"}</span>
                 </p>
                 <input
                   value={val}
@@ -2521,7 +2529,7 @@ function CompactStochBtcPanel({
           </div>
           <button
             onClick={handleApplySettings}
-            disabled={savingSettings || loading || (!slIn.trim() && !trigIn.trim() && !trailIn.trim() && !tpIn.trim())}
+            disabled={savingSettings || loading || (!slIn.trim() && !trigIn.trim() && !trailIn.trim() && !tpIn.trim() && !dwellIn.trim())}
             className="w-full text-xs font-bold px-2.5 py-1 rounded bg-blue-500/20 text-blue-400 hover:bg-blue-500/30 disabled:opacity-30"
           >
             {savingSettings ? "Applying…" : "Apply"}
@@ -2529,7 +2537,10 @@ function CompactStochBtcPanel({
           <p className="text-gray-600 text-[9px] leading-snug">
             Leave a box blank to keep it. Takes effect immediately, including on an open position
             (the exchange-side stop is re-placed at the new SL). TP stays 0.10%. Trail 0 = exit on
-            the first tick down after the trigger.
+            the first tick down after the trigger. Dwell: the TP (in Fixed TP mode) or the trail's
+            pullback (in Trail mode) must hold for this many seconds before it actually closes --
+            0 = instant, same as before. Research is mixed: it measurably cuts whipsaw on both,
+            but hasn't beaten the plain no-dwell candidate yet. SL is never delayed.
           </p>
         </div>
       )}
@@ -2713,6 +2724,9 @@ function HedgeDualLegPanel({
   // winner exit and the trail is suppressed. See StochBot._exit_params's docstring.
   const curTp = longState?.override_tp_pct ?? null;
   const curExitMode: string = longState?.override_exit_mode ?? "trail";
+  // Dwell -- see Worker 1's panel for the full reasoning.
+  const curDwell: number = longState?.override_dwell_seconds ?? 0;
+  const [dwellIn, setDwellIn] = useState("");
 
   async function handleSetExitMode(mode: "trail" | "tp") {
     if (mode === curExitMode) return;
@@ -2740,6 +2754,7 @@ function HedgeDualLegPanel({
     if (trigIn.trim()) payload.trigger = trigIn.trim();
     if (trailIn.trim()) payload.trail = trailIn.trim();
     if (tpIn.trim()) payload.tp = tpIn.trim();
+    if (dwellIn.trim()) payload.dwell = dwellIn.trim();
     if (Object.keys(payload).length === 0) return;
     // The route writes BOTH legs together -- unequal exits would break the breakeven floor.
     if (!confirm(
@@ -2747,7 +2762,8 @@ function HedgeDualLegPanel({
       + `SL      ${payload.sl ?? "(unchanged)"}%\n`
       + `Trigger ${payload.trigger ?? "(unchanged)"}%\n`
       + `Trail   ${payload.trail ?? "(unchanged)"}%\n`
-      + `TP      ${payload.tp ?? "(unchanged)"}%\n\n`
+      + `TP      ${payload.tp ?? "(unchanged)"}%\n`
+      + `Dwell   ${payload.dwell ?? "(unchanged)"}s\n\n`
       + `Takes effect immediately, including on an open position.`
     )) return;
     setSavingSettings(true);
@@ -2758,7 +2774,7 @@ function HedgeDualLegPanel({
     if (!res.ok) {
       const b = await res.json().catch(() => ({}));
       alert(b.error || "Could not apply settings.");
-    } else { setSlIn(""); setTrigIn(""); setTrailIn(""); setTpIn(""); }
+    } else { setSlIn(""); setTrigIn(""); setTrailIn(""); setTpIn(""); setDwellIn(""); }
     await onToggled();
     setSavingSettings(false);
   }
@@ -3297,14 +3313,15 @@ function HedgeDualLegPanel({
                 either way.
               </p>
             </div>
-            <div className="grid grid-cols-4 gap-1.5">
-              {([["SL", slIn, setSlIn, curSl],
-                 ["Trigger", trigIn, setTrigIn, curTrig],
-                 ["Trail", trailIn, setTrailIn, curTrail],
-                 ["TP", tpIn, setTpIn, curTp]] as const).map(([label, val, set, cur]) => (
+            <div className="grid grid-cols-5 gap-1.5">
+              {([["SL", slIn, setSlIn, curSl, "%"],
+                 ["Trigger", trigIn, setTrigIn, curTrig, "%"],
+                 ["Trail", trailIn, setTrailIn, curTrail, "%"],
+                 ["TP", tpIn, setTpIn, curTp, "%"],
+                 ["Dwell", dwellIn, setDwellIn, curDwell, "s"]] as const).map(([label, val, set, cur, unit]) => (
                 <div key={label}>
                   <p className="text-gray-500 text-[9px] uppercase">
-                    {label} <span className="text-gray-600">now {cur != null ? cur + "%" : "—"}</span>
+                    {label} <span className="text-gray-600">now {cur != null ? cur + unit : "—"}</span>
                   </p>
                   <input
                     value={val}
@@ -3318,7 +3335,7 @@ function HedgeDualLegPanel({
             </div>
             <button
               onClick={handleApplySettings}
-              disabled={savingSettings || loading || (!slIn.trim() && !trigIn.trim() && !trailIn.trim() && !tpIn.trim())}
+              disabled={savingSettings || loading || (!slIn.trim() && !trigIn.trim() && !trailIn.trim() && !tpIn.trim() && !dwellIn.trim())}
               className="w-full text-xs font-bold px-2.5 py-1 rounded bg-blue-500/20 text-blue-400 hover:bg-blue-500/30 disabled:opacity-30"
             >
               {savingSettings ? "Applying…" : "Apply to both legs"}
@@ -3326,7 +3343,10 @@ function HedgeDualLegPanel({
             <p className="text-gray-600 text-[9px] leading-snug">
               Leave a box blank to keep it. Applies to BOTH legs at once and takes effect
               immediately, including on an open position — stop the bot first if you'd rather it
-              only affect the next cycle.
+              only affect the next cycle. Dwell: the TP (Fixed TP mode) or the trail's pullback
+              (Trail mode) must hold for this many seconds before it closes -- 0 = instant. SL is
+              never delayed. Research found it cuts whipsaw on both but hasn't beaten plain
+              no-dwell yet -- see WORKER_2_HANDOFF.md follow-up.
             </p>
           </div>
           <div className="space-y-1">
