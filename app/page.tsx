@@ -2519,9 +2519,8 @@ function CompactStochBtcPanel({
                ["TP", tpIn, setTpIn, curTp, "%"],
                ["Dwell", dwellIn, setDwellIn, curDwell, "s"]] as const).map(([label, val, set, cur, unit]) => (
               <div key={label}>
-                <p className="text-gray-500 text-[9px] uppercase">
-                  {label} <span className="text-gray-600">now {cur != null ? cur + unit : "—"}</span>
-                </p>
+                <p className="text-gray-500 text-[9px] uppercase">{label}</p>
+                <p className="text-gray-600 text-[9px]">now {cur != null ? cur + unit : "—"}</p>
                 <input
                   value={val}
                   onChange={(e) => set(e.target.value)}
@@ -3328,9 +3327,8 @@ function HedgeDualLegPanel({
                  ["TP", tpIn, setTpIn, curTp, "%"],
                  ["Dwell", dwellIn, setDwellIn, curDwell, "s"]] as const).map(([label, val, set, cur, unit]) => (
                 <div key={label}>
-                  <p className="text-gray-500 text-[9px] uppercase">
-                    {label} <span className="text-gray-600">now {cur != null ? cur + unit : "—"}</span>
-                  </p>
+                  <p className="text-gray-500 text-[9px] uppercase">{label}</p>
+                  <p className="text-gray-600 text-[9px]">now {cur != null ? cur + unit : "—"}</p>
                   <input
                     value={val}
                     onChange={(e) => set(e.target.value)}
