@@ -1215,7 +1215,22 @@ def compute_candle_volume_avg(candles, window=10):
     if len(closed) < window:
         return None
     bars = closed[-window:]
-    return sum(c["v"] for c in bars) / len(bars)
+    return sum(c.get("v", 0) for c in bars) / len(bars)
+
+
+def compute_candle_volume_rate(candles, window=10):
+    """Change in compute_candle_volume_avg() between this closed candle and the one before it --
+    signed BTC/min. Readout only (Worker 2, 2026-10-02): the research finding was that a high
+    but STABLE volume level traded fine while a violently CHANGING level (even mid-level) is
+    where real losses happened, so the rate matters independently of the level. None if either
+    average is unavailable (too few candles)."""
+    now = compute_candle_volume_avg(candles, window)
+    if now is None:
+        return None
+    prior = compute_candle_volume_avg(candles[:-1], window)
+    if prior is None:
+        return None
+    return now - prior
 
 
 def compute_live_flip_streak(candles, lookback=20):
@@ -2727,13 +2742,19 @@ class StochBot:
             vol_allowed = vol_pct is not None and vol_pct <= cfg.environment_vol_max_pct
         allowed = er_allowed and vol_allowed
         candle_t = bars[-1]["t"] if bars else None
+        # Traded-volume readout (2026-10-02, "same guard for worker 2" -- step 1 of 2, display
+        # only, no gating yet). Distinct from vol_pct above, which is a volatility (high-low)
+        # measure; this is actual BTC size traded, same function as Worker 1's volume-jump guard.
+        traded_volume = compute_candle_volume_avg(self.candles, 10)
+        traded_volume_rate = compute_candle_volume_rate(self.candles, 10)
         snapshot = {"allowed": allowed, "er": er, "candle_t": candle_t,
                     "checked_at": now, "window": cfg.environment_er_window,
                     "pause_below": cfg.environment_er_pause_below,
                     "resume_at": cfg.environment_er_resume_at,
                     "er_allowed": er_allowed, "vol_pct": vol_pct,
                     "vol_allowed": vol_allowed, "vol_max_pct": cfg.environment_vol_max_pct,
-                    "vol_window": cfg.environment_vol_window}
+                    "vol_window": cfg.environment_vol_window,
+                    "volume": traded_volume, "volume_rate": traded_volume_rate}
         reading.update(snapshot)
         key = (candle_t, allowed, er_allowed, vol_allowed, er is not None)
         if key != self._environment_logged_key:

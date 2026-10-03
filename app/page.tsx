@@ -2459,6 +2459,10 @@ function HedgeDualLegPanel({
   const environmentGreen = environmentFresh && environment?.er_allowed === true;
   const volatilityGreen = environmentFresh && environment?.vol_allowed === true;
   const liveVol: number | null = environmentFresh ? environment?.vol_pct ?? null : null;
+  // Traded-volume readout (2026-10-02, "same guard for worker 2" -- step 1 of 2, display only,
+  // no gating yet). Reuses the environment_er row rather than a new state column or migration.
+  const liveTradedVolume: number | null = environmentFresh ? environment?.volume ?? null : null;
+  const liveTradedVolumeRate: number | null = environmentFresh ? environment?.volume_rate ?? null : null;
   const curSl = longState?.override_sl_pct ?? null;
   const curTrig = longState?.override_profit_lock_trigger ?? null;
   const curTrail = longState?.override_profit_lock_trail ?? null;
@@ -2849,6 +2853,13 @@ function HedgeDualLegPanel({
                     {liveVol != null ? liveVol.toFixed(4) + "%" : "—"}
                   </span>
                   <span className="text-[10px] font-normal text-gray-500 ml-1.5">{liveVol == null ? "waiting" : volatilityGreen ? "green" : "red"}</span>
+                </p>
+                <p className="font-bold text-sm tabular-nums text-gray-300" title="Traded volume: mean BTC size of 10 closed one-minute candles. Readout only, not gated.">
+                  <span className="text-gray-500 mr-1">Volume</span>
+                  {liveTradedVolume != null ? liveTradedVolume.toFixed(2) + " BTC" : "—"}
+                  <span className="text-[10px] font-normal text-gray-500 ml-1.5">
+                    {liveTradedVolumeRate == null ? "" : (liveTradedVolumeRate >= 0 ? "+" : "") + liveTradedVolumeRate.toFixed(2) + " BTC/min"}
+                  </span>
                 </p>
                 <p className="text-[10px] text-gray-400">
                   Filters OFF · readings only
