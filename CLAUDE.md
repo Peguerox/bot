@@ -68,10 +68,28 @@ project with no git/Render/Vercel link -- never work there.
     trail always worse than zero give-back -- that sweep ran under the OLD stochastic+zebra
     regime; this is an explicit live test under the NEW flip regime, not a re-validated
     finding. Dashboard overrides updated to match (0.06 / 0.03 / 0.03).
+  - **Live-tuned tighter for very low volume (<2 BTC), 2026-10-02 same day:** dashboard
+    overrides nudged to SL 0.06 (unchanged) / trigger 0.02 / trail 0.02 specifically while
+    watching sub-2-BTC conditions -- the user's own real-time call, applied via the manual
+    exit levers, not re-validated against a sweep. Overrides are a single live value (not
+    volume-tiered), so this is whatever the panel currently shows, not a permanent rule tied
+    to the <2 BTC condition -- check the panel's SL/Trigger/Trail boxes for the actual current
+    numbers rather than trusting this note once more time has passed.
+  - **Live controls added same day:** dashboard toggles for stochastic/zebra/flip on-off and a
+    live volume-switch-threshold override (`schema_has_regime_overrides`,
+    `StochBot._regime_controls`, `lighter_btc_initial_regime_overrides.sql`) -- turning a
+    regime off only blocks new entries there, never closes a position already open. Switch
+    threshold raised live 2 -> 4 BTC same day (user's own call, not re-swept).
+  - **Live stochastic-band control, 2026-10-02:** `override_stoch_band_lo/hi`
+    (`StochBot._stoch_band_controls`, `lighter_btc_initial_stoch_band_override.sql`) -- ONE
+    shared K band applied to BOTH the entry signal and the reversal exit together (they move
+    as a pair, not independently). NULL uses the compiled 25/75. `compute_stoch_signal` now
+    takes optional `entry_lo/entry_hi/reversal_lo/reversal_hi` args for this; every other
+    caller passes none, so behaviour elsewhere is unchanged.
   - **Live readouts:** `live_candle_volume` and `live_flip_streak_dir/len` on the state row
     (need their migrations run) show the current volume, the live streak count, and which
     signal governs entries, on the dashboard panel.
-  - 735 worker checks pass. See `compute_flip_signal`'s docstring in `stoch_bot_core.py` for
+  - 751 worker checks pass. See `compute_flip_signal`'s docstring in `stoch_bot_core.py` for
     the full reasoning. All of this is still a live hypothesis on a handful of real trades,
     not a proven edge -- keep watching it.
 - **Late-visible fill follow-up (2026-10-02):** previous recovery fix missed successful

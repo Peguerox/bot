@@ -5039,6 +5039,65 @@ async def t_regime_toggle_off_by_default_schema_flag():
     check("entered long -- override present on the row but the schema flag is off", side == "long", side)
 
 
+def _band_k80_candles():
+    # [0,100,50,50,80]: hh=100 ll=0, closed[-1]=80 -> K=100*(80-0)/(100-0)=80
+    return make_dispersion_candles([0, 100, 50, 50, 80])
+
+
+async def t_stoch_signal_band_override_narrows_entry():
+    print("\n[compute_stoch_signal: explicit lo/hi args override the compiled band for one call]")
+    candles = _band_k80_candles()
+    ex = FakeExchange()
+    bot = make_bot(ex, candles_kind="mid")
+    bot.candles = candles
+    default_sig, default_rev, _ = bot.compute_stoch_signal()
+    check("default 25/75 band -- K=80 enters short", default_sig == "short", default_sig)
+    check("default band -- reversal also short", default_rev == "short", default_rev)
+    override_sig, override_rev, _ = bot.compute_stoch_signal(25, 85, 25, 85)
+    check("override hi=85 -- K=80 no longer fires", override_sig is None, override_sig)
+    check("override hi=85 -- reversal no longer fires either", override_rev is None, override_rev)
+
+
+async def t_stoch_signal_band_override_no_args_unchanged():
+    print("\n[compute_stoch_signal: calling with no override args behaves exactly as before]")
+    candles = _band_k80_candles()
+    ex = FakeExchange()
+    bot = make_bot(ex, candles_kind="mid")
+    bot.candles = candles
+    sig, rev, _ = bot.compute_stoch_signal()
+    check("still enters short with no args passed", sig == "short" and rev == "short", (sig, rev))
+
+
+async def _stoch_band_case(state_overrides, schema_on=True):
+    """K=80 (see _band_k80_candles): default 25/75 band enters short. An override hi>=80
+    should block it; the point is proving the LIVE tick() path actually threads the override
+    through compute_stoch_signal, not just the function's own optional args."""
+    ex = FakeExchange()
+    bot = make_bot(ex, candles_kind="mid", schema_has_regime_overrides=schema_on)
+    bot.candles = _band_k80_candles()
+    bot.state_row.update(state_overrides)
+    await bot.tick()
+    return bot.state_row["side"]
+
+
+async def t_stoch_band_control_blocks_entry_via_tick():
+    print("\n[stoch band control: override_stoch_band_hi threaded through the real tick() path]")
+    side = await _stoch_band_case({"override_stoch_band_lo": 25.0, "override_stoch_band_hi": 85.0})
+    check("blocked -- K=80 no longer clears an 85 ceiling", side is None, side)
+
+
+async def t_stoch_band_control_default_unchanged():
+    print("\n[stoch band control: no override -- default 25/75 band still enters]")
+    side = await _stoch_band_case({})
+    check("entered short -- default band, K=80", side == "short", side)
+
+
+async def t_stoch_band_control_off_by_default_schema_flag():
+    print("\n[stoch band control: schema_has_regime_overrides=False ignores the override columns]")
+    side = await _stoch_band_case({"override_stoch_band_lo": 25.0, "override_stoch_band_hi": 85.0}, schema_on=False)
+    check("entered short -- override present on the row but the schema flag is off", side == "short", side)
+
+
 async def t_volume_switch_uses_flip_above_threshold():
     print("\n[volume regime switch: at/above threshold, flip signal wins and gates are bypassed]")
     side = await _volume_switch_case(candle_volume=5.0, threshold=2.0)
@@ -5125,6 +5184,11 @@ async def main():
               t_regime_toggle_flip_on_default,
               t_regime_toggle_volume_threshold_override,
               t_regime_toggle_off_by_default_schema_flag,
+              t_stoch_signal_band_override_narrows_entry,
+              t_stoch_signal_band_override_no_args_unchanged,
+              t_stoch_band_control_blocks_entry_via_tick,
+              t_stoch_band_control_default_unchanged,
+              t_stoch_band_control_off_by_default_schema_flag,
               t_entry_vol_gate_rehydrates_paused_state_after_restart,
               t_entry_vol_gate_blocks_reversal_reopen_but_not_the_close,
               t_self_lock_paper_shadow_opens_when_flat,

@@ -1596,6 +1596,11 @@ class StochBot:
         # _prior_candle_signal is ever read before the first tick has run.
         self._regime_flip_enabled = True
         self._regime_vol_threshold = self.cfg.volume_regime_switch_threshold
+        # See _stoch_band_controls -- same reasoning as the regime defaults just above.
+        self._stoch_band_entry_lo = self.cfg.entry_lo
+        self._stoch_band_entry_hi = self.cfg.entry_hi
+        self._stoch_band_reversal_lo = self.cfg.reversal_lo
+        self._stoch_band_reversal_hi = self.cfg.reversal_hi
         # See BotConfig.profit_lock_burn_k_gate's docstring. _burned_signal_via distinguishes a
         # profit-lock-sourced burn (eligible for the K-reclaim early-clear) from a loss-sourced
         # one (always needs the ordinary full signal reset). _position_entry_k is the real
@@ -1959,7 +1964,11 @@ class StochBot:
                     pass  # never let market-data logging affect trading
             await asyncio.sleep(sleep_s)
 
-    def compute_stoch_signal(self):
+    def compute_stoch_signal(self, entry_lo=None, entry_hi=None, reversal_lo=None, reversal_hi=None):
+        """entry_lo/entry_hi/reversal_lo/reversal_hi, if given, override the compiled
+        cfg.entry_lo/entry_hi/reversal_lo/reversal_hi for this call only -- see
+        _stoch_band_controls. Every existing caller passes none of these (all four stay None),
+        so behaviour is identical to before unless a caller explicitly opts in."""
         c = self.candles
         w = self.cfg.stoch_window
         if len(c) < w + 2:
@@ -1972,10 +1981,14 @@ class StochBot:
         if hh == ll:
             return None, None, ts
         k = 100 * (closed[-1]["c"] - ll) / (hh - ll)
-        entry_signal = _sig(k, self.cfg.entry_lo, self.cfg.entry_hi)
+        entry_lo = entry_lo if entry_lo is not None else self.cfg.entry_lo
+        entry_hi = entry_hi if entry_hi is not None else self.cfg.entry_hi
+        reversal_lo = reversal_lo if reversal_lo is not None else self.cfg.reversal_lo
+        reversal_hi = reversal_hi if reversal_hi is not None else self.cfg.reversal_hi
+        entry_signal = _sig(k, entry_lo, entry_hi)
         self.live_k = k
         self.live_signal = entry_signal
-        return entry_signal, _sig(k, self.cfg.reversal_lo, self.cfg.reversal_hi), ts
+        return entry_signal, _sig(k, reversal_lo, reversal_hi), ts
 
     def compute_zscore_signal(self):
         """Mean-reversion z-score signal -- see BotConfig.use_zscore_signal. Ported from
@@ -2081,6 +2094,23 @@ class StochBot:
             o = state.get("override_volume_switch_threshold")
             if o is not None: vol_threshold = float(o)
         return stochastic_enabled, zebra_enabled, flip_enabled, vol_threshold
+
+    def _stoch_band_controls(self, state):
+        """(entry_lo, entry_hi, reversal_lo, reversal_hi) for this tick -- direct request,
+        2026-10-02 ("can we change [reversal] to 85/15... along with the stochastic signal").
+        A single shared band override, when set, applies to BOTH entry and reversal together
+        (they're tied by request, not independently overridable) -- NULL means 'use the
+        compiled defaults', independently for entry vs reversal as normal. Same override shape
+        and schema flag as _regime_controls (BotConfig.schema_has_regime_overrides)."""
+        cfg = self.cfg
+        entry_lo, entry_hi = cfg.entry_lo, cfg.entry_hi
+        reversal_lo, reversal_hi = cfg.reversal_lo, cfg.reversal_hi
+        if cfg.schema_has_regime_overrides:
+            o = state.get("override_stoch_band_lo")
+            if o is not None: entry_lo = reversal_lo = float(o)
+            o = state.get("override_stoch_band_hi")
+            if o is not None: entry_hi = reversal_hi = float(o)
+        return entry_lo, entry_hi, reversal_lo, reversal_hi
 
     def _exit_params(self, state):
         """(sl_pct, profit_lock_trigger, profit_lock_trail) for this tick.
@@ -2205,7 +2235,9 @@ class StochBot:
                     self.candles, cfg.flip_signal_min_trend_len, cfg.flip_signal_min_size_pct,
                     cfg.flip_signal_min_body_pct)
             else:
-                sig, _, _ = self.compute_stoch_signal()
+                sig, _, _ = self.compute_stoch_signal(
+                    self._stoch_band_entry_lo, self._stoch_band_entry_hi,
+                    self._stoch_band_reversal_lo, self._stoch_band_reversal_hi)
         finally:
             self.candles = saved_candles
             self.joint_adaptive_last = saved_joint
@@ -4399,7 +4431,12 @@ class StochBot:
         elif cfg.use_zscore_signal:
             entry_signal, reversal_signal, candle_ts = self.compute_zscore_signal()
         else:
-            entry_signal, reversal_signal, candle_ts = self.compute_stoch_signal()
+            (stoch_band_entry_lo, stoch_band_entry_hi,
+             stoch_band_reversal_lo, stoch_band_reversal_hi) = self._stoch_band_controls(state)
+            self._stoch_band_entry_lo, self._stoch_band_entry_hi = stoch_band_entry_lo, stoch_band_entry_hi
+            self._stoch_band_reversal_lo, self._stoch_band_reversal_hi = stoch_band_reversal_lo, stoch_band_reversal_hi
+            entry_signal, reversal_signal, candle_ts = self.compute_stoch_signal(
+                stoch_band_entry_lo, stoch_band_entry_hi, stoch_band_reversal_lo, stoch_band_reversal_hi)
         # See BotConfig.volume_regime_switch_threshold -- a full override, not an extra gate:
         # at/above the threshold this REPLACES whatever the block above just computed. See
         # _regime_controls for the four live toggles layered on top.

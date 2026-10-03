@@ -8,11 +8,16 @@ import { getSupabaseAdmin } from "@/lib/supabase-admin";
 // Bounds are sanity rails against typos on real money. Trail may be 0 or equal to the trigger
 // here. Worker 1 ran zero give-back (exit on the first tick down) until 2026-10-02, when a
 // real trade peaked at +0.04% and gave it all back to the SL -- trigger/trail moved to 0.03/0.03.
+//
+// bandLo/bandHi (2026-10-02, direct request) override the stochastic's own 25/75 K band -- ONE
+// shared pair applied to both the entry signal and the reversal exit together, not independently.
 const LIMITS = {
   sl: { min: 0.01, max: 0.5, label: "stop-loss" },
   trigger: { min: 0.01, max: 1.0, label: "profit-lock trigger" },
   trail: { min: 0, max: 0.5, label: "profit-lock trail" },
   volThreshold: { min: 0, max: 100, label: "volume switch threshold" },
+  bandLo: { min: 0, max: 49, label: "stochastic band low (K)" },
+  bandHi: { min: 51, max: 100, label: "stochastic band high (K)" },
 };
 
 export async function POST(req: NextRequest) {
@@ -24,6 +29,8 @@ export async function POST(req: NextRequest) {
     ["trigger", "override_profit_lock_trigger"],
     ["trail", "override_profit_lock_trail"],
     ["volThreshold", "override_volume_switch_threshold"],
+    ["bandLo", "override_stoch_band_lo"],
+    ["bandHi", "override_stoch_band_hi"],
   ] as const) {
     const raw = body[key];
     if (raw === undefined || raw === null || raw === "") continue;
@@ -65,7 +72,7 @@ export async function POST(req: NextRequest) {
   // against the value that will actually be live, so changing only one of the two is validated too.
   const { data: cur, error: readError } = await sb
     .from("lighter_btc_initial_state")
-    .select("override_profit_lock_trigger, override_profit_lock_trail")
+    .select("override_profit_lock_trigger, override_profit_lock_trail, override_stoch_band_lo, override_stoch_band_hi")
     .eq("id", 1)
     .single();
   if (readError) {
@@ -80,6 +87,14 @@ export async function POST(req: NextRequest) {
   if (trig != null && trail != null && trail > trig) {
     return NextResponse.json(
       { error: `Trail (${trail}%) must not be larger than the trigger (${trig}%).` },
+      { status: 400 }
+    );
+  }
+  const bandLo = (out["override_stoch_band_lo"] as number | undefined) ?? cur?.override_stoch_band_lo;
+  const bandHi = (out["override_stoch_band_hi"] as number | undefined) ?? cur?.override_stoch_band_hi;
+  if (bandLo != null && bandHi != null && bandLo >= bandHi) {
+    return NextResponse.json(
+      { error: `Band low (${bandLo}) must be less than band high (${bandHi}).` },
       { status: 400 }
     );
   }

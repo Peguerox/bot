@@ -1552,6 +1552,32 @@ function CompactStochBtcPanel({
   const curVolThreshold: number = state?.override_volume_switch_threshold ?? 4;
   const [volThresholdIn, setVolThresholdIn] = useState("");
   const [savingSignal, setSavingSignal] = useState<string | null>(null);
+  // Must match entry_lo/entry_hi (== reversal_lo/reversal_hi) in lighter_stoch_dca_btc_initial.py.
+  const curBandLo: number = state?.override_stoch_band_lo ?? 25;
+  const curBandHi: number = state?.override_stoch_band_hi ?? 75;
+  const [bandLoIn, setBandLoIn] = useState("");
+  const [bandHiIn, setBandHiIn] = useState("");
+
+  async function handleApplyBand() {
+    if (!bandLoIn.trim() && !bandHiIn.trim()) return;
+    if (!confirm(`Set the stochastic band to ${bandLoIn.trim() || curBandLo} / ${bandHiIn.trim() || curBandHi} for ${title}? Applies to BOTH entry and reversal. Takes effect immediately.`)) return;
+    setSavingSignal("band");
+    const payload: Record<string, string> = {};
+    if (bandLoIn.trim()) payload.bandLo = bandLoIn.trim();
+    if (bandHiIn.trim()) payload.bandHi = bandHiIn.trim();
+    const res = await fetch("/api/lighter-btc-initial-settings", {
+      method: "POST", headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(payload),
+    });
+    if (!res.ok) {
+      const b = await res.json().catch(() => ({}));
+      alert(b.error || "Could not apply the change.");
+    } else {
+      setBandLoIn(""); setBandHiIn("");
+    }
+    await onToggled();
+    setSavingSignal(null);
+  }
 
   async function handleToggleSignal(key: "stochastic" | "zebra" | "flip", label: string, next: boolean) {
     if (!confirm(`Turn ${label} ${next ? "ON" : "OFF"} for ${title}? Takes effect immediately.`)) return;
@@ -2111,6 +2137,39 @@ function CompactStochBtcPanel({
             lets the raw stochastic signal trade without the 65-75 band. Turning a regime OFF
             only blocks new entries there -- never closes a position already open.
           </p>
+          <div className="pt-1">
+            <p className="text-gray-500 text-[9px] uppercase">
+              Stochastic band (K) <span className="text-gray-600">now {curBandLo} / {curBandHi} -- entry AND reversal</span>
+            </p>
+            <div className="flex items-end gap-1.5 mt-1">
+              <input
+                value={bandLoIn}
+                onChange={(e) => setBandLoIn(e.target.value)}
+                placeholder={String(curBandLo)}
+                inputMode="decimal"
+                className="w-full bg-gray-900 border border-gray-700 rounded px-1.5 py-1 text-xs text-white tabular-nums focus:outline-none focus:border-blue-500"
+              />
+              <span className="text-gray-600 text-xs pb-1">/</span>
+              <input
+                value={bandHiIn}
+                onChange={(e) => setBandHiIn(e.target.value)}
+                placeholder={String(curBandHi)}
+                inputMode="decimal"
+                className="w-full bg-gray-900 border border-gray-700 rounded px-1.5 py-1 text-xs text-white tabular-nums focus:outline-none focus:border-blue-500"
+              />
+              <button
+                onClick={handleApplyBand}
+                disabled={savingSignal !== null || loading || (!bandLoIn.trim() && !bandHiIn.trim())}
+                className="text-xs font-bold px-2.5 py-1 rounded bg-blue-500/20 text-blue-400 hover:bg-blue-500/30 disabled:opacity-30 whitespace-nowrap"
+              >
+                {savingSignal === "band" ? "…" : "Set"}
+              </button>
+            </div>
+            <p className="text-gray-600 text-[9px] leading-snug mt-1">
+              Wider (e.g. 15/85) means fewer, more extreme signals -- both the entry trigger and
+              the reversal exit move together.
+            </p>
+          </div>
         </div>
       )}
       {showLevers && liveCandleVolume != null && liveCandleVolume >= curVolThreshold && !loading && (() => {
