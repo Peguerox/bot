@@ -90,10 +90,25 @@ project with no git/Render/Vercel link -- never work there.
     route reads current values with `select("*")`, not named columns -- a column whose
     migration hasn't run yet must never error every OTHER control on the same panel (it did,
     once, before this).
-  - **Live readouts:** `live_candle_volume` and `live_flip_streak_dir/len` on the state row
-    (need their migrations run) show the current volume, the live streak count, and which
-    signal governs entries, on the dashboard panel.
-  - 751 worker checks pass. See `compute_flip_signal`'s docstring in `stoch_bot_core.py` for
+  - **Volume-jump guard, 2026-10-02:** `volume_jump_ratio=3.0` / `volume_jump_pause_seconds=120`
+    (`compute_volume_jump_ratio`, `StochBot._update_volume_jump_guard`,
+    `lighter_btc_initial_volume_jump.sql`), live-overridable the same way. Direct request
+    ("this cannot happen") after a real live loss (trade 1697): one outlier candle
+    (volume ~4.7-5.6x its own trailing baseline) distorted the 5-bar stochastic into real
+    whipsaw -- K swung 11->89->53->97->87 across 7 minutes -- and the bot entered short right
+    into it. When the latest closed candle's own volume is >= the ratio times its own
+    trailing-10 baseline, ALL new entries (both regimes) and reversal reopens pause for the
+    window -- never blocks an exit, same contract as every other gate in this file. 3.0 is the
+    95th percentile of a 14,773-candle sample, picked with margin below the real incident
+    rather than at the point of rarest significance. Caught and fixed before deploy: the first
+    version called `compute_volume_jump_ratio` unconditionally even when the guard was off,
+    crashing on any candle data without a "v" field -- reordered to bail out before computing
+    when unconfigured, and the function itself now reads `.get("v", 0)` rather than `["v"]`.
+  - **Live readouts:** `live_candle_volume`, `live_flip_streak_dir/len`, and
+    `live_volume_jump_ratio` on the state row (need their migrations run) show the current
+    volume, the live streak count, the jump-guard reading, and which signal governs entries,
+    on the dashboard panel.
+  - 762 worker checks pass. See `compute_flip_signal`'s docstring in `stoch_bot_core.py` for
     the full reasoning. All of this is still a live hypothesis on a handful of real trades,
     not a proven edge -- keep watching it.
 - **Late-visible fill follow-up (2026-10-02):** previous recovery fix missed successful

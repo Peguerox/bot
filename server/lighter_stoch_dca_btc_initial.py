@@ -383,6 +383,16 @@ CONFIG = BotConfig(
     # entry) -- explicitly prioritizing catching fewer real signals over chasing the highest
     # win-rate cutoff (0.02%, the median, reaches 67%/+$0.0286 but keeps only 56% of signals).
     flip_signal_min_body_pct=0.005,
+    # Direct request, 2026-10-02 ("this cannot happen" after a real live loss, trade 1697: an
+    # outlier candle, volume ~4.7-5.6x its own baseline, distorted the 5-bar stochastic into a
+    # real whipsaw -- K swung 11->89->53->97->87 across 7 minutes -- and the bot entered short
+    # right into it). Checked against 14,773 historical candles: ratio>=3.0 is the 95th
+    # percentile (~5% of candles), comfortably below the real incident's ratio, picked with
+    # margin rather than at the point of rarest significance. 120s pause matches the existing
+    # post-reversal-cooldown convention. Live-overridable -- see BotConfig.volume_jump_ratio.
+    volume_jump_ratio=3.0,
+    volume_jump_lookback=10,
+    volume_jump_pause_seconds=120.0,
     # See profit_lock_trigger_pct above for the full reasoning -- trigger 0.03/trail 0.03 is an
     # explicit live test under the flip regime, replacing the old zero-give-back default.
     profit_lock_trail_pct=0.03,

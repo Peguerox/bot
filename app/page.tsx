@@ -1592,6 +1592,36 @@ function CompactStochBtcPanel({
     setSavingSignal(null);
   }
 
+  // Volume-jump guard (2026-10-02, direct request: "this cannot happen" after a real loss
+  // traced to an outlier candle distorting the stochastic). Must match volume_jump_ratio /
+  // volume_jump_pause_seconds in lighter_stoch_dca_btc_initial.py.
+  const liveJumpRatio: number | null = state?.live_volume_jump_ratio ?? null;
+  const curJumpRatio: number = state?.override_volume_jump_ratio ?? 3.0;
+  const curJumpPause: number = state?.override_volume_jump_pause_seconds ?? 120;
+  const [jumpRatioIn, setJumpRatioIn] = useState("");
+  const [jumpPauseIn, setJumpPauseIn] = useState("");
+
+  async function handleApplyJumpGuard() {
+    if (!jumpRatioIn.trim() && !jumpPauseIn.trim()) return;
+    if (!confirm(`Set the volume-jump guard to ratio ${jumpRatioIn.trim() || curJumpRatio}x / pause ${jumpPauseIn.trim() || curJumpPause}s for ${title}? Takes effect immediately.`)) return;
+    setSavingSignal("jump");
+    const payload: Record<string, string> = {};
+    if (jumpRatioIn.trim()) payload.jumpRatio = jumpRatioIn.trim();
+    if (jumpPauseIn.trim()) payload.jumpPause = jumpPauseIn.trim();
+    const res = await fetch("/api/lighter-btc-initial-settings", {
+      method: "POST", headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(payload),
+    });
+    if (!res.ok) {
+      const b = await res.json().catch(() => ({}));
+      alert(b.error || "Could not apply the change.");
+    } else {
+      setJumpRatioIn(""); setJumpPauseIn("");
+    }
+    await onToggled();
+    setSavingSignal(null);
+  }
+
   async function handleToggleSignal(key: "stochastic" | "zebra" | "flip", label: string, next: boolean) {
     if (!confirm(`Turn ${label} ${next ? "ON" : "OFF"} for ${title}? Takes effect immediately.`)) return;
     setSavingSignal(key);
@@ -2187,6 +2217,64 @@ function CompactStochBtcPanel({
           <p className="text-gray-600 text-[9px] leading-snug mt-1">
             Entry and reversal bands are independent -- set one without affecting the other.
             Wider (e.g. 15/85) means fewer, more extreme signals.
+          </p>
+        </div>
+      )}
+      {showLevers && !loading && (
+        <div className="bg-gray-800/60 rounded-lg p-2">
+          {/* 2026-10-02, direct request ("this cannot happen") after a real loss traced to a
+              single outlier candle distorting the 5-bar stochastic. Pauses new entries (both
+              regimes) for the pause window whenever the latest closed candle's own volume is
+              this many times its own trailing baseline. */}
+          <p className="text-gray-500 text-[10px] uppercase">Volume-jump guard</p>
+          <p className="font-bold text-sm tabular-nums">
+            <span className={liveJumpRatio == null ? "text-gray-500"
+              : liveJumpRatio >= curJumpRatio ? "text-red-400" : "text-green-400"}>
+              {liveJumpRatio != null ? liveJumpRatio.toFixed(2) + "x" : "—"}
+            </span>
+            <span className="text-[10px] font-normal text-gray-500 ml-1.5">
+              {liveJumpRatio == null ? "no reading yet"
+                : liveJumpRatio >= curJumpRatio ? "SPIKE -- new entries paused"
+                : "normal"}
+            </span>
+          </p>
+          <div className="flex items-end gap-1.5 mt-1.5">
+            <div className="flex-1">
+              <p className="text-gray-500 text-[9px] uppercase">
+                Trigger ratio <span className="text-gray-600">now {curJumpRatio}x</span>
+              </p>
+              <input
+                value={jumpRatioIn}
+                onChange={(e) => setJumpRatioIn(e.target.value)}
+                placeholder={String(curJumpRatio)}
+                inputMode="decimal"
+                className="w-full bg-gray-900 border border-gray-700 rounded px-1.5 py-1 text-xs text-white tabular-nums focus:outline-none focus:border-blue-500"
+              />
+            </div>
+            <div className="flex-1">
+              <p className="text-gray-500 text-[9px] uppercase">
+                Pause <span className="text-gray-600">now {curJumpPause}s</span>
+              </p>
+              <input
+                value={jumpPauseIn}
+                onChange={(e) => setJumpPauseIn(e.target.value)}
+                placeholder={String(curJumpPause)}
+                inputMode="decimal"
+                className="w-full bg-gray-900 border border-gray-700 rounded px-1.5 py-1 text-xs text-white tabular-nums focus:outline-none focus:border-blue-500"
+              />
+            </div>
+            <button
+              onClick={handleApplyJumpGuard}
+              disabled={savingSignal !== null || loading || (!jumpRatioIn.trim() && !jumpPauseIn.trim())}
+              className="text-xs font-bold px-2.5 py-1 rounded bg-blue-500/20 text-blue-400 hover:bg-blue-500/30 disabled:opacity-30 whitespace-nowrap"
+            >
+              {savingSignal === "jump" ? "…" : "Set"}
+            </button>
+          </div>
+          <p className="text-gray-600 text-[9px] leading-snug mt-1">
+            When the latest closed candle's own volume is this many times its trailing-10
+            baseline, new entries (and reversal reopens) pause for the window above. Never
+            closes a position already open.
           </p>
         </div>
       )}

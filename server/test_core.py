@@ -4987,6 +4987,89 @@ async def _regime_toggle_case(state_overrides, schema_on=True, candle_volume=1.0
     return bot.state_row["side"]
 
 
+def _jump_candles(volumes, base=86000.0):
+    """One closed candle per entry in `volumes` (flat price, just the v field varies), plus
+    one trailing live candle. compute_volume_jump_ratio reads closed[-1] as the latest and the
+    `lookback` before it as the baseline."""
+    t0 = 1700000000000
+    c = [{"t": t0 + i * 60000, "o": base, "h": base + 1, "l": base - 1, "c": base, "v": v}
+         for i, v in enumerate(volumes)]
+    c.append({"t": t0 + len(volumes) * 60000, "o": base, "h": base, "l": base, "c": base,
+              "v": volumes[-1] if volumes else 1.0})
+    return c
+
+
+async def t_volume_jump_ratio_basic():
+    print("\n[compute_volume_jump_ratio: hand-computed example]")
+    candles = _jump_candles([1.0] * 10 + [5.0])
+    ratio = core.compute_volume_jump_ratio(candles, lookback=10)
+    check("5.0 against a 1.0 baseline -> 5.0x", ratio is not None and abs(ratio - 5.0) < 1e-9, ratio)
+
+
+async def t_volume_jump_ratio_needs_full_lookback():
+    print("\n[compute_volume_jump_ratio: None until the lookback window is actually full]")
+    candles = _jump_candles([1.0] * 5 + [5.0])
+    check("only 5 baseline candles, lookback=10 -> None",
+          core.compute_volume_jump_ratio(candles, lookback=10) is None)
+
+
+async def t_volume_jump_ratio_zero_baseline():
+    print("\n[compute_volume_jump_ratio: zero baseline -> None, never a division error]")
+    candles = _jump_candles([0.0] * 10 + [5.0])
+    check("zero baseline -> None", core.compute_volume_jump_ratio(candles, lookback=10) is None)
+
+
+async def _volume_jump_case(volumes, state_overrides=None, ratio_cfg=3.0, schema_on=True):
+    """A clean fresh LONG stochastic signal (K=0) on the last 5 closed candles, independent of
+    `volumes` -- the 5-bar window's first 4 bars sit high, the last (same object as closed[-1],
+    so it keeps whatever volume `volumes` gave it -- the spike candle) sits low. Proves the
+    guard, when it fires, blocks an entry a clean signal would otherwise have taken."""
+    ex = FakeExchange()
+    candles = _jump_candles(volumes)
+    closed = candles[:-1]
+    window = closed[-5:]
+    for c in window[:-1]:
+        c["o"] = c["h"] = c["l"] = c["c"] = 86100.0
+    window[-1]["o"] = window[-1]["h"] = window[-1]["l"] = window[-1]["c"] = 86000.0
+    bot = make_bot(ex, candles_kind="mid", volume_jump_ratio=ratio_cfg, volume_jump_lookback=10,
+                    volume_jump_pause_seconds=120.0, schema_has_regime_overrides=schema_on)
+    bot.candles = candles
+    if state_overrides:
+        bot.state_row.update(state_overrides)
+    await bot.tick()
+    return bot.state_row["side"]
+
+
+async def t_volume_jump_guard_blocks_entry_on_spike():
+    print("\n[volume-jump guard: a real spike blocks an otherwise-clean fresh entry]")
+    side = await _volume_jump_case([1.0] * 10 + [5.0])  # 5.0x -- over the 3.0 default
+    check("blocked -- spike detected", side is None, side)
+
+
+async def t_volume_jump_guard_allows_entry_without_spike():
+    print("\n[volume-jump guard: no spike -- the clean signal enters normally]")
+    side = await _volume_jump_case([1.0] * 11)  # 1.0x -- flat, no spike
+    check("entered long -- no spike, ratio_cfg=3.0", side == "long", side)
+
+
+async def t_volume_jump_guard_off_by_default():
+    print("\n[volume-jump guard: None (off) never blocks, even with a real spike present]")
+    side = await _volume_jump_case([1.0] * 10 + [5.0], ratio_cfg=None)
+    check("entered long -- guard not configured", side == "long", side)
+
+
+async def t_volume_jump_guard_live_override_ratio():
+    print("\n[volume-jump guard: live override raises the ratio past a spike that would otherwise block]")
+    side = await _volume_jump_case([1.0] * 10 + [5.0], {"override_volume_jump_ratio": 10.0})
+    check("entered long -- override ratio (10x) not cleared by a 5x spike", side == "long", side)
+
+
+async def t_volume_jump_guard_off_by_default_schema_flag():
+    print("\n[volume-jump guard: schema_has_regime_overrides=False ignores the override columns]")
+    side = await _volume_jump_case([1.0] * 10 + [5.0], {"override_volume_jump_ratio": 10.0}, schema_on=False)
+    check("blocked -- override present on the row but the schema flag is off", side is None, side)
+
+
 async def t_regime_toggle_stochastic_off_blocks_low_volume_entry():
     print("\n[regime toggle: override_stochastic_enabled=False blocks the low-volume regime]")
     side = await _regime_toggle_case({"override_stochastic_enabled": False}, zebra_band=False)
@@ -5194,6 +5277,14 @@ async def main():
               t_volume_switch_uses_flip_above_threshold,
               t_volume_switch_keeps_normal_path_below_threshold,
               t_volume_switch_off_by_default,
+              t_volume_jump_ratio_basic,
+              t_volume_jump_ratio_needs_full_lookback,
+              t_volume_jump_ratio_zero_baseline,
+              t_volume_jump_guard_blocks_entry_on_spike,
+              t_volume_jump_guard_allows_entry_without_spike,
+              t_volume_jump_guard_off_by_default,
+              t_volume_jump_guard_live_override_ratio,
+              t_volume_jump_guard_off_by_default_schema_flag,
               t_regime_toggle_stochastic_off_blocks_low_volume_entry,
               t_regime_toggle_stochastic_on_default,
               t_regime_toggle_zebra_off_bypasses_band,

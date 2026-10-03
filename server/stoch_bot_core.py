@@ -330,6 +330,19 @@ class BotConfig:
     # means every other bot is unaffected; reads are always safe even before the migration
     # (state.get on a missing column just returns None), only a write would need the gate.
     schema_has_regime_overrides: bool = False
+    # Volume-jump guard (2026-10-02, direct request, "this cannot happen" after a real live
+    # loss traced to a single outlier candle distorting the 5-bar stochastic -- see
+    # compute_volume_jump_ratio's docstring for the full incident and the data behind the
+    # 3.0/120s defaults below). When the most recent closed candle's own volume is
+    # >= volume_jump_ratio times its own trailing baseline, ALL new entries (both regimes) and
+    # reversal reopens are paused for volume_jump_pause_seconds -- never blocks an exit,
+    # same contract as every other gate in this file. None = off (default, no other bot
+    # affected). Live-overridable the same way as the regime controls -- see
+    # _volume_jump_controls, BotConfig.schema_has_regime_overrides (same schema flag, same
+    # override-columns-are-safe-to-read-before-migration reasoning).
+    volume_jump_ratio: Optional[float] = None
+    volume_jump_lookback: int = 10
+    volume_jump_pause_seconds: float = 120.0
     # Low-volatility entry gate (2026-09-29, direct request): the OPPOSITE direction from the
     # pair above -- blocks new entries (and a reversal's reopen leg, never TP/SL/exits) when
     # the market is TOO QUIET rather than too spiky. Built to test a real finding from 844 real
@@ -1164,6 +1177,35 @@ def compute_color_weighted_balance_index(candles, window=5):
     return (1 - abs(num / den)) * 100
 
 
+def compute_volume_jump_ratio(candles, lookback=10):
+    """Ratio of the most recently CLOSED candle's own traded volume to the mean of the
+    `lookback` closed candles immediately before it (not including itself) -- a single-candle
+    volume SPIKE detector. Distinct from compute_candle_volume_avg (a rolling mean LEVEL, not a
+    spike ratio): a market can sit at an elevated-but-stable volume level for a while (no
+    spike, ratio ~1) or spike hard for one candle without ever crossing an absolute level
+    (ratio huge even if the absolute volume stays modest). See
+    BotConfig.volume_jump_ratio. None if too few candles or the baseline is 0.
+
+    Direct motivation, 2026-10-02: a real live loss (trade 1697) was entered on a stochastic K
+    reading distorted by one outlier candle (volume 5.64 BTC against a ~1-1.5 BTC baseline,
+    ratio ~4-5x) sitting inside the 5-bar K window -- K swung 11->89->53->97->87->83->80 across
+    seven minutes of real whipsaw. Checked against 14,773 historical candles: ratio >=3x is the
+    95th percentile (happens on ~5% of candles); the actual incident candle was comfortably
+    above that (~4.7-5.6x against its own baseline). 3.0 was picked with margin below the real
+    incident, not at the point of rarest significance."""
+    closed = candles[:-1]
+    if len(closed) < lookback + 1:
+        return None
+    latest = closed[-1]
+    baseline_bars = closed[-(lookback + 1):-1]
+    # .get, not [] -- candle data from every real source used in this file always carries "v",
+    # but this must never be the thing that turns a missing field into a crashed tick.
+    baseline = sum(b.get("v", 0) for b in baseline_bars) / lookback
+    if baseline <= 0:
+        return None
+    return latest.get("v", 0) / baseline
+
+
 def compute_candle_volume_avg(candles, window=10):
     """Mean TRADED volume (candle "v", BTC size, not price range) over the trailing `window`
     CLOSED candles. Distinct from every vol_pct/volatility measure elsewhere in this file --
@@ -1601,6 +1643,8 @@ class StochBot:
         self._stoch_band_entry_hi = self.cfg.entry_hi
         self._stoch_band_reversal_lo = self.cfg.reversal_lo
         self._stoch_band_reversal_hi = self.cfg.reversal_hi
+        # See BotConfig.volume_jump_ratio / _update_volume_jump_guard.
+        self._last_volume_jump_at = None
         # See BotConfig.profit_lock_burn_k_gate's docstring. _burned_signal_via distinguishes a
         # profit-lock-sourced burn (eligible for the K-reclaim early-clear) from a loss-sourced
         # one (always needs the ordinary full signal reset). _position_entry_k is the real
@@ -2709,6 +2753,35 @@ class StochBot:
         if cd is None or self._last_reversal_close_at is None:
             return False
         return (time.time() - self._last_reversal_close_at) < cd
+
+    def _update_volume_jump_guard(self, state):
+        """Arms/extends the guard's cooldown timer when the volume-jump ratio is at or above
+        threshold, and returns whether a pause is currently active. See
+        BotConfig.volume_jump_ratio for the full reasoning. The live_volume_jump_ratio dashboard
+        readout is a SEPARATE write elsewhere (near live_candle_volume) -- this method only
+        gates entries, it does not persist anything.
+
+        Resolves the threshold/pause overrides and bails out BEFORE computing the ratio when
+        the guard isn't configured at all -- not just for efficiency, but so a bot that never
+        enabled this feature never calls compute_volume_jump_ratio on candle data that might
+        not even carry a "v" field."""
+        cfg = self.cfg
+        ratio_threshold = cfg.volume_jump_ratio
+        pause_seconds = cfg.volume_jump_pause_seconds
+        if cfg.schema_has_regime_overrides:
+            o = state.get("override_volume_jump_ratio")
+            if o is not None: ratio_threshold = float(o)
+            o = state.get("override_volume_jump_pause_seconds")
+            if o is not None: pause_seconds = float(o)
+        if ratio_threshold is None:
+            return False
+        ratio = compute_volume_jump_ratio(self.candles, cfg.volume_jump_lookback)
+        now_s = time.time()
+        if ratio is not None and ratio >= ratio_threshold:
+            self._last_volume_jump_at = now_s
+        if self._last_volume_jump_at is None:
+            return False
+        return (now_s - self._last_volume_jump_at) < pause_seconds
 
     def _cycle_gap_elapsed(self):
         """True if enough time has passed since THIS leg went flat -- see
@@ -4563,6 +4636,17 @@ class StochBot:
                                                   "live_flip_streak_len": streak_len})
                     except Exception:
                         pass
+                    # Isolated best-effort write (2026-10-02, direct request: "lets try to
+                    # detect the huge jump in volume") -- the volume-jump guard's own reading,
+                    # shown regardless of whether cfg.volume_jump_ratio is actually enabled, so
+                    # it can be watched before deciding to turn the guard on. Requires
+                    # lighter_btc_initial_volume_jump.sql.
+                    jr = compute_volume_jump_ratio(self.candles, cfg.volume_jump_lookback)
+                    if jr is not None:
+                        try:
+                            await self.update_state({"live_volume_jump_ratio": jr})
+                        except Exception:
+                            pass
                 if cfg.color_balance_index_min is not None or cfg.color_balance_index_max is not None:
                     # Isolated best-effort write (2026-10-01) so the dashboard can show the live
                     # color-weighted balance index the entry gate is reading. Written into the
@@ -4760,6 +4844,12 @@ class StochBot:
         # See BotConfig.post_reversal_cooldown_seconds -- blocks a fresh entry the same way the
         # gates above do, never an exit.
         if self._reversal_cooldown_active():
+            entry_signal = None
+
+        # See BotConfig.volume_jump_ratio -- blocks a fresh entry the same way the gates above
+        # do, never an exit. volume_jump_active is reused below at the reversal-reopen gate.
+        volume_jump_active = self._update_volume_jump_guard(state)
+        if volume_jump_active:
             entry_signal = None
 
         if cfg.trading_hours_utc is not None:
@@ -5273,7 +5363,7 @@ class StochBot:
                     reopen_burned = False
                 reopen_overconfirmed = self._entry_overconfirmed(reversal_signal)
                 if (self.entry_vol_paused or intrabar_dispersion_blocked or zebra_blocked
-                        or balance_blocked or self._reversal_cooldown_active()
+                        or balance_blocked or self._reversal_cooldown_active() or volume_jump_active
                         or (cfg.self_lock_enabled and self.real_trading_locked)
                         or (cfg.trading_hours_utc is not None
                             and self._apply_trading_hours_gate(reversal_signal) is None)

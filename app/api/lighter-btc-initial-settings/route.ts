@@ -21,6 +21,8 @@ const LIMITS = {
   bandHi: { min: 51, max: 100, label: "entry band high (K)" },
   reversalLo: { min: 0, max: 49, label: "reversal band low (K)" },
   reversalHi: { min: 51, max: 100, label: "reversal band high (K)" },
+  jumpRatio: { min: 1.1, max: 20, label: "volume-jump ratio" },
+  jumpPause: { min: 0, max: 1800, label: "volume-jump pause (seconds)" },
 };
 
 export async function POST(req: NextRequest) {
@@ -36,6 +38,8 @@ export async function POST(req: NextRequest) {
     ["bandHi", "override_stoch_band_hi"],
     ["reversalLo", "override_stoch_reversal_lo"],
     ["reversalHi", "override_stoch_reversal_hi"],
+    ["jumpRatio", "override_volume_jump_ratio"],
+    ["jumpPause", "override_volume_jump_pause_seconds"],
   ] as const) {
     const raw = body[key];
     if (raw === undefined || raw === null || raw === "") continue;
