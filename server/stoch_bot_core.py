@@ -1681,6 +1681,11 @@ class StochBot:
         self._last_wiggle = None
         self._last_volume_jump_volume = None
         self._last_volume_jump_rate = None
+        # Whichever peak the ACTIVE release_mode is tracking, for the dashboard -- direct
+        # report: "I only see the timer" with no way to tell whether a wiggle/volume/rate
+        # release is close or far. None when release_mode is off/unset. See
+        # _update_volume_jump_guard.
+        self._last_release_peak = None
         # See BotConfig.profit_lock_burn_k_gate's docstring. _burned_signal_via distinguishes a
         # profit-lock-sourced burn (eligible for the K-reclaim early-clear) from a loss-sourced
         # one (always needs the ordinary full signal reset). _position_entry_k is the real
@@ -2911,6 +2916,7 @@ class StochBot:
 
         if ratio_threshold is None:
             self._volume_jump_paused_until = None
+            self._last_release_peak = None
             return False
         ratio = compute_volume_jump_ratio(self.candles, cfg.volume_jump_lookback)
         now_s = time.time()
@@ -2932,12 +2938,21 @@ class StochBot:
                 self._volume_jump_peak_rate = max(self._volume_jump_peak_rate or 0.0, rate_mag)
         if self._last_volume_jump_at is None:
             self._volume_jump_paused_until = None
+            self._last_release_peak = None
             return False
         if cleared_at is not None and self._last_volume_jump_at <= cleared_at:
             self._volume_jump_paused_until = None
+            self._last_release_peak = None
             return False
         paused_until = self._last_volume_jump_at + pause_seconds  # hard cap regardless of mode
         released_early = False
+        # The peak for whichever metric is ACTIVE, cached for the dashboard (2026-10-03, direct
+        # report: "I only see the timer... you need to put the volume at which it was paused" --
+        # otherwise there's no way to tell a wiggle/volume/rate release is making progress versus
+        # just silently riding out the fixed cap). None whenever no arm is selected.
+        self._last_release_peak = {"volume": self._volume_jump_peak_volume,
+                                    "wiggle": self._volume_jump_peak_wiggle,
+                                    "rate": self._volume_jump_peak_rate}.get(release_mode)
         if release_mode == "volume" and self._volume_jump_peak_volume and volume_now is not None:
             released_early = volume_now <= 0.5 * self._volume_jump_peak_volume
         elif release_mode == "wiggle" and self._volume_jump_peak_wiggle and wiggle is not None:
@@ -4849,6 +4864,14 @@ class StochBot:
                             await self.update_state({"live_volume_jump_rate": self._last_volume_jump_rate})
                         except Exception:
                             pass
+                    # Unconditional write, unlike the three above -- None is itself a meaningful,
+                    # intentional state here (no release mode active, or not currently paused)
+                    # and must overwrite a stale number left from an earlier spike, not be
+                    # skipped the way "not available yet" is for the other readouts.
+                    try:
+                        await self.update_state({"live_volume_jump_release_peak": self._last_release_peak})
+                    except Exception:
+                        pass
                 if cfg.color_balance_index_min is not None or cfg.color_balance_index_max is not None:
                     # Isolated best-effort write (2026-10-01) so the dashboard can show the live
                     # color-weighted balance index the entry gate is reading. Written into the

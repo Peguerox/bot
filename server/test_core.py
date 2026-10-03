@@ -5355,6 +5355,36 @@ async def t_volume_jump_release_peak_resets_on_a_new_spike():
           bot._volume_jump_peak_volume)
 
 
+async def t_volume_jump_release_peak_readout_matches_the_active_mode():
+    print("\n[volume-jump release: _last_release_peak reflects whichever metric is the active arm]")
+    bot = _release_bot(volume_jump_release_mode="rate")
+    bot.candles = _jump_candles([1.0] * 10 + [5.0])  # a real spike -- arms with a real peak set
+    bot._update_volume_jump_guard(bot.state_row)
+    check("readout matches the rate peak, not volume or wiggle",
+          bot._last_release_peak == bot._volume_jump_peak_rate, bot._last_release_peak)
+    check("rate peak is a real number, not None", bot._last_release_peak is not None)
+
+
+async def t_volume_jump_release_peak_readout_none_when_mode_off():
+    print("\n[volume-jump release: _last_release_peak stays None with no arm selected, even while paused]")
+    bot = _release_bot()  # release_mode defaults to off
+    bot.candles = _jump_candles([1.0] * 10 + [5.0])  # a real spike -- still arms the plain timer
+    active = bot._update_volume_jump_guard(bot.state_row)
+    check("armed on the fixed timer", active is True, active)
+    check("no peak readout -- no arm is selected to target one", bot._last_release_peak is None,
+          bot._last_release_peak)
+
+
+async def t_volume_jump_release_peak_readout_clears_once_not_paused():
+    print("\n[volume-jump release: _last_release_peak clears back to None once the guard isn't paused]")
+    bot = _release_bot(volume_jump_release_mode="volume")
+    bot._last_release_peak = 42.0  # a stale value from an earlier spike, never cleared
+    bot.candles = _jump_candles([1.0] * 11)  # flat -- no spike, nothing armed
+    active = bot._update_volume_jump_guard(bot.state_row)
+    check("not paused", active is False, active)
+    check("stale peak readout cleared", bot._last_release_peak is None, bot._last_release_peak)
+
+
 async def t_volume_jump_release_mode_live_override():
     print("\n[volume-jump release: override_volume_jump_release_mode picks the arm live]")
     bot = _release_bot()  # compiled default is off
@@ -5617,6 +5647,9 @@ async def main():
               t_volume_jump_release_rate_mode_releases_at_half_peak,
               t_volume_jump_release_rate_mode_stays_active_above_half,
               t_volume_jump_release_peak_resets_on_a_new_spike,
+              t_volume_jump_release_peak_readout_matches_the_active_mode,
+              t_volume_jump_release_peak_readout_none_when_mode_off,
+              t_volume_jump_release_peak_readout_clears_once_not_paused,
               t_volume_jump_release_mode_live_override,
               t_volume_jump_release_mode_override_off_by_default_schema_flag,
               t_volume_jump_release_respects_hard_cap_when_metric_never_decays,

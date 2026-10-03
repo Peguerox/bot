@@ -1632,6 +1632,13 @@ function CompactStochBtcPanel({
   const liveWiggle: number | null = state?.live_wiggle ?? null;
   const liveJumpRate: number | null = state?.live_volume_jump_rate ?? null;
   const curReleaseMode: string = state?.override_volume_jump_release_mode ?? "off";
+  // Release-target readout (2026-10-03, direct report: "I only see the timer... you need to
+  // put the volume at which it was paused") -- without this there's no way to tell a
+  // wiggle/volume/rate release is making real progress versus just silently riding out the
+  // fixed cap. null whenever no arm is selected or nothing is currently paused.
+  const liveReleasePeak: number | null = state?.live_volume_jump_release_peak ?? null;
+  const releaseUnit = curReleaseMode === "volume" ? " BTC" : curReleaseMode === "rate" ? " BTC/min" : "";
+  const releasePrefix = curReleaseMode === "wiggle" ? "$" : "";
   const [savingRelease, setSavingRelease] = useState(false);
 
   async function handleSetReleaseMode(mode: "off" | "volume" | "wiggle" | "rate") {
@@ -2328,6 +2335,13 @@ function CompactStochBtcPanel({
                 : "new entries allowed"}
             </span>
           </p>
+          {jumpPausedActive && curReleaseMode !== "off" && (
+            <p className="text-[10px] text-amber-300 mt-0.5">
+              {liveReleasePeak != null
+                ? `target: ${curReleaseMode} ≤ ${releasePrefix}${(liveReleasePeak / 2).toFixed(2)}${releaseUnit} (half of peak ${releasePrefix}${liveReleasePeak.toFixed(2)}${releaseUnit}) -- releases early the moment this is reached, or at the timer above, whichever is first`
+                : "waiting for a peak reading…"}
+            </p>
+          )}
           {jumpPausedActive && (
             <button
               onClick={handleClearVolumeJump}
@@ -2616,6 +2630,10 @@ function HedgeDualLegPanel({
   const liveWiggle: number | null = longState?.live_wiggle ?? null;
   const curReleaseMode: string = longState?.override_volume_jump_release_mode ?? "off";
   const [savingRelease, setSavingRelease] = useState(false);
+  // Release-target readout -- see Worker 1's panel for the full reasoning.
+  const liveReleasePeak: number | null = longState?.live_volume_jump_release_peak ?? null;
+  const releaseUnit = curReleaseMode === "volume" ? " BTC" : curReleaseMode === "rate" ? " BTC/min" : "";
+  const releasePrefix = curReleaseMode === "wiggle" ? "$" : "";
 
   async function handleSetReleaseMode(mode: "off" | "volume" | "wiggle" | "rate") {
     if (mode === curReleaseMode) return;
@@ -3154,6 +3172,13 @@ function HedgeDualLegPanel({
                     : "new cycles allowed"}
                 </span>
               </p>
+              {jumpPausedActive && curReleaseMode !== "off" && (
+                <p className="text-[10px] text-amber-300 mt-0.5">
+                  {liveReleasePeak != null
+                    ? `target: ${curReleaseMode} ≤ ${releasePrefix}${(liveReleasePeak / 2).toFixed(2)}${releaseUnit} (half of peak ${releasePrefix}${liveReleasePeak.toFixed(2)}${releaseUnit}) -- releases early the moment this is reached, or at the timer above, whichever is first`
+                    : "waiting for a peak reading…"}
+                </p>
+              )}
               {jumpPausedActive && (
                 <button
                   onClick={handleClearVolumeJump}
