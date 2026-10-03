@@ -23,6 +23,7 @@ const LIMITS = {
   reversalHi: { min: 51, max: 100, label: "reversal band high (K)" },
   jumpRatio: { min: 1.1, max: 20, label: "volume-jump ratio" },
   jumpPause: { min: 0, max: 1800, label: "volume-jump pause (seconds)" },
+  tp: { min: 0.01, max: 1.0, label: "take-profit" },
 };
 
 export async function POST(req: NextRequest) {
@@ -40,6 +41,7 @@ export async function POST(req: NextRequest) {
     ["reversalHi", "override_stoch_reversal_hi"],
     ["jumpRatio", "override_volume_jump_ratio"],
     ["jumpPause", "override_volume_jump_pause_seconds"],
+    ["tp", "override_tp_pct"],
   ] as const) {
     const raw = body[key];
     if (raw === undefined || raw === null || raw === "") continue;
@@ -91,6 +93,18 @@ export async function POST(req: NextRequest) {
       return NextResponse.json({ error: `releaseMode must be off/volume/wiggle/rate (got "${rm}").` }, { status: 400 });
     }
     out["override_volume_jump_release_mode"] = rm === "off" ? null : rm;
+  }
+
+  // Exit-style selector (2026-10-03, direct request: "build the same thing for worker 1" --
+  // mirrors the hedge's trail/TP switch). "trail" is the default/current behavior; "tp" makes
+  // a literal TP (at override_tp_pct) the only winner exit and suppresses the profit-lock
+  // trail. SL is never touched -- see StochBot._exit_params's docstring.
+  if (body.exitMode !== undefined) {
+    const em = body.exitMode;
+    if (em !== "trail" && em !== "tp") {
+      return NextResponse.json({ error: `exitMode must be trail/tp (got "${em}").` }, { status: 400 });
+    }
+    out["override_exit_mode"] = em;
   }
 
   if (Object.keys(out).length === 0) {
