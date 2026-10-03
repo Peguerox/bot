@@ -80,12 +80,16 @@ project with no git/Render/Vercel link -- never work there.
     `StochBot._regime_controls`, `lighter_btc_initial_regime_overrides.sql`) -- turning a
     regime off only blocks new entries there, never closes a position already open. Switch
     threshold raised live 2 -> 4 BTC same day (user's own call, not re-swept).
-  - **Live stochastic-band control, 2026-10-02:** `override_stoch_band_lo/hi`
-    (`StochBot._stoch_band_controls`, `lighter_btc_initial_stoch_band_override.sql`) -- ONE
-    shared K band applied to BOTH the entry signal and the reversal exit together (they move
-    as a pair, not independently). NULL uses the compiled 25/75. `compute_stoch_signal` now
-    takes optional `entry_lo/entry_hi/reversal_lo/reversal_hi` args for this; every other
-    caller passes none, so behaviour elsewhere is unchanged.
+  - **Live stochastic-band controls, 2026-10-02:** `override_stoch_band_lo/hi` (entry) and
+    `override_stoch_reversal_lo/hi` (reversal) -- `StochBot._stoch_band_controls`,
+    `lighter_btc_initial_stoch_band_override.sql` +
+    `lighter_btc_initial_stoch_reversal_band_override.sql`. REVISED same day: first version
+    tied entry and reversal to one shared pair; now fully independent, each NULL-means-25/75.
+    `compute_stoch_signal` takes optional `entry_lo/entry_hi/reversal_lo/reversal_hi` args for
+    this; every other caller passes none, so behaviour elsewhere is unchanged. The settings API
+    route reads current values with `select("*")`, not named columns -- a column whose
+    migration hasn't run yet must never error every OTHER control on the same panel (it did,
+    once, before this).
   - **Live readouts:** `live_candle_volume` and `live_flip_streak_dir/len` on the state row
     (need their migrations run) show the current volume, the live streak count, and which
     signal governs entries, on the dashboard panel.
