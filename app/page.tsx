@@ -2857,9 +2857,11 @@ function HedgeDualLegPanel({
                 <p className="font-bold text-sm tabular-nums text-gray-300" title="Traded volume: mean BTC size of 10 closed one-minute candles. Readout only, not gated.">
                   <span className="text-gray-500 mr-1">Volume</span>
                   {liveTradedVolume != null ? liveTradedVolume.toFixed(2) + " BTC" : "—"}
-                  <span className="text-[10px] font-normal text-gray-500 ml-1.5">
-                    {liveTradedVolumeRate == null ? "" : (liveTradedVolumeRate >= 0 ? "+" : "") + liveTradedVolumeRate.toFixed(2) + " BTC/min"}
-                  </span>
+                </p>
+                <p className="text-xs tabular-nums text-gray-400" title="Volume rate: change vs. one candle earlier. Readout only, not gated.">
+                  <span className="text-gray-500 mr-1">Rate</span>
+                  {liveTradedVolumeRate == null ? "—"
+                    : (liveTradedVolumeRate >= 0 ? "+" : "") + liveTradedVolumeRate.toFixed(2) + " BTC/min"}
                 </p>
                 <p className="text-[10px] text-gray-400">
                   Filters OFF · readings only
