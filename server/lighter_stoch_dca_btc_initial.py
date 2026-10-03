@@ -388,11 +388,18 @@ CONFIG = BotConfig(
     # real whipsaw -- K swung 11->89->53->97->87 across 7 minutes -- and the bot entered short
     # right into it). Checked against 14,773 historical candles: ratio>=3.0 is the 95th
     # percentile (~5% of candles), comfortably below the real incident's ratio, picked with
-    # margin rather than at the point of rarest significance. 120s pause matches the existing
-    # post-reversal-cooldown convention. Live-overridable -- see BotConfig.volume_jump_ratio.
+    # margin rather than at the point of rarest significance.
+    # REVISED same day, direct request: pause raised 120s -> 1800s (30 min). A volume-recovery
+    # design (stay paused until volume actually drops back near its pre-spike level) was
+    # considered and explicitly rejected -- checking the same 23:00-01:00 UTC window where this
+    # incident happened, elevated volume clusters EVERY day regardless of weekday, consistent
+    # with recurring perpetual-futures funding settlements (00:00/08:00/16:00 UTC) rather than
+    # a one-off large order; waiting for a full reversion to the pre-spike baseline could
+    # realistically take hours, not minutes. A longer fixed pause was judged more practical
+    # than an open-ended wait. Live-overridable -- see BotConfig.volume_jump_ratio.
     volume_jump_ratio=3.0,
     volume_jump_lookback=10,
-    volume_jump_pause_seconds=120.0,
+    volume_jump_pause_seconds=1800.0,
     # See profit_lock_trigger_pct above for the full reasoning -- trigger 0.03/trail 0.03 is an
     # explicit live test under the flip regime, replacing the old zero-give-back default.
     profit_lock_trail_pct=0.03,

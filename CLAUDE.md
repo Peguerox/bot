@@ -90,7 +90,7 @@ project with no git/Render/Vercel link -- never work there.
     route reads current values with `select("*")`, not named columns -- a column whose
     migration hasn't run yet must never error every OTHER control on the same panel (it did,
     once, before this).
-  - **Volume-jump guard, 2026-10-02:** `volume_jump_ratio=3.0` / `volume_jump_pause_seconds=120`
+  - **Volume-jump guard, 2026-10-02:** `volume_jump_ratio=3.0` / `volume_jump_pause_seconds=1800`
     (`compute_volume_jump_ratio`, `StochBot._update_volume_jump_guard`,
     `lighter_btc_initial_volume_jump.sql`), live-overridable the same way. Direct request
     ("this cannot happen") after a real live loss (trade 1697): one outlier candle
@@ -100,10 +100,19 @@ project with no git/Render/Vercel link -- never work there.
     trailing-10 baseline, ALL new entries (both regimes) and reversal reopens pause for the
     window -- never blocks an exit, same contract as every other gate in this file. 3.0 is the
     95th percentile of a 14,773-candle sample, picked with margin below the real incident
-    rather than at the point of rarest significance. Caught and fixed before deploy: the first
-    version called `compute_volume_jump_ratio` unconditionally even when the guard was off,
-    crashing on any candle data without a "v" field -- reordered to bail out before computing
-    when unconfigured, and the function itself now reads `.get("v", 0)` rather than `["v"]`.
+    rather than at the point of rarest significance.
+    - **Pause REVISED same day, 120s -> 1800s (30 min):** a volume-recovery design (stay
+      paused until volume actually drops back near its pre-spike level) was proposed, then
+      explicitly dropped -- checked the same 23:00-01:00 UTC window where this incident
+      happened across the full historical dataset: elevated volume clusters there EVERY day
+      regardless of weekday, consistent with recurring perpetual-futures funding settlements
+      (00:00/08:00/16:00 UTC) rather than a one-off large order. Waiting for a full reversion
+      to the pre-spike baseline could realistically take hours; a longer fixed pause was
+      judged more practical than an open-ended wait.
+    - Caught and fixed before deploy: the first version called `compute_volume_jump_ratio`
+      unconditionally even when the guard was off, crashing on any candle data without a "v"
+      field -- reordered to bail out before computing when unconfigured, and the function
+      itself now reads `.get("v", 0)` rather than `["v"]`.
   - **Live readouts:** `live_candle_volume`, `live_flip_streak_dir/len`, and
     `live_volume_jump_ratio` on the state row (need their migrations run) show the current
     volume, the live streak count, the jump-guard reading, and which signal governs entries,

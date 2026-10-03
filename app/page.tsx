@@ -1597,7 +1597,7 @@ function CompactStochBtcPanel({
   // volume_jump_pause_seconds in lighter_stoch_dca_btc_initial.py.
   const liveJumpRatio: number | null = state?.live_volume_jump_ratio ?? null;
   const curJumpRatio: number = state?.override_volume_jump_ratio ?? 3.0;
-  const curJumpPause: number = state?.override_volume_jump_pause_seconds ?? 120;
+  const curJumpPause: number = state?.override_volume_jump_pause_seconds ?? 1800;
   const [jumpRatioIn, setJumpRatioIn] = useState("");
   const [jumpPauseIn, setJumpPauseIn] = useState("");
 
