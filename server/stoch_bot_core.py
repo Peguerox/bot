@@ -2233,15 +2233,20 @@ class StochBot:
         WORKER_2_HANDOFF.md research recommendation (SL .05 / fixed TP .10 / trailing OFF) rather
         than letting the two winner-exit styles run partially mixed. SL is untouched by this
         either way -- the one protection that always stays active regardless of exit_mode.
+        "floor" (2026-10-03, direct request: "whenever the first leg gets out, arm a new stop
+        loss") makes the dormant partner-cut breakeven floor the only winner protection, live-
+        selectable without flipping BotConfig.breakeven_floor_enabled -- see floor_enabled where
+        exit_mode is consumed, and the breakeven-floor block itself, for the full mechanism.
 
-        dwell_seconds (2026-10-03, direct request: "a dwell strategy... used in both fixed TP
-        and trail") -- requires the TP level (in "tp" mode) or the trail's pullback (in "trail"
-        mode) to stay continuously true for this many seconds before actually closing, instead
-        of firing on the very first touch. 0 (default) reproduces the old instant-fire behavior
-        exactly. Backed by research/codex-worker2/quiet_exit_study/dwell_test.py: real data
-        showed dwell measurably reduces whipsaw on both mechanisms, but didn't conclusively beat
-        the plain no-dwell candidate either way -- this is a live experiment, not a proven edge.
-        Never applies to SL or any other protection exit, which stay instant always."""
+        dwell_seconds (2026-10-03, direct request: "a dwell strategy") -- requires the trail's
+        pullback (in "trail" mode) or the armed floor's trigger (in "floor" mode) to stay
+        continuously true for this many seconds before actually closing, instead of firing on
+        the very first touch. 0 (default) reproduces the old instant-fire behavior exactly.
+        Deliberately NEVER applied to TP ("if you get to the TP you want to get out") or to SL
+        or any other protection exit -- those always stay instant. Backed by
+        research/codex-worker2/quiet_exit_study/dwell_test.py: real data showed dwell measurably
+        reduces whipsaw on the mechanisms it was tested against, but didn't conclusively beat
+        the plain no-dwell candidate either way -- this is a live experiment, not a proven edge."""
         cfg = self.cfg
         sl, trig, trail, tp = cfg.sl_pct, cfg.profit_lock_trigger_pct, cfg.profit_lock_trail_pct, cfg.tp_pct
         exit_mode = "trail"
@@ -2256,7 +2261,7 @@ class StochBot:
             o = state.get("override_tp_pct")
             if o is not None: tp = float(o)
             o = state.get("override_exit_mode")
-            if o in ("trail", "tp"): exit_mode = o
+            if o in ("trail", "tp", "floor"): exit_mode = o
             o = state.get("override_dwell_seconds")
             if o is not None: dwell = float(o)
         return sl, trig, trail, tp, exit_mode, dwell
@@ -2705,6 +2710,11 @@ class StochBot:
         self._breakeven_floor_pct = None
         self._breakeven_reached = False
         self._breakeven_partner_read_at = 0.0
+        # Called at every position-close point (this method's own docstring), so this is a
+        # second, independent place the dwell timer gets cleared -- belt and suspenders with the
+        # profit_lock_peak_pct resets, not a replacement for them (the trail's own dwell usage
+        # has nothing to do with the breakeven floor and must stay covered either way).
+        self._dwell_touch_at = None
 
     @staticmethod
     def breakeven_floor_pct(partner_cycle_pnl, own_notional_usd, fixed_floor_pct=None):
@@ -5321,8 +5331,18 @@ class StochBot:
             # (a literal TP and the profit-lock trail are alternate winner-exit styles, not
             # meant to run partially mixed). SL is NEVER touched by exit_mode -- it is the one
             # protection that stays in place regardless of which winner-exit style is active.
+            #
+            # "floor" (2026-10-03, direct request: "whenever the first leg gets out... arm a new
+            # stop loss... that's the point") -- the dormant partner-cut breakeven floor
+            # (BotConfig.breakeven_floor_enabled) becomes the ONLY winner protection, live-
+            # selectable without flipping the compiled flag; see floor_enabled below and the
+            # breakeven-floor block further down. TP and the plain trail both go off in this
+            # mode -- the floor only ever does anything once the partner has actually closed, so
+            # unlike "trail"/"tp" it's an exit condition that doesn't move at all before the
+            # partner exits (matches the user's "now's the time you enter the position" framing).
             tp_enabled = (not cfg.disable_literal_tp) if exit_mode == "trail" else (exit_mode == "tp")
             trail_enabled = cfg.profit_lock_enabled if exit_mode == "trail" else False
+            floor_enabled = (exit_mode == "floor")
             pos_tp = pos_tp if pos_tp is not None else ov_tp
             pos_sl = pos_sl if pos_sl is not None else ov_sl
             if cfg.schema_has_exit_overrides and state.get("override_sl_pct") is not None:
@@ -5341,12 +5361,12 @@ class StochBot:
             if side == "long":
                 if check_price <= sl:
                     gap_hit = "SL"
-                elif tp_enabled and self._dwell_ready(check_price >= tp, dwell_seconds):
+                elif tp_enabled and check_price >= tp:
                     gap_hit = "TP"
             else:
                 if check_price >= sl:
                     gap_hit = "SL"
-                elif tp_enabled and self._dwell_ready(check_price <= tp, dwell_seconds):
+                elif tp_enabled and check_price <= tp:
                     gap_hit = "TP"
 
             if gap_hit is None and cfg.saving_lock_arm_frac_of_sl is not None and ae:
@@ -5413,12 +5433,15 @@ class StochBot:
                         except Exception:
                             pass  # best-effort only -- in-memory tracking above is authoritative
 
-            if gap_hit is None and cfg.breakeven_floor_enabled and ae:
-                # Breakeven floor -- see BotConfig.breakeven_floor_enabled. Checked AFTER the
-                # profit-lock trail so that whichever protects more fires first: above
-                # profit_lock_trigger_pct the trail normally stops a slide well before it ever
-                # reaches the floor, and between the floor and the trigger this is the only
-                # protection there is.
+            if gap_hit is None and (cfg.breakeven_floor_enabled or floor_enabled) and ae:
+                # Breakeven floor -- see BotConfig.breakeven_floor_enabled, or exit_mode="floor"
+                # (_exit_params' docstring) for the live-selectable path that doesn't need the
+                # compiled flag. Checked AFTER the profit-lock trail so that whichever protects
+                # more fires first: above profit_lock_trigger_pct the trail normally stops a
+                # slide well before it ever reaches the floor, and between the floor and the
+                # trigger this is the only protection there is. In "floor" exit_mode specifically
+                # the plain trail is off entirely (trail_enabled=False), so this is the ONLY
+                # winner protection besides SL.
                 if not self._breakeven_restored:
                     self._breakeven_restored = True
                     if self._breakeven_baseline is None:
@@ -5490,7 +5513,13 @@ class StochBot:
                     arm_at = floor_pct + cfg.breakeven_floor_arm_margin_pct
                     if unrealized_pct >= arm_at:
                         self._breakeven_reached = True
-                    elif self._breakeven_reached and unrealized_pct <= floor_pct:
+                        self._dwell_touch_at = None  # a fresh arm is not itself a touch of the floor
+                    # dwell only applies via the live exit_mode="floor" path -- a bot using the
+                    # OLDER compiled breakeven_floor_enabled flag directly (dwell_seconds stays
+                    # whatever _exit_params resolved, but floor_enabled gates it to 0 here) keeps
+                    # the exact old instant-fire behavior, unchanged by this feature's existence.
+                    elif self._dwell_ready(self._breakeven_reached and unrealized_pct <= floor_pct,
+                                            dwell_seconds if floor_enabled else 0):
                         gap_hit = "BREAKEVEN_LOCK"
 
             if (cfg.use_joint_adaptive and cfg.stoch_turn_exit_enabled

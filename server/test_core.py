@@ -2443,36 +2443,80 @@ async def t_dwell_ready_fires_once_elapsed():
     check("ready -- stood there long enough", ready is True, ready)
 
 
-async def t_exit_mode_tp_dwell_blocks_a_single_touch():
-    print("\n[exit_mode tp + dwell: a single tick at the TP level does not close yet]")
+async def t_exit_mode_tp_ignores_dwell_fires_instantly():
+    print("\n[exit_mode tp: dwell NEVER applies to TP -- direct correction, fires on first touch]")
     entry = 86000.0
     ex = FakeExchange(position=round(10.0 / entry, 5), collateral=10.0)
     partner = {"side": None, "realized_pnl_usd": 0.0}
     state = _breakeven_state(entry, 10.0)
     state["override_exit_mode"] = "tp"
-    state["override_dwell_seconds"] = 10.0
+    state["override_dwell_seconds"] = 30.0  # large dwell, deliberately -- must have zero effect
     bot = _breakeven_bot(ex, state, partner, breakeven_floor_enabled=False,
                           schema_has_exit_overrides=True)
-    await _tick_at(bot, entry * (1 + 0.10 / 100) + 1.0)  # past the TP level, just this one tick
-    check("still open -- touched but hasn't dwelled yet", bot.state_row["side"] == "long",
+    await _tick_at(bot, entry * (1 + 0.10 / 100) + 1.0)  # a single tick past TP
+    check("closed via TP on the very first touch", bot.state_row["side"] is None, bot.state_row["side"])
+    check("reason is TP", any(a == "closed" and d.get("reason") == "TP" for a, d in bot.runs),
+          [(a, d.get("reason")) for a, d in bot.runs if a == "closed"])
+
+
+async def t_exit_mode_floor_dwell_blocks_a_single_touch():
+    print("\n[exit_mode floor + dwell: a single tick at the armed floor does not close yet]")
+    entry = 86000.0
+    ex = FakeExchange(position=round(10.0 / entry, 5), collateral=10.0)
+    partner = {"side": "short", "realized_pnl_usd": 0.0}
+    state = _breakeven_state(entry, 10.0)
+    state["override_exit_mode"] = "floor"
+    state["override_dwell_seconds"] = 10.0
+    bot = _breakeven_bot(ex, state, partner, breakeven_floor_enabled=False,  # live path alone, not the compiled flag
+                          profit_lock_trigger_pct=0.05, profit_lock_trail_pct=0.01,
+                          schema_has_exit_overrides=True)
+    partner["side"] = None
+    partner["realized_pnl_usd"] = -0.005  # partner cut at its stop
+    await _tick_at(bot, entry * (1 + 0.06 / 100))  # at/above arm_at (floor .05 + margin .01) -- arms
+    check("floor armed", bot._breakeven_reached is True, bot._breakeven_reached)
+    await _tick_at(bot, entry * (1 + 0.025 / 100))  # back down at/below the floor, ONE tick
+    check("still open -- touched the floor but hasn't dwelled yet", bot.state_row["side"] == "long",
           bot.state_row["side"])
 
 
-async def t_exit_mode_tp_dwell_fires_once_elapsed():
-    print("\n[exit_mode tp + dwell: closes via TP once continuously past it for dwell_seconds]")
+async def t_exit_mode_floor_dwell_fires_once_elapsed():
+    print("\n[exit_mode floor + dwell: closes via BREAKEVEN_LOCK once continuously past the floor]")
     entry = 86000.0
     ex = FakeExchange(position=round(10.0 / entry, 5), collateral=10.0)
-    partner = {"side": None, "realized_pnl_usd": 0.0}
+    partner = {"side": "short", "realized_pnl_usd": 0.0}
     state = _breakeven_state(entry, 10.0)
-    state["override_exit_mode"] = "tp"
+    state["override_exit_mode"] = "floor"
     state["override_dwell_seconds"] = 10.0
     bot = _breakeven_bot(ex, state, partner, breakeven_floor_enabled=False,
+                          profit_lock_trigger_pct=0.05, profit_lock_trail_pct=0.01,
                           schema_has_exit_overrides=True)
-    bot._dwell_touch_at = time.time() - 15.0  # already standing past TP for 15s
-    await _tick_at(bot, entry * (1 + 0.10 / 100) + 1.0)
-    check("closed via TP", bot.state_row["side"] is None, bot.state_row["side"])
-    check("reason is TP", any(a == "closed" and d.get("reason") == "TP" for a, d in bot.runs),
+    partner["side"] = None
+    partner["realized_pnl_usd"] = -0.005
+    await _tick_at(bot, entry * (1 + 0.06 / 100))  # at/above arm_at -- arms
+    bot._dwell_touch_at = time.time() - 15.0  # pretend it's already been standing at the floor
+    await _tick_at(bot, entry * (1 + 0.025 / 100))
+    check("closed via BREAKEVEN_LOCK", bot.state_row["side"] is None, bot.state_row["side"])
+    check("reason is BREAKEVEN_LOCK",
+          any(a == "closed" and d.get("reason") == "BREAKEVEN_LOCK" for a, d in bot.runs),
           [(a, d.get("reason")) for a, d in bot.runs if a == "closed"])
+
+
+async def t_exit_mode_floor_compiled_flag_alone_ignores_dwell():
+    print("\n[breakeven floor via the OLDER compiled flag alone (no exit_mode override) stays instant]")
+    entry = 86000.0
+    ex = FakeExchange(position=round(10.0 / entry, 5), collateral=10.0)
+    partner = {"side": "short", "realized_pnl_usd": 0.0}
+    state = _breakeven_state(entry, 10.0)
+    state["override_dwell_seconds"] = 10.0  # present, but floor_enabled is False (exit_mode stays "trail")
+    bot = _breakeven_bot(ex, state, partner, breakeven_floor_enabled=True,  # the OLD compiled path
+                          profit_lock_trigger_pct=10.0, profit_lock_trail_pct=0.01,  # trail unreachable
+                          schema_has_exit_overrides=True)
+    partner["side"] = None
+    partner["realized_pnl_usd"] = -0.005
+    await _tick_at(bot, entry * (1 + 0.06 / 100))  # at/above arm_at -- arms
+    await _tick_at(bot, entry * (1 + 0.025 / 100))  # a single tick at the floor
+    check("closed instantly -- dwell only applies via the live exit_mode=\"floor\" path",
+          bot.state_row["side"] is None, bot.state_row["side"])
 
 
 async def t_trail_dwell_blocks_a_single_touch():
@@ -5925,8 +5969,10 @@ async def main():
               t_dwell_ready_zero_seconds_is_instant,
               t_dwell_ready_first_touch_not_enough,
               t_dwell_ready_fires_once_elapsed,
-              t_exit_mode_tp_dwell_blocks_a_single_touch,
-              t_exit_mode_tp_dwell_fires_once_elapsed,
+              t_exit_mode_tp_ignores_dwell_fires_instantly,
+              t_exit_mode_floor_dwell_blocks_a_single_touch,
+              t_exit_mode_floor_dwell_fires_once_elapsed,
+              t_exit_mode_floor_compiled_flag_alone_ignores_dwell,
               t_trail_dwell_blocks_a_single_touch,
               t_trail_dwell_fires_once_elapsed,
               t_trail_dwell_resets_on_a_new_peak,

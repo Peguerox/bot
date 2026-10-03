@@ -1558,6 +1558,11 @@ function CompactStochBtcPanel({
   const [dwellIn, setDwellIn] = useState("");
 
   async function handleSetExitMode(mode: "trail" | "tp") {
+    // "floor" (partner-cut breakeven floor) is deliberately NOT offered here -- it only ever
+    // arms once a cycle PARTNER closes, and Worker 1 has no partner (no cycle_partner_table),
+    // so it would silently never do anything: TP and the trail would both be off with no floor
+    // ever arming, leaving the position running on SL alone forever. Hedge-only -- see the
+    // HedgeDualLegPanel's own handleSetExitMode.
     if (mode === curExitMode) return;
     if (!confirm(
       mode === "tp"
@@ -2537,10 +2542,9 @@ function CompactStochBtcPanel({
           <p className="text-gray-600 text-[9px] leading-snug">
             Leave a box blank to keep it. Takes effect immediately, including on an open position
             (the exchange-side stop is re-placed at the new SL). TP stays 0.10%. Trail 0 = exit on
-            the first tick down after the trigger. Dwell: the TP (in Fixed TP mode) or the trail's
-            pullback (in Trail mode) must hold for this many seconds before it actually closes --
-            0 = instant, same as before. Research is mixed: it measurably cuts whipsaw on both,
-            but hasn't beaten the plain no-dwell candidate yet. SL is never delayed.
+            the first tick down after the trigger. Dwell: in Trail mode, the trail's pullback
+            must hold for this many seconds before it actually closes -- 0 = instant, same as
+            before. Never applies to TP (reaching it should close right away) or SL.
           </p>
         </div>
       )}
@@ -2728,11 +2732,13 @@ function HedgeDualLegPanel({
   const curDwell: number = longState?.override_dwell_seconds ?? 0;
   const [dwellIn, setDwellIn] = useState("");
 
-  async function handleSetExitMode(mode: "trail" | "tp") {
+  async function handleSetExitMode(mode: "trail" | "tp" | "floor") {
     if (mode === curExitMode) return;
     if (!confirm(
       mode === "tp"
         ? `Switch BOTH legs to fixed-TP mode? The profit-lock trail is suppressed; only SL and the TP level close a winner. Takes effect immediately, including on an open position.`
+        : mode === "floor"
+        ? `Switch BOTH legs to floor mode? TP and the plain trail are both off. Until a leg's partner closes, only SL protects it; once the partner closes, a new stop arms at roughly the level that offsets the partner's loss (dwell-gated if set). Takes effect immediately, including on an open position.`
         : `Switch BOTH legs back to trail mode? Literal TP is disabled again; the profit-lock trail governs winners, same as before. Takes effect immediately, including on an open position.`
     )) return;
     setSavingExitMode(true);
@@ -3292,8 +3298,8 @@ function HedgeDualLegPanel({
               <p className="text-gray-500 text-[9px] uppercase">
                 Exit mode <span className="text-gray-600">now {curExitMode}</span>
               </p>
-              <div className="grid grid-cols-2 gap-1 mt-1">
-                {(["trail", "tp"] as const).map((mode) => (
+              <div className="grid grid-cols-3 gap-1 mt-1">
+                {(["trail", "tp", "floor"] as const).map((mode) => (
                   <button
                     key={mode}
                     onClick={() => handleSetExitMode(mode)}
@@ -3302,15 +3308,17 @@ function HedgeDualLegPanel({
                       curExitMode === mode ? "bg-blue-500/30 text-blue-300" : "bg-gray-700/50 text-gray-500 hover:bg-gray-700"
                     }`}
                   >
-                    {mode === "tp" ? "Fixed TP" : "Trail"}
+                    {mode === "tp" ? "Fixed TP" : mode === "floor" ? "Floor" : "Trail"}
                   </button>
                 ))}
               </div>
               <p className="text-gray-600 text-[9px] leading-snug mt-1">
                 Trail: the profit-lock trigger/trail below governs winners (current behavior).
                 Fixed TP: the trail is suppressed -- only SL and the TP level below close a
-                winner, per the WORKER_2_HANDOFF.md research candidate. SL always stays active
-                either way.
+                winner, per the WORKER_2_HANDOFF.md research candidate. Floor: TP and the trail
+                are both off -- only SL protects until this leg's partner closes, then a new
+                stop arms near the level that offsets the partner's loss (the dwell box below
+                can delay that new stop; it never delays TP or SL). SL always stays active.
               </p>
             </div>
             <div className="grid grid-cols-5 gap-1.5">
@@ -3343,10 +3351,10 @@ function HedgeDualLegPanel({
             <p className="text-gray-600 text-[9px] leading-snug">
               Leave a box blank to keep it. Applies to BOTH legs at once and takes effect
               immediately, including on an open position — stop the bot first if you'd rather it
-              only affect the next cycle. Dwell: the TP (Fixed TP mode) or the trail's pullback
-              (Trail mode) must hold for this many seconds before it closes -- 0 = instant. SL is
-              never delayed. Research found it cuts whipsaw on both but hasn't beaten plain
-              no-dwell yet -- see WORKER_2_HANDOFF.md follow-up.
+              only affect the next cycle. Dwell: the trail's pullback (Trail mode) or the armed
+              floor (Floor mode) must hold for this many seconds before it closes -- 0 = instant.
+              Never applies to TP (take it the instant it's reached) or SL. Research found it
+              cuts whipsaw but hasn't beaten plain no-dwell yet -- see WORKER_2_HANDOFF.md follow-up.
             </p>
           </div>
           <div className="space-y-1">

@@ -75,12 +75,14 @@ export async function POST(req: NextRequest) {
   // Exit-style selector (2026-10-03, direct request after WORKER_2_HANDOFF.md research: "a
   // panel where i can change between trail and TP so i can test multiple strategies"). "trail"
   // is the default/current behavior; "tp" is the research-recommended controlled comparison
-  // (literal TP at override_tp_pct, trail suppressed). SL is never touched by this -- see
-  // StochBot._exit_params's docstring for the full reasoning.
+  // (literal TP at override_tp_pct, trail suppressed). "floor" (direct follow-up: "whenever the
+  // first leg gets out... arm a new stop loss") live-activates the dormant partner-cut
+  // breakeven floor as the only winner protection, hedge-only since it needs a cycle partner.
+  // SL is never touched by this -- see StochBot._exit_params's docstring for the full reasoning.
   if (body.exitMode !== undefined) {
     const em = body.exitMode;
-    if (em !== "trail" && em !== "tp") {
-      return NextResponse.json({ error: `exitMode must be trail/tp (got "${em}").` }, { status: 400 });
+    if (em !== "trail" && em !== "tp" && em !== "floor") {
+      return NextResponse.json({ error: `exitMode must be trail/tp/floor (got "${em}").` }, { status: 400 });
     }
     out["override_exit_mode"] = em;
   }
