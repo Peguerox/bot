@@ -1784,21 +1784,39 @@ class StochBot:
             "base_amount_btc": base_amount, "pnl_usd": pnl_usd, "reason": reason,
             "legs_used": legs_used, "opened_at": opened_at,
         }
+        full_row = dict(row)
         if cycle_id is not None:
             # Omitted entirely rather than sent as null -- schema_has_cycle_id bots only pass a
             # value once the migration exists; a bot/table without that column must never see
             # this key at all, or PostgREST rejects the whole insert.
-            row["cycle_id"] = cycle_id
+            full_row["cycle_id"] = cycle_id
         if entry_features is not None:
             # Same reasoning as cycle_id above -- only passed at all once schema_has_entry_
             # features is on and the migration has added these columns.
-            row.update(entry_features)
-        await self.sb(
-            "POST",
-            f"{self.cfg.table_trades}?on_conflict=opened_at,side,avg_entry_price",
-            row,
-            extra_headers={"Prefer": "resolution=ignore-duplicates,return=representation"},
-        )
+            full_row.update(entry_features)
+        try:
+            await self.sb(
+                "POST",
+                f"{self.cfg.table_trades}?on_conflict=opened_at,side,avg_entry_price",
+                full_row,
+                extra_headers={"Prefer": "resolution=ignore-duplicates,return=representation"},
+            )
+        except Exception as e:
+            # Real incident, 2026-10-03: schema_has_entry_features turned on (entry_
+            # settings_snapshot) before its migration had actually run -- the flag being True
+            # does NOT guarantee the column exists -- and every close on the affected bots
+            # failed to log a trade row at all, not just lose the new field, because PostgREST
+            # rejects the WHOLE insert on one unknown column. By the time log_trade runs, the
+            # realized PnL this row exists to capture is already final and correct in state --
+            # losing the ROW is still a real loss of research data, so always fall back to the
+            # guaranteed-safe core columns rather than silently dropping the insert entirely.
+            await self.log_run("log_trade_fallback", {"error": str(e)[:300]})
+            await self.sb(
+                "POST",
+                f"{self.cfg.table_trades}?on_conflict=opened_at,side,avg_entry_price",
+                row,
+                extra_headers={"Prefer": "resolution=ignore-duplicates,return=representation"},
+            )
 
     # ── Candles ─────────────────────────────────────────────────────────────────────────────
     async def fetch_candles(self, count=60):

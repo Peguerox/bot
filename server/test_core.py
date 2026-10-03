@@ -2453,6 +2453,51 @@ async def t_entry_settings_snapshot_falls_back_to_compiled_defaults():
           snap["jump_release_mode"])
 
 
+async def t_log_trade_falls_back_to_core_row_when_entry_features_column_missing():
+    print("\n[log_trade: a missing entry_features column falls back to the guaranteed-safe core row]")
+    # Real incident, 2026-10-03: schema_has_entry_features turned on before its migration had
+    # actually run -- PostgREST rejects the WHOLE insert on one unknown column, so every close
+    # silently failed to log a trade row at all (not just lose the new field). The real position
+    # close/PnL was never at risk (that's already final in state by the time log_trade runs) --
+    # only the research row was being lost.
+    bot = make_bot(FakeExchange())
+    bot.log_trade = StochBot.log_trade.__get__(bot)  # the REAL method, not the test harness's recorder
+    calls = []
+
+    async def flaky_sb(method, path, body=None, extra_headers=None):
+        calls.append(body)
+        if len(calls) == 1:
+            raise RuntimeError("supabase 400 on POST t: column 'entry_settings_snapshot' not found")
+        return [body]
+    bot.sb = flaky_sb
+    await bot.log_trade("long", 86000.0, 86100.0, 0.0001, 1.0, "TP", 1, "2026-10-03T00:00:00Z",
+                         entry_features={"entry_k": 50.0,
+                                         "entry_settings_snapshot": {"exit_mode": "trail"}})
+    check("retried after the failure", len(calls) == 2, len(calls))
+    check("first attempt included the rich entry_features", "entry_k" in calls[0], calls[0])
+    check("fallback attempt dropped entry_features but kept the core fields",
+          "entry_k" not in calls[1] and calls[1]["side"] == "long" and calls[1]["pnl_usd"] == 1.0,
+          calls[1])
+    check("fallback logged for visibility",
+          any(a == "log_trade_fallback" for a, d in bot.runs), bot.runs)
+
+
+async def t_log_trade_no_fallback_needed_when_insert_succeeds():
+    print("\n[log_trade: the normal path never touches the fallback when the insert just works]")
+    bot = make_bot(FakeExchange())
+    bot.log_trade = StochBot.log_trade.__get__(bot)
+    calls = []
+
+    async def ok_sb(method, path, body=None, extra_headers=None):
+        calls.append(body)
+        return [body]
+    bot.sb = ok_sb
+    await bot.log_trade("short", 86000.0, 85900.0, 0.0001, 0.5, "SL", 1, "2026-10-03T00:00:00Z",
+                         entry_features={"entry_k": 50.0})
+    check("exactly one call -- no retry needed", len(calls) == 1, len(calls))
+    check("no fallback logged", not any(a == "log_trade_fallback" for a, d in bot.runs), bot.runs)
+
+
 async def t_dwell_ready_not_touched_resets_the_timer():
     print("\n[dwell: _dwell_ready(False, ...) always resets, even if a timer was already running]")
     bot = _breakeven_bot(FakeExchange(), _breakeven_state(86000.0, 10.0),
@@ -6013,6 +6058,8 @@ async def main():
               t_exit_mode_ignored_without_schema_flag,
               t_entry_settings_snapshot_captures_exit_and_jump_settings,
               t_entry_settings_snapshot_falls_back_to_compiled_defaults,
+              t_log_trade_falls_back_to_core_row_when_entry_features_column_missing,
+              t_log_trade_no_fallback_needed_when_insert_succeeds,
               t_dwell_ready_not_touched_resets_the_timer,
               t_dwell_ready_zero_seconds_is_instant,
               t_dwell_ready_first_touch_not_enough,
