@@ -23,11 +23,12 @@ const LIMITS = {
   dwell: { min: 0, max: 300, label: "dwell (seconds)" },
   jumpRatio: { min: 1.1, max: 20, label: "volume-jump ratio" },
   jumpPause: { min: 0, max: 1800, label: "volume-jump pause (seconds)" },
+  wiggleLock: { min: 0.01, max: 50, label: "volume/wiggle lock threshold" },
 };
 
 export async function POST(req: NextRequest) {
   const body = await req.json();
-  const out: Record<string, number | string | null> = {};
+  const out: Record<string, number | string | boolean | null> = {};
 
   for (const [key, col] of [
     ["sl", "override_sl_pct"],
@@ -37,6 +38,7 @@ export async function POST(req: NextRequest) {
     ["dwell", "override_dwell_seconds"],
     ["jumpRatio", "override_volume_jump_ratio"],
     ["jumpPause", "override_volume_jump_pause_seconds"],
+    ["wiggleLock", "override_volume_wiggle_lock_threshold"],
   ] as const) {
     const raw = body[key];
     if (raw === undefined || raw === null || raw === "") continue;
@@ -52,6 +54,16 @@ export async function POST(req: NextRequest) {
       );
     }
     out[col] = v;
+  }
+
+  // Volume/wiggle lock on/off switch (2026-10-03, direct request: "give me an on and off switch
+  // too") -- separate from the threshold number so the lock can be disabled without losing the
+  // configured level. Both legs always carry the same switch, same reason as every other guard.
+  if (body.wiggleLockEnabled !== undefined) {
+    if (typeof body.wiggleLockEnabled !== "boolean") {
+      return NextResponse.json({ error: "wiggleLockEnabled must be true or false." }, { status: 400 });
+    }
+    out["override_volume_wiggle_lock_enabled"] = body.wiggleLockEnabled;
   }
 
   // Manual "clear pause" button -- writes a marker timestamp, not a literal flag; see

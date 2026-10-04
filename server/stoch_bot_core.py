@@ -354,6 +354,13 @@ class BotConfig:
     # selectable rather than picking one blind).
     volume_jump_release_mode: Optional[str] = None
     wiggle_window: int = 5
+    # Volume/wiggle ratio lock (2026-10-04, direct request during a real live investigation --
+    # "lock the bots when this ratio is above .30... something to detect very quickly"). A
+    # SEPARATE, simpler gate from the volume-jump guard above: no peak-tracking, no pause timer,
+    # no release mode -- just the INSTANT reading against a threshold, re-evaluated every tick,
+    # so it reacts (both locking AND releasing) as fast as a fresh candle allows. None (default)
+    # is off. See compute_volume_wiggle_ratio / _volume_wiggle_allows_cycle.
+    volume_wiggle_lock_threshold: Optional[float] = None
     # Low-volatility entry gate (2026-09-29, direct request): the OPPOSITE direction from the
     # pair above -- blocks new entries (and a reversal's reopen leg, never TP/SL/exits) when
     # the market is TOO QUIET rather than too spiky. Built to test a real finding from 844 real
@@ -1247,6 +1254,24 @@ def compute_candle_volume_rate(candles, window=10):
     return now - prior
 
 
+def compute_volume_wiggle_ratio(candles, vol_window=10, wiggle_window=5):
+    """compute_candle_volume_avg / compute_intrabar_dispersion -- traded BTC relative to how
+    much price is actually dispersing. 2026-10-04, direct request during a real live
+    investigation ("someone increasing and decreasing volume on command"): a LOT of volume with
+    LITTLE price movement is exactly "chop/wiggle" -- a lot of trading activity not translating
+    into real price discovery -- which plain volume or plain wiggle alone can't tell apart from
+    a normal trending move (where volume and wiggle both rise together). Checked against the
+    real incident: the choppy hour measured 0.56, the highest of the full prior 24h window
+    (mean 0.34, median 0.24) -- a genuine, elevated reading, not a hunch. None if either
+    component is None, or if wiggle is exactly 0 (nothing to divide by -- a flat, dispersion-
+    free market, which this ratio isn't meaningful for anyway)."""
+    vol = compute_candle_volume_avg(candles, vol_window)
+    wig = compute_intrabar_dispersion(candles, wiggle_window)
+    if vol is None or wig is None or wig == 0:
+        return None
+    return vol / wig
+
+
 def compute_live_flip_streak(candles, lookback=20):
     """Live readout (2026-10-02, direct request: "a candle counter so i can see we are doing
     it correctly... 1 2 3 waiting for flip") -- how many consecutive same-color CLOSED candles
@@ -1690,6 +1715,8 @@ class StochBot:
         self._last_volume_jump_volume = None
         self._last_volume_jump_rate = None
         self._last_volume_jump_ratio = None  # see _update_volume_jump_guard, _entry_settings_snapshot
+        self._last_volume_wiggle_ratio = None  # see _update_volume_wiggle_lock
+        self._volume_wiggle_locked = False
         # Whichever peak the ACTIVE release_mode is tracking, for the dashboard -- direct
         # report: "I only see the timer" with no way to tell whether a wiggle/volume/rate
         # release is close or far. None when release_mode is off/unset. See
@@ -2872,6 +2899,47 @@ class StochBot:
             except Exception:
                 pass  # Dashboard logging cannot interrupt stops/exits.
 
+    def _update_volume_wiggle_lock(self, state):
+        """Instant volume/wiggle ratio vs a live-adjustable threshold -- 2026-10-04, direct
+        request during a real live investigation ("lock the bots when this ratio is above .30
+        ... something to detect very quickly"). Deliberately simpler than the volume-jump guard
+        above: no peak-tracking, no pause timer, no release mode -- just the CURRENT candle's
+        reading re-checked every tick, so it locks AND releases as fast as a fresh candle
+        allows, matching the explicit "get out [of the lock] quickly" request. Sets
+        self._volume_wiggle_locked as a side effect (same pattern as
+        _update_volume_jump_guard/self._volume_jump_paused_until) so fixed_direction bots (the
+        hedge) can read it via _volume_wiggle_allows_cycle without recomputing. Always caches
+        self._last_volume_wiggle_ratio for the dashboard, even when the threshold itself is
+        unconfigured -- same "watch before choosing" reasoning as every other readout here.
+        Never touches an exit, only ever blocks a fresh entry, same contract as every gate in
+        this file.
+
+        override_volume_wiggle_lock_enabled (direct follow-up: "give me an on and off switch
+        too") -- a SEPARATE boolean from the threshold number, so flipping it off doesn't lose
+        whatever threshold was dialed in. Defaults True (enabled) whenever a threshold is
+        configured, matching the behavior before this switch existed."""
+        cfg = self.cfg
+        threshold = cfg.volume_wiggle_lock_threshold
+        enabled = True
+        if cfg.schema_has_regime_overrides:
+            o = state.get("override_volume_wiggle_lock_threshold")
+            if o is not None:
+                threshold = float(o)
+            o = state.get("override_volume_wiggle_lock_enabled")
+            if o is not None:
+                enabled = bool(o)
+        ratio = compute_volume_wiggle_ratio(self.candles)
+        self._last_volume_wiggle_ratio = ratio
+        locked = enabled and threshold is not None and ratio is not None and ratio > threshold
+        self._volume_wiggle_locked = locked
+        return locked
+
+    def _volume_wiggle_allows_cycle(self):
+        """See _update_volume_wiggle_lock's docstring -- same 'fixed_direction bots never
+        consult entry_signal' reasoning as _volume_jump_allows_cycle. self._volume_wiggle_locked
+        is set earlier in the SAME tick."""
+        return not self._volume_wiggle_locked
+
     def _volume_jump_allows_cycle(self):
         """2026-10-03, "build the same guard for worker 2": a fixed_direction bot (the hedge)
         never looks at entry_signal, so the ordinary entry_signal=None block in tick() that
@@ -2886,7 +2954,7 @@ class StochBot:
         """Every condition for DECLARING readiness for a new cycle (or, standalone, entering)."""
         return (self._environment_allows_cycle() and self._has_entry_pressure() and self._cycle_gap_elapsed()
                 and self._has_entry_dispersion() and self._candle_unused()
-                and self._volume_jump_allows_cycle())
+                and self._volume_jump_allows_cycle() and self._volume_wiggle_allows_cycle())
 
     def _reversal_cooldown_active(self):
         """See BotConfig.post_reversal_cooldown_seconds."""
@@ -4984,6 +5052,15 @@ class StochBot:
                         await self.update_state({"live_volume_jump_release_peak": self._last_release_peak})
                     except Exception:
                         pass
+                    # Volume/wiggle ratio lock readout (2026-10-04) -- shown regardless of
+                    # whether volume_wiggle_lock_threshold is actually configured, same "watch
+                    # before choosing" reasoning as live_volume_jump_ratio above.
+                    if self._last_volume_wiggle_ratio is not None:
+                        try:
+                            await self.update_state(
+                                {"live_volume_wiggle_ratio": self._last_volume_wiggle_ratio})
+                        except Exception:
+                            pass
                 if cfg.color_balance_index_min is not None or cfg.color_balance_index_max is not None:
                     # Isolated best-effort write (2026-10-01) so the dashboard can show the live
                     # color-weighted balance index the entry gate is reading. Written into the
@@ -5187,6 +5264,12 @@ class StochBot:
         # do, never an exit. volume_jump_active is reused below at the reversal-reopen gate.
         volume_jump_active = self._update_volume_jump_guard(state)
         if volume_jump_active:
+            entry_signal = None
+
+        # See BotConfig.volume_wiggle_lock_threshold -- same contract as every gate here, never
+        # touches an exit. volume_wiggle_locked is reused below at _wants_new_cycle (hedge).
+        volume_wiggle_locked = self._update_volume_wiggle_lock(state)
+        if volume_wiggle_locked:
             entry_signal = None
 
         if cfg.trading_hours_utc is not None:
@@ -5735,6 +5818,7 @@ class StochBot:
                 reopen_overconfirmed = self._entry_overconfirmed(reversal_signal)
                 if (self.entry_vol_paused or intrabar_dispersion_blocked or zebra_blocked
                         or balance_blocked or self._reversal_cooldown_active() or volume_jump_active
+                        or volume_wiggle_locked
                         or (cfg.self_lock_enabled and self.real_trading_locked)
                         or (cfg.trading_hours_utc is not None
                             and self._apply_trading_hours_gate(reversal_signal) is None)

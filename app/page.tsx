@@ -1728,6 +1728,51 @@ function CompactStochBtcPanel({
     setSavingSignal(null);
   }
 
+  // Volume/wiggle lock (2026-10-03, direct request after a live "market manipulation" concern
+  // -- "we need something to detect very quickly so we can lock in the bot and get out"). Ratio
+  // = volume_avg / wiggle (intrabar dispersion); unlike the jump guard above this is a pure
+  // instant reading with no peak-tracking or pause timer -- it blocks new entries only while
+  // the ratio stays above the threshold, and releases the instant it drops back down.
+  const liveWiggleRatio: number | null = state?.live_volume_wiggle_ratio ?? null;
+  const curWiggleLockThreshold: number | null = state?.override_volume_wiggle_lock_threshold ?? null;
+  const curWiggleLockEnabled: boolean = state?.override_volume_wiggle_lock_enabled ?? true;
+  const wiggleLocked = curWiggleLockEnabled && curWiggleLockThreshold != null
+    && liveWiggleRatio != null && liveWiggleRatio > curWiggleLockThreshold;
+  const [wiggleLockThresholdIn, setWiggleLockThresholdIn] = useState("");
+
+  async function handleSetWiggleLockThreshold() {
+    if (!wiggleLockThresholdIn.trim()) return;
+    if (!confirm(`Set the volume/wiggle lock threshold to ${wiggleLockThresholdIn.trim()} for ${title}? Takes effect immediately.`)) return;
+    setSavingSignal("wiggleLock");
+    const res = await fetch("/api/lighter-btc-initial-settings", {
+      method: "POST", headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ wiggleLock: wiggleLockThresholdIn.trim() }),
+    });
+    if (!res.ok) {
+      const b = await res.json().catch(() => ({}));
+      alert(b.error || "Could not apply the change.");
+    } else {
+      setWiggleLockThresholdIn("");
+    }
+    await onToggled();
+    setSavingSignal(null);
+  }
+
+  async function handleToggleWiggleLock(next: boolean) {
+    if (!confirm(`Turn the volume/wiggle lock ${next ? "ON" : "OFF"} for ${title}? Takes effect immediately.`)) return;
+    setSavingSignal("wiggleLockEnabled");
+    const res = await fetch("/api/lighter-btc-initial-settings", {
+      method: "POST", headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ wiggleLockEnabled: next }),
+    });
+    if (!res.ok) {
+      const b = await res.json().catch(() => ({}));
+      alert(b.error || "Could not apply the change.");
+    }
+    await onToggled();
+    setSavingSignal(null);
+  }
+
   async function handleToggleSignal(key: "stochastic" | "zebra" | "flip", label: string, next: boolean) {
     if (!confirm(`Turn ${label} ${next ? "ON" : "OFF"} for ${title}? Takes effect immediately.`)) return;
     setSavingSignal(key);
@@ -2449,6 +2494,66 @@ function CompactStochBtcPanel({
           </p>
         </div>
       )}
+      {showLevers && !loading && (
+        <div className="bg-gray-800/60 rounded-lg p-2">
+          {/* 2026-10-03, direct request after a live "market manipulation" concern -- ratio of
+              volume to wiggle (intrabar dispersion). Instant reading, no pause timer: blocks
+              new entries only while the ratio stays above the threshold, releases the moment
+              it drops. */}
+          <div className="flex items-baseline justify-between">
+            <p className="text-gray-500 text-[10px] uppercase">Volume/wiggle lock</p>
+            <button
+              onClick={() => handleToggleWiggleLock(!curWiggleLockEnabled)}
+              disabled={savingSignal !== null || loading}
+              className={`text-[10px] font-bold px-1.5 py-0.5 rounded disabled:opacity-30 ${
+                curWiggleLockEnabled ? "bg-blue-500/20 text-blue-300" : "bg-gray-700/50 text-gray-500"
+              }`}
+            >
+              {savingSignal === "wiggleLockEnabled" ? "…" : curWiggleLockEnabled ? "ON" : "OFF"}
+            </button>
+          </div>
+          <p className="font-bold text-sm tabular-nums">
+            <span className={!curWiggleLockEnabled ? "text-gray-500" : wiggleLocked ? "text-red-400" : "text-green-400"}>
+              {!curWiggleLockEnabled ? "OFF" : wiggleLocked ? "LOCKED" : "not locked"}
+            </span>
+            <span className="text-[10px] font-normal text-gray-500 ml-1.5">
+              {curWiggleLockEnabled ? (wiggleLocked ? "new entries blocked" : "new entries allowed") : "switch is off -- never blocks"}
+            </span>
+          </p>
+          <p className="text-[11px] text-gray-500 mt-0.5 tabular-nums">
+            latest reading:{" "}
+            <span className={liveWiggleRatio == null ? "text-gray-500"
+              : curWiggleLockThreshold != null && liveWiggleRatio > curWiggleLockThreshold ? "text-red-400" : "text-gray-400"}>
+              {liveWiggleRatio != null ? liveWiggleRatio.toFixed(2) : "—"}
+            </span>
+          </p>
+          <div className="flex items-end gap-1.5 mt-1.5">
+            <div className="flex-1">
+              <p className="text-gray-500 text-[9px] uppercase">
+                Threshold <span className="text-gray-600">now {curWiggleLockThreshold ?? "off"}</span>
+              </p>
+              <input
+                value={wiggleLockThresholdIn}
+                onChange={(e) => setWiggleLockThresholdIn(e.target.value)}
+                placeholder={curWiggleLockThreshold != null ? String(curWiggleLockThreshold) : "e.g. 0.30"}
+                inputMode="decimal"
+                className="w-full bg-gray-900 border border-gray-700 rounded px-1.5 py-1 text-xs text-white tabular-nums focus:outline-none focus:border-blue-500"
+              />
+            </div>
+            <button
+              onClick={handleSetWiggleLockThreshold}
+              disabled={savingSignal !== null || loading || !wiggleLockThresholdIn.trim()}
+              className="text-xs font-bold px-2.5 py-1 rounded bg-blue-500/20 text-blue-400 hover:bg-blue-500/30 disabled:opacity-30 whitespace-nowrap"
+            >
+              {savingSignal === "wiggleLock" ? "…" : "Set"}
+            </button>
+          </div>
+          <p className="text-gray-600 text-[9px] leading-snug mt-1">
+            Volume ÷ wiggle. Instant reading, no pause timer -- blocks new entries only while
+            above the threshold, releases the moment it drops back down.
+          </p>
+        </div>
+      )}
       {showLevers && liveCandleVolume != null && liveCandleVolume >= curVolThreshold && !loading && (() => {
         const dots = liveStreakLen != null ? "●".repeat(Math.min(liveStreakLen, 5)) + (liveStreakLen > 5 ? "+" : "") : "—";
         const dirLabel = liveStreakDir === "long" ? "GREEN" : liveStreakDir === "short" ? "RED" : "—";
@@ -2714,6 +2819,50 @@ function HedgeDualLegPanel({
     }
     await onToggled();
     setSavingJump(null);
+  }
+
+  // Volume/wiggle lock -- see Worker 1's panel for the full reasoning. Pure instant reading, no
+  // peak-tracking or pause timer. LONG leg is the live-readout owner, same convention as the
+  // jump guard above; overrides are written identically to both legs.
+  const liveWiggleRatio: number | null = longState?.live_volume_wiggle_ratio ?? null;
+  const curWiggleLockThreshold: number | null = longState?.override_volume_wiggle_lock_threshold ?? null;
+  const curWiggleLockEnabled: boolean = longState?.override_volume_wiggle_lock_enabled ?? true;
+  const wiggleLocked = curWiggleLockEnabled && curWiggleLockThreshold != null
+    && liveWiggleRatio != null && liveWiggleRatio > curWiggleLockThreshold;
+  const [wiggleLockThresholdIn, setWiggleLockThresholdIn] = useState("");
+  const [savingWiggleLock, setSavingWiggleLock] = useState<string | null>(null);
+
+  async function handleSetWiggleLockThreshold() {
+    if (!wiggleLockThresholdIn.trim()) return;
+    if (!confirm(`Set the volume/wiggle lock threshold to ${wiggleLockThresholdIn.trim()} for both hedge legs? Takes effect immediately.`)) return;
+    setSavingWiggleLock("wiggleLock");
+    const res = await fetch("/api/lighter-hedge-settings", {
+      method: "POST", headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ wiggleLock: wiggleLockThresholdIn.trim() }),
+    });
+    if (!res.ok) {
+      const b = await res.json().catch(() => ({}));
+      alert(b.error || "Could not apply the change.");
+    } else {
+      setWiggleLockThresholdIn("");
+    }
+    await onToggled();
+    setSavingWiggleLock(null);
+  }
+
+  async function handleToggleWiggleLock(next: boolean) {
+    if (!confirm(`Turn the volume/wiggle lock ${next ? "ON" : "OFF"} for both hedge legs? Takes effect immediately.`)) return;
+    setSavingWiggleLock("wiggleLockEnabled");
+    const res = await fetch("/api/lighter-hedge-settings", {
+      method: "POST", headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ wiggleLockEnabled: next }),
+    });
+    if (!res.ok) {
+      const b = await res.json().catch(() => ({}));
+      alert(b.error || "Could not apply the change.");
+    }
+    await onToggled();
+    setSavingWiggleLock(null);
   }
 
   const curSl = longState?.override_sl_pct ?? null;
@@ -3288,6 +3437,64 @@ function HedgeDualLegPanel({
                   {savingJump === "jump" ? "…" : "Set"}
                 </button>
               </div>
+            </div>
+            <div className="bg-gray-800/60 rounded-lg p-2 col-span-2">
+              {/* 2026-10-03, direct request after a live "market manipulation" concern -- ratio
+                  of volume to wiggle (intrabar dispersion), same mechanism as Worker 1's panel.
+                  Instant reading, no pause timer: blocks new paired cycles only while the ratio
+                  stays above the threshold, releases the moment it drops. */}
+              <div className="flex items-baseline justify-between">
+                <p className="text-gray-500 text-[10px] uppercase">Volume/wiggle lock (both legs)</p>
+                <button
+                  onClick={() => handleToggleWiggleLock(!curWiggleLockEnabled)}
+                  disabled={savingWiggleLock !== null || loading}
+                  className={`text-[10px] font-bold px-1.5 py-0.5 rounded disabled:opacity-30 ${
+                    curWiggleLockEnabled ? "bg-blue-500/20 text-blue-300" : "bg-gray-700/50 text-gray-500"
+                  }`}
+                >
+                  {savingWiggleLock === "wiggleLockEnabled" ? "…" : curWiggleLockEnabled ? "ON" : "OFF"}
+                </button>
+              </div>
+              <p className="font-bold text-sm tabular-nums">
+                <span className={!curWiggleLockEnabled ? "text-gray-500" : wiggleLocked ? "text-red-400" : "text-green-400"}>
+                  {!curWiggleLockEnabled ? "OFF" : wiggleLocked ? "LOCKED" : "not locked"}
+                </span>
+                <span className="text-[10px] font-normal text-gray-500 ml-1.5">
+                  {curWiggleLockEnabled ? (wiggleLocked ? "new cycles blocked" : "new cycles allowed") : "switch is off -- never blocks"}
+                </span>
+              </p>
+              <p className="text-[11px] text-gray-500 mt-0.5 tabular-nums">
+                latest reading:{" "}
+                <span className={liveWiggleRatio == null ? "text-gray-500"
+                  : curWiggleLockThreshold != null && liveWiggleRatio > curWiggleLockThreshold ? "text-red-400" : "text-gray-400"}>
+                  {liveWiggleRatio != null ? liveWiggleRatio.toFixed(2) : "—"}
+                </span>
+              </p>
+              <div className="flex items-end gap-1.5 mt-1.5">
+                <div className="flex-1">
+                  <p className="text-gray-500 text-[9px] uppercase">
+                    Threshold <span className="text-gray-600">now {curWiggleLockThreshold ?? "off"}</span>
+                  </p>
+                  <input
+                    value={wiggleLockThresholdIn}
+                    onChange={(e) => setWiggleLockThresholdIn(e.target.value)}
+                    placeholder={curWiggleLockThreshold != null ? String(curWiggleLockThreshold) : "e.g. 0.30"}
+                    inputMode="decimal"
+                    className="w-full bg-gray-900 border border-gray-700 rounded px-1.5 py-1 text-xs text-white tabular-nums focus:outline-none focus:border-blue-500"
+                  />
+                </div>
+                <button
+                  onClick={handleSetWiggleLockThreshold}
+                  disabled={savingWiggleLock !== null || loading || !wiggleLockThresholdIn.trim()}
+                  className="text-xs font-bold px-2.5 py-1 rounded bg-blue-500/20 text-blue-400 hover:bg-blue-500/30 disabled:opacity-30 whitespace-nowrap"
+                >
+                  {savingWiggleLock === "wiggleLock" ? "…" : "Set"}
+                </button>
+              </div>
+              <p className="text-gray-600 text-[9px] leading-snug mt-1">
+                Volume ÷ wiggle. Instant reading, no pause timer -- blocks new paired cycles only
+                while above the threshold, releases the moment it drops back down.
+              </p>
             </div>
           </div>
           {/* Manual exit settings; environment readings are together above. */}

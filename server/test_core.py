@@ -5373,6 +5373,114 @@ def _wiggle_candles(mids, v=1.0):
     return c
 
 
+def _ratio_candles(volumes, mids):
+    """Both volume AND price midpoint independently controllable per candle, for
+    compute_volume_wiggle_ratio (needs both compute_candle_volume_avg and
+    compute_intrabar_dispersion from the same candle list). Same length required."""
+    t0 = 1700000000000
+    c = [{"t": t0 + i * 60000, "o": m, "h": m + 0.5, "l": m - 0.5, "c": m, "v": v}
+         for i, (v, m) in enumerate(zip(volumes, mids))]
+    last_v = volumes[-1] if volumes else 1.0
+    last_m = mids[-1] if mids else 86000.0
+    c.append({"t": t0 + len(mids) * 60000, "o": last_m, "h": last_m + 0.5, "l": last_m - 0.5,
+              "c": last_m, "v": last_v})
+    return c
+
+
+async def t_volume_wiggle_ratio_basic():
+    print("\n[compute_volume_wiggle_ratio: equals volume_avg / dispersion from the same candles]")
+    candles = _ratio_candles([1.0] * 10, [86000, 86000, 86000, 86000, 86000, 86000, 86100, 85900, 86050, 85950])
+    vol = core.compute_candle_volume_avg(candles, window=10)
+    wig = core.compute_intrabar_dispersion(candles, window=5)
+    ratio = core.compute_volume_wiggle_ratio(candles, vol_window=10, wiggle_window=5)
+    check("vol and wiggle both computed", vol is not None and wig is not None and wig != 0, (vol, wig))
+    check("ratio equals vol/wig", ratio is not None and abs(ratio - vol / wig) < 1e-9, (ratio, vol, wig))
+
+
+async def t_volume_wiggle_ratio_needs_both_components():
+    print("\n[compute_volume_wiggle_ratio: None when either component is unavailable]")
+    short_candles = _ratio_candles([1.0] * 3, [86000] * 3)  # not enough for either window
+    check("too few candles -> None", core.compute_volume_wiggle_ratio(short_candles) is None)
+
+
+async def t_volume_wiggle_ratio_flat_price_is_none():
+    print("\n[compute_volume_wiggle_ratio: a perfectly flat price (wiggle=0) is None, not a divide-by-zero]")
+    candles = _ratio_candles([1.0] * 10, [86000.0] * 10)  # flat -- dispersion is exactly 0
+    check("flat price -> None, never a crash", core.compute_volume_wiggle_ratio(candles) is None)
+
+
+async def t_volume_wiggle_lock_blocks_above_threshold():
+    print("\n[volume/wiggle lock: locks when the instant ratio is above the threshold]")
+    bot = make_bot(FakeExchange(), candles_kind="mid", volume_wiggle_lock_threshold=0.30,
+                    schema_has_regime_overrides=True)
+    # Flat price (wiggle=0) always reads None -> never locks regardless of volume; use a tiny
+    # real wiggle with a large volume so the ratio is unambiguously above 0.30.
+    bot.candles = _ratio_candles([100.0] * 10, [86000, 86000, 86000, 86000, 86000, 86000, 86100, 85900, 86050, 85950])
+    locked = bot._update_volume_wiggle_lock(bot.state_row)
+    check("locked", locked is True, locked)
+    check("_volume_wiggle_allows_cycle reflects the lock", bot._volume_wiggle_allows_cycle() is False)
+
+
+async def t_volume_wiggle_lock_allows_at_or_below_threshold():
+    print("\n[volume/wiggle lock: stays unlocked when the instant ratio is at/below the threshold]")
+    bot = make_bot(FakeExchange(), candles_kind="mid", volume_wiggle_lock_threshold=100.0,
+                    schema_has_regime_overrides=True)
+    bot.candles = _ratio_candles([1.0] * 10, [86000, 86000, 86000, 86000, 86000, 86000, 86100, 85900, 86050, 85950])
+    locked = bot._update_volume_wiggle_lock(bot.state_row)
+    check("not locked", locked is False, locked)
+    check("_volume_wiggle_allows_cycle reflects the unlock", bot._volume_wiggle_allows_cycle() is True)
+
+
+async def t_volume_wiggle_lock_off_by_default():
+    print("\n[volume/wiggle lock: off by default -- unconfigured never locks regardless of the ratio]")
+    bot = make_bot(FakeExchange(), candles_kind="mid")  # volume_wiggle_lock_threshold defaults None
+    bot.candles = _ratio_candles([100.0] * 10, [86000, 86000, 86000, 86000, 86000, 86000, 86100, 85900, 86050, 85950])
+    locked = bot._update_volume_wiggle_lock(bot.state_row)
+    check("never locks when unconfigured", locked is False, locked)
+
+
+async def t_volume_wiggle_lock_live_override():
+    print("\n[volume/wiggle lock: override_volume_wiggle_lock_threshold picks the threshold live]")
+    bot = make_bot(FakeExchange(), candles_kind="mid", schema_has_regime_overrides=True)  # compiled off
+    bot.candles = _ratio_candles([100.0] * 10, [86000, 86000, 86000, 86000, 86000, 86000, 86100, 85900, 86050, 85950])
+    bot.state_row["override_volume_wiggle_lock_threshold"] = 0.30
+    locked = bot._update_volume_wiggle_lock(bot.state_row)
+    check("locked via the live override", locked is True, locked)
+
+
+async def t_volume_wiggle_lock_override_ignored_without_schema_flag():
+    print("\n[volume/wiggle lock: schema_has_regime_overrides=False ignores the override]")
+    bot = make_bot(FakeExchange(), candles_kind="mid", schema_has_regime_overrides=False)
+    bot.candles = _ratio_candles([100.0] * 10, [86000, 86000, 86000, 86000, 86000, 86000, 86100, 85900, 86050, 85950])
+    bot.state_row["override_volume_wiggle_lock_threshold"] = 0.30
+    locked = bot._update_volume_wiggle_lock(bot.state_row)
+    check("still unlocked -- override present but the schema flag is off", locked is False, locked)
+
+
+async def t_volume_wiggle_lock_enabled_switch_overrides_without_losing_threshold():
+    print("\n[volume/wiggle lock: override_volume_wiggle_lock_enabled=False disables it, threshold untouched]")
+    bot = make_bot(FakeExchange(), candles_kind="mid", volume_wiggle_lock_threshold=0.30,
+                    schema_has_regime_overrides=True)
+    bot.candles = _ratio_candles([100.0] * 10, [86000, 86000, 86000, 86000, 86000, 86000, 86100, 85900, 86050, 85950])
+    bot.state_row["override_volume_wiggle_lock_enabled"] = False
+    locked = bot._update_volume_wiggle_lock(bot.state_row)
+    check("not locked -- switched off even though the ratio is above threshold", locked is False, locked)
+    check("the threshold itself is unchanged", bot.cfg.volume_wiggle_lock_threshold == 0.30,
+          bot.cfg.volume_wiggle_lock_threshold)
+    bot.state_row["override_volume_wiggle_lock_enabled"] = True
+    locked_again = bot._update_volume_wiggle_lock(bot.state_row)
+    check("locks again once switched back on, same threshold", locked_again is True, locked_again)
+
+
+async def t_volume_wiggle_lock_blocks_a_hedge_style_cycle():
+    print("\n[volume/wiggle lock: blocks a fixed_direction leg's _wants_new_cycle, not just entry_signal]")
+    bot = _hedge_leg(volume_wiggle_lock_threshold=0.30)
+    bot.candles = _ratio_candles([100.0] * 10, [86000, 86000, 86000, 86000, 86000, 86000, 86100, 85900, 86050, 85950])
+    locked = bot._update_volume_wiggle_lock(bot.state_row)
+    check("locked", locked is True, locked)
+    check("fixed_direction leg does not want a new cycle while locked", bot._wants_new_cycle() is False)
+
+
 async def t_volume_jump_ratio_basic():
     print("\n[compute_volume_jump_ratio: hand-computed example]")
     candles = _jump_candles([1.0] * 10 + [5.0])
@@ -5894,6 +6002,16 @@ async def main():
               t_volume_switch_uses_flip_above_threshold,
               t_volume_switch_keeps_normal_path_below_threshold,
               t_volume_switch_off_by_default,
+              t_volume_wiggle_ratio_basic,
+              t_volume_wiggle_ratio_needs_both_components,
+              t_volume_wiggle_ratio_flat_price_is_none,
+              t_volume_wiggle_lock_blocks_above_threshold,
+              t_volume_wiggle_lock_allows_at_or_below_threshold,
+              t_volume_wiggle_lock_off_by_default,
+              t_volume_wiggle_lock_live_override,
+              t_volume_wiggle_lock_override_ignored_without_schema_flag,
+              t_volume_wiggle_lock_enabled_switch_overrides_without_losing_threshold,
+              t_volume_wiggle_lock_blocks_a_hedge_style_cycle,
               t_volume_jump_ratio_basic,
               t_volume_jump_ratio_needs_full_lookback,
               t_volume_jump_ratio_zero_baseline,

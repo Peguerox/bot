@@ -25,6 +25,7 @@ const LIMITS = {
   jumpPause: { min: 0, max: 1800, label: "volume-jump pause (seconds)" },
   tp: { min: 0.01, max: 1.0, label: "take-profit" },
   dwell: { min: 0, max: 300, label: "dwell (seconds)" },
+  wiggleLock: { min: 0.01, max: 50, label: "volume/wiggle lock threshold" },
 };
 
 export async function POST(req: NextRequest) {
@@ -44,6 +45,7 @@ export async function POST(req: NextRequest) {
     ["jumpPause", "override_volume_jump_pause_seconds"],
     ["tp", "override_tp_pct"],
     ["dwell", "override_dwell_seconds"],
+    ["wiggleLock", "override_volume_wiggle_lock_threshold"],
   ] as const) {
     const raw = body[key];
     if (raw === undefined || raw === null || raw === "") continue;
@@ -67,6 +69,7 @@ export async function POST(req: NextRequest) {
     ["stochastic", "override_stochastic_enabled"],
     ["zebra", "override_zebra_enabled"],
     ["flip", "override_flip_enabled"],
+    ["wiggleLockEnabled", "override_volume_wiggle_lock_enabled"],
   ] as const) {
     const raw = body[key];
     if (raw === undefined || raw === null) continue;
