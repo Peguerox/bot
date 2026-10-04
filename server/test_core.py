@@ -6028,8 +6028,74 @@ async def t_hedge_entry_filters():
     check("trade settings include filter configuration", snapshot["entry_filters"]["config"]["zscoreEnabled"] is False)
 
 
+async def t_hedge_volatility_filters():
+    print("\n[ATR/BandWidth, prior-only percentile, history, and safe exits]")
+    bot = make_bot(FakeExchange(), hedge_entry_filters=True, hedge_entry_filter_owner=True)
+    now = time.time(); minute = int(now // 60) * 60000
+    bars = [{"t": minute-(1501-i)*60000, "o":100., "h":100.1, "l":99.9, "c":100.} for i in range(1502)]
+    bars[-2].update(o=110.,h=110.1,l=109.9,c=110.)
+    bars[-1].update(o=1.,h=1.,l=1.,c=1.)  # forming candle must not influence either gate
+    bot.hedge_candle_history = bars
+    bot.candles = bars[-60:];bot.candles_updated_at=now
+    config={"atrEnabled":True,"atrWindow":5,"bandwidthEnabled":True,"bandwidthWindow":5}
+    def refresh():bot._refresh_hedge_entry_filters({"override_hedge_entry_filters":config},True);return bot._hedge_entry_reading
+    reading=refresh()
+    check("ATR and BandWidth pass independently of direction",reading["allowed"])
+    check("ATR includes gap from previous close",abs(reading["atr"]-((10.1+4*.2)/5/110*100))<1e-9,reading["atr"])
+    check("ATR percentile excludes current spike",abs(reading["atr_threshold"]-.2)<1e-9,reading["atr_threshold"])
+    check("BandWidth is four population std deviations over mean",abs(reading["bandwidth"]-400*4/102)<1e-9,reading["bandwidth"])
+    check("BandWidth baseline excludes scored close",reading["bandwidth_threshold"]==0)
+    check("full previous day has exactly 1440 baseline readings",reading["atr_baseline_samples"]==1440 and reading["bandwidth_baseline_samples"]==1440)
+    cached=bot._hedge_volatility_cache;refresh()
+    check("unchanged closed candle reuses computed baseline",bot._hedge_volatility_cache is cached)
+    bot.candles_updated_at=now-100;reading=refresh()
+    check("cached volatility cannot bypass stale data guard",not reading["allowed"] and reading["atr"] is None)
+    bot.candles_updated_at=now
+    bars[-10]["t"]-=60000;reading=refresh()
+    check("history gap blocks enabled volatility gates",not reading["allowed"])
+    bars[-10]["t"]+=60000
+    config["stochasticEnabled"]=True;config["stochasticHigh"]=100
+    reading=refresh()
+    check("all enabled gates combine with AND",not reading["allowed"] and reading["atr_allowed"] and reading["bandwidth_allowed"])
+    config["stochasticEnabled"]=False
+    config["atrEnabled"]=False;reading=refresh()
+    check("BandWidth can run alone",reading["allowed"] and reading["atr_allowed"])
+    config["atrEnabled"]=True;config["bandwidthEnabled"]=False;reading=refresh()
+    check("ATR can run alone",reading["allowed"] and reading["bandwidth_allowed"])
+    config["bandwidthEnabled"]=True
+    bars[-2].update(o=100.,h=100.1,l=99.9,c=100.);reading=refresh()
+    check("equal or flat baseline does not pass above-percentile gate",not reading["allowed"] and not reading["bandwidth_allowed"])
+    config["atrPercentile"]=100;reading=refresh()
+    check("invalid stored percentile fails closed",not reading["allowed"])
+    config["atrPercentile"]=80
+    bot.hedge_candle_history=bars[-125:];reading=refresh()
+    check("fewer than 120 prior readings blocks enabled gates",not reading["allowed"])
+    bot.hedge_candle_history=[];bot.candles=[];config["atrEnabled"]=False;config["bandwidthEnabled"]=False
+    reading=refresh()
+    check("all OFF needs no extended history",reading["allowed"])
+    old={"stochasticEnabled":False,"stochasticWindow":5,"stochasticLow":10,"stochasticHigh":90,"zscoreEnabled":False,"zscoreWindow":5,"zscoreLow":-2,"zscoreHigh":2}
+    bot._refresh_hedge_entry_filters({"override_hedge_entry_filters":old},True)
+    check("old JSON defaults both new switches OFF",bot._hedge_entry_reading["allowed"] and not bot._hedge_entry_reading["config"]["atrEnabled"] and not bot._hedge_entry_reading["config"]["bandwidthEnabled"])
+    # Background pagination is bounded and preserves the legacy 60-bar input.
+    owner=make_bot(FakeExchange(),hedge_entry_filters=True,hedge_entry_filter_owner=True)
+    owner.candles=bars[-60:];calls=[]
+    async def history_fetch(count=60,end_ms=None):
+        calls.append((count,end_ms));return [b for b in bars if b["t"]<=end_ms][-count:]
+    owner.fetch_candles=history_fetch
+    await owner._refresh_hedge_candle_history()
+    check("history bootstrap is bounded to three 500-bar requests",len(calls)==3 and all(c[0]==500 for c in calls))
+    check("history holds 1502 while legacy candles stay 60",len(owner.hedge_candle_history)==1502 and len(owner.candles)==60)
+    calls.clear();await owner._refresh_hedge_candle_history()
+    check("full history refresh needs no extra network request",not calls)
+    ex=FakeExchange(position=.00012)
+    opened=make_bot(ex,fixed_direction="long",sl_pct=.03,hedge_entry_filters=True,hedge_entry_filter_owner=True)
+    opened.state_row.update(side="long",legs=[{"price":86100.,"usd_size":86100.*.00012}],first_entry_price=86100.,override_hedge_entry_filters={"atrEnabled":True,"bandwidthEnabled":True})
+    await opened.tick()
+    check("missing ATR/BandWidth history never blocks an existing exit",opened.state_row["side"] is None and any(o["reduce_only"] for o in ex.orders))
+
+
 async def main():
-    for t in (t_hedge_entry_filters, t_environment_two_binary_switches,
+    for t in (t_hedge_volatility_filters, t_hedge_entry_filters, t_environment_two_binary_switches,
               t_environment_er_hysteresis_and_freshness,
               t_environment_shared_clearance_and_scope,
               t_environment_paused_exits_still_run,

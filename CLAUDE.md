@@ -290,7 +290,7 @@ single-account configs, kept deliberately as the revert path) and the `*.bak` fi
 
 ## Database (Supabase)
 
-### Worker 2 optional entry filters — staged locally, awaiting SQL (2026-10-04)
+### Worker 2 optional entry filters — deployed (2026-10-04, c60cda2)
 
 User requested editable stochastic and z-score entry filters. Both default OFF. Each enabled
 filter requires a closed-bar reading below its Low or above its High; when both are enabled,
@@ -301,10 +301,27 @@ the scored close. Missing/stale/invalid enabled readings block fresh cycles only
 
 `override_hedge_entry_filters` JSONB on `lighter_btc_optimal_state` is the single authoritative
 setting; the LONG owner publishes one shared permission to both legs, avoiding partial
-two-row updates. Migration: `supabase/migrations/lighter_hedge_entry_filters.sql`. Do not push
-these changes until the user confirms that SQL ran. The new panel starts with both switches
+two-row updates. Migration: `supabase/migrations/lighter_hedge_entry_filters.sql`. User confirmed SQL and the column was verified before deployment. All accounts were paused
+and exchange-flat before pushing; new locks and the OFF filter checkpoint were verified.
+The prior enabled states were restored (Worker 1 ON; Worker 2/3 OFF). The new panel starts with both switches
 OFF; no live filter has been enabled by this implementation. Monitor checkpoints and trade
 settings snapshots include the active filter configuration/readings for later comparison.
+
+### Worker 2 ATR and Bollinger BandWidth controls (2026-10-04)
+
+User requested both in the existing entry-filter panel. Stored in the same JSONB column;
+no SQL migration. New switches default OFF; existing Stochastic/Z settings are preserved.
+All enabled filters combine with AND and gate paired entries only, never exits.
+ATR defaults to 10 closed 1-minute bars, arithmetic mean true range / latest close *100.
+BandWidth defaults to 20 closed bars, 400 * population close standard deviation / mean.
+Both pass strictly above the editable percentile (default 80) of PRECEDING up to 1440
+indicator readings, excluding the current reading; at least 120 prior readings required.
+This matches the movement study's adaptive thresholds, not a fixed ATR percent or a squeeze.
+Owner-only background history bootstraps with at most three extra 500-bar requests, retains
+1502 bars, and merges normal minute refreshes. Legacy indicator inputs remain 60 bars.
+Calculations are cached per closed candle/config; stale/invalid data still fails closed.
+Tests cover true-range gaps, prior-only percentiles, history bootstrap, combined permission,
+legacy JSON defaults and exits while new filters are blocked. Deployment status: pending.
 
 No `exec_sql` RPC exists in this project — DDL (new tables, ALTER TABLE) can't be applied via a
 script. Write the migration as a `.sql` file in `supabase/migrations/`, send it to the user, and

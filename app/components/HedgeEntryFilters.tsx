@@ -12,7 +12,7 @@ export default function HedgeEntryFilters({ settings, reading, onSaved }: {
   const [draft, setDraft] = useState<Record<string, string>>({});
   const [saving, setSaving] = useState(false);
   const [error, setError] = useState("");
-  const anyOn = current.stochasticEnabled || current.zscoreEnabled;
+  const anyOn = current.stochasticEnabled || current.zscoreEnabled || current.atrEnabled || current.bandwidthEnabled;
   const fresh = reading?.checked_at != null && Date.now() / 1000 - reading.checked_at >= 0 && Date.now() / 1000 - reading.checked_at <= 90;
   const matches = reading?.config && Object.keys(current).every((k) => reading.config[k] === current[k as keyof Settings]);
   async function save(patch: Partial<Settings>, applyDraft = true) {
@@ -48,7 +48,7 @@ export default function HedgeEntryFilters({ settings, reading, onSaved }: {
     <div className="flex justify-between items-baseline gap-2">
       <p className="text-gray-500 text-[10px] uppercase">Entry filters · both legs</p>
       <span className={`text-[10px] font-bold ${!anyOn ? "text-gray-400" : !fresh || !matches ? "text-gray-500" : reading.allowed ? "text-green-400" : "text-red-400"}`}>
-        {!anyOn ? "Both OFF · no signal filter" : !fresh || !matches ? "Updating…" : reading.allowed ? "Signals OK" : "Waiting for signals"}
+        {!anyOn ? "All OFF · no signal filter" : !fresh || !matches ? "Updating…" : reading.allowed ? "Signals OK" : "Waiting for signals"}
       </span>
     </div>
     {(["stochastic", "zscore"] as const).map((kind) => {
@@ -76,8 +76,37 @@ export default function HedgeEntryFilters({ settings, reading, onSaved }: {
         </div>
       </div>;
     })}
+    {(["atr", "bandwidth"] as const).map((kind) => {
+      const atr = kind === "atr";
+      const enabledKey = atr ? "atrEnabled" : "bandwidthEnabled";
+      const on = current[enabledKey];
+      const value = reading?.[kind];
+      const cutoff = reading?.[`${kind}_threshold`];
+      const pass = reading?.[`${kind}_allowed`];
+      return <div key={kind} className="space-y-1.5">
+        <div className="flex items-center justify-between">
+          <p className="text-xs text-gray-300">{atr ? "ATR" : "Bollinger BandWidth"}
+            <span className={`ml-2 tabular-nums ${!on || !fresh || !matches ? "text-gray-500" : pass ? "text-green-400" : "text-red-400"}`}>
+              {fresh && matches && value != null ? `${value.toFixed(4)}%` : "—"}
+            </span>
+            <span className="ml-2 text-[10px] text-gray-500">
+              {fresh && matches && cutoff != null ? `cutoff ${cutoff.toFixed(4)}%` : ""}
+            </span>
+          </p>
+          <button onClick={() => save({ [enabledKey]: !on }, false)} disabled={saving}
+            className={`text-[10px] font-bold px-1.5 py-0.5 rounded disabled:opacity-30 ${on ? "bg-blue-500/20 text-blue-300" : "bg-gray-700/50 text-gray-500"}`}>
+            {on ? "ON" : "OFF"}
+          </button>
+        </div>
+        <div className="flex gap-2">
+          {field(atr ? "atrWindow" : "bandwidthWindow", atr ? "ATR minutes" : "BandWidth minutes")}
+          {field(atr ? "atrPercentile" : "bandwidthPercentile", atr ? "ATR percentile" : "BandWidth percentile")}
+        </div>
+        <p className="text-gray-500 text-[10px]">Above cutoff passes. Cutoff uses previous 24h; percentile 80 selects unusually strong readings.</p>
+      </div>;
+    })}
     <div className="flex justify-between items-center gap-2">
-      <p className="text-gray-500 text-[10px]">Below Low or above High passes. Both ON need both signals. Closed 1-minute candles.</p>
+      <p className="text-gray-500 text-[10px]">Stoch/Z: below Low or above High. Every enabled filter must pass. All OFF removes signal filters. Closed 1-minute candles.</p>
       <button onClick={() => save({})} disabled={saving || !Object.values(draft).some((v) => v.trim())}
         className="text-xs font-bold px-2.5 py-1 rounded bg-blue-500/20 text-blue-400 disabled:opacity-30">{saving ? "…" : "Set"}</button>
     </div>

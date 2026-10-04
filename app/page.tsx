@@ -3201,7 +3201,7 @@ function HedgeDualLegPanel({
         <div>
           <h3 className="text-white font-bold text-sm">Worker 2 · Hedge Strategy (2 legs)</h3>
           <p className="text-gray-500 text-[11px] leading-relaxed">
-            Both legs open together: Worker 2 LONG, Worker 3 SHORT, $10 per leg. Stochastic and z-score below gate new pairs only. Both OFF removes those signal filters; existing volume safeguards still apply. Exit controls apply to both legs. ER15 and Vol10 remain readings only.
+            Both legs open together: Worker 2 LONG, Worker 3 SHORT, $10 per leg. Stochastic, Z-score, ATR and Bollinger BandWidth below gate new pairs only. All OFF removes those signal filters; existing volume safeguards still apply. Exit controls apply to both legs. ER15 and Vol10 remain readings only.
           </p>
         </div>
         <div className="flex items-center gap-1.5 flex-wrap">

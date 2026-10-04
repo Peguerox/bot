@@ -38,6 +38,8 @@ const defaults = () => ({ ...config.DEFAULT_HEDGE_ENTRY_FILTERS });
 test("both disabled are explicit defaults", () => {
   assert.equal(defaults().stochasticEnabled, false);
   assert.equal(defaults().zscoreEnabled, false);
+  assert.equal(defaults().atrEnabled, false);
+  assert.equal(defaults().bandwidthEnabled, false);
 });
 test("one atomic owner write saves both optional filters without touching exits", async () => {
   const { api, writes } = route();
@@ -51,7 +53,8 @@ test("one atomic owner write saves both optional filters without touching exits"
 });
 for (const patch of [{ stochasticWindow: 1 }, { zscoreWindow: 51 }, { stochasticWindow: 2.5 },
   { stochasticLow: 90, stochasticHigh: 10 }, { stochasticLow: -1 }, { zscoreLow: 1 },
-  { zscoreHigh: 0 }, { stochasticEnabled: "false" }, { zscoreWindow: "5" }, { zscoreHigh: Infinity }]) {
+  { zscoreHigh: 0 }, { stochasticEnabled: "false" }, { zscoreWindow: "5" }, { zscoreHigh: Infinity }, { atrEnabled: "false" }, { atrWindow: 51 },
+  { bandwidthWindow: 1 }, { atrPercentile: 0 }, { bandwidthPercentile: 100 }, { atrPercentile: NaN }]) {
   test(`invalid controls do not write: ${JSON.stringify(patch)}`, async () => {
     const { api, writes } = route();
     const res = await api.POST({ json: async () => ({ entryFilters: { ...defaults(), ...patch } }) });
@@ -69,4 +72,23 @@ test("missing database column is reported as a save failure", async () => {
   const response = await api.POST({ json: async () => ({ entryFilters: defaults() }) });
   assert.equal(response.status, 500);
   assert.equal(response.body.error, "Entry filter column missing");
+});
+
+test("old complete stochastic/Z payload defaults new gates OFF", async () => {
+  const { api, writes } = route();
+  const filters = defaults();
+  for (const key of Object.keys(filters)) if (key.startsWith("atr") || key.startsWith("bandwidth")) delete filters[key];
+  const res = await api.POST({ json: async () => ({ entryFilters: filters }) });
+  assert.equal(res.status, 200);
+  assert.equal(writes[0].patch.override_hedge_entry_filters.atrEnabled, false);
+  assert.equal(writes[0].patch.override_hedge_entry_filters.bandwidthEnabled, false);
+});
+test("ATR/BandWidth controls save atomically alongside existing filters", async () => {
+  const { api, writes } = route();
+  const filters = { ...defaults(), zscoreEnabled: true, atrEnabled: true, bandwidthEnabled: true,
+    atrWindow: 15, atrPercentile: 75, bandwidthWindow: 30, bandwidthPercentile: 85 };
+  assert.equal((await api.POST({ json: async () => ({ entryFilters: filters }) })).status, 200);
+  assert.equal(writes.length, 1);
+  assert.equal(writes[0].patch.override_hedge_entry_filters.zscoreEnabled, true);
+  assert.equal(writes[0].patch.override_hedge_entry_filters.atrPercentile, 75);
 });

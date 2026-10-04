@@ -1524,6 +1524,8 @@ class StochBot:
         self.account_index = None
         self.candles = []
         self.candles_updated_at = 0.0
+        self.hedge_candle_history = []  # Owner-only 24h baseline; legacy candles stay at 60.
+        self._hedge_volatility_cache = None
         self.last_order_ts = 0.0
         self.ws_connected_at = 0.0
         self.last_heartbeat = 0.0
@@ -1850,8 +1852,8 @@ class StochBot:
             )
 
     # ── Candles ─────────────────────────────────────────────────────────────────────────────
-    async def fetch_candles(self, count=60):
-        end_ms = int(time.time() * 1000)
+    async def fetch_candles(self, count=60, end_ms=None):
+        end_ms = int(time.time() * 1000) if end_ms is None else end_ms
         url = (f"https://mainnet.zklighter.elliot.ai/api/v1/candles?market_id={self.cfg.market_index}"
                f"&resolution=1m&start_timestamp=0&end_timestamp={end_ms}&count_back={count}")
         async with self.http.get(url) as resp:
@@ -1866,11 +1868,98 @@ class StochBot:
             data = jsonlib.loads(text)
         return sorted(data.get("c", []), key=lambda c: c["t"])
 
+    async def _refresh_hedge_candle_history(self):
+        """Bounded startup backfill, then merge the normal 60-bar minute refresh.
+
+        Runs in the candle background task, never in the order/exit path. Only the
+        shared entry owner fetches history. Preserve legacy indicator candle sizes.
+        """
+        merged = {c["t"]: c for c in self.hedge_candle_history}
+        merged.update({c["t"]: c for c in self.candles})
+        if not merged:
+            return
+        ordered = sorted(merged.values(), key=lambda c: c["t"])[-1502:]
+        # Rebuild bounded history after a data gap instead of filling across it.
+        for i in range(len(ordered) - 1, 0, -1):
+            if ordered[i]["t"] - ordered[i-1]["t"] != 60000:
+                ordered = ordered[i:]
+                break
+        if len(ordered) < 1502:
+            for _ in range(3):
+                older = await self.fetch_candles(500, end_ms=ordered[0]["t"] - 1)
+                if not older or older[-1]["t"] >= ordered[0]["t"]:
+                    raise ValueError("History pagination did not advance")
+                ordered = sorted({c["t"]: c for c in older + ordered}.values(), key=lambda c: c["t"])[-1502:]
+                if len(ordered) >= 1502:
+                    break
+        if any(b["t"] - a["t"] != 60000 for a, b in zip(ordered, ordered[1:])):
+            raise ValueError("History has missing minute candles")
+        self.hedge_candle_history = ordered
+
+    def _hedge_volatility_readings(self, config):
+        """Research definitions: SMA true-range/price and 4*population-SD/SMA.
+
+        Threshold is an interpolated percentile of PRECEDING up to 1440 readings,
+        excluding the scored reading. At least 120 baseline readings are required.
+        Cached per closed candle/settings so ticks never redo a day of calculations.
+        """
+        source = self.hedge_candle_history or self.candles
+        bars = source[:-1]
+        if not bars:
+            return {}
+        key = (bars[0]["t"], len(bars), bars[-1]["t"], bars[-1]["h"], bars[-1]["l"], bars[-1]["c"],
+               config["atrWindow"], config["atrPercentile"], config["bandwidthWindow"],
+               config["bandwidthPercentile"], config["atrEnabled"], config["bandwidthEnabled"])
+        valid = (0 <= time.time() - self.candles_updated_at <= 90
+                 and 0 <= time.time() - (bars[-1]["t"] / 1000 + 60) <= 90
+                 and all(b["t"] - a["t"] == 60000 for a, b in zip(bars, bars[1:]))
+                 and all(math.isfinite(b[k]) and b[k] > 0 for b in bars for k in ("h", "l", "c"))
+                 and all(b["l"] <= b["c"] <= b["h"] for b in bars))
+        if not valid:
+            return {}
+        if self._hedge_volatility_cache and self._hedge_volatility_cache[0] == key:
+            return self._hedge_volatility_cache[1]
+        out = {}
+        for kind in ("atr", "bandwidth"):
+            if not config[kind + "Enabled"]:
+                continue
+            w = config[kind + "Window"]
+            values = []
+            first = max(w if kind == "atr" else w - 1, len(bars) - 1441)
+            for i in range(first, len(bars)):
+                sample = bars[i-w+1:i+1]
+                if kind == "atr":
+                    ranges = [max(bars[j]["h"] - bars[j]["l"],
+                                  abs(bars[j]["h"] - bars[j-1]["c"]),
+                                  abs(bars[j]["l"] - bars[j-1]["c"])) for j in range(i-w+1, i+1)]
+                    value = sum(ranges) / w / bars[i]["c"] * 100
+                else:
+                    mean = sum(b["c"] for b in sample) / w
+                    std = (sum((b["c"] - mean) ** 2 for b in sample) / w) ** .5
+                    value = 400 * std / mean
+                values.append(value)
+            if len(values) < 121:
+                continue
+            baseline = sorted(values[:-1])
+            index = (len(baseline)-1) * config[kind + "Percentile"] / 100
+            lower = int(index)
+            threshold = baseline[lower] + (baseline[min(lower+1,len(baseline)-1)] - baseline[lower]) * (index-lower)
+            out.update({kind: values[-1], kind + "_threshold": threshold,
+                        kind + "_allowed": values[-1] > threshold,
+                        kind + "_baseline_samples": len(baseline)})
+        self._hedge_volatility_cache = (key, out)
+        return out
+
     async def run_candle_refresh_forever(self):
         while True:
             try:
                 self.candles = await self.fetch_candles()
                 self.candles_updated_at = time.time()
+                if self.cfg.hedge_entry_filters and self.cfg.hedge_entry_filter_owner:
+                    try:
+                        await self._refresh_hedge_candle_history()
+                    except Exception as e:
+                        await self.log_run("hedge_history_fetch_failed", {"error": str(e)[:300]})
             except Exception as e:
                 await self.log_run("candle_fetch_failed", {"error": str(e)[:300]})
             now = time.time()
@@ -2807,54 +2896,63 @@ class StochBot:
         return self._compute_pressure_source_signal()[0] is not None
 
     def _refresh_hedge_entry_filters(self, state, holds_lock):
-        """One owner publishes both optional, direction-independent entry permissions.
+        """One owner publishes all optional, direction-independent entry permissions.
 
         Only CLOSED bars are scored. Z excludes the scored close from its baseline.
         Enabled gates combine with AND; either extreme opens BOTH fixed-direction legs.
-        Both disabled permit entries even with no candle data. Never manages exits.
+        All disabled permit entries even with no candle data. Never manages exits.
         """
         if not self.cfg.hedge_entry_filters or not self.cfg.hedge_entry_filter_owner or not holds_lock:
             return
         defaults = {"stochasticEnabled": False, "stochasticWindow": 5,
                     "stochasticLow": 25, "stochasticHigh": 75,
                     "zscoreEnabled": False, "zscoreWindow": 5,
-                    "zscoreLow": -2, "zscoreHigh": 2}
+                    "zscoreLow": -2, "zscoreHigh": 2,
+                    "atrEnabled": False, "atrWindow": 10, "atrPercentile": 80,
+                    "bandwidthEnabled": False, "bandwidthWindow": 20, "bandwidthPercentile": 80}
         raw = state.get("override_hedge_entry_filters")
         config = dict(defaults)
         target = self.hedge_entry_hub
         if target is None:
             target = self._hedge_entry_reading
         result = {"allowed": False, "checked_at": time.time(), "stochastic": None,
-                  "zscore": None, "stochastic_allowed": False, "zscore_allowed": False}
+                  "zscore": None, "atr": None, "bandwidth": None,
+                  "atr_threshold": None, "bandwidth_threshold": None,
+                  "stochastic_allowed": False, "zscore_allowed": False,
+                  "atr_allowed": False, "bandwidth_allowed": False,
+                  "volatility_history_bars": max(0, len(self.hedge_candle_history)-1)}
         try:
             if raw is not None:
                 if not isinstance(raw, dict): raise ValueError("Invalid entry filters")
                 config.update(raw)
-            for key in ("stochasticEnabled", "zscoreEnabled"):
+            for key in ("stochasticEnabled", "zscoreEnabled", "atrEnabled", "bandwidthEnabled"):
                 if not isinstance(config[key], bool): raise ValueError("Invalid switch")
-            for key in ("stochasticWindow", "zscoreWindow"):
+            for key in ("stochasticWindow", "zscoreWindow", "atrWindow", "bandwidthWindow"):
                 value = config[key]
                 if isinstance(value, bool) or not isinstance(value, (int, float)) or not math.isfinite(value) or int(value) != value or not 2 <= value <= 50:
                     raise ValueError("Invalid window")
                 config[key] = int(value)
-            for key in ("stochasticLow", "stochasticHigh", "zscoreLow", "zscoreHigh"):
+            for key in ("stochasticLow", "stochasticHigh", "zscoreLow", "zscoreHigh", "atrPercentile", "bandwidthPercentile"):
                 value = config[key]
                 if isinstance(value, bool) or not isinstance(value, (int, float)) or not math.isfinite(value):
                     raise ValueError("Invalid threshold")
             if not (0 <= config["stochasticLow"] < config["stochasticHigh"] <= 100
-                    and -20 <= config["zscoreLow"] < 0 < config["zscoreHigh"] <= 20):
+                    and -20 <= config["zscoreLow"] < 0 < config["zscoreHigh"] <= 20
+                    and 1 <= config["atrPercentile"] <= 99 and 1 <= config["bandwidthPercentile"] <= 99):
                 raise ValueError("Invalid bands")
             result["config"] = config
             stoch_on, z_on = config["stochasticEnabled"], config["zscoreEnabled"]
             result["stochastic_allowed"], result["zscore_allowed"] = not stoch_on, not z_on
-            if not stoch_on and not z_on:
+            result["atr_allowed"] = not config["atrEnabled"]
+            result["bandwidth_allowed"] = not config["bandwidthEnabled"]
+            if not any(config[k] for k in ("stochasticEnabled", "zscoreEnabled", "atrEnabled", "bandwidthEnabled")):
                 result["allowed"] = True
             else:
                 count = max(config["stochasticWindow"] if stoch_on else 0,
                             config["zscoreWindow"] + 1 if z_on else 0)
-                bars = self.candles[:-1][-count:]
+                bars = self.candles[:-1][-count:] if count else []
                 now = result["checked_at"]
-                valid = (len(bars) == count and 0 <= now - self.candles_updated_at <= 90
+                valid = (count > 0 and len(bars) == count and 0 <= now - self.candles_updated_at <= 90
                          and 0 <= now - (bars[-1]["t"] / 1000 + 60) <= 90
                          and all(b["t"] - a["t"] == 60000 for a, b in zip(bars, bars[1:]))
                          and all(math.isfinite(b[k]) and b[k] > 0 for b in bars for k in ("h", "l", "c"))
@@ -2872,7 +2970,9 @@ class StochBot:
                     z = (bars[-1]["c"] - mean) / std if std > 0 else None
                     result["zscore"] = z
                     result["zscore_allowed"] = z is not None and (z < config["zscoreLow"] or z > config["zscoreHigh"])
-                result["allowed"] = result["stochastic_allowed"] and result["zscore_allowed"]
+                if config["atrEnabled"] or config["bandwidthEnabled"]:
+                    result.update(self._hedge_volatility_readings(config))
+                result["allowed"] = all(result[k + "_allowed"] for k in ("stochastic", "zscore", "atr", "bandwidth"))
         except (ValueError, TypeError, KeyError, IndexError, OverflowError):
             result["config"] = config
         target.clear()
