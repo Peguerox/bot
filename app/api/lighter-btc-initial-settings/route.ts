@@ -13,7 +13,11 @@ import { getSupabaseAdmin } from "@/lib/supabase-admin";
 // stochastic's own 25/75 K band -- entry and reversal independently, not a shared pair
 // (first version tied them together; revised same day on direct follow-up request).
 const LIMITS = {
-  sl: { min: 0.01, max: 0.5, label: "stop-loss" },
+  // max raised 0.5 -> 100 (2026-10-04, direct request: "test a no stop loss strategy... just
+  // the reversal to come out") -- there's no literal "off" switch for SL, so a very large
+  // number (e.g. 100) is the practical equivalent: it will never realistically be reached,
+  // leaving the reversal exit as the only thing that can close a losing position.
+  sl: { min: 0.01, max: 100, label: "stop-loss" },
   trigger: { min: 0.01, max: 1.0, label: "profit-lock trigger" },
   trail: { min: 0, max: 0.5, label: "profit-lock trail" },
   volThreshold: { min: 0, max: 100, label: "volume switch threshold" },
