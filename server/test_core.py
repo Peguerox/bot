@@ -2453,6 +2453,37 @@ async def t_entry_settings_snapshot_falls_back_to_compiled_defaults():
           snap["jump_release_mode"])
 
 
+async def t_entry_settings_snapshot_captures_volume_and_er_regime():
+    print("\n[entry settings snapshot: captures traded volume and the 2h efficiency ratio]")
+    entry = 86000.0
+    ex = FakeExchange(position=round(10.0 / entry, 5), collateral=10.0)
+    partner = {"side": None, "realized_pnl_usd": 0.0}
+    bot = _breakeven_bot(ex, _breakeven_state(entry, 10.0), partner, breakeven_floor_enabled=False,
+                          schema_has_exit_overrides=True, schema_has_regime_overrides=True)
+    candles = _trending_candles_122()
+    for c in candles:
+        c["v"] = 2.5
+    bot.candles = candles
+    snap = bot._entry_settings_snapshot(bot.state_row)
+    check("volume_now matches the candles' traded size", snap["volume_now"] == 2.5, snap["volume_now"])
+    check("er_2h close to 1.0 -- pure trend, no path reversal",
+          snap["er_2h"] is not None and abs(snap["er_2h"] - 1.0) < 1e-9, snap["er_2h"])
+    check("er_2h_direction is long -- close rose over the window",
+          snap["er_2h_direction"] == "long", snap["er_2h_direction"])
+
+
+async def t_entry_settings_snapshot_er_none_without_enough_history():
+    print("\n[entry settings snapshot: too few candles -- volume/ER fields are None, not a crash]")
+    entry = 86000.0
+    ex = FakeExchange(position=round(10.0 / entry, 5), collateral=10.0)
+    partner = {"side": None, "realized_pnl_usd": 0.0}
+    bot = _breakeven_bot(ex, _breakeven_state(entry, 10.0), partner, breakeven_floor_enabled=False,
+                          schema_has_exit_overrides=True, schema_has_regime_overrides=True)
+    snap = bot._entry_settings_snapshot(bot.state_row)  # default short candle history
+    check("er_2h is None -- not enough candles for a 120-window read", snap["er_2h"] is None, snap["er_2h"])
+    check("er_2h_direction is None too", snap["er_2h_direction"] is None, snap["er_2h_direction"])
+
+
 async def t_log_trade_falls_back_to_core_row_when_entry_features_column_missing():
     print("\n[log_trade: a missing entry_features column falls back to the guaranteed-safe core row]")
     # Real incident, 2026-10-03: schema_has_entry_features turned on before its migration had
@@ -6020,6 +6051,45 @@ async def t_stoch_window_control_off_by_default_schema_flag():
     check("no entry -- override present on the row but the schema flag is off", side is None, side)
 
 
+def _trending_candles_122():
+    # 122 candles, close rising by 1 each bar, zero path reversal -- deterministic ER ~1.0, "long".
+    t0 = 1700000000000
+    base = 86000.0
+    return [{"t": t0 + i * 60000, "o": base + i, "h": base + i, "l": base + i, "c": base + i}
+            for i in range(123)]  # 122 closed + 1 live, satisfies period=120 (needs closed>=121)
+
+
+async def t_er_2h_readout_written_on_tick():
+    print("\n[live_er_2h: a 120-candle efficiency ratio is published on the first tick]")
+    ex = FakeExchange()
+    bot = make_bot(ex, candles_kind="mid", candles=_trending_candles_122(), schema_has_live_signal=True)
+    await bot.tick()
+    check("live_er_2h written", bot.state_row.get("live_er_2h") is not None, bot.state_row.get("live_er_2h"))
+    check("live_er_2h close to 1.0 -- pure trend, no path reversal",
+          bot.state_row.get("live_er_2h") is not None and abs(bot.state_row["live_er_2h"] - 1.0) < 1e-9,
+          bot.state_row.get("live_er_2h"))
+    check("live_er_2h_direction is long -- close rose over the window",
+          bot.state_row.get("live_er_2h_direction") == "long", bot.state_row.get("live_er_2h_direction"))
+
+
+async def t_er_2h_readout_skipped_without_enough_history():
+    print("\n[live_er_2h: not enough candles -- no write, no crash]")
+    ex = FakeExchange()
+    bot = make_bot(ex, candles_kind="mid", schema_has_live_signal=True)  # default "mid" candles, far fewer than 121
+    await bot.tick()
+    check("live_er_2h not written -- insufficient history",
+          "live_er_2h" not in bot.state_row, bot.state_row.get("live_er_2h"))
+
+
+async def t_er_2h_readout_off_without_schema_flag():
+    print("\n[live_er_2h: schema_has_live_signal=False -- no write at all]")
+    ex = FakeExchange()
+    bot = make_bot(ex, candles_kind="mid", candles=_trending_candles_122(), schema_has_live_signal=False)
+    await bot.tick()
+    check("live_er_2h not written -- live-signal schema flag off",
+          "live_er_2h" not in bot.state_row, bot.state_row.get("live_er_2h"))
+
+
 async def t_volume_switch_uses_flip_above_threshold():
     print("\n[volume regime switch: at/above threshold, flip signal wins and gates are bypassed]")
     side = await _volume_switch_case(candle_volume=5.0, threshold=2.0)
@@ -6237,6 +6307,9 @@ async def main():
               t_flip_signal_requires_an_actual_flip,
               t_flip_signal_size_filter,
               t_flip_signal_min_body_pct_filter,
+              t_er_2h_readout_written_on_tick,
+              t_er_2h_readout_skipped_without_enough_history,
+              t_er_2h_readout_off_without_schema_flag,
               t_volume_switch_uses_flip_above_threshold,
               t_volume_switch_keeps_normal_path_below_threshold,
               t_volume_switch_off_by_default,
@@ -6423,6 +6496,8 @@ async def main():
               t_exit_mode_ignored_without_schema_flag,
               t_entry_settings_snapshot_captures_exit_and_jump_settings,
               t_entry_settings_snapshot_falls_back_to_compiled_defaults,
+              t_entry_settings_snapshot_captures_volume_and_er_regime,
+              t_entry_settings_snapshot_er_none_without_enough_history,
               t_log_trade_falls_back_to_core_row_when_entry_features_column_missing,
               t_log_trade_no_fallback_needed_when_insert_succeeds,
               t_dwell_ready_not_touched_resets_the_timer,

@@ -3317,14 +3317,18 @@ class StochBot:
 
     def _entry_settings_snapshot(self, state):
         """One small dict, logged once per trade at entry (see schema_has_entry_features),
-        answering "which settings were actually live for THIS trade" -- 2026-10-03, direct
-        request: the user has been hand-testing many exit_mode/dwell/volume-jump combinations
-        and wants the data to later work out which settings won under which conditions, without
-        it, only the CURRENT dashboard value is known, with no link back to any past trade.
-        Deliberately lean (one JSONB column, not a dozen new ones) -- just the exit levers
-        actually in effect (_exit_params) plus the volume-jump guard's settings and its live
-        ratio reading at this exact moment, not a repeat of what entry_vol_pct/entry_dispersion
-        already cover."""
+        answering "which settings were actually live for THIS trade, and under what market
+        regime" -- 2026-10-03, direct request: the user has been hand-testing many exit_mode/
+        dwell/volume-jump combinations and wants the data to later work out which settings won
+        under which conditions, without it, only the CURRENT dashboard value is known, with no
+        link back to any past trade. volume_now/er_2h/er_2h_direction added 2026-10-04 (direct
+        follow-up: "you need to be saving all the details... settings depending on volume and
+        then ER so we can do these adjustments later") -- the same regime context driving the
+        chop-vs-trend question this session, captured per-trade so earnings (already in
+        pnl_usd) can be correlated against it later without re-deriving it from candles. Still
+        deliberately lean -- just the exit levers actually in effect (_exit_params), the
+        volume-jump guard's settings and live ratio, and now volume+ER, not a repeat of what
+        entry_vol_pct/entry_dispersion already cover."""
         cfg = self.cfg
         sl, trig, trail, tp, exit_mode, dwell = self._exit_params(state)
         jump_ratio_threshold = cfg.volume_jump_ratio
@@ -3337,11 +3341,14 @@ class StochBot:
             if o is not None: jump_pause_seconds = float(o)
             o = state.get("override_volume_jump_release_mode")
             if o is not None: jump_release_mode = o or None
+        volume_now = compute_candle_volume_avg(self.candles, 10)
+        er_2h, er_2h_direction = compute_er_and_direction(self.candles, 120)
         return {
             "exit_mode": exit_mode, "sl_pct": sl, "tp_pct": tp,
             "trigger_pct": trig, "trail_pct": trail, "dwell_seconds": dwell,
             "jump_ratio_threshold": jump_ratio_threshold, "jump_pause_seconds": jump_pause_seconds,
             "jump_release_mode": jump_release_mode, "jump_ratio_now": self._last_volume_jump_ratio,
+            "volume_now": volume_now, "er_2h": er_2h, "er_2h_direction": er_2h_direction,
             **({"entry_filters": dict(self.hedge_entry_hub if self.hedge_entry_hub is not None else self._hedge_entry_reading)}
                if cfg.hedge_entry_filters else {}),
         }
@@ -5213,6 +5220,23 @@ class StochBot:
                     try:
                         await self.update_state({"live_flip_streak_dir": streak_dir,
                                                   "live_flip_streak_len": streak_len})
+                    except Exception:
+                        pass
+                # 2-hour efficiency ratio readout (2026-10-04, direct request: "publish the ER 2
+                # hours... so I can see it") -- a slower-moving regime indicator than the
+                # existing ER15 (same compute_er_and_direction formula, 120 one-minute candles
+                # instead of 15). Research this session found ER15 too noisy to tell a choppy
+                # day from a trending one -- it flagged "trend" several times an hour on BOTH a
+                # genuinely choppy day and a genuinely trending one. A 120-candle window's
+                # DIRECTION holding steady across several hourly checks was the cleanest signal
+                # found (not the magnitude alone) -- this publishes the raw number and direction;
+                # judging consistency over time is still on the user, watching the panel.
+                # Unconditional (no schema_has_* gate beyond schema_has_live_signal above) since
+                # it's pure candle math, no extra network call, same cost as live_k right above.
+                er_2h, er_2h_dir = compute_er_and_direction(self.candles, 120)
+                if er_2h is not None:
+                    try:
+                        await self.update_state({"live_er_2h": er_2h, "live_er_2h_direction": er_2h_dir})
                     except Exception:
                         pass
                 if cfg.volume_jump_ratio is not None:

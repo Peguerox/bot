@@ -1539,6 +1539,13 @@ function CompactStochBtcPanel({
   const liveVol: number | null = state?.live_vol_pct ?? null;
   const liveZebra: number | null = state?.live_zebra_index ?? null;
   const liveCandleVolume: number | null = state?.live_candle_volume ?? null;
+  // 2-hour efficiency ratio (2026-10-04, direct request: "publish the ER 2 hours... so I can see
+  // it") -- same net-move/path-length formula as the hedge's ER15, over 120 candles instead of
+  // 15. Research this session found ER15 too noisy to tell a choppy day from a trending one; a
+  // 120-candle window's DIRECTION holding steady across several checks (not the number alone,
+  // and not any single reading) was the cleanest signal found. Readout only, gates nothing.
+  const liveEr2h: number | null = state?.live_er_2h ?? null;
+  const liveEr2hDir: string | null = state?.live_er_2h_direction ?? null;
   const liveStreakDir: string | null = state?.live_flip_streak_dir ?? null;
   const liveStreakLen: number | null = state?.live_flip_streak_len ?? null;
   const curSl = state?.override_sl_pct ?? null;
@@ -2658,6 +2665,29 @@ function CompactStochBtcPanel({
           </div>
         );
       })()}
+      {showLevers && !loading && (
+        <div className="bg-gray-800/60 rounded-lg p-2">
+          {/* 2026-10-04, direct request: "publish the ER 2 hours... so I can see it" -- a
+              slower-moving regime indicator (chop vs trend) than ER15. Readout only, gates
+              nothing. The reading alone isn't the signal -- watch whether the direction holds
+              the same across several checks over a couple hours; it flipping often means chop. */}
+          <p className="text-gray-500 text-[10px] uppercase">Efficiency ratio (2h, chop vs trend)</p>
+          <p className="font-bold text-sm tabular-nums">
+            <span className={liveEr2h == null ? "text-gray-500"
+              : liveEr2h >= 0.15 ? "text-amber-400" : "text-gray-300"}>
+              {liveEr2h != null ? liveEr2h.toFixed(3) : "—"}
+            </span>
+            <span className="text-[10px] font-normal text-gray-500 ml-1.5">
+              {liveEr2h == null ? "no reading yet"
+                : `${liveEr2hDir === "long" ? "up" : liveEr2hDir === "short" ? "down" : "flat"} -- near 0 = chop, near 1 = trend`}
+            </span>
+          </p>
+          <p className="text-gray-600 text-[9px] leading-snug mt-1">
+            Watch whether the direction holds steady across several checks over a couple hours --
+            that's the real signal, not any single reading.
+          </p>
+        </div>
+      )}
       {showLevers && !loading && (
         <div className="bg-gray-800/60 rounded-lg p-2 space-y-2">
           <div className="flex items-baseline justify-between">
