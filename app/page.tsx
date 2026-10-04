@@ -1660,6 +1660,25 @@ function CompactStochBtcPanel({
   const liveJumpRatio: number | null = state?.live_volume_jump_ratio ?? null;
   const curJumpRatio: number = state?.override_volume_jump_ratio ?? 3.0;
   const curJumpPause: number = state?.override_volume_jump_pause_seconds ?? 1800;
+  // On/off switch (2026-10-04, direct request: "put a switch on an off for the volume jump
+  // gard") -- separate from the ratio/pause numbers so the guard can be disabled without losing
+  // the configured threshold, same pattern as the wiggle lock's switch.
+  const curJumpGuardEnabled: boolean = state?.override_volume_jump_enabled ?? true;
+
+  async function handleToggleJumpGuard(next: boolean) {
+    if (!confirm(`Turn the volume-jump guard ${next ? "ON" : "OFF"} for ${title}? Takes effect immediately.`)) return;
+    setSavingSignal("jumpGuardEnabled");
+    const res = await fetch("/api/lighter-btc-initial-settings", {
+      method: "POST", headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ jumpGuardEnabled: next }),
+    });
+    if (!res.ok) {
+      const b = await res.json().catch(() => ({}));
+      alert(b.error || "Could not apply the change.");
+    }
+    await onToggled();
+    setSavingSignal(null);
+  }
   // 3-arm early release (2026-10-03, direct request: "build them both... volume, wiggle, or
   // rate"). All three readings always show, regardless of which (if any) is selected as the
   // controlling arm -- "off" (default) is the plain fixed-timer pause, unchanged from before.
@@ -2430,13 +2449,25 @@ function CompactStochBtcPanel({
               single outlier candle distorting the 5-bar stochastic. Pauses new entries (both
               regimes) for the pause window whenever the latest closed candle's own volume is
               this many times its own trailing baseline. */}
-          <p className="text-gray-500 text-[10px] uppercase">Volume-jump guard</p>
+          <div className="flex items-baseline justify-between">
+            <p className="text-gray-500 text-[10px] uppercase">Volume-jump guard</p>
+            <button
+              onClick={() => handleToggleJumpGuard(!curJumpGuardEnabled)}
+              disabled={savingSignal !== null || loading}
+              className={`text-[10px] font-bold px-1.5 py-0.5 rounded disabled:opacity-30 ${
+                curJumpGuardEnabled ? "bg-blue-500/20 text-blue-300" : "bg-gray-700/50 text-gray-500"
+              }`}
+            >
+              {savingSignal === "jumpGuardEnabled" ? "…" : curJumpGuardEnabled ? "ON" : "OFF"}
+            </button>
+          </div>
           <p className="font-bold text-sm tabular-nums">
-            <span className={jumpPausedActive ? "text-red-400" : "text-green-400"}>
-              {jumpPausedActive ? "PAUSED" : "ARMED, not paused"}
+            <span className={!curJumpGuardEnabled ? "text-gray-500" : jumpPausedActive ? "text-red-400" : "text-green-400"}>
+              {!curJumpGuardEnabled ? "OFF" : jumpPausedActive ? "PAUSED" : "ARMED, not paused"}
             </span>
             <span className="text-[10px] font-normal text-gray-500 ml-1.5">
-              {jumpPausedActive
+              {!curJumpGuardEnabled ? "switch is off -- never blocks"
+                : jumpPausedActive
                 ? `new entries blocked -- clears in ${Math.floor(jumpSecondsLeft / 60)}:${String(jumpSecondsLeft % 60).padStart(2, "0")}`
                 : "new entries allowed"}
             </span>
@@ -2792,6 +2823,24 @@ function HedgeDualLegPanel({
   const liveJumpRatio: number | null = longState?.live_volume_jump_ratio ?? null;
   const curJumpRatio: number = longState?.override_volume_jump_ratio ?? 3.0;
   const curJumpPause: number = longState?.override_volume_jump_pause_seconds ?? 1800;
+  // On/off switch -- see Worker 1's panel for the full reasoning. Both legs always carry the
+  // same switch, same reason as every other guard override here.
+  const curJumpGuardEnabled: boolean = longState?.override_volume_jump_enabled ?? true;
+
+  async function handleToggleJumpGuard(next: boolean) {
+    if (!confirm(`Turn the volume-jump guard ${next ? "ON" : "OFF"} for both hedge legs? Takes effect immediately.`)) return;
+    setSavingJump("jumpGuardEnabled");
+    const res = await fetch("/api/lighter-hedge-settings", {
+      method: "POST", headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ jumpGuardEnabled: next }),
+    });
+    if (!res.ok) {
+      const b = await res.json().catch(() => ({}));
+      alert(b.error || "Could not apply the change.");
+    }
+    await onToggled();
+    setSavingJump(null);
+  }
   // 3-arm early release -- see Worker 1's panel for the full reasoning. "Volume" reuses the
   // existing liveTradedVolume/liveTradedVolumeRate readout above rather than new columns; only
   // wiggle is genuinely new here.
@@ -3382,13 +3431,25 @@ function HedgeDualLegPanel({
                   2026-10-03, direct request ("build the same guard for worker 2") -- same
                   guard as Worker 1's (compute_volume_jump_ratio), same panel shape. Blocks NEW
                   paired cycles only, never an exit -- see _volume_jump_allows_cycle's docstring. */}
-              <p className="text-gray-500 text-[10px] uppercase">Volume-jump guard</p>
+              <div className="flex items-baseline justify-between">
+                <p className="text-gray-500 text-[10px] uppercase">Volume-jump guard</p>
+                <button
+                  onClick={() => handleToggleJumpGuard(!curJumpGuardEnabled)}
+                  disabled={savingJump !== null || loading}
+                  className={`text-[10px] font-bold px-1.5 py-0.5 rounded disabled:opacity-30 ${
+                    curJumpGuardEnabled ? "bg-blue-500/20 text-blue-300" : "bg-gray-700/50 text-gray-500"
+                  }`}
+                >
+                  {savingJump === "jumpGuardEnabled" ? "…" : curJumpGuardEnabled ? "ON" : "OFF"}
+                </button>
+              </div>
               <p className="font-bold text-sm tabular-nums">
-                <span className={jumpPausedActive ? "text-red-400" : "text-green-400"}>
-                  {jumpPausedActive ? "PAUSED" : "ARMED, not paused"}
+                <span className={!curJumpGuardEnabled ? "text-gray-500" : jumpPausedActive ? "text-red-400" : "text-green-400"}>
+                  {!curJumpGuardEnabled ? "OFF" : jumpPausedActive ? "PAUSED" : "ARMED, not paused"}
                 </span>
                 <span className="text-[10px] font-normal text-gray-500 ml-1.5">
-                  {jumpPausedActive
+                  {!curJumpGuardEnabled ? "switch is off -- never blocks"
+                    : jumpPausedActive
                     ? `new cycles blocked -- clears in ${Math.floor(jumpSecondsLeft / 60)}:${String(jumpSecondsLeft % 60).padStart(2, "0")}`
                     : "new cycles allowed"}
                 </span>

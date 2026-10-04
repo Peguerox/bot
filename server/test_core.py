@@ -5552,6 +5552,54 @@ async def t_volume_jump_guard_off_by_default_schema_flag():
     check("blocked -- override present on the row but the schema flag is off", side is None, side)
 
 
+async def t_volume_jump_guard_enabled_switch_off_allows_entry_despite_spike():
+    print("\n[volume-jump guard: override_volume_jump_enabled=False allows entry despite a real spike]")
+    side = await _volume_jump_case([1.0] * 10 + [5.0], {"override_volume_jump_enabled": False})
+    check("entered long -- switch off, 5x spike ignored", side == "long", side)
+
+
+async def t_volume_jump_guard_enabled_switch_true_keeps_blocking():
+    print("\n[volume-jump guard: override_volume_jump_enabled=True behaves exactly like the default]")
+    side = await _volume_jump_case([1.0] * 10 + [5.0], {"override_volume_jump_enabled": True})
+    check("blocked -- switch explicitly on, spike still gates", side is None, side)
+
+
+async def t_volume_jump_guard_enabled_switch_off_by_default_schema_flag():
+    print("\n[volume-jump guard: schema_has_regime_overrides=False ignores the enabled override]")
+    side = await _volume_jump_case([1.0] * 10 + [5.0], {"override_volume_jump_enabled": False}, schema_on=False)
+    check("blocked -- override present on the row but the schema flag is off", side is None, side)
+
+
+async def t_volume_jump_guard_enabled_switch_off_still_shows_the_reading():
+    print("\n[volume-jump guard: switch off still computes/caches the ratio reading for the dashboard]")
+    ex = FakeExchange()
+    candles = _jump_candles([1.0] * 10 + [5.0])
+    bot = make_bot(ex, candles_kind="mid", volume_jump_ratio=3.0, volume_jump_lookback=10,
+                    volume_jump_pause_seconds=120.0, schema_has_regime_overrides=True)
+    bot.candles = candles
+    bot.state_row["override_volume_jump_enabled"] = False
+    active = bot._update_volume_jump_guard(bot.state_row)
+    check("gate returns inactive -- switch off", active is False, active)
+    check("ratio reading still computed, not blanked to None", bot._last_volume_jump_ratio is not None,
+          bot._last_volume_jump_ratio)
+
+
+async def t_volume_jump_guard_enabled_switch_off_clears_an_active_pause():
+    print("\n[volume-jump guard: flipping the switch off immediately clears an already-active pause]")
+    ex = FakeExchange()
+    candles = _jump_candles([1.0] * 10 + [5.0])
+    bot = make_bot(ex, candles_kind="mid", volume_jump_ratio=3.0, volume_jump_lookback=10,
+                    volume_jump_pause_seconds=120.0, schema_has_regime_overrides=True)
+    bot.candles = candles
+    active = bot._update_volume_jump_guard(bot.state_row)
+    check("armed first -- spike present, switch still on", active is True, active)
+    bot.state_row["override_volume_jump_enabled"] = False
+    active = bot._update_volume_jump_guard(bot.state_row)
+    check("inactive the next tick once the switch flips off", active is False, active)
+    check("paused_until cleared, not just ignored", bot._volume_jump_paused_until is None,
+          bot._volume_jump_paused_until)
+
+
 async def t_volume_jump_guard_tracks_paused_until():
     print("\n[volume-jump guard: _volume_jump_paused_until reflects the actual pause window]")
     ex = FakeExchange()
@@ -6210,6 +6258,11 @@ async def main():
               t_volume_jump_guard_off_by_default,
               t_volume_jump_guard_live_override_ratio,
               t_volume_jump_guard_off_by_default_schema_flag,
+              t_volume_jump_guard_enabled_switch_off_allows_entry_despite_spike,
+              t_volume_jump_guard_enabled_switch_true_keeps_blocking,
+              t_volume_jump_guard_enabled_switch_off_by_default_schema_flag,
+              t_volume_jump_guard_enabled_switch_off_still_shows_the_reading,
+              t_volume_jump_guard_enabled_switch_off_clears_an_active_pause,
               t_volume_jump_guard_tracks_paused_until,
               t_volume_jump_guard_paused_until_none_when_calm,
               t_volume_jump_clear_marker_forgives_an_old_pause,

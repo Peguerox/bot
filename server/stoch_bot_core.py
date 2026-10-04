@@ -3225,6 +3225,13 @@ class StochBot:
         pause_seconds = cfg.volume_jump_pause_seconds
         cleared_at = None
         release_mode = cfg.volume_jump_release_mode
+        # override_volume_jump_enabled (2026-10-04, direct request: "put a switch on and off for
+        # the volume jump guard") -- a SEPARATE boolean from the ratio/pause numbers, same reason
+        # as the wiggle lock's switch: flipping it off doesn't lose whatever threshold was dialed
+        # in. Defaults True (on) whenever the guard is configured at all, matching behavior
+        # before this switch existed. Distinct from ratio_threshold being None ("not configured")
+        # -- this is "configured but manually paused off".
+        enabled = True
         if cfg.schema_has_regime_overrides:
             o = state.get("override_volume_jump_ratio")
             if o is not None: ratio_threshold = float(o)
@@ -3239,6 +3246,9 @@ class StochBot:
             o = state.get("override_volume_jump_release_mode")
             if o is not None:
                 release_mode = o or None  # "" clears back to the fixed-timer-only default
+            o = state.get("override_volume_jump_enabled")
+            if o is not None:
+                enabled = bool(o)
 
         # Always compute and cache the three comparison readings -- even with the guard
         # unconfigured or release_mode off -- so the dashboard can show all three for the user
@@ -3253,13 +3263,14 @@ class StochBot:
         self._last_volume_jump_volume = volume_now
         self._last_volume_jump_rate = rate_now
 
-        if ratio_threshold is None:
+        # The ratio reading itself is still shown whenever the guard is CONFIGURED, even while
+        # the switch is off -- "watch before choosing", same as the wiggle lock's own reading.
+        ratio = compute_volume_jump_ratio(self.candles, cfg.volume_jump_lookback) if ratio_threshold is not None else None
+        self._last_volume_jump_ratio = ratio
+        if not enabled or ratio_threshold is None:
             self._volume_jump_paused_until = None
             self._last_release_peak = None
-            self._last_volume_jump_ratio = None
             return False
-        ratio = compute_volume_jump_ratio(self.candles, cfg.volume_jump_lookback)
-        self._last_volume_jump_ratio = ratio
         now_s = time.time()
         is_new_spike = ratio is not None and ratio >= ratio_threshold
         if is_new_spike:

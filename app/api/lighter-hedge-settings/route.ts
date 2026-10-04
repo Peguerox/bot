@@ -82,6 +82,16 @@ export async function POST(req: NextRequest) {
     out["override_volume_wiggle_lock_enabled"] = body.wiggleLockEnabled;
   }
 
+  // Volume-jump guard on/off switch (2026-10-04, direct request: "put a switch on an off for
+  // the volume jump gard") -- separate from the ratio/pause numbers, same reason as the wiggle
+  // lock's switch above. Both legs always carry the same switch.
+  if (body.jumpGuardEnabled !== undefined) {
+    if (typeof body.jumpGuardEnabled !== "boolean") {
+      return NextResponse.json({ error: "jumpGuardEnabled must be true or false." }, { status: 400 });
+    }
+    out["override_volume_jump_enabled"] = body.jumpGuardEnabled;
+  }
+
   // Manual "clear pause" button -- writes a marker timestamp, not a literal flag; see
   // override_volume_jump_cleared_at's docstring (StochBot._update_volume_jump_guard) for why
   // this forgives only the pause already in progress, not future spikes.

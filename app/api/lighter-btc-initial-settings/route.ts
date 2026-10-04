@@ -81,6 +81,7 @@ export async function POST(req: NextRequest) {
     ["zebra", "override_zebra_enabled"],
     ["flip", "override_flip_enabled"],
     ["wiggleLockEnabled", "override_volume_wiggle_lock_enabled"],
+    ["jumpGuardEnabled", "override_volume_jump_enabled"],
   ] as const) {
     const raw = body[key];
     if (raw === undefined || raw === null) continue;
