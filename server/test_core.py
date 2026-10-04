@@ -5952,8 +5952,84 @@ async def t_volume_switch_off_by_default():
           bot.state_row["side"])
 
 
+async def t_hedge_entry_filters():
+    print("\n[hedge signal controls, closed bars, shared AND permission]")
+    bot = make_bot(FakeExchange(), hedge_entry_filters=True, hedge_entry_filter_owner=True)
+    bot.candles = []
+    bot._refresh_hedge_entry_filters({}, True)
+    check("both OFF need no candles", bot._hedge_entry_allows_cycle())
+    now = time.time()
+    minute = int(now // 60) * 60000
+    closes = [100, 101, 99, 100, 101, 110]
+    bot.candles = [{"t": minute - (len(closes)-i)*60000, "o": c, "h": c+.1, "l": c-.1, "c": c} for i,c in enumerate(closes)]
+    bot.candles.append({"t": minute, "o": 1, "h": 1, "l": 1, "c": 1})
+    bot.candles_updated_at = now
+    config = {"stochasticEnabled": True, "zscoreEnabled": True}
+    bot._refresh_hedge_entry_filters({"override_hedge_entry_filters": config}, True)
+    reading = bot._hedge_entry_reading
+    check("both signals pass high extremes", bot._hedge_entry_allows_cycle())
+    check("forming candle excluded from K", reading["stochastic"] > 98)
+    check("z excludes scored close from baseline", reading["zscore"] > 10)
+    config["stochasticHigh"] = 100
+    bot._refresh_hedge_entry_filters({"override_hedge_entry_filters": config}, True)
+    check("both ON means AND", not bot._hedge_entry_allows_cycle() and bot._hedge_entry_reading["zscore_allowed"])
+    config["stochasticEnabled"] = False
+    bot._refresh_hedge_entry_filters({"override_hedge_entry_filters": config}, True)
+    check("Z only ignores disabled stochastic", bot._hedge_entry_allows_cycle())
+    config["stochasticEnabled"] = True
+    config["stochasticHigh"] = 75
+    config["zscoreEnabled"] = False
+    bot._refresh_hedge_entry_filters({"override_hedge_entry_filters": config}, True)
+    check("stochastic alone works", bot._hedge_entry_allows_cycle())
+    config["zscoreEnabled"] = True
+    bot.candles_updated_at = now - 100
+    bot._refresh_hedge_entry_filters({"override_hedge_entry_filters": config}, True)
+    check("enabled filters block stale candles", not bot._hedge_entry_allows_cycle())
+    bot.candles_updated_at = now
+    bot.candles[-3]["t"] -= 60000
+    bot._refresh_hedge_entry_filters({"override_hedge_entry_filters": config}, True)
+    check("enabled filters block candle gaps", not bot._hedge_entry_allows_cycle())
+    bot.candles[-3]["t"] += 60000
+    config["stochasticEnabled"] = False
+    config["zscoreEnabled"] = False
+    bot._refresh_hedge_entry_filters({"override_hedge_entry_filters": config}, True)
+    check("both OFF immediately unblock signal gate", bot._hedge_entry_allows_cycle())
+    shared = {}
+    bot.hedge_entry_hub = shared
+    follower = make_bot(FakeExchange(), hedge_entry_filters=True)
+    follower.hedge_entry_hub = shared
+    bot._refresh_hedge_entry_filters({"override_hedge_entry_filters": config}, True)
+    check("both legs share one permission", bot._hedge_entry_allows_cycle() and follower._hedge_entry_allows_cycle())
+    follower._refresh_hedge_entry_filters({"override_hedge_entry_filters": {"zscoreEnabled": True}}, True)
+    check("follower cannot overwrite owner", follower._hedge_entry_allows_cycle())
+    shared["checked_at"] = now - 100
+    check("stale shared permission blocks both", not bot._hedge_entry_allows_cycle() and not follower._hedge_entry_allows_cycle())
+    bot._refresh_hedge_entry_filters({"override_hedge_entry_filters": {"stochasticEnabled": "false"}}, True)
+    check("invalid stored switches fail closed", not bot._hedge_entry_allows_cycle())
+    for c in bot.candles[:-1]: c.update(h=100,l=100,c=100)
+    bot._refresh_hedge_entry_filters({"override_hedge_entry_filters": {"zscoreEnabled": True}}, True)
+    check("zero variance Z blocks safely", not bot._hedge_entry_allows_cycle())
+    bot._refresh_hedge_entry_filters({"override_hedge_entry_filters": {"stochasticEnabled": True}}, True)
+    check("zero range stochastic blocks safely", not bot._hedge_entry_allows_cycle())
+    unaffected = make_bot(FakeExchange())
+    check("other workers ignore hedge-only gate", unaffected._hedge_entry_allows_cycle())
+    flat_ex = FakeExchange()
+    blocked = make_bot(flat_ex, fixed_direction="long", hedge_entry_filters=True, hedge_entry_filter_owner=True)
+    blocked.state_row["override_hedge_entry_filters"] = {"zscoreEnabled": True}
+    await blocked.tick()
+    check("enabled invalid-data filter prevents a real entry", blocked.state_row["side"] is None and not flat_ex.orders)
+    ex = FakeExchange(position=0.00012)
+    open_bot = make_bot(ex, fixed_direction="long", sl_pct=.03, hedge_entry_filters=True, hedge_entry_filter_owner=True)
+    open_bot.state_row.update(side="long", legs=[{"price":86100., "usd_size":86100.*.00012}], first_entry_price=86100., override_hedge_entry_filters={"zscoreEnabled":True})
+    await open_bot.tick()
+    check("blocked hedge filter does not stop an existing SL exit", open_bot.state_row["side"] is None and any(o["reduce_only"] for o in ex.orders))
+    bot._refresh_hedge_entry_filters({}, True)
+    snapshot = bot._entry_settings_snapshot({})
+    check("trade settings include filter configuration", snapshot["entry_filters"]["config"]["zscoreEnabled"] is False)
+
+
 async def main():
-    for t in (t_environment_two_binary_switches,
+    for t in (t_hedge_entry_filters, t_environment_two_binary_switches,
               t_environment_er_hysteresis_and_freshness,
               t_environment_shared_clearance_and_scope,
               t_environment_paused_exits_still_run,

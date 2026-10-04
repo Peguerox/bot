@@ -1,5 +1,6 @@
 import { NextRequest, NextResponse } from "next/server";
 import { getSupabaseAdmin } from "@/lib/supabase-admin";
+import { validateHedgeEntryFilters } from "@/lib/hedge-entry-filters";
 
 // Manual exit levers for the hedge. Writes sl / trigger / trail to BOTH leg rows in one call.
 //
@@ -28,6 +29,21 @@ const LIMITS = {
 
 export async function POST(req: NextRequest) {
   const body = await req.json();
+  // Entry controls have one authoritative owner. The worker publishes the owner's
+  // permission to BOTH legs, avoiding disagreement during a two-row settings write.
+  if (body.entryFilters !== undefined) {
+    if (Object.keys(body).some((key) => key !== "entryFilters")) {
+      return NextResponse.json({ error: "Save entry filters separately from exit settings." }, { status: 400 });
+    }
+    let filters;
+    try { filters = validateHedgeEntryFilters(body.entryFilters); }
+    catch (error) { return NextResponse.json({ error: (error as Error).message }, { status: 400 }); }
+    const { data, error } = await getSupabaseAdmin().from("lighter_btc_optimal_state")
+      .update({ override_hedge_entry_filters: filters }).eq("id", 1)
+      .select("override_hedge_entry_filters").single();
+    if (error) return NextResponse.json({ error: error.message }, { status: 500 });
+    return NextResponse.json({ ok: true, applied: data });
+  }
   const out: Record<string, number | string | boolean | null> = {};
 
   for (const [key, col] of [

@@ -796,6 +796,8 @@ class BotConfig:
     # (see pressure_signal_hub on StochBot / _pressure_biased_leg_usd) -- every other leg just
     # reads it. False (default) for every other bot, including a hedge's non-owner leg(s).
     pressure_signal_owner: bool = False
+    hedge_entry_filters: bool = False
+    hedge_entry_filter_owner: bool = False
     # 2026-09-29/30, temporary diagnostic: prints a checkpoint at each major step of tick()/
     # try_enter()/confirm_fill(), gated so it never fires for any other bot. Added specifically
     # to pinpoint where the hedge dual-leg process hangs (every individual piece -- reads,
@@ -1675,6 +1677,8 @@ class StochBot:
         # lighter_hedge_dual_leg.py's main(). None (default): pressure bias, if enabled, uses
         # this bot's own compute_stoch_signal() reading in isolation, same as any standalone bot.
         self.pressure_signal_hub = None
+        self.hedge_entry_hub = None
+        self._hedge_entry_reading = {"allowed": False}
         self.environment_hub = None
         self._environment_reading = {"allowed": False}
         self._environment_restored = False
@@ -2802,6 +2806,84 @@ class StochBot:
             return hub.get("signal") is not None
         return self._compute_pressure_source_signal()[0] is not None
 
+    def _refresh_hedge_entry_filters(self, state, holds_lock):
+        """One owner publishes both optional, direction-independent entry permissions.
+
+        Only CLOSED bars are scored. Z excludes the scored close from its baseline.
+        Enabled gates combine with AND; either extreme opens BOTH fixed-direction legs.
+        Both disabled permit entries even with no candle data. Never manages exits.
+        """
+        if not self.cfg.hedge_entry_filters or not self.cfg.hedge_entry_filter_owner or not holds_lock:
+            return
+        defaults = {"stochasticEnabled": False, "stochasticWindow": 5,
+                    "stochasticLow": 25, "stochasticHigh": 75,
+                    "zscoreEnabled": False, "zscoreWindow": 5,
+                    "zscoreLow": -2, "zscoreHigh": 2}
+        raw = state.get("override_hedge_entry_filters")
+        config = dict(defaults)
+        target = self.hedge_entry_hub
+        if target is None:
+            target = self._hedge_entry_reading
+        result = {"allowed": False, "checked_at": time.time(), "stochastic": None,
+                  "zscore": None, "stochastic_allowed": False, "zscore_allowed": False}
+        try:
+            if raw is not None:
+                if not isinstance(raw, dict): raise ValueError("Invalid entry filters")
+                config.update(raw)
+            for key in ("stochasticEnabled", "zscoreEnabled"):
+                if not isinstance(config[key], bool): raise ValueError("Invalid switch")
+            for key in ("stochasticWindow", "zscoreWindow"):
+                value = config[key]
+                if isinstance(value, bool) or not isinstance(value, (int, float)) or not math.isfinite(value) or int(value) != value or not 2 <= value <= 50:
+                    raise ValueError("Invalid window")
+                config[key] = int(value)
+            for key in ("stochasticLow", "stochasticHigh", "zscoreLow", "zscoreHigh"):
+                value = config[key]
+                if isinstance(value, bool) or not isinstance(value, (int, float)) or not math.isfinite(value):
+                    raise ValueError("Invalid threshold")
+            if not (0 <= config["stochasticLow"] < config["stochasticHigh"] <= 100
+                    and -20 <= config["zscoreLow"] < 0 < config["zscoreHigh"] <= 20):
+                raise ValueError("Invalid bands")
+            result["config"] = config
+            stoch_on, z_on = config["stochasticEnabled"], config["zscoreEnabled"]
+            result["stochastic_allowed"], result["zscore_allowed"] = not stoch_on, not z_on
+            if not stoch_on and not z_on:
+                result["allowed"] = True
+            else:
+                count = max(config["stochasticWindow"] if stoch_on else 0,
+                            config["zscoreWindow"] + 1 if z_on else 0)
+                bars = self.candles[:-1][-count:]
+                now = result["checked_at"]
+                valid = (len(bars) == count and 0 <= now - self.candles_updated_at <= 90
+                         and 0 <= now - (bars[-1]["t"] / 1000 + 60) <= 90
+                         and all(b["t"] - a["t"] == 60000 for a, b in zip(bars, bars[1:]))
+                         and all(math.isfinite(b[k]) and b[k] > 0 for b in bars for k in ("h", "l", "c"))
+                         and all(b["l"] <= b["c"] <= b["h"] for b in bars))
+                if valid and stoch_on:
+                    sample = bars[-config["stochasticWindow"]:]
+                    hi, lo = max(b["h"] for b in sample), min(b["l"] for b in sample)
+                    k = 100 * (sample[-1]["c"] - lo) / (hi - lo) if hi > lo else None
+                    result["stochastic"] = k
+                    result["stochastic_allowed"] = k is not None and (k < config["stochasticLow"] or k > config["stochasticHigh"])
+                if valid and z_on:
+                    sample = [b["c"] for b in bars[-(config["zscoreWindow"] + 1):-1]]
+                    mean = sum(sample) / len(sample)
+                    std = (sum((v - mean) ** 2 for v in sample) / len(sample)) ** .5
+                    z = (bars[-1]["c"] - mean) / std if std > 0 else None
+                    result["zscore"] = z
+                    result["zscore_allowed"] = z is not None and (z < config["zscoreLow"] or z > config["zscoreHigh"])
+                result["allowed"] = result["stochastic_allowed"] and result["zscore_allowed"]
+        except (ValueError, TypeError, KeyError, IndexError, OverflowError):
+            result["config"] = config
+        target.clear()
+        target.update(result)
+
+    def _hedge_entry_allows_cycle(self):
+        if not self.cfg.hedge_entry_filters:
+            return True
+        reading = self.hedge_entry_hub if self.hedge_entry_hub is not None else self._hedge_entry_reading
+        return bool(reading.get("allowed") and 0 <= time.time() - reading.get("checked_at", 0) <= 90)
+
     def _has_entry_dispersion(self):
         """True unless min_intrabar_dispersion_to_enter is set and the current reading is below
         it. No reading yet (too few candles) -> False, so a freshly-booted leg waits for a real
@@ -2890,8 +2972,11 @@ class StochBot:
                     "vol_allowed": vol_allowed, "vol_max_pct": cfg.environment_vol_max_pct,
                     "vol_window": cfg.environment_vol_window,
                     "volume": traded_volume, "volume_rate": traded_volume_rate}
+        if cfg.hedge_entry_filters:
+            snapshot["entry_filters"] = dict(self.hedge_entry_hub if self.hedge_entry_hub is not None else self._hedge_entry_reading)
         reading.update(snapshot)
-        key = (candle_t, allowed, er_allowed, vol_allowed, er is not None)
+        key = (candle_t, allowed, er_allowed, vol_allowed, er is not None,
+               repr(snapshot.get("entry_filters", {}).get("config")))
         if key != self._environment_logged_key:
             try:
                 await self.log_run("environment_er", snapshot)
@@ -2952,7 +3037,7 @@ class StochBot:
 
     def _wants_new_cycle(self):
         """Every condition for DECLARING readiness for a new cycle (or, standalone, entering)."""
-        return (self._environment_allows_cycle() and self._has_entry_pressure() and self._cycle_gap_elapsed()
+        return (self._hedge_entry_allows_cycle() and self._environment_allows_cycle() and self._has_entry_pressure() and self._cycle_gap_elapsed()
                 and self._has_entry_dispersion() and self._candle_unused()
                 and self._volume_jump_allows_cycle() and self._volume_wiggle_allows_cycle())
 
@@ -3128,6 +3213,8 @@ class StochBot:
             "trigger_pct": trig, "trail_pct": trail, "dwell_seconds": dwell,
             "jump_ratio_threshold": jump_ratio_threshold, "jump_pause_seconds": jump_pause_seconds,
             "jump_release_mode": jump_release_mode, "jump_ratio_now": self._last_volume_jump_ratio,
+            **({"entry_filters": dict(self.hedge_entry_hub if self.hedge_entry_hub is not None else self._hedge_entry_reading)}
+               if cfg.hedge_entry_filters else {}),
         }
 
     def _cycle_gap_elapsed(self):
@@ -4739,6 +4826,7 @@ class StochBot:
         # otherwise its lock would go stale and a zombie from an earlier deploy could claim it.
         # The result only ever gates new entries; every exit path below runs regardless.
         holds_lock = await self._acquire_instance_lock()
+        self._refresh_hedge_entry_filters(state, holds_lock)
         await self._refresh_environment(holds_lock)
 
         if cfg.self_lock_enabled and cfg.self_lock_relocks_on_boot:

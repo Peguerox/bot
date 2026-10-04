@@ -3,6 +3,7 @@
 import { useEffect, useState } from "react";
 import { getSupabase } from "@/lib/supabase";
 import PnLChart from "@/components/PnLChart";
+import HedgeEntryFilters from "./components/HedgeEntryFilters";
 import { SEED_USD as HT_SEED_USD, dropPctForLevel as htDropPctForLevel } from "@/lib/sol-hypertrade-config";
 
 // Mirrors trigger/live-bot-surfer-solbtc.ts BUF_UP/BUF_DN/ARM/GIVEBACK -- keep in sync if that changes.
@@ -3200,7 +3201,7 @@ function HedgeDualLegPanel({
         <div>
           <h3 className="text-white font-bold text-sm">Worker 2 · Hedge Strategy (2 legs)</h3>
           <p className="text-gray-500 text-[11px] leading-relaxed">
-            Both legs open together whenever both accounts are flat: Worker 2 LONG, Worker 3 SHORT, $10 per leg. No stochastic or balance entry filter. SL 0.03%; profit lock arms at +0.05% and trails 0.01% (dashboard overrides apply). Environment filters are OFF. ER15 and Vol10 are readings only for gathering data; their colors do not block trading.
+            Both legs open together: Worker 2 LONG, Worker 3 SHORT, $10 per leg. Stochastic and z-score below gate new pairs only. Both OFF removes those signal filters; existing volume safeguards still apply. Exit controls apply to both legs. ER15 and Vol10 remain readings only.
           </p>
         </div>
         <div className="flex items-center gap-1.5 flex-wrap">
@@ -3241,6 +3242,8 @@ function HedgeDualLegPanel({
       ) : (
         <>
           <div className="grid grid-cols-2 gap-2 text-xs">
+            <HedgeEntryFilters settings={longState?.override_hedge_entry_filters}
+              reading={environment?.entry_filters} onSaved={onToggled} />
             <div className="bg-gray-800/60 rounded-lg p-2">
               <div className="flex items-center gap-1.5">
                 <p className="text-gray-500 text-[10px] uppercase">Combined Equity</p>

@@ -193,6 +193,8 @@ LONG_CONFIG = BotConfig(
     environment_vol_window=10,
     environment_er_window=15,
     environment_signal_owner=True,
+    hedge_entry_filters=True,
+    hedge_entry_filter_owner=True,
     # 2026-10-01, direct request ("give it another try... let's get the same settings"): FULL
     # REVERT of every strategy/economics setting to the exact original from 2026-09-29 (commit
     # 8469702, the config that ran 124 cycles at 90.3% win / +2.55% in the original backtest and
@@ -284,6 +286,7 @@ SHORT_CONFIG = BotConfig(
     environment_vol_window=10,
     environment_er_window=15,
     environment_signal_owner=False,  # Both legs use the long owner's single reading.
+    hedge_entry_filters=True,
     # See LONG_CONFIG's docstring -- full revert to the 2026-09-29 original, infra/correctness
     # fixes kept.
     tp_pct=0.10, sl_pct=0.03,
@@ -346,6 +349,9 @@ async def main():
     shared_pressure_hub = {"signal": None}
     long_bot.pressure_signal_hub = shared_pressure_hub
     short_bot.pressure_signal_hub = shared_pressure_hub
+    shared_entry_hub = {"allowed": False}
+    long_bot.hedge_entry_hub = shared_entry_hub
+    short_bot.hedge_entry_hub = shared_entry_hub
     # 2026-09-30, real bug: cycle_partner_table alone (a plain DB read of "is the other leg flat?")
     # enforced only "a cut leg waits", never "both enter together" -- whichever leg polled first
     # entered, the other then saw it holding and refused, and from one beat of skew onward the two

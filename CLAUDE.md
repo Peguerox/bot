@@ -290,6 +290,22 @@ single-account configs, kept deliberately as the revert path) and the `*.bak` fi
 
 ## Database (Supabase)
 
+### Worker 2 optional entry filters — staged locally, awaiting SQL (2026-10-04)
+
+User requested editable stochastic and z-score entry filters. Both default OFF. Each enabled
+filter requires a closed-bar reading below its Low or above its High; when both are enabled,
+both must pass. Neither selects a leg: entries remain equal paired LONG/SHORT. Existing exits
+and volume safeguards remain separate. Windows are editable 2–50 closed one-minute candles.
+Z-score uses the previous N closes as its population-standard-deviation baseline, excluding
+the scored close. Missing/stale/invalid enabled readings block fresh cycles only.
+
+`override_hedge_entry_filters` JSONB on `lighter_btc_optimal_state` is the single authoritative
+setting; the LONG owner publishes one shared permission to both legs, avoiding partial
+two-row updates. Migration: `supabase/migrations/lighter_hedge_entry_filters.sql`. Do not push
+these changes until the user confirms that SQL ran. The new panel starts with both switches
+OFF; no live filter has been enabled by this implementation. Monitor checkpoints and trade
+settings snapshots include the active filter configuration/readings for later comparison.
+
 No `exec_sql` RPC exists in this project — DDL (new tables, ALTER TABLE) can't be applied via a
 script. Write the migration as a `.sql` file in `supabase/migrations/`, send it to the user, and
 they run it manually in the Supabase SQL Editor. DML (row reads/writes) can be done directly via
