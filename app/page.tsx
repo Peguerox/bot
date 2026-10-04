@@ -1602,6 +1602,29 @@ function CompactStochBtcPanel({
   const [entryHiIn, setEntryHiIn] = useState("");
   const [reversalLoIn, setReversalLoIn] = useState("");
   const [reversalHiIn, setReversalHiIn] = useState("");
+  // Stochastic window (2026-10-04, direct request: "change the window of stochastic for worker
+  // 1"). Candle count, not a K value -- governs both the entry and reversal bands above (one K
+  // per tick, tested against both).
+  const curStochWindow: number = state?.override_stoch_window ?? 5;
+  const [stochWindowIn, setStochWindowIn] = useState("");
+
+  async function handleApplyStochWindow() {
+    if (!stochWindowIn.trim()) return;
+    if (!confirm(`Set the stochastic window to ${stochWindowIn.trim()} candles for ${title}? Takes effect immediately.`)) return;
+    setSavingSignal("stochWindow");
+    const res = await fetch("/api/lighter-btc-initial-settings", {
+      method: "POST", headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ stochWindow: stochWindowIn.trim() }),
+    });
+    if (!res.ok) {
+      const b = await res.json().catch(() => ({}));
+      alert(b.error || "Could not apply the change.");
+    } else {
+      setStochWindowIn("");
+    }
+    await onToggled();
+    setSavingSignal(null);
+  }
 
   async function handleApplyBand(kind: "entry" | "reversal") {
     const [loIn, hiIn, curLo, curHi] = kind === "entry"
@@ -2374,6 +2397,31 @@ function CompactStochBtcPanel({
             Entry and reversal bands are independent -- set one without affecting the other.
             Wider (e.g. 15/85) means fewer, more extreme signals.
           </p>
+          <div className="pt-1">
+            <p className="text-gray-500 text-[9px] uppercase">
+              Window (candles) <span className="text-gray-600">now {curStochWindow}</span>
+            </p>
+            <div className="flex items-end gap-1.5 mt-1">
+              <input
+                value={stochWindowIn}
+                onChange={(e) => setStochWindowIn(e.target.value)}
+                placeholder={String(curStochWindow)}
+                inputMode="numeric"
+                className="w-full bg-gray-900 border border-gray-700 rounded px-1.5 py-1 text-xs text-white tabular-nums focus:outline-none focus:border-blue-500"
+              />
+              <button
+                onClick={handleApplyStochWindow}
+                disabled={savingSignal !== null || loading || !stochWindowIn.trim()}
+                className="text-xs font-bold px-2.5 py-1 rounded bg-blue-500/20 text-blue-400 hover:bg-blue-500/30 disabled:opacity-30 whitespace-nowrap"
+              >
+                {savingSignal === "stochWindow" ? "…" : "Set"}
+              </button>
+            </div>
+            <p className="text-gray-600 text-[9px] leading-snug mt-1">
+              How many closed candles the stochastic K reads. Smaller = more sensitive, fires
+              more often. Applies to both bands above.
+            </p>
+          </div>
         </div>
       )}
       {showLevers && !loading && (

@@ -5924,6 +5924,54 @@ async def t_stoch_band_control_reversal_override_does_not_touch_entry():
     check("entered short -- entry band untouched by a reversal-only override", side == "short", side)
 
 
+def _window_sensitive_candles():
+    # mids [60,95,55,65,70]: window=5 (default) -> hh=95,ll=55,close=70 -> K=37.5 (inside 25/75,
+    # no entry). window=3 -> bars [55,65,70], hh=70,ll=55,close=70 -> K=100 (fires short). Picked
+    # so overriding the window is the ONLY thing that can flip entry on, same proof shape as
+    # _band_k80_candles for the band override tests.
+    return make_dispersion_candles([60, 95, 55, 65, 70])
+
+
+async def t_stoch_signal_window_override_changes_k():
+    print("\n[compute_stoch_signal: a window arg overrides the compiled cfg.stoch_window for one call]")
+    candles = _window_sensitive_candles()
+    ex = FakeExchange()
+    bot = make_bot(ex, candles_kind="mid")
+    bot.candles = candles
+    default_sig, default_rev, _ = bot.compute_stoch_signal()
+    check("default window=5 -- K=37.5, inside the band, no signal", default_sig is None, default_sig)
+    override_sig, override_rev, _ = bot.compute_stoch_signal(window=3)
+    check("window=3 -- K=100, fires short", override_sig == "short", override_sig)
+    check("window=3 -- reversal fires too (same K, same band)", override_rev == "short", override_rev)
+
+
+async def _stoch_window_case(state_overrides, schema_on=True):
+    ex = FakeExchange()
+    bot = make_bot(ex, candles_kind="mid", schema_has_regime_overrides=schema_on)
+    bot.candles = _window_sensitive_candles()
+    bot.state_row.update(state_overrides)
+    await bot.tick()
+    return bot.state_row["side"]
+
+
+async def t_stoch_window_control_enables_entry_via_tick():
+    print("\n[stoch window control: override_stoch_window threaded through the real tick() path]")
+    side = await _stoch_window_case({"override_stoch_window": 3.0})
+    check("entered short -- narrower window reveals K=100", side == "short", side)
+
+
+async def t_stoch_window_control_default_unchanged():
+    print("\n[stoch window control: no override -- default window=5 still blocks (K=37.5)]")
+    side = await _stoch_window_case({})
+    check("no entry -- default window, K inside the band", side is None, side)
+
+
+async def t_stoch_window_control_off_by_default_schema_flag():
+    print("\n[stoch window control: schema_has_regime_overrides=False ignores the override column]")
+    side = await _stoch_window_case({"override_stoch_window": 3.0}, schema_on=False)
+    check("no entry -- override present on the row but the schema flag is off", side is None, side)
+
+
 async def t_volume_switch_uses_flip_above_threshold():
     print("\n[volume regime switch: at/above threshold, flip signal wins and gates are bypassed]")
     side = await _volume_switch_case(candle_volume=5.0, threshold=2.0)
@@ -6198,6 +6246,10 @@ async def main():
               t_stoch_band_control_off_by_default_schema_flag,
               t_stoch_signal_entry_and_reversal_independently_overridable,
               t_stoch_band_control_reversal_override_does_not_touch_entry,
+              t_stoch_signal_window_override_changes_k,
+              t_stoch_window_control_enables_entry_via_tick,
+              t_stoch_window_control_default_unchanged,
+              t_stoch_window_control_off_by_default_schema_flag,
               t_entry_vol_gate_rehydrates_paused_state_after_restart,
               t_entry_vol_gate_blocks_reversal_reopen_but_not_the_close,
               t_self_lock_paper_shadow_opens_when_flat,

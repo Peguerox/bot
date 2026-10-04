@@ -2196,13 +2196,15 @@ class StochBot:
                     pass  # never let market-data logging affect trading
             await asyncio.sleep(sleep_s)
 
-    def compute_stoch_signal(self, entry_lo=None, entry_hi=None, reversal_lo=None, reversal_hi=None):
+    def compute_stoch_signal(self, entry_lo=None, entry_hi=None, reversal_lo=None, reversal_hi=None, window=None):
         """entry_lo/entry_hi/reversal_lo/reversal_hi, if given, override the compiled
         cfg.entry_lo/entry_hi/reversal_lo/reversal_hi for this call only -- see
-        _stoch_band_controls. Every existing caller passes none of these (all four stay None),
-        so behaviour is identical to before unless a caller explicitly opts in."""
+        _stoch_band_controls. window, if given, overrides cfg.stoch_window the same way -- see
+        _stoch_window_control (2026-10-04, direct request: "change the window of stochastic for
+        worker 1"). Every existing caller passes none of these, so behaviour is identical to
+        before unless a caller explicitly opts in."""
         c = self.candles
-        w = self.cfg.stoch_window
+        w = window if window is not None else self.cfg.stoch_window
         if len(c) < w + 2:
             return None, None, None
         closed = c[:-1]
@@ -2349,6 +2351,22 @@ class StochBot:
             o = state.get("override_stoch_reversal_hi")
             if o is not None: reversal_hi = float(o)
         return entry_lo, entry_hi, reversal_lo, reversal_hi
+
+    def _stoch_window_control(self, state):
+        """Live override for cfg.stoch_window -- 2026-10-04, direct request: "give me the
+        possibility to change the window of stochastic for worker 1". Governs BOTH the entry
+        band and the reversal band checks, since compute_stoch_signal computes one K per call
+        and tests it against both bands -- there's no such thing as a separate entry-only or
+        reversal-only window. NULL (the default) means "use the compiled default" (cfg.
+        stoch_window), same contract and schema flag as _stoch_band_controls. Cast to int --
+        candle counts, not a percentage."""
+        cfg = self.cfg
+        window = cfg.stoch_window
+        if cfg.schema_has_regime_overrides:
+            o = state.get("override_stoch_window")
+            if o is not None:
+                window = int(o)
+        return window
 
     def _exit_params(self, state):
         """(sl_pct, profit_lock_trigger, profit_lock_trail, tp_pct, exit_mode, dwell_seconds)
@@ -5062,8 +5080,10 @@ class StochBot:
              stoch_band_reversal_lo, stoch_band_reversal_hi) = self._stoch_band_controls(state)
             self._stoch_band_entry_lo, self._stoch_band_entry_hi = stoch_band_entry_lo, stoch_band_entry_hi
             self._stoch_band_reversal_lo, self._stoch_band_reversal_hi = stoch_band_reversal_lo, stoch_band_reversal_hi
+            stoch_window = self._stoch_window_control(state)
             entry_signal, reversal_signal, candle_ts = self.compute_stoch_signal(
-                stoch_band_entry_lo, stoch_band_entry_hi, stoch_band_reversal_lo, stoch_band_reversal_hi)
+                stoch_band_entry_lo, stoch_band_entry_hi, stoch_band_reversal_lo, stoch_band_reversal_hi,
+                stoch_window)
         # See BotConfig.volume_regime_switch_threshold -- a full override, not an extra gate:
         # at/above the threshold this REPLACES whatever the block above just computed. See
         # _regime_controls for the four live toggles layered on top.

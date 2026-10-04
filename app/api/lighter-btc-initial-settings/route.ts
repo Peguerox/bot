@@ -30,6 +30,9 @@ const LIMITS = {
   tp: { min: 0.01, max: 1.0, label: "take-profit" },
   dwell: { min: 0, max: 300, label: "dwell (seconds)" },
   wiggleLock: { min: 0.01, max: 50, label: "volume/wiggle lock threshold" },
+  // 2026-10-04, direct request: "change the window of stochastic for worker 1". Integer candle
+  // count; governs both the entry and reversal bands (see StochBot._stoch_window_control).
+  stochWindow: { min: 2, max: 50, label: "stochastic window" },
 };
 
 export async function POST(req: NextRequest) {
@@ -50,10 +53,11 @@ export async function POST(req: NextRequest) {
     ["tp", "override_tp_pct"],
     ["dwell", "override_dwell_seconds"],
     ["wiggleLock", "override_volume_wiggle_lock_threshold"],
+    ["stochWindow", "override_stoch_window"],
   ] as const) {
     const raw = body[key];
     if (raw === undefined || raw === null || raw === "") continue;
-    const v = Number(raw);
+    let v = Number(raw);
     const lim = LIMITS[key];
     if (!Number.isFinite(v)) {
       return NextResponse.json({ error: `${lim.label}: "${raw}" is not a number.` }, { status: 400 });
@@ -64,6 +68,9 @@ export async function POST(req: NextRequest) {
         { status: 400 }
       );
     }
+    // Candle count, not a percentage -- the worker casts with int() regardless, round here so
+    // the dashboard's "now X" readout matches what actually ends up live.
+    if (key === "stochWindow") v = Math.round(v);
     out[col] = v;
   }
 
