@@ -2844,6 +2844,11 @@ function HedgeDualLegPanel({
   // no gating yet). Reuses the environment_er row rather than a new state column or migration.
   const liveTradedVolume: number | null = environmentFresh ? environment?.volume ?? null : null;
   const liveTradedVolumeRate: number | null = environmentFresh ? environment?.volume_rate ?? null : null;
+  // 2-hour efficiency ratio (2026-10-04, direct request: "put it in both [panels], I have
+  // worker 1 off for now") -- same readout as Worker 1's panel, LONG leg is the owner (already
+  // has schema_has_live_signal=True), same convention as every other shared hedge readout.
+  const liveEr2h: number | null = longState?.live_er_2h ?? null;
+  const liveEr2hDir: string | null = longState?.live_er_2h_direction ?? null;
   // Volume-jump guard (2026-10-03, "build the same guard for worker 2" -- step 2, the actual
   // gate, same panel shape as Worker 1's). LONG leg is the live-readout owner, same convention
   // as ER15/Vol10; the override values are written identically to both legs so either leg's
@@ -3449,6 +3454,23 @@ function HedgeDualLegPanel({
                   {liveSignal === "long" ? "leaning LONG — readout only, legs stay $10 / $10"
                     : liveSignal === "short" ? "leaning SHORT — readout only, legs stay $10 / $10"
                     : "neutral — readout only, legs stay $10 / $10"}
+                </span>
+              </p>
+            </div>
+            <div className="bg-gray-800/60 rounded-lg p-2">
+              {/* 2026-10-04, direct request: "put it in both, I have worker 1 off for now" --
+                  same readout as Worker 1's panel, readings only, gates nothing. Watch whether
+                  the direction holds steady across several checks over a couple hours -- that's
+                  the real signal, not any single reading. */}
+              <p className="text-gray-500 text-[10px] uppercase">Efficiency ratio (2h, chop vs trend)</p>
+              <p className="font-bold text-sm tabular-nums">
+                <span className={liveEr2h == null ? "text-gray-500"
+                  : liveEr2h >= 0.15 ? "text-amber-400" : "text-gray-300"}>
+                  {liveEr2h != null ? liveEr2h.toFixed(3) : "—"}
+                </span>
+                <span className="text-[10px] font-normal text-gray-500 ml-1.5">
+                  {liveEr2h == null ? "no reading yet"
+                    : `${liveEr2hDir === "long" ? "up" : liveEr2hDir === "short" ? "down" : "flat"} -- near 0 = chop, near 1 = trend`}
                 </span>
               </p>
             </div>
