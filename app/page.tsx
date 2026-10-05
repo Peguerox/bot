@@ -4323,70 +4323,54 @@ function MasterSchedulePanel({
 
       <div className="bg-gray-800/60 rounded-lg p-2">
         <p className="text-gray-500 text-[10px] uppercase mb-1.5">Live readings (Worker 1's feed)</p>
-        <div className="flex gap-1.5 overflow-x-auto">
-          <div className="bg-gray-900/50 rounded-lg p-2 flex-shrink-0 w-[150px]">
-            <p className="text-gray-500 text-[9px] uppercase">ER (2h, chop vs trend)</p>
-            <p className="text-[11px] tabular-nums">
-              <span className={`font-bold text-sm ${liveEr == null ? "text-gray-500" : liveEr >= 0.15 ? "text-amber-400" : "text-gray-300"}`}>
-                {liveEr != null ? liveEr.toFixed(3) : "—"}
-              </span>{" "}
-              <span className="text-gray-500 text-[9px]">net move ÷ total move. Near 0 = chop, near 1 = trend.</span>
+        <div className="grid grid-cols-8 gap-1">
+          <div className="bg-gray-900/50 rounded-lg p-1.5">
+            <p className="text-gray-500 text-[8px] uppercase leading-tight">ER 2h</p>
+            <p className={`font-bold text-xs tabular-nums ${liveEr == null ? "text-gray-500" : liveEr >= 0.15 ? "text-amber-400" : "text-gray-300"}`}>
+              {liveEr != null ? liveEr.toFixed(3) : "—"}
             </p>
+            <p className="text-gray-500 text-[8px] leading-tight mt-0.5">near 0 = chop, near 1 = trend</p>
           </div>
-          <div className="bg-gray-900/50 rounded-lg p-2 flex-shrink-0 w-[150px]">
-            <p className="text-gray-500 text-[9px] uppercase">Volume (BTC/min)</p>
-            <p className="text-[11px] tabular-nums">
-              <span className="font-bold text-sm text-gray-300">{liveVolume != null ? liveVolume.toFixed(2) : "—"}</span>{" "}
-              <span className="text-gray-500 text-[9px]">avg BTC traded per minute, last 10 candles.</span>
-            </p>
+          <div className="bg-gray-900/50 rounded-lg p-1.5">
+            <p className="text-gray-500 text-[8px] uppercase leading-tight">Volume</p>
+            <p className="font-bold text-xs tabular-nums text-gray-300">{liveVolume != null ? liveVolume.toFixed(2) : "—"}</p>
+            <p className="text-gray-500 text-[8px] leading-tight mt-0.5">avg BTC/min, last 10 candles</p>
           </div>
-          <div className="bg-gray-900/50 rounded-lg p-2 flex-shrink-0 w-[150px]">
-            <p className="text-gray-500 text-[9px] uppercase">Wiggle ($ swing)</p>
-            <p className="text-[11px] tabular-nums">
-              <span className="font-bold text-sm text-gray-300">{liveWiggle != null ? liveWiggle.toFixed(2) : "—"}</span>{" "}
-              <span className="text-gray-500 text-[9px]">avg $ swing (high−low) per candle, last 5 candles.</span>
-            </p>
+          <div className="bg-gray-900/50 rounded-lg p-1.5">
+            <p className="text-gray-500 text-[8px] uppercase leading-tight">Wiggle</p>
+            <p className="font-bold text-xs tabular-nums text-gray-300">{liveWiggle != null ? liveWiggle.toFixed(2) : "—"}</p>
+            <p className="text-gray-500 text-[8px] leading-tight mt-0.5">avg $ swing, last 5 candles</p>
           </div>
-          <div className="bg-gray-900/50 rounded-lg p-2 flex-shrink-0 w-[150px]">
-            <p className="text-gray-500 text-[9px] uppercase">Wiggle/Vol</p>
-            <p className="text-[11px] tabular-nums">
-              <span className={`font-bold text-sm ${liveVolWiggleRatio == null ? "text-gray-500" : liveVolWiggleRatio <= 3.33 ? "text-amber-400" : "text-gray-300"}`}>
-                {liveVolWiggleRatio != null ? liveVolWiggleRatio.toFixed(3) : "—"}
-              </span>{" "}
-              <span className="text-gray-500 text-[9px]">swing vs volume. Low = price moving without much volume behind it.</span>
+          <div className="bg-gray-900/50 rounded-lg p-1.5">
+            <p className="text-gray-500 text-[8px] uppercase leading-tight">Wiggle/Vol</p>
+            <p className={`font-bold text-xs tabular-nums ${liveVolWiggleRatio == null ? "text-gray-500" : liveVolWiggleRatio <= 3.33 ? "text-amber-400" : "text-gray-300"}`}>
+              {liveVolWiggleRatio != null ? liveVolWiggleRatio.toFixed(3) : "—"}
             </p>
+            <p className="text-gray-500 text-[8px] leading-tight mt-0.5">low = thin, moving without volume</p>
           </div>
-          <div className="bg-gray-900/50 rounded-lg p-2 flex-shrink-0 w-[150px]">
-            <p className="text-gray-500 text-[9px] uppercase">Vol×Wiggle</p>
-            <p className="text-[11px] tabular-nums">
-              <span className="font-bold text-sm text-gray-300">{liveVolWiggleProduct != null ? liveVolWiggleProduct.toFixed(1) : "—"}</span>{" "}
-              <span className="text-gray-500 text-[9px]">volume and wiggle combined into one activity number.</span>
-            </p>
+          <div className="bg-gray-900/50 rounded-lg p-1.5">
+            <p className="text-gray-500 text-[8px] uppercase leading-tight">Vol×Wiggle</p>
+            <p className="font-bold text-xs tabular-nums text-gray-300">{liveVolWiggleProduct != null ? liveVolWiggleProduct.toFixed(1) : "—"}</p>
+            <p className="text-gray-500 text-[8px] leading-tight mt-0.5">volume and wiggle combined</p>
           </div>
-          <div className="bg-gray-900/50 rounded-lg p-2 flex-shrink-0 w-[150px]">
-            <p className="text-gray-500 text-[9px] uppercase">Vol rate</p>
-            <p className="text-[11px] tabular-nums">
-              <span className={`font-bold text-sm ${liveRate == null ? "text-gray-500" : liveRate > 0.05 ? "text-green-400" : liveRate < -0.05 ? "text-red-400" : "text-gray-300"}`}>
-                {liveRate != null ? liveRate.toFixed(2) : "—"}
-              </span>{" "}
-              <span className="text-gray-500 text-[9px]">volume speeding up or slowing down vs its own recent pace.</span>
+          <div className="bg-gray-900/50 rounded-lg p-1.5">
+            <p className="text-gray-500 text-[8px] uppercase leading-tight">Vol rate</p>
+            <p className={`font-bold text-xs tabular-nums ${liveRate == null ? "text-gray-500" : liveRate > 0.05 ? "text-green-400" : liveRate < -0.05 ? "text-red-400" : "text-gray-300"}`}>
+              {liveRate != null ? liveRate.toFixed(2) : "—"}
             </p>
+            <p className="text-gray-500 text-[8px] leading-tight mt-0.5">volume speeding up/slowing down</p>
           </div>
-          <div className="bg-gray-900/50 rounded-lg p-2 flex-shrink-0 w-[150px]">
-            <p className="text-gray-500 text-[9px] uppercase">Zebra (alternation)</p>
-            <p className="text-[11px] tabular-nums">
-              <span className="font-bold text-sm text-gray-300">{liveZebra != null ? liveZebra.toFixed(1) : "—"}</span>{" "}
-              <span className="text-gray-500 text-[9px]">% of last 5 candles that flipped color in a row -- real zigzag.</span>
-            </p>
+          <div className="bg-gray-900/50 rounded-lg p-1.5">
+            <p className="text-gray-500 text-[8px] uppercase leading-tight">Zebra</p>
+            <p className="font-bold text-xs tabular-nums text-gray-300">{liveZebra != null ? liveZebra.toFixed(1) : "—"}</p>
+            <p className="text-gray-500 text-[8px] leading-tight mt-0.5">% candles that flip color in a row</p>
           </div>
-          <div className="bg-gray-900/50 rounded-lg p-2 flex-shrink-0 w-[150px]">
-            <p className="text-gray-500 text-[9px] uppercase">Color balance</p>
-            <p className="text-[11px] tabular-nums">
-              <span className={`font-bold text-sm ${liveColorBalance == null ? "text-gray-500" : liveColorBalance >= 65 && liveColorBalance <= 75 ? "text-green-400" : "text-amber-400"}`}>
-                {liveColorBalance != null ? liveColorBalance.toFixed(0) : "—"}
-              </span>{" "}
-              <span className="text-gray-500 text-[9px]">net balance, 5 candles, 0-100. Worker 1's own gate wants 65-75.</span>
+          <div className="bg-gray-900/50 rounded-lg p-1.5">
+            <p className="text-gray-500 text-[8px] uppercase leading-tight">Color bal</p>
+            <p className={`font-bold text-xs tabular-nums ${liveColorBalance == null ? "text-gray-500" : liveColorBalance >= 65 && liveColorBalance <= 75 ? "text-green-400" : "text-amber-400"}`}>
+              {liveColorBalance != null ? liveColorBalance.toFixed(0) : "—"}
             </p>
+            <p className="text-gray-500 text-[8px] leading-tight mt-0.5">net balance; Worker 1 gate 65-75</p>
           </div>
         </div>
       </div>
