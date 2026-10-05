@@ -6097,12 +6097,12 @@ def _schedule_candles(volume=2.5):
     return c  # ER ~1.0 (pure uptrend), volume=`volume`, rate~0.0 (uniform volume), some wiggle>0
 
 
-def _schedule_sb(rules, enabled=True, calls=None, min_hold_minutes=0):
+def _schedule_sb(rules, enabled=True, calls=None, min_hold_seconds=0):
     async def fake_sb(method, path, body=None, extra_headers=None):
         if calls is not None:
             calls.append(path)
         if path.startswith("bot_schedule_rules"):
-            return [{"enabled": enabled, "rules": rules, "min_hold_minutes": min_hold_minutes}]
+            return [{"enabled": enabled, "rules": rules, "min_hold_seconds": min_hold_seconds}]
         raise AssertionError(f"unexpected sb call: {method} {path}")
     return fake_sb
 
@@ -6479,38 +6479,38 @@ async def t_schedule_rules_fetch_is_throttled():
 
 
 async def t_schedule_rules_min_hold_zero_applies_instantly():
-    print("\n[schedule rules: min_hold_minutes=0 (default) -- instant switch, same as before this feature]")
+    print("\n[schedule rules: min_hold_seconds=0 (default) -- instant switch, same as before this feature]")
     ex = FakeExchange()
     bot = make_bot(ex, candles=_schedule_candles(volume=2.5), schedule_rules_enabled=True,
                     schedule_rules_bot_key="worker1")
     rule = {"vol_wiggle_product_min": 3.0, "vol_wiggle_product_max": 4.0,
             "worker1": {"sl_pct": 0.22}}
-    bot.sb = _schedule_sb([rule], min_hold_minutes=0)
+    bot.sb = _schedule_sb([rule], min_hold_seconds=0)
     await bot._apply_schedule_rules(bot.state_row)
     check("applied on the very first matching tick", bot.state_row.get("override_sl_pct") == 0.22)
 
 
 async def t_schedule_rules_min_hold_delays_a_new_candidate():
-    print("\n[schedule rules: min_hold_minutes>0 -- a brand new candidate is NOT applied immediately]")
+    print("\n[schedule rules: min_hold_seconds>0 -- a brand new candidate is NOT applied immediately]")
     ex = FakeExchange()
     bot = make_bot(ex, candles=_schedule_candles(volume=2.5), schedule_rules_enabled=True,
                     schedule_rules_bot_key="worker1")
     rule = {"vol_wiggle_product_min": 3.0, "vol_wiggle_product_max": 4.0,
             "worker1": {"sl_pct": 0.22}}
-    bot.sb = _schedule_sb([rule], min_hold_minutes=5)
+    bot.sb = _schedule_sb([rule], min_hold_seconds=300)
     await bot._apply_schedule_rules(bot.state_row)
     check("rule matches but hasn't been held 5 minutes yet -- not applied",
           "override_sl_pct" not in bot.state_row)
 
 
 async def t_schedule_rules_min_hold_applies_once_cleared():
-    print("\n[schedule rules: min_hold_minutes>0 -- applies once the candidate has been held long enough]")
+    print("\n[schedule rules: min_hold_seconds>0 -- applies once the candidate has been held long enough]")
     ex = FakeExchange()
     bot = make_bot(ex, candles=_schedule_candles(volume=2.5), schedule_rules_enabled=True,
                     schedule_rules_bot_key="worker1")
     rule = {"vol_wiggle_product_min": 3.0, "vol_wiggle_product_max": 4.0,
             "worker1": {"sl_pct": 0.22}}
-    bot.sb = _schedule_sb([rule], min_hold_minutes=5)
+    bot.sb = _schedule_sb([rule], min_hold_seconds=300)
     await bot._apply_schedule_rules(bot.state_row)
     check("not applied yet", "override_sl_pct" not in bot.state_row)
     bot._schedule_candidate_since = time.time() - 301  # pretend 5+ minutes have passed
@@ -6519,14 +6519,14 @@ async def t_schedule_rules_min_hold_applies_once_cleared():
 
 
 async def t_schedule_rules_min_hold_resets_on_candidate_change():
-    print("\n[schedule rules: min_hold_minutes>0 -- a flip to a DIFFERENT candidate restarts the "
+    print("\n[schedule rules: min_hold_seconds>0 -- a flip to a DIFFERENT candidate restarts the "
           "timer and keeps the previously-effective rule's settings in place]")
     ex = FakeExchange()
     bot = make_bot(ex, candles=_schedule_candles(volume=2.5), schedule_rules_enabled=True,
                     schedule_rules_bot_key="worker1")
     rule_a = {"vol_wiggle_product_min": 3.0, "vol_wiggle_product_max": 4.0,
               "worker1": {"sl_pct": 0.22}}
-    bot.sb = _schedule_sb([rule_a], min_hold_minutes=5)
+    bot.sb = _schedule_sb([rule_a], min_hold_seconds=300)
     await bot._apply_schedule_rules(bot.state_row)
     bot._schedule_candidate_since = time.time() - 301
     await bot._apply_schedule_rules(bot.state_row)
@@ -6537,7 +6537,7 @@ async def t_schedule_rules_min_hold_resets_on_candidate_change():
     # content changed. This must count as a new candidate and restart the hold.
     rule_b = {"vol_wiggle_product_min": 3.0, "vol_wiggle_product_max": 4.0,
               "worker1": {"sl_pct": 0.33}}
-    bot.sb = _schedule_sb([rule_b], min_hold_minutes=5)
+    bot.sb = _schedule_sb([rule_b], min_hold_seconds=300)
     bot._schedule_rules_last_fetch_ts = 0.0  # force the throttle to allow picking up rule_b
     await bot._apply_schedule_rules(bot.state_row)
     check("rule_b is a new candidate -- NOT applied yet, rule_a's settings remain in effect",

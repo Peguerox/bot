@@ -130,15 +130,15 @@ export async function POST(req: NextRequest) {
     out.rules = body.rules;
   }
 
-  // 2026-10-05, direct request: "it needs to stay there for so amount of minutes in order to
-  // apply the rule" -- one hold time for the whole rule set, not per rule. 0 = old instant-switch
-  // behaviour. See StochBot._apply_schedule_rules.
-  if (body.min_hold_minutes !== undefined) {
-    const v = body.min_hold_minutes;
-    if (typeof v !== "number" || !Number.isFinite(v) || v < 0 || v > 180) {
-      return NextResponse.json({ error: "min_hold_minutes must be a number between 0 and 180." }, { status: 400 });
+  // 2026-10-05, direct request: "it needs to stay there for so amount of seconds in order to
+  // apply the rule" (seconds, not minutes -- revised same day) -- one hold time for the whole
+  // rule set, not per rule. 0 = old instant-switch behaviour. See StochBot._apply_schedule_rules.
+  if (body.min_hold_seconds !== undefined) {
+    const v = body.min_hold_seconds;
+    if (typeof v !== "number" || !Number.isFinite(v) || v < 0 || v > 10800) {
+      return NextResponse.json({ error: "min_hold_seconds must be a number between 0 and 10800." }, { status: 400 });
     }
-    out.min_hold_minutes = v;
+    out.min_hold_seconds = v;
   }
 
   if (Object.keys(out).length === 0) {

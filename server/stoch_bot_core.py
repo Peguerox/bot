@@ -3261,7 +3261,7 @@ class StochBot:
                 # select=* (not named columns): a column whose migration hasn't run yet must
                 # never error the WHOLE fetch -- PostgREST rejects an explicit select naming an
                 # unknown column outright, which would have broken schedule automation entirely
-                # (not just the new min_hold_minutes field) until bot_schedule_min_hold.sql runs.
+                # (not just the new min_hold_seconds field) until bot_schedule_min_hold.sql runs.
                 # Same lesson as the settings API route's select("*") -- see CLAUDE.md.
                 rows = await self.sb("GET", "bot_schedule_rules?select=*&id=eq.1")
                 self._schedule_rules_cache = rows[0] if rows else None
@@ -3304,14 +3304,14 @@ class StochBot:
                 break
         # Minimum-hold debounce: `matched` is just "whichever rule the live numbers satisfy THIS
         # instant" -- `effective` below is what actually governs, which only moves to a new
-        # candidate once it has been the top match continuously for min_hold_minutes. A candidate
+        # candidate once it has been the top match continuously for min_hold_seconds. A candidate
         # that flips (to a different rule, or to no-match) before clearing its hold restarts the
         # timer and never takes effect; `effective` just keeps whatever was last actually applied.
         matched_key = jsonlib.dumps(matched, sort_keys=True) if matched is not None else None
         if matched_key != self._schedule_candidate_key or self._schedule_candidate_since is None:
             self._schedule_candidate_key = matched_key
             self._schedule_candidate_since = now
-        hold_seconds = (cache.get("min_hold_minutes") or 0) * 60.0
+        hold_seconds = cache.get("min_hold_seconds") or 0
         held_for = now - self._schedule_candidate_since
         if hold_seconds > 0 and held_for < hold_seconds:
             effective = self._schedule_effective_rule

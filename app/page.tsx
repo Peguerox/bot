@@ -4065,16 +4065,17 @@ function MasterSchedulePanel({
   const [expanded, setExpanded] = useState<number | null>(null);
   const [saving, setSaving] = useState(false);
   const [togglingBoth, setTogglingBoth] = useState(false);
-  // 2026-10-05, direct request: "it needs to stay there for so amount of minutes in order to
-  // apply the rule" -- raw string, same decimal-input pattern as every rule field (parsed only
-  // at save time) so typing "5." doesn't get snapped back to "5" mid-keystroke.
-  const [minHoldMinutes, setMinHoldMinutes] = useState<string>("0");
+  // 2026-10-05, direct request: "it needs to stay there for so amount of seconds in order to
+  // apply the rule" (seconds, not minutes -- revised same day) -- raw string, same decimal-input
+  // pattern as every rule field (parsed only at save time) so typing "5." doesn't get snapped
+  // back to "5" mid-keystroke.
+  const [minHoldSeconds, setMinHoldSeconds] = useState<string>("0");
   const loadedOnce = useRef(false);
 
   useEffect(() => {
     if (!loadedOnce.current && scheduleState) {
       setRules(Array.isArray(scheduleState.rules) ? scheduleState.rules : []);
-      setMinHoldMinutes(String(scheduleState.min_hold_minutes ?? 0));
+      setMinHoldSeconds(String(scheduleState.min_hold_seconds ?? 0));
       loadedOnce.current = true;
     }
   }, [scheduleState]);
@@ -4109,7 +4110,7 @@ function MasterSchedulePanel({
     setSaving(true);
     const ok = await postSchedule({
       rules: rules.map(normalizeRuleForSave),
-      min_hold_minutes: numOrNull(minHoldMinutes) ?? 0,
+      min_hold_seconds: numOrNull(minHoldSeconds) ?? 0,
     });
     if (ok) await onToggled();
     setSaving(false);
@@ -4168,30 +4169,27 @@ function MasterSchedulePanel({
     setRules((r) => r.map((rule, idx) => (idx === i ? { ...rule, [bot]: { ...rule[bot], ...patch } } : rule)));
   }
 
-  // "Live readings" box below -- Worker 1's own numbers, unrelated to the schedule-matching
-  // fix. Unchanged from before 2026-10-05 (do NOT point these at live_schedule_* -- that broke
-  // this box entirely until bot_schedule_live_metrics.sql is run, since those columns don't
-  // exist yet; these older columns already work today).
-  const liveEr = worker1State?.live_er_2h ?? null;
-  const liveVolume = worker1State?.live_candle_volume ?? null;
-  const liveWiggle = worker1State?.live_wiggle ?? null;
-  const liveRate = worker1State?.live_volume_jump_rate ?? null;
-  const liveVolWiggleRatio = worker1State?.live_volume_wiggle_ratio ?? null;
-  const liveVolWiggleProduct = liveVolume != null && liveWiggle != null ? liveVolume * liveWiggle : null;
+  // 2026-10-05, one source of truth (fixed a real split): the "Live readings" box below and
+  // "Currently governing" used to read TWO DIFFERENT sets of columns for the same metrics --
+  // this box showed the older live_candle_volume/live_wiggle/etc (refreshed on their own, older
+  // cadence), while governing matched against live_schedule_* (refreshed every 5s by
+  // _apply_schedule_rules, the actual numbers the backend matches rules against). Because this
+  // metric swings fast, those two "live" snapshots could show wildly different numbers for what
+  // looked like the same reading -- direct report, a screenshot showing Vol×Wiggle 28.4 in this
+  // box (under Rule 1's <=30 cutoff) while Currently governing said OFF (its own number was
+  // 83+). Now both read live_schedule_* exclusively, so the number on screen always matches
+  // what's actually deciding. Needs bot_schedule_live_metrics.sql (now applied).
+  const liveEr = worker1State?.live_schedule_er ?? null;
+  const liveVolume = worker1State?.live_schedule_volume ?? null;
+  const liveWiggle = worker1State?.live_schedule_wiggle ?? null;
+  const liveRate = worker1State?.live_schedule_rate ?? null;
+  const liveVolWiggleRatio = worker1State?.live_schedule_vol_wiggle_ratio ?? null;
+  const liveVolWiggleProduct = worker1State?.live_schedule_vol_wiggle_product ?? null;
 
-  // 2026-10-05 bug fix, SEPARATE from the box above: "Currently governing" used to match using
-  // ONLY Worker 1's numbers for BOTH bots -- the hedge never published its own, so whenever
-  // Worker 1 was off the box showed Worker 1's (irrelevant) match, not the hedge's real one.
-  // live_schedule_* is the exact number _apply_schedule_rules just matched against, published
-  // separately by each bot (StochBot.schema_has_schedule_metrics) -- until the migration runs
-  // these read null, which correctly shows "OFF" (fail-closed, same as the backend) rather than
-  // a wrong guess.
   const liveMiamiHour = getMiamiHour();
   const worker1Metrics = {
-    er: worker1State?.live_schedule_er ?? null, volume: worker1State?.live_schedule_volume ?? null,
-    wiggle: worker1State?.live_schedule_wiggle ?? null, rate: worker1State?.live_schedule_rate ?? null,
-    volWiggleRatio: worker1State?.live_schedule_vol_wiggle_ratio ?? null,
-    volWiggleProduct: worker1State?.live_schedule_vol_wiggle_product ?? null,
+    er: liveEr, volume: liveVolume, wiggle: liveWiggle, rate: liveRate,
+    volWiggleRatio: liveVolWiggleRatio, volWiggleProduct: liveVolWiggleProduct,
   };
   const hedgeMetrics = {
     er: hedgeLongState?.live_schedule_er ?? null,
@@ -4269,7 +4267,7 @@ function MasterSchedulePanel({
         blocks/allows new entries, same as every other ON/OFF switch here.
       </p>
 
-      <div className="bg-gray-800/60 rounded-lg p-2 flex items-center justify-between gap-2 flex-wrap">
+      <div className="bg-gray-800/60 rounded-lg p-2 grid grid-cols-2 items-center gap-2">
         <div className="flex items-center gap-2">
           <div>
             <p className="text-gray-500 text-[10px] uppercase">Schedule automation</p>
@@ -4283,17 +4281,17 @@ function MasterSchedulePanel({
             {saving ? "…" : scheduleEnabled ? "Turn OFF" : "Turn ON"}
           </button>
         </div>
-        <div className="flex items-center gap-1 shrink-0">
+        <div className="flex items-center justify-end gap-1">
           <span className="text-gray-500 text-[10px] uppercase">Min hold</span>
           <input
-            value={minHoldMinutes}
-            onChange={(e) => setMinHoldMinutes(e.target.value)}
+            value={minHoldSeconds}
+            onChange={(e) => setMinHoldSeconds(e.target.value)}
             placeholder="0"
             inputMode="decimal"
             title="A rule only takes effect once it's been the match for this long -- stops fast flip-flopping. 0 = instant."
             className="w-14 bg-gray-900 border border-gray-700 rounded px-1.5 py-1 text-[11px] text-white tabular-nums text-right focus:outline-none focus:border-blue-500"
           />
-          <span className="text-gray-500 text-[10px]">min</span>
+          <span className="text-gray-500 text-[10px]">sec</span>
         </div>
       </div>
 
