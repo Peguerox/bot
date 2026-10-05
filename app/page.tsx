@@ -3982,6 +3982,39 @@ function normalizeRuleForSave(rule: any): any {
   return out;
 }
 
+// Mirrors StochBot._rule_matches / _schedule_current_hour exactly (server/stoch_bot_core.py) --
+// client-side so the panel can show which rule is ACTUALLY governing the bots right now, not
+// just list what's saved. Direct request: "put the selected settings... so we can see the rule
+// and know what is about." Read-only display logic; the real decision is always made server-side.
+function getMiamiHour(): number {
+  const parts = new Intl.DateTimeFormat("en-US", { timeZone: "America/New_York", hour: "numeric", hour12: false }).formatToParts(new Date());
+  const h = parts.find((p) => p.type === "hour")?.value;
+  const hour = h ? parseInt(h, 10) : NaN;
+  return hour === 24 ? 0 : hour; // some locales render midnight as "24"
+}
+
+function ruleConditionsMatch(rule: any, hour: number, metrics: Record<string, number | null>): boolean {
+  const hs = rule.hour_start, he = rule.hour_end;
+  if (hs != null && he != null) {
+    if (hs <= he) { if (!(hs <= hour && hour < he)) return false; }
+    else { if (!(hour >= hs || hour < he)) return false; }
+  }
+  const pairs: [number | null, string, string][] = [
+    [metrics.er, "er_min", "er_max"], [metrics.volume, "volume_min", "volume_max"],
+    [metrics.wiggle, "wiggle_min", "wiggle_max"], [metrics.rate, "rate_min", "rate_max"],
+    [metrics.volWiggleRatio, "vol_wiggle_ratio_min", "vol_wiggle_ratio_max"],
+    [metrics.volWiggleProduct, "vol_wiggle_product_min", "vol_wiggle_product_max"],
+  ];
+  for (const [value, loKey, hiKey] of pairs) {
+    const lo = rule[loKey], hi = rule[hiKey];
+    if (lo == null && hi == null) continue;
+    if (value == null) return false;
+    if (lo != null && value < lo) return false;
+    if (hi != null && value > hi) return false;
+  }
+  return true;
+}
+
 function MasterSchedulePanel({
   scheduleState, worker1State, hedgeLongState, loading, onToggled,
 }: {
@@ -4096,6 +4129,17 @@ function MasterSchedulePanel({
   // client-side; the backend computes the same product independently at rule-evaluation time
   // (StochBot._apply_schedule_rules), never from this display value.
   const liveVolWiggleProduct = liveVolume != null && liveWiggle != null ? liveVolume * liveWiggle : null;
+
+  // Which saved rule is actually governing the bots right now (or none) -- first in list order
+  // whose hour range + conditions all hold against the live readings above. Display only; the
+  // real match is decided independently server-side on each bot's own candle feed.
+  const liveMiamiHour = getMiamiHour();
+  const liveMetrics = { er: liveEr, volume: liveVolume, wiggle: liveWiggle, rate: liveRate,
+                         volWiggleRatio: liveVolWiggleRatio, volWiggleProduct: liveVolWiggleProduct };
+  const matchedRuleIdx = scheduleEnabled
+    ? rules.findIndex((r) => ruleConditionsMatch(r, liveMiamiHour, liveMetrics))
+    : -1;
+  const matchedRule = matchedRuleIdx >= 0 ? rules[matchedRuleIdx] : null;
 
   const condField = (label: string, i: number, loKey: string, hiKey: string, rule: any, unit = "") => (
     <div className="flex-1 min-w-[90px]">
@@ -4214,6 +4258,47 @@ function MasterSchedulePanel({
             </p>
           </div>
         </div>
+      </div>
+
+      <div className="bg-gray-800/60 rounded-lg p-2">
+        <p className="text-gray-500 text-[10px] uppercase mb-1">Currently governing</p>
+        {!scheduleEnabled ? (
+          <p className="text-[11px] text-gray-500">Schedule automation is off -- rules aren't applying anything.</p>
+        ) : matchedRule == null ? (
+          <p className="text-[11px] text-amber-400">No rule matches right now -- both bots will turn OFF on the next check.</p>
+        ) : (
+          <>
+            <p className="text-[11px] text-white font-bold mb-1">
+              Rule {matchedRuleIdx + 1}
+              <span className={`ml-1.5 text-[9px] font-bold px-1 rounded ${matchedRule.worker1_enabled !== false ? "bg-green-500/20 text-green-400" : "bg-red-500/20 text-red-400"}`}>
+                W1 {matchedRule.worker1_enabled !== false ? "ON" : "OFF"}
+              </span>
+              <span className={`ml-1 text-[9px] font-bold px-1 rounded ${matchedRule.hedge_enabled !== false ? "bg-green-500/20 text-green-400" : "bg-red-500/20 text-red-400"}`}>
+                Hedge {matchedRule.hedge_enabled !== false ? "ON" : "OFF"}
+              </span>
+            </p>
+            {matchedRule.worker1_enabled !== false && (
+              <p className="text-[10px] text-gray-300 leading-snug">
+                <span className="text-gray-500">W1:</span>{" "}
+                {[["SL", "sl_pct"], ["Trig", "trigger_pct"], ["Trail", "trail_pct"], ["TP", "tp_pct"],
+                  ["Dwell", "dwell_seconds"], ["BandLo", "band_lo"], ["BandHi", "band_hi"],
+                  ["RevLo", "reversal_lo"], ["RevHi", "reversal_hi"], ["Window", "window"]]
+                  .filter(([, k]) => matchedRule.worker1?.[k] != null)
+                  .map(([label, k]) => `${label} ${matchedRule.worker1[k]}`).join(" · ")
+                  || "no settings set -- leaving current values alone"}
+              </p>
+            )}
+            {matchedRule.hedge_enabled !== false && (
+              <p className="text-[10px] text-gray-300 leading-snug">
+                <span className="text-gray-500">Hedge:</span>{" "}
+                {[["SL", "sl_pct"], ["Trig", "trigger_pct"], ["Trail", "trail_pct"], ["TP", "tp_pct"], ["Dwell", "dwell_seconds"]]
+                  .filter(([, k]) => matchedRule.hedge?.[k] != null)
+                  .map(([label, k]) => `${label} ${matchedRule.hedge[k]}`).join(" · ")
+                  || "no settings set -- leaving current values alone"}
+              </p>
+            )}
+          </>
+        )}
       </div>
 
       <div className="space-y-1.5">
