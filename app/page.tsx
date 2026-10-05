@@ -4116,6 +4116,16 @@ function MasterSchedulePanel({
     setSaving(false);
   }
 
+  // 2026-10-05, direct report: "i dont have any button to confirm the 50 seconds" -- Min hold
+  // only saved via the big "Save rules" button far below the rule list, with nothing next to the
+  // box itself suggesting that. Scoped save, right next to the input.
+  async function handleSaveMinHold() {
+    setSaving(true);
+    const ok = await postSchedule({ min_hold_seconds: numOrNull(minHoldSeconds) ?? 0 });
+    if (ok) await onToggled();
+    setSaving(false);
+  }
+
   async function handleBothOn() {
     if (!confirm("Turn BOTH Worker 1 and the hedge ON?")) return;
     setTogglingBoth(true);
@@ -4292,6 +4302,10 @@ function MasterSchedulePanel({
             className="w-14 bg-gray-900 border border-gray-700 rounded px-1.5 py-1 text-[11px] text-white tabular-nums text-right focus:outline-none focus:border-blue-500"
           />
           <span className="text-gray-500 text-[10px]">sec</span>
+          <button onClick={handleSaveMinHold} disabled={saving || loading}
+            className="text-[10px] font-bold px-2 py-1 rounded bg-blue-500/20 text-blue-400 hover:bg-blue-500/30 disabled:opacity-30">
+            {saving ? "…" : "Set"}
+          </button>
         </div>
       </div>
 
