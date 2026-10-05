@@ -6489,6 +6489,28 @@ async def t_schedule_rules_malformed_data_fails_closed():
     check("treated as no match -- bot turned off, same as any other no-match", bot.state_row["enabled"] is False)
 
 
+async def t_schedule_rules_mutates_local_state_dict_immediately():
+    print("\n[schedule rules: real-money bug fix -- mutates the passed-in state dict immediately, "
+          "so the rest of the SAME tick never acts on a stale pre-decision enabled value]")
+    ex = FakeExchange()
+    bot = make_bot(ex, candles=_schedule_candles(), schedule_rules_enabled=True,
+                    schedule_rules_bot_key="hedge")
+    rule = {"hedge_enabled": False}  # no conditions -> always matches, turns the bot off
+    bot.sb = _schedule_sb([rule])
+    # Mirror tick()'s real shape: `state` is a SEPARATE dict object from bot.state_row --
+    # get_state() returns a fresh copy in production, update_state() only PATCHes the DB and
+    # never touches it. Before this fix, tick()'s own `wants_in = ... and state.get("enabled")`
+    # check (much further down in the same call) kept reading this stale True for the rest of
+    # the tick, letting a leg the schedule had JUST turned off still enter a new hedge cycle.
+    local_state = dict(bot.state_row)
+    local_state["enabled"] = True
+    await bot._apply_schedule_rules(local_state)
+    check("the local state dict reflects the new enabled value immediately",
+          local_state.get("enabled") is False)
+    check("the DB-side row was independently updated too",
+          bot.state_row.get("enabled") is False)
+
+
 async def t_schedule_rules_metrics_not_published_without_schema_flag():
     print("\n[schedule rules: schema_has_schedule_metrics=False (default) -- never publishes live_schedule_*]")
     ex = FakeExchange()
@@ -6793,6 +6815,7 @@ async def main():
               t_schedule_rules_unchanged_match_does_not_rewrite,
               t_schedule_rules_fetch_is_throttled,
               t_schedule_rules_malformed_data_fails_closed,
+              t_schedule_rules_mutates_local_state_dict_immediately,
               t_schedule_rules_metrics_not_published_without_schema_flag,
               t_schedule_rules_publishes_live_metrics_with_schema_flag,
               t_schedule_rules_metrics_publish_is_isolated_from_settings_patch,

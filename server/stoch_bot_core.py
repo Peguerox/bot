@@ -3309,6 +3309,19 @@ class StochBot:
                 patch.update({col: settings[src] for src, col in field_map if settings.get(src) is not None})
         if not patch:
             return
+        # 2026-10-05 bug fix, real money: `state` here is the SAME dict tick() fetched at the
+        # very top of this call and keeps using for the rest of its own logic (notably
+        # `wants_in = ... and state.get("enabled") ...` for the hedge's cycle-barrier entry
+        # check, much further down in tick()). update_state() only PATCHes Supabase -- it never
+        # touches this local dict -- so without this line, a leg whose schedule check JUST
+        # decided "enabled: False" right here would still see the OLD, stale enabled=True for
+        # the remainder of THIS SAME tick, and could still declare readiness / enter a new hedge
+        # cycle on the very tick that turned it off. Observed live 2026-10-05: two real hedge
+        # cycles opened with only one leg filled, each within ~1s of a schedule_rule_applied
+        # {"enabled": False} log for that same leg -- the other leg (ticking independently,
+        # already fresh) correctly declined, leaving the stale leg unpaired. Mutating the local
+        # dict immediately closes that window regardless of whether the DB write below succeeds.
+        state.update(patch)
         try:
             await self.update_state(patch)
             if new_key is not None and len(patch) > (1 if "enabled" in patch else 0):
