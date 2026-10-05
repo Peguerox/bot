@@ -4198,10 +4198,10 @@ function MasterSchedulePanel({
                 <div>
                   <p className="text-gray-500 text-[9px] uppercase mb-1">Hour range (Miami time, 0-23, optional)</p>
                   <div className="flex gap-1">
-                    <input value={rule.hour_start ?? ""} onChange={(e) => patchRule(i, { hour_start: numOrNull(e.target.value) })}
+                    <input value={rule.hour_start ?? ""} onChange={(e) => patchRule(i, { hour_start: e.target.value })}
                       placeholder="start" inputMode="numeric"
                       className="w-full bg-gray-900 border border-gray-700 rounded px-1.5 py-1 text-[11px] text-white tabular-nums focus:outline-none focus:border-blue-500" />
-                    <input value={rule.hour_end ?? ""} onChange={(e) => patchRule(i, { hour_end: numOrNull(e.target.value) })}
+                    <input value={rule.hour_end ?? ""} onChange={(e) => patchRule(i, { hour_end: e.target.value })}
                       placeholder="end" inputMode="numeric"
                       className="w-full bg-gray-900 border border-gray-700 rounded px-1.5 py-1 text-[11px] text-white tabular-nums focus:outline-none focus:border-blue-500" />
                   </div>
