@@ -4269,34 +4269,29 @@ function MasterSchedulePanel({
         blocks/allows new entries, same as every other ON/OFF switch here.
       </p>
 
-      <div className="bg-gray-800/60 rounded-lg p-2 flex items-center justify-between">
-        <div>
-          <p className="text-gray-500 text-[10px] uppercase">Schedule automation</p>
-          <p className={`font-bold text-sm ${scheduleEnabled ? "text-green-400" : "text-gray-500"}`}>
-            {scheduleEnabled ? "ON" : "OFF"}
-          </p>
-        </div>
-        <button onClick={handleToggleSchedule} disabled={saving || loading}
-          className={`text-xs font-bold px-2.5 py-1 rounded disabled:opacity-30 ${
-            scheduleEnabled ? "bg-green-500/20 text-green-400" : "bg-gray-700/50 text-gray-500"}`}>
-          {saving ? "…" : scheduleEnabled ? "Turn OFF" : "Turn ON"}
-        </button>
-      </div>
-
-      <div className="bg-gray-800/60 rounded-lg p-2 flex items-center justify-between gap-2">
-        <div>
-          <p className="text-gray-500 text-[10px] uppercase">Minimum hold before switching</p>
-          <p className="text-gray-600 text-[9px] leading-tight">
-            A rule only takes effect once it's been the match for this long -- stops fast flip-flopping. 0 = switch instantly (old behavior).
-          </p>
+      <div className="bg-gray-800/60 rounded-lg p-2 flex items-center justify-between gap-2 flex-wrap">
+        <div className="flex items-center gap-2">
+          <div>
+            <p className="text-gray-500 text-[10px] uppercase">Schedule automation</p>
+            <p className={`font-bold text-sm ${scheduleEnabled ? "text-green-400" : "text-gray-500"}`}>
+              {scheduleEnabled ? "ON" : "OFF"}
+            </p>
+          </div>
+          <button onClick={handleToggleSchedule} disabled={saving || loading}
+            className={`text-xs font-bold px-2.5 py-1 rounded disabled:opacity-30 ${
+              scheduleEnabled ? "bg-green-500/20 text-green-400" : "bg-gray-700/50 text-gray-500"}`}>
+            {saving ? "…" : scheduleEnabled ? "Turn OFF" : "Turn ON"}
+          </button>
         </div>
         <div className="flex items-center gap-1 shrink-0">
+          <span className="text-gray-500 text-[10px] uppercase">Min hold</span>
           <input
             value={minHoldMinutes}
             onChange={(e) => setMinHoldMinutes(e.target.value)}
             placeholder="0"
             inputMode="decimal"
-            className="w-16 bg-gray-900 border border-gray-700 rounded px-1.5 py-1 text-[11px] text-white tabular-nums text-right focus:outline-none focus:border-blue-500"
+            title="A rule only takes effect once it's been the match for this long -- stops fast flip-flopping. 0 = instant."
+            className="w-14 bg-gray-900 border border-gray-700 rounded px-1.5 py-1 text-[11px] text-white tabular-nums text-right focus:outline-none focus:border-blue-500"
           />
           <span className="text-gray-500 text-[10px]">min</span>
         </div>
