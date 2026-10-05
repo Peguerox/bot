@@ -4329,48 +4329,48 @@ function MasterSchedulePanel({
             <p className={`font-bold text-xs tabular-nums ${liveEr == null ? "text-gray-500" : liveEr >= 0.15 ? "text-amber-400" : "text-gray-300"}`}>
               {liveEr != null ? liveEr.toFixed(3) : "—"}
             </p>
-            <p className="text-gray-500 text-[8px] leading-tight mt-0.5">near 0 = chop, near 1 = trend</p>
+            <p className="text-gray-500 text-[8px] leading-tight mt-0.5">How straight vs choppy the last 2h have been. Near 0 = going nowhere. Near 1 = moving in one direction.</p>
           </div>
           <div className="bg-gray-900/50 rounded-lg p-1.5">
             <p className="text-gray-500 text-[8px] uppercase leading-tight">Volume</p>
             <p className="font-bold text-xs tabular-nums text-gray-300">{liveVolume != null ? liveVolume.toFixed(2) : "—"}</p>
-            <p className="text-gray-500 text-[8px] leading-tight mt-0.5">avg BTC/min, last 10 candles</p>
+            <p className="text-gray-500 text-[8px] leading-tight mt-0.5">How much BTC is actually trading right now, averaged over the last 10 minutes. Higher = more real activity.</p>
           </div>
           <div className="bg-gray-900/50 rounded-lg p-1.5">
             <p className="text-gray-500 text-[8px] uppercase leading-tight">Wiggle</p>
             <p className="font-bold text-xs tabular-nums text-gray-300">{liveWiggle != null ? liveWiggle.toFixed(2) : "—"}</p>
-            <p className="text-gray-500 text-[8px] leading-tight mt-0.5">avg $ swing, last 5 candles</p>
+            <p className="text-gray-500 text-[8px] leading-tight mt-0.5">How many dollars price swings within each candle, averaged over the last 5. A simple volatility reading.</p>
           </div>
           <div className="bg-gray-900/50 rounded-lg p-1.5">
             <p className="text-gray-500 text-[8px] uppercase leading-tight">Wiggle/Vol</p>
             <p className={`font-bold text-xs tabular-nums ${liveVolWiggleRatio == null ? "text-gray-500" : liveVolWiggleRatio <= 3.33 ? "text-amber-400" : "text-gray-300"}`}>
               {liveVolWiggleRatio != null ? liveVolWiggleRatio.toFixed(3) : "—"}
             </p>
-            <p className="text-gray-500 text-[8px] leading-tight mt-0.5">low = thin, moving without volume</p>
+            <p className="text-gray-500 text-[8px] leading-tight mt-0.5">How much price is actually moving for the volume behind it. Low = lots of trading, barely any real movement.</p>
           </div>
           <div className="bg-gray-900/50 rounded-lg p-1.5">
             <p className="text-gray-500 text-[8px] uppercase leading-tight">Vol×Wiggle</p>
             <p className="font-bold text-xs tabular-nums text-gray-300">{liveVolWiggleProduct != null ? liveVolWiggleProduct.toFixed(1) : "—"}</p>
-            <p className="text-gray-500 text-[8px] leading-tight mt-0.5">volume and wiggle combined</p>
+            <p className="text-gray-500 text-[8px] leading-tight mt-0.5">Volume and wiggle multiplied together -- one combined number for total market activity.</p>
           </div>
           <div className="bg-gray-900/50 rounded-lg p-1.5">
             <p className="text-gray-500 text-[8px] uppercase leading-tight">Vol rate</p>
             <p className={`font-bold text-xs tabular-nums ${liveRate == null ? "text-gray-500" : liveRate > 0.05 ? "text-green-400" : liveRate < -0.05 ? "text-red-400" : "text-gray-300"}`}>
               {liveRate != null ? liveRate.toFixed(2) : "—"}
             </p>
-            <p className="text-gray-500 text-[8px] leading-tight mt-0.5">volume speeding up/slowing down</p>
+            <p className="text-gray-500 text-[8px] leading-tight mt-0.5">Whether trading volume right now is picking up or dying down vs its own recent pace.</p>
           </div>
           <div className="bg-gray-900/50 rounded-lg p-1.5">
             <p className="text-gray-500 text-[8px] uppercase leading-tight">Zebra</p>
             <p className="font-bold text-xs tabular-nums text-gray-300">{liveZebra != null ? liveZebra.toFixed(1) : "—"}</p>
-            <p className="text-gray-500 text-[8px] leading-tight mt-0.5">% candles that flip color in a row</p>
+            <p className="text-gray-500 text-[8px] leading-tight mt-0.5">How often the last 5 candles actually flipped color back and forth -- the real zig-zag pattern.</p>
           </div>
           <div className="bg-gray-900/50 rounded-lg p-1.5">
             <p className="text-gray-500 text-[8px] uppercase leading-tight">Color bal</p>
             <p className={`font-bold text-xs tabular-nums ${liveColorBalance == null ? "text-gray-500" : liveColorBalance >= 65 && liveColorBalance <= 75 ? "text-green-400" : "text-amber-400"}`}>
               {liveColorBalance != null ? liveColorBalance.toFixed(0) : "—"}
             </p>
-            <p className="text-gray-500 text-[8px] leading-tight mt-0.5">net balance; Worker 1 gate 65-75</p>
+            <p className="text-gray-500 text-[8px] leading-tight mt-0.5">Whether the last 5 candles' ups and downs cancel out or lean one way. Worker 1 only enters at 65-75.</p>
           </div>
         </div>
       </div>
