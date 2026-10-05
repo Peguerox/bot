@@ -3022,13 +3022,15 @@ function HedgeDualLegPanel({
   const curDwell: number = longState?.override_dwell_seconds ?? 0;
   const [dwellIn, setDwellIn] = useState("");
 
-  async function handleSetExitMode(mode: "trail" | "tp" | "floor") {
+  async function handleSetExitMode(mode: "trail" | "tp" | "floor" | "no_sl") {
     if (mode === curExitMode) return;
     if (!confirm(
       mode === "tp"
         ? `Switch BOTH legs to fixed-TP mode? The profit-lock trail is suppressed; only SL and the TP level close a winner. Takes effect immediately, including on an open position.`
         : mode === "floor"
         ? `Switch BOTH legs to floor mode? TP and the plain trail are both off. Until a leg's partner closes, only SL protects it; once the partner closes, a new stop arms at roughly the level that offsets the partner's loss (dwell-gated if set). Takes effect immediately, including on an open position.`
+        : mode === "no_sl"
+        ? `Switch BOTH legs to No-SL mode? Whichever leg loses first still gets cut by its ordinary SL -- that's unchanged. But once a leg's partner has closed, THAT leg's own SL (and its real exchange-side stop order) comes OFF -- from then on only a stochastic signal reversal or its own trail can close it. This removes the hard loss limit on the surviving leg. Takes effect immediately, including on an open position.`
         : `Switch BOTH legs back to trail mode? Literal TP is disabled again; the profit-lock trail governs winners, same as before. Takes effect immediately, including on an open position.`
     )) return;
     setSavingExitMode(true);
@@ -3678,8 +3680,8 @@ function HedgeDualLegPanel({
               <p className="text-gray-500 text-[9px] uppercase">
                 Exit mode <span className="text-gray-600">now {curExitMode}</span>
               </p>
-              <div className="grid grid-cols-3 gap-1 mt-1">
-                {(["trail", "tp", "floor"] as const).map((mode) => (
+              <div className="grid grid-cols-4 gap-1 mt-1">
+                {(["trail", "tp", "floor", "no_sl"] as const).map((mode) => (
                   <button
                     key={mode}
                     onClick={() => handleSetExitMode(mode)}
@@ -3688,7 +3690,7 @@ function HedgeDualLegPanel({
                       curExitMode === mode ? "bg-blue-500/30 text-blue-300" : "bg-gray-700/50 text-gray-500 hover:bg-gray-700"
                     }`}
                   >
-                    {mode === "tp" ? "Fixed TP" : mode === "floor" ? "Floor" : "Trail"}
+                    {mode === "tp" ? "Fixed TP" : mode === "floor" ? "Floor" : mode === "no_sl" ? "No SL" : "Trail"}
                   </button>
                 ))}
               </div>
@@ -3698,7 +3700,11 @@ function HedgeDualLegPanel({
                 winner, per the WORKER_2_HANDOFF.md research candidate. Floor: TP and the trail
                 are both off -- only SL protects until this leg's partner closes, then a new
                 stop arms near the level that offsets the partner's loss (the dwell box below
-                can delay that new stop; it never delays TP or SL). SL always stays active.
+                can delay that new stop; it never delays TP or SL). No SL: whichever leg loses
+                first still gets cut by its own SL as normal -- but once that happens, the
+                surviving leg's SL (internal and the real exchange order) comes off entirely;
+                only a stochastic signal reversal or its own trail can close it from then on.
+                Higher risk by design -- there is no longer a hard cap on that leg's loss.
               </p>
             </div>
             <div className="grid grid-cols-5 gap-1.5">

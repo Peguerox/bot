@@ -1650,6 +1650,14 @@ class StochBot:
         self._breakeven_reached = False
         self._breakeven_restored = False
         self._breakeven_partner_read_at = 0.0
+        # exit_mode="no_sl" (2026-10-05, direct request): SL stays active until THIS leg's own
+        # partner has closed -- "the first leg needs to get out with a SL" -- then this leg's own
+        # SL (internal check and the native exchange order) is skipped, leaving only the ordinary
+        # profit-lock trail and a stochastic signal reversal able to close it. Sticky once True
+        # for the life of the current position (the cycle barrier guarantees the partner can't
+        # re-open mid-cycle); reset at every position-close point alongside the breakeven state.
+        self._no_sl_partner_closed = False
+        self._no_sl_partner_checked_at = 0.0
         # Single-instance lock. The id is per-LEG, not per-process: the hedge bot runs two legs in
         # one process and they lock two DIFFERENT rows, so sharing one id would make "who holds
         # this?" ambiguous in the logs for no benefit.
@@ -2442,6 +2450,21 @@ class StochBot:
         loss") makes the dormant partner-cut breakeven floor the only winner protection, live-
         selectable without flipping BotConfig.breakeven_floor_enabled -- see floor_enabled where
         exit_mode is consumed, and the breakeven-floor block itself, for the full mechanism.
+        "no_sl" (2026-10-05, direct request: "when we using stochastic on worker 2 you can have
+        no SL and only get out by signal reversal or trail", then the direct follow-up
+        "remember the first leg needs to get out with a SL") -- the ONE exception to "SL is
+        untouched by exit_mode" above, and it is NOT unconditional. SL stays fully active, exactly
+        like "trail" mode, until THIS leg's own partner has closed (checked via the same
+        cycle_partner_table read _partner_is_flat already uses, throttled to 1/s -- see
+        self._no_sl_partner_closed). Whichever leg loses first still gets cut by its ordinary SL,
+        same as today -- that structural mechanic is untouched. Only once the partner is gone does
+        this (now-surviving) leg's own SL check, and its native exchange-side stop order (see
+        _sync_native_exits), get skipped -- from that point on the ONLY things that can close it
+        are a stochastic signal reversal (reversal_ready, unaffected by exit_mode) or its own
+        profit-lock trail (trail_enabled stays on throughout no_sl mode, same as "trail"; TP stays
+        suppressed). This removes the hard bound on the SURVIVING leg's loss between its partner
+        closing and whichever of those two fires -- opt-in, off by default, real-money risk the
+        user explicitly asked for.
 
         dwell_seconds (2026-10-03, direct request: "a dwell strategy") -- requires the trail's
         pullback (in "trail" mode) or the armed floor's trigger (in "floor" mode) to stay
@@ -2466,7 +2489,7 @@ class StochBot:
             o = state.get("override_tp_pct")
             if o is not None: tp = float(o)
             o = state.get("override_exit_mode")
-            if o in ("trail", "tp", "floor"): exit_mode = o
+            if o in ("trail", "tp", "floor", "no_sl"): exit_mode = o
             o = state.get("override_dwell_seconds")
             if o is not None: dwell = float(o)
         return sl, trig, trail, tp, exit_mode, dwell
@@ -2920,6 +2943,11 @@ class StochBot:
         # profit_lock_peak_pct resets, not a replacement for them (the trail's own dwell usage
         # has nothing to do with the breakeven floor and must stay covered either way).
         self._dwell_touch_at = None
+        # Same "every position-close point" reasoning for exit_mode="no_sl" -- see its own
+        # comment in __init__. Independent of the breakeven floor, but this is the established
+        # shared reset point for per-cycle state.
+        self._no_sl_partner_closed = False
+        self._no_sl_partner_checked_at = 0.0
 
     @staticmethod
     def breakeven_floor_pct(partner_cycle_pnl, own_notional_usd, fixed_floor_pct=None):
@@ -4082,7 +4110,7 @@ class StochBot:
         self._native_tp_synced = desired
         await self.log_run("native_tp_synced", {"side": side, "trigger": trigger_price})
 
-    async def _sync_native_exits(self, side, qty, sl_trigger, tp_trigger):
+    async def _sync_native_exits(self, side, qty, sl_trigger, tp_trigger, suppress_sl=False):
         """Keep whichever native orders are enabled resting at the current trigger levels, sized
         to `qty` -- see BotConfig.native_stop_loss_enabled / native_take_profit_enabled. No-ops
         unless at least one desired (trigger, qty) pair actually changed (a fresh entry, a live
@@ -4094,11 +4122,24 @@ class StochBot:
         side would also wipe out the still-valid other side, leaving the position with only one
         of its two native exits resting until the next change happened to notice. Re-placing an
         unchanged side is cheap; silently losing a side's protection is not.
+
+        suppress_sl (2026-10-05, exit_mode="no_sl"): once this leg's own partner has closed, the
+        REAL exchange-side stop must come off too, not just the internal gap_hit="SL" check --
+        a resting native stop order fires on its own regardless of what this process decides.
         """
         cfg = self.cfg
-        want_sl = cfg.native_stop_loss_enabled
+        want_sl = cfg.native_stop_loss_enabled and not suppress_sl
         want_tp = cfg.native_take_profit_enabled and not cfg.disable_literal_tp
         if not (want_sl or want_tp):
+            # Neither side is wanted NOW. Compiled-only flags never changed mid-position, so this
+            # used to mean "never placed anything, nothing to do" -- but suppress_sl (exit_mode
+            # "no_sl") can flip want_sl False mid-position with a real order already resting.
+            # Cancelling only when something was actually synced keeps the common (never placed
+            # anything) case a true no-op.
+            if self._native_stop_synced is not None or self._native_tp_synced is not None:
+                await self.cancel_all()
+                self._native_stop_synced = None
+                self._native_tp_synced = None
             return
         q = round(qty, 8)
         desired_sl = (sl_trigger, q) if want_sl else None
@@ -5987,7 +6028,7 @@ class StochBot:
             # unlike "trail"/"tp" it's an exit condition that doesn't move at all before the
             # partner exits (matches the user's "now's the time you enter the position" framing).
             tp_enabled = (not cfg.disable_literal_tp) if exit_mode == "trail" else (exit_mode == "tp")
-            trail_enabled = cfg.profit_lock_enabled if exit_mode == "trail" else False
+            trail_enabled = cfg.profit_lock_enabled if exit_mode in ("trail", "no_sl") else False
             floor_enabled = (exit_mode == "floor")
             pos_tp = pos_tp if pos_tp is not None else ov_tp
             pos_sl = pos_sl if pos_sl is not None else ov_sl
@@ -5998,19 +6039,32 @@ class StochBot:
             sl = round_trigger(state["first_entry_price"] * (1 - pos_sl / 100 if side == "long"
                                                              else 1 + pos_sl / 100),
                                up=(side != "long"))
+            # no_sl: SL (internal and native) stays live until this leg's own partner has closed
+            # -- "the first leg needs to get out with a SL" -- see _exit_params' docstring and
+            # self._no_sl_partner_closed's comment in __init__. Throttled to 1/s, same budget as
+            # the breakeven floor's partner read; sticky once True for this position's life.
+            no_sl_skip = False
+            if exit_mode == "no_sl":
+                if not self._no_sl_partner_closed:
+                    now_s = time.time()
+                    if now_s - self._no_sl_partner_checked_at >= 1.0:
+                        self._no_sl_partner_checked_at = now_s
+                        if await self._partner_is_flat():
+                            self._no_sl_partner_closed = True
+                no_sl_skip = self._no_sl_partner_closed
             if cfg.native_stop_loss_enabled or cfg.native_take_profit_enabled:
                 qty_now = total_qty(legs)
                 if qty_now > 0:
-                    await self._sync_native_exits(side, qty_now, sl, tp)
+                    await self._sync_native_exits(side, qty_now, sl, tp, suppress_sl=no_sl_skip)
             check_price = best_bid if side == "long" else best_ask
             gap_hit = None
             if side == "long":
-                if check_price <= sl:
+                if not no_sl_skip and check_price <= sl:
                     gap_hit = "SL"
                 elif tp_enabled and check_price >= tp:
                     gap_hit = "TP"
             else:
-                if check_price >= sl:
+                if not no_sl_skip and check_price >= sl:
                     gap_hit = "SL"
                 elif tp_enabled and check_price <= tp:
                     gap_hit = "TP"

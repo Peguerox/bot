@@ -116,11 +116,15 @@ export async function POST(req: NextRequest) {
   // (literal TP at override_tp_pct, trail suppressed). "floor" (direct follow-up: "whenever the
   // first leg gets out... arm a new stop loss") live-activates the dormant partner-cut
   // breakeven floor as the only winner protection, hedge-only since it needs a cycle partner.
-  // SL is never touched by this -- see StochBot._exit_params's docstring for the full reasoning.
+  // "no_sl" (2026-10-05, direct request: "no SL and only get out by signal reversal or trail",
+  // then "remember the first leg needs to get out with a SL") -- SL stays active until this
+  // leg's own partner has closed, then both the internal SL check AND the native exchange stop
+  // order are skipped; only a stochastic signal reversal or this leg's own trail can close it
+  // after that. See StochBot._exit_params's docstring for the full reasoning.
   if (body.exitMode !== undefined) {
     const em = body.exitMode;
-    if (em !== "trail" && em !== "tp" && em !== "floor") {
-      return NextResponse.json({ error: `exitMode must be trail/tp/floor (got "${em}").` }, { status: 400 });
+    if (em !== "trail" && em !== "tp" && em !== "floor" && em !== "no_sl") {
+      return NextResponse.json({ error: `exitMode must be trail/tp/floor/no_sl (got "${em}").` }, { status: 400 });
     }
     out["override_exit_mode"] = em;
   }

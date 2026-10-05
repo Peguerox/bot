@@ -2021,6 +2021,7 @@ async def _tick_at(bot, price):
     # The partner read is throttled to 1/s so a test sweeping several prices in a row would
     # otherwise only ever get one reading.
     bot._breakeven_partner_read_at = 0.0
+    bot._no_sl_partner_checked_at = 0.0
     await bot.tick()
 
 
@@ -2639,6 +2640,84 @@ async def t_exit_mode_floor_compiled_flag_alone_ignores_dwell():
     await _tick_at(bot, entry * (1 + 0.025 / 100))  # a single tick at the floor
     check("closed instantly -- dwell only applies via the live exit_mode=\"floor\" path",
           bot.state_row["side"] is None, bot.state_row["side"])
+
+
+async def t_exit_mode_no_sl_sl_still_fires_before_partner_closes():
+    print("\n[exit_mode no_sl: the FIRST leg to lose still gets cut by its ordinary SL]")
+    entry = 86000.0
+    ex = FakeExchange(position=round(10.0 / entry, 5), collateral=10.0)
+    partner = {"side": "short", "realized_pnl_usd": 0.0}  # partner still open
+    state = _breakeven_state(entry, 10.0)
+    state["override_exit_mode"] = "no_sl"
+    bot = _breakeven_bot(ex, state, partner, breakeven_floor_enabled=False,
+                          schema_has_exit_overrides=True)
+    await _tick_at(bot, entry * (1 - 0.03 / 100) - 1.0)  # past the normal 0.03% SL
+    check("closed via SL -- partner hasn't closed yet, SL stays fully active",
+          bot.state_row["side"] is None, bot.state_row["side"])
+    check("reason is SL", any(a == "closed" and d.get("reason") == "SL" for a, d in bot.runs),
+          [(a, d.get("reason")) for a, d in bot.runs if a == "closed"])
+
+
+async def t_exit_mode_no_sl_sl_suppressed_after_partner_closes():
+    print("\n[exit_mode no_sl: SL comes OFF once this leg's own partner has closed]")
+    entry = 86000.0
+    ex = FakeExchange(position=round(10.0 / entry, 5), collateral=10.0)
+    partner = {"side": None, "realized_pnl_usd": -0.003}  # partner already closed (the loser)
+    state = _breakeven_state(entry, 10.0)
+    state["override_exit_mode"] = "no_sl"
+    bot = _breakeven_bot(ex, state, partner, breakeven_floor_enabled=False,
+                          profit_lock_trigger_pct=10.0, profit_lock_trail_pct=0.01,  # trail unreachable here
+                          schema_has_exit_overrides=True)
+    await _tick_at(bot, entry * (1 - 0.03 / 100) - 1.0)  # well past the normal 0.03% SL
+    check("still open -- SL suppressed now that the partner is gone",
+          bot.state_row["side"] == "long", bot.state_row["side"])
+    await _tick_at(bot, entry * (1 - 1.0 / 100))  # a full 1% underwater -- SL would have fired long ago
+    check("still open even far underwater -- no_sl means no SL, by design",
+          bot.state_row["side"] == "long", bot.state_row["side"])
+
+
+async def t_exit_mode_no_sl_trail_still_protects_the_survivor():
+    print("\n[exit_mode no_sl: the ordinary profit-lock trail still closes a winner]")
+    entry = 86000.0
+    ex = FakeExchange(position=round(10.0 / entry, 5), collateral=10.0)
+    partner = {"side": None, "realized_pnl_usd": -0.003}  # partner already closed
+    state = _breakeven_state(entry, 10.0)
+    state["override_exit_mode"] = "no_sl"
+    bot = _breakeven_bot(ex, state, partner, breakeven_floor_enabled=False,
+                          profit_lock_trigger_pct=0.05, profit_lock_trail_pct=0.01,
+                          schema_has_exit_overrides=True)
+    await _tick_at(bot, entry * (1 + 0.06 / 100))  # past trigger -- trail arms
+    await _tick_at(bot, entry * (1 + 0.03 / 100))  # pulls back past trail_pct from the peak
+    check("closed via PROFIT_LOCK -- trail is untouched by no_sl",
+          bot.state_row["side"] is None, bot.state_row["side"])
+    check("reason is PROFIT_LOCK",
+          any(a == "closed" and d.get("reason") == "PROFIT_LOCK" for a, d in bot.runs),
+          [(a, d.get("reason")) for a, d in bot.runs if a == "closed"])
+
+
+async def t_exit_mode_no_sl_native_stop_cancelled_after_partner_closes():
+    print("\n[exit_mode no_sl: the REAL exchange-side stop order is cancelled too, not just the internal check]")
+    entry = 86000.0
+    ex = FakeExchange(position=round(10.0 / entry, 5), collateral=10.0)
+    partner = {"side": "short", "realized_pnl_usd": 0.0}
+    state = _breakeven_state(entry, 10.0)
+    state["override_exit_mode"] = "no_sl"
+    bot = _breakeven_bot(ex, state, partner, breakeven_floor_enabled=False,
+                          native_stop_loss_enabled=True, schema_has_exit_overrides=True)
+    await _tick_at(bot, entry)  # partner still open -- native stop should be resting
+    check("native stop placed while partner is still open", len(getattr(ex, "sl_orders", [])) >= 1,
+          getattr(ex, "sl_orders", None))
+    orders_before = len(ex.sl_orders)
+    cancels_before = getattr(ex, "cancel_all_calls", 0)
+    partner["side"] = None
+    partner["realized_pnl_usd"] = -0.003  # partner just closed
+    await _tick_at(bot, entry)
+    check("cancel_all was actually called -- the real resting order is cleared, not just forgotten",
+          getattr(ex, "cancel_all_calls", 0) > cancels_before, getattr(ex, "cancel_all_calls", None))
+    check("native stop sync marked cleared (want_sl False once partner closed)",
+          bot._native_stop_synced is None, bot._native_stop_synced)
+    check("no NEW native stop order placed after the partner closed",
+          len(ex.sl_orders) == orders_before, (len(ex.sl_orders), orders_before))
 
 
 async def t_trail_dwell_blocks_a_single_touch():
@@ -7178,6 +7257,10 @@ async def main():
               t_exit_mode_floor_dwell_blocks_a_single_touch,
               t_exit_mode_floor_dwell_fires_once_elapsed,
               t_exit_mode_floor_compiled_flag_alone_ignores_dwell,
+              t_exit_mode_no_sl_sl_still_fires_before_partner_closes,
+              t_exit_mode_no_sl_sl_suppressed_after_partner_closes,
+              t_exit_mode_no_sl_trail_still_protects_the_survivor,
+              t_exit_mode_no_sl_native_stop_cancelled_after_partner_closes,
               t_trail_dwell_blocks_a_single_touch,
               t_trail_dwell_fires_once_elapsed,
               t_trail_dwell_resets_on_a_new_peak,
