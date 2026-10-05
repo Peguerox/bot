@@ -4160,22 +4160,31 @@ function MasterSchedulePanel({
     setRules((r) => r.map((rule, idx) => (idx === i ? { ...rule, [bot]: { ...rule[bot], ...patch } } : rule)));
   }
 
-  // 2026-10-05 bug fix: this used to read ONLY Worker 1's live_candle_volume/live_wiggle for
-  // BOTH bots' "currently governing" display -- the hedge never published those, so whenever
-  // Worker 1 was off the box showed Worker 1's (irrelevant) match, not the hedge's real one.
-  // live_schedule_* is the exact same number _apply_schedule_rules just matched against,
-  // published separately by each bot (StochBot.schema_has_schedule_metrics) -- so each bot's
-  // match below is computed from that bot's own reading, never borrowed from the other.
-  const liveEr = worker1State?.live_schedule_er ?? null;
-  const liveVolume = worker1State?.live_schedule_volume ?? null;
-  const liveWiggle = worker1State?.live_schedule_wiggle ?? null;
-  const liveRate = worker1State?.live_schedule_rate ?? null;
-  const liveVolWiggleRatio = worker1State?.live_schedule_vol_wiggle_ratio ?? null;
-  const liveVolWiggleProduct = worker1State?.live_schedule_vol_wiggle_product ?? null;
+  // "Live readings" box below -- Worker 1's own numbers, unrelated to the schedule-matching
+  // fix. Unchanged from before 2026-10-05 (do NOT point these at live_schedule_* -- that broke
+  // this box entirely until bot_schedule_live_metrics.sql is run, since those columns don't
+  // exist yet; these older columns already work today).
+  const liveEr = worker1State?.live_er_2h ?? null;
+  const liveVolume = worker1State?.live_candle_volume ?? null;
+  const liveWiggle = worker1State?.live_wiggle ?? null;
+  const liveRate = worker1State?.live_volume_jump_rate ?? null;
+  const liveVolWiggleRatio = worker1State?.live_volume_wiggle_ratio ?? null;
+  const liveVolWiggleProduct = liveVolume != null && liveWiggle != null ? liveVolume * liveWiggle : null;
 
+  // 2026-10-05 bug fix, SEPARATE from the box above: "Currently governing" used to match using
+  // ONLY Worker 1's numbers for BOTH bots -- the hedge never published its own, so whenever
+  // Worker 1 was off the box showed Worker 1's (irrelevant) match, not the hedge's real one.
+  // live_schedule_* is the exact number _apply_schedule_rules just matched against, published
+  // separately by each bot (StochBot.schema_has_schedule_metrics) -- until the migration runs
+  // these read null, which correctly shows "OFF" (fail-closed, same as the backend) rather than
+  // a wrong guess.
   const liveMiamiHour = getMiamiHour();
-  const worker1Metrics = { er: liveEr, volume: liveVolume, wiggle: liveWiggle, rate: liveRate,
-                            volWiggleRatio: liveVolWiggleRatio, volWiggleProduct: liveVolWiggleProduct };
+  const worker1Metrics = {
+    er: worker1State?.live_schedule_er ?? null, volume: worker1State?.live_schedule_volume ?? null,
+    wiggle: worker1State?.live_schedule_wiggle ?? null, rate: worker1State?.live_schedule_rate ?? null,
+    volWiggleRatio: worker1State?.live_schedule_vol_wiggle_ratio ?? null,
+    volWiggleProduct: worker1State?.live_schedule_vol_wiggle_product ?? null,
+  };
   const hedgeMetrics = {
     er: hedgeLongState?.live_schedule_er ?? null,
     volume: hedgeLongState?.live_schedule_volume ?? null,
