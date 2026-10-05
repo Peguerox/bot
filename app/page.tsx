@@ -4277,7 +4277,7 @@ function MasterSchedulePanel({
         blocks/allows new entries, same as every other ON/OFF switch here.
       </p>
 
-      <div className="bg-gray-800/60 rounded-lg p-2 grid grid-cols-2 items-center gap-2">
+      <div className="bg-gray-800/60 rounded-lg p-2 flex items-center flex-wrap gap-4">
         <div className="flex items-center gap-2">
           <div>
             <p className="text-gray-500 text-[10px] uppercase">Schedule automation</p>
@@ -4291,7 +4291,7 @@ function MasterSchedulePanel({
             {saving ? "…" : scheduleEnabled ? "Turn OFF" : "Turn ON"}
           </button>
         </div>
-        <div className="flex items-center justify-end gap-1">
+        <div className="flex items-center gap-1 pl-4 border-l border-gray-700">
           <span className="text-gray-500 text-[10px] uppercase">Min hold</span>
           <input
             value={minHoldSeconds}
