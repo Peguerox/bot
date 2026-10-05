@@ -4173,12 +4173,46 @@ function MasterSchedulePanel({
       <div className="bg-gray-800/60 rounded-lg p-2">
         <p className="text-gray-500 text-[10px] uppercase mb-1">Live readings (Worker 1's feed)</p>
         <div className="grid grid-cols-6 gap-1.5 text-[10px] tabular-nums">
-          <div><p className="text-gray-600 text-[9px] uppercase">ER 2h</p>{liveEr != null ? liveEr.toFixed(3) : "—"}</div>
-          <div><p className="text-gray-600 text-[9px] uppercase">Volume</p>{liveVolume != null ? liveVolume.toFixed(2) : "—"}</div>
-          <div><p className="text-gray-600 text-[9px] uppercase">Wiggle</p>{liveWiggle != null ? liveWiggle.toFixed(2) : "—"}</div>
-          <div><p className="text-gray-600 text-[9px] uppercase">Rate</p>{liveRate != null ? liveRate.toFixed(2) : "—"}</div>
-          <div><p className="text-gray-600 text-[9px] uppercase">Vol/Wiggle</p>{liveVolWiggleRatio != null ? liveVolWiggleRatio.toFixed(3) : "—"}</div>
-          <div><p className="text-gray-600 text-[9px] uppercase">Vol×Wiggle</p>{liveVolWiggleProduct != null ? liveVolWiggleProduct.toFixed(1) : "—"}</div>
+          <div>
+            <p className="text-gray-600 text-[9px] uppercase">ER 2h</p>
+            <p className={liveEr == null ? "text-gray-500" : liveEr >= 0.15 ? "text-amber-400" : "text-gray-300"}>
+              {liveEr != null ? liveEr.toFixed(3) : "—"}
+            </p>
+            <p className="text-gray-600 text-[8px] leading-tight">{liveEr == null ? "" : liveEr >= 0.15 ? "trending" : "chop"}</p>
+          </div>
+          <div>
+            <p className="text-gray-600 text-[9px] uppercase">Volume</p>
+            <p className="text-gray-300">{liveVolume != null ? liveVolume.toFixed(2) : "—"}</p>
+            <p className="text-gray-600 text-[8px] leading-tight">BTC/min avg</p>
+          </div>
+          <div>
+            <p className="text-gray-600 text-[9px] uppercase">Wiggle</p>
+            <p className="text-gray-300">{liveWiggle != null ? liveWiggle.toFixed(2) : "—"}</p>
+            <p className="text-gray-600 text-[8px] leading-tight">$ price swing</p>
+          </div>
+          <div>
+            <p className="text-gray-600 text-[9px] uppercase">Rate</p>
+            <p className={liveRate == null ? "text-gray-500" : liveRate > 0.05 ? "text-green-400" : liveRate < -0.05 ? "text-red-400" : "text-gray-300"}>
+              {liveRate != null ? liveRate.toFixed(2) : "—"}
+            </p>
+            <p className="text-gray-600 text-[8px] leading-tight">
+              {liveRate == null ? "" : liveRate > 0.05 ? "ramping up" : liveRate < -0.05 ? "cooling off" : "flat"}
+            </p>
+          </div>
+          <div>
+            <p className="text-gray-600 text-[9px] uppercase">Vol/Wiggle</p>
+            <p className={liveVolWiggleRatio == null ? "text-gray-500" : liveVolWiggleRatio >= 0.30 ? "text-amber-400" : "text-gray-300"}>
+              {liveVolWiggleRatio != null ? liveVolWiggleRatio.toFixed(3) : "—"}
+            </p>
+            <p className="text-gray-600 text-[8px] leading-tight">
+              {liveVolWiggleRatio == null ? "" : liveVolWiggleRatio >= 0.30 ? "watch -- thin?" : "normal"}
+            </p>
+          </div>
+          <div>
+            <p className="text-gray-600 text-[9px] uppercase">Vol×Wiggle</p>
+            <p className="text-gray-300">{liveVolWiggleProduct != null ? liveVolWiggleProduct.toFixed(1) : "—"}</p>
+            <p className="text-gray-600 text-[8px] leading-tight">volume × swing</p>
+          </div>
         </div>
       </div>
 
