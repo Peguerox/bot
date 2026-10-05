@@ -1538,7 +1538,13 @@ function CompactStochBtcPanel({
   const [savingSettings, setSavingSettings] = useState(false);
   const liveVol: number | null = state?.live_vol_pct ?? null;
   const liveZebra: number | null = state?.live_zebra_index ?? null;
-  const liveCandleVolume: number | null = state?.live_candle_volume ?? null;
+  // 2026-10-05, direct report: "the BTC volume on the universal panel is not the same as the
+  // BTC volume on the Worker 1 panel" -- both are compute_candle_volume_avg(candles, 10), same
+  // formula/window, but written by two SEPARATE calls at different points in the tick (this
+  // one gated behind volume_regime_switch_threshold being set; live_schedule_volume now
+  // unconditional) -- same drift-from-two-writers bug as the earlier wiggle/volume box, fixed
+  // the same way: one source of truth.
+  const liveCandleVolume: number | null = state?.live_schedule_volume ?? state?.live_candle_volume ?? null;
   // 2-hour efficiency ratio (2026-10-04, direct request: "publish the ER 2 hours... so I can see
   // it") -- same net-move/path-length formula as the hedge's ER15, over 120 candles instead of
   // 15. Research this session found ER15 too noisy to tell a choppy day from a trending one; a
