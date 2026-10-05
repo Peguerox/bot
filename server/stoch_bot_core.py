@@ -3170,7 +3170,7 @@ class StochBot:
         inlined) so tests can pin a deterministic hour instead of depending on when they run."""
         return datetime.now(SCHEDULE_TZ).hour
 
-    def _rule_matches(self, rule, hour, er, volume, wiggle, rate, vol_wiggle_ratio):
+    def _rule_matches(self, rule, hour, er, volume, wiggle, rate, vol_wiggle_ratio, vol_wiggle_product):
         """True if `rule`'s conditions all hold right now. Every field is independently optional
         -- a rule can be pure-hour, pure-condition, or both. `hour` is Miami local time (see
         _schedule_current_hour); hour_start/hour_end wrap past midnight when start > end (e.g.
@@ -3188,7 +3188,8 @@ class StochBot:
                                        (volume, "volume_min", "volume_max"),
                                        (wiggle, "wiggle_min", "wiggle_max"),
                                        (rate, "rate_min", "rate_max"),
-                                       (vol_wiggle_ratio, "vol_wiggle_ratio_min", "vol_wiggle_ratio_max")):
+                                       (vol_wiggle_ratio, "vol_wiggle_ratio_min", "vol_wiggle_ratio_max"),
+                                       (vol_wiggle_product, "vol_wiggle_product_min", "vol_wiggle_product_max")):
             lo, hi = rule.get(lo_key), rule.get(hi_key)
             if lo is None and hi is None:
                 continue
@@ -3252,10 +3253,16 @@ class StochBot:
         wiggle = compute_intrabar_dispersion(self.candles, 5)
         rate = compute_candle_volume_rate(self.candles, 10)
         vol_wiggle_ratio = compute_volume_wiggle_ratio(self.candles)
+        # Volume x wiggle PRODUCT (2026-10-04, direct request: "volume and wiggle product can be
+        # a filter as well... below 90 you trade") -- deliberately NOT a dedicated compute_*
+        # function, since it's just the two readings already computed above multiplied together;
+        # no new candle math, no new live-readout column needed (the dashboard shows the same
+        # product client-side from the two numbers it already displays).
+        vol_wiggle_product = volume * wiggle if volume is not None and wiggle is not None else None
         hour = self._schedule_current_hour()
         matched = None
         for rule in rules:
-            if self._rule_matches(rule, hour, er, volume, wiggle, rate, vol_wiggle_ratio):
+            if self._rule_matches(rule, hour, er, volume, wiggle, rate, vol_wiggle_ratio, vol_wiggle_product):
                 matched = rule
                 break
         settings = matched.get(cfg.schedule_rules_bot_key) if matched else None

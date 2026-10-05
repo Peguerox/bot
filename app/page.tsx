@@ -3931,6 +3931,7 @@ const EMPTY_RULE = {
   er_min: null, er_max: null, volume_min: null, volume_max: null,
   wiggle_min: null, wiggle_max: null, rate_min: null, rate_max: null,
   vol_wiggle_ratio_min: null, vol_wiggle_ratio_max: null,
+  vol_wiggle_product_min: null, vol_wiggle_product_max: null,
   // Per-bot ON/OFF switch, independent of that bot having a settings object on the same rule --
   // direct request: "maybe with this rule I want 1 on and the other off... I need a little
   // switch". Default true (both run) -- see normalizeRuleForSave / StochBot._apply_schedule_rules.
@@ -3958,6 +3959,7 @@ const RULE_NUMERIC_FIELDS = [
   "hour_start", "hour_end", "er_min", "er_max", "volume_min", "volume_max",
   "wiggle_min", "wiggle_max", "rate_min", "rate_max",
   "vol_wiggle_ratio_min", "vol_wiggle_ratio_max",
+  "vol_wiggle_product_min", "vol_wiggle_product_max",
 ] as const;
 const BOT_NUMERIC_FIELDS = [
   "sl_pct", "trigger_pct", "trail_pct", "tp_pct", "dwell_seconds",
@@ -4089,6 +4091,11 @@ function MasterSchedulePanel({
   const liveWiggle = worker1State?.live_wiggle ?? null;
   const liveRate = worker1State?.live_volume_jump_rate ?? null;
   const liveVolWiggleRatio = worker1State?.live_volume_wiggle_ratio ?? null;
+  // Volume x wiggle PRODUCT (2026-10-04, direct request: "volume and wiggle product can be a
+  // filter as well"). No new live column -- same two numbers already shown above, multiplied
+  // client-side; the backend computes the same product independently at rule-evaluation time
+  // (StochBot._apply_schedule_rules), never from this display value.
+  const liveVolWiggleProduct = liveVolume != null && liveWiggle != null ? liveVolume * liveWiggle : null;
 
   const condField = (label: string, i: number, loKey: string, hiKey: string, rule: any, unit = "") => (
     <div className="flex-1 min-w-[90px]">
@@ -4171,6 +4178,7 @@ function MasterSchedulePanel({
           <div><p className="text-gray-600 text-[9px] uppercase">Wiggle</p>{liveWiggle != null ? liveWiggle.toFixed(2) : "—"}</div>
           <div><p className="text-gray-600 text-[9px] uppercase">Rate</p>{liveRate != null ? liveRate.toFixed(2) : "—"}</div>
           <div><p className="text-gray-600 text-[9px] uppercase">Vol/Wiggle</p>{liveVolWiggleRatio != null ? liveVolWiggleRatio.toFixed(3) : "—"}</div>
+          <div><p className="text-gray-600 text-[9px] uppercase">Vol×Wiggle</p>{liveVolWiggleProduct != null ? liveVolWiggleProduct.toFixed(1) : "—"}</div>
         </div>
       </div>
 
@@ -4193,6 +4201,7 @@ function MasterSchedulePanel({
                   {(rule.wiggle_min != null || rule.wiggle_max != null) ? " · wiggle bound" : ""}
                   {(rule.rate_min != null || rule.rate_max != null) ? " · rate bound" : ""}
                   {(rule.vol_wiggle_ratio_min != null || rule.vol_wiggle_ratio_max != null) ? " · vol/wiggle bound" : ""}
+                  {(rule.vol_wiggle_product_min != null || rule.vol_wiggle_product_max != null) ? " · vol×wiggle bound" : ""}
                 </span>
               </p>
               <div className="flex items-center gap-1">
@@ -4226,6 +4235,7 @@ function MasterSchedulePanel({
                     {condField("Wiggle", i, "wiggle_min", "wiggle_max", rule)}
                     {condField("Rate", i, "rate_min", "rate_max", rule)}
                     {condField("Vol/Wiggle", i, "vol_wiggle_ratio_min", "vol_wiggle_ratio_max", rule)}
+                    {condField("Vol×Wiggle", i, "vol_wiggle_product_min", "vol_wiggle_product_max", rule)}
                   </div>
                 </div>
                 <div>

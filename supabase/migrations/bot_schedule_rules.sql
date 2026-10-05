@@ -19,6 +19,7 @@
 --     "wiggle_min": number | null, "wiggle_max": number | null,
 --     "rate_min": number | null, "rate_max": number | null,
 --     "vol_wiggle_ratio_min": number | null, "vol_wiggle_ratio_max": number | null,
+--     "vol_wiggle_product_min": number | null, "vol_wiggle_product_max": number | null,
 --     "worker1_enabled": boolean (default true), "hedge_enabled": boolean (default true),
 --     "worker1": { "sl_pct", "trigger_pct", "trail_pct", "tp_pct", "dwell_seconds",
 --                  "band_lo", "band_hi", "reversal_lo", "reversal_hi", "window" },

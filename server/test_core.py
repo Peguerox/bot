@@ -6112,10 +6112,10 @@ async def t_rule_matches_hour_range_basic():
     ex = FakeExchange()
     bot = make_bot(ex)
     rule = {"hour_start": 8, "hour_end": 16}
-    check("inside the range", bot._rule_matches(rule, 10, None, None, None, None, None))
-    check("at the start boundary (inclusive)", bot._rule_matches(rule, 8, None, None, None, None, None))
-    check("at the end boundary (exclusive)", not bot._rule_matches(rule, 16, None, None, None, None, None))
-    check("outside the range", not bot._rule_matches(rule, 20, None, None, None, None, None))
+    check("inside the range", bot._rule_matches(rule, 10, None, None, None, None, None, None))
+    check("at the start boundary (inclusive)", bot._rule_matches(rule, 8, None, None, None, None, None, None))
+    check("at the end boundary (exclusive)", not bot._rule_matches(rule, 16, None, None, None, None, None, None))
+    check("outside the range", not bot._rule_matches(rule, 20, None, None, None, None, None, None))
 
 
 async def t_rule_matches_hour_range_wraps_midnight():
@@ -6123,10 +6123,10 @@ async def t_rule_matches_hour_range_wraps_midnight():
     ex = FakeExchange()
     bot = make_bot(ex)
     rule = {"hour_start": 22, "hour_end": 6}
-    check("23:00 matches (after wrap start)", bot._rule_matches(rule, 23, None, None, None, None, None))
-    check("02:00 matches (before wrap end)", bot._rule_matches(rule, 2, None, None, None, None, None))
+    check("23:00 matches (after wrap start)", bot._rule_matches(rule, 23, None, None, None, None, None, None))
+    check("02:00 matches (before wrap end)", bot._rule_matches(rule, 2, None, None, None, None, None, None))
     check("12:00 does not match (outside the overnight span)",
-          not bot._rule_matches(rule, 12, None, None, None, None, None))
+          not bot._rule_matches(rule, 12, None, None, None, None, None, None))
 
 
 async def t_rule_matches_no_hour_range_matches_any_hour():
@@ -6134,8 +6134,8 @@ async def t_rule_matches_no_hour_range_matches_any_hour():
     ex = FakeExchange()
     bot = make_bot(ex)
     rule = {"er_min": 0.1}
-    check("matches at hour 3", bot._rule_matches(rule, 3, 0.2, None, None, None, None))
-    check("matches at hour 19", bot._rule_matches(rule, 19, 0.2, None, None, None, None))
+    check("matches at hour 3", bot._rule_matches(rule, 3, 0.2, None, None, None, None, None))
+    check("matches at hour 19", bot._rule_matches(rule, 19, 0.2, None, None, None, None, None))
 
 
 async def t_rule_matches_condition_bounds():
@@ -6143,11 +6143,11 @@ async def t_rule_matches_condition_bounds():
     ex = FakeExchange()
     bot = make_bot(ex)
     rule = {"volume_min": 2.0, "volume_max": 5.0}
-    check("inside bounds", bot._rule_matches(rule, 0, None, 3.0, None, None, None))
-    check("at the min (inclusive)", bot._rule_matches(rule, 0, None, 2.0, None, None, None))
-    check("at the max (inclusive)", bot._rule_matches(rule, 0, None, 5.0, None, None, None))
-    check("below the min", not bot._rule_matches(rule, 0, None, 1.9, None, None, None))
-    check("above the max", not bot._rule_matches(rule, 0, None, 5.1, None, None, None))
+    check("inside bounds", bot._rule_matches(rule, 0, None, 3.0, None, None, None, None))
+    check("at the min (inclusive)", bot._rule_matches(rule, 0, None, 2.0, None, None, None, None))
+    check("at the max (inclusive)", bot._rule_matches(rule, 0, None, 5.0, None, None, None, None))
+    check("below the min", not bot._rule_matches(rule, 0, None, 1.9, None, None, None, None))
+    check("above the max", not bot._rule_matches(rule, 0, None, 5.1, None, None, None, None))
 
 
 async def t_rule_matches_missing_reading_fails_closed():
@@ -6155,7 +6155,7 @@ async def t_rule_matches_missing_reading_fails_closed():
     ex = FakeExchange()
     bot = make_bot(ex)
     rule = {"wiggle_max": 50.0}
-    check("no wiggle reading available -- does not match", not bot._rule_matches(rule, 0, None, None, None, None, None))
+    check("no wiggle reading available -- does not match", not bot._rule_matches(rule, 0, None, None, None, None, None, None))
 
 
 async def t_rule_matches_combined_hour_and_conditions():
@@ -6163,9 +6163,9 @@ async def t_rule_matches_combined_hour_and_conditions():
     ex = FakeExchange()
     bot = make_bot(ex)
     rule = {"hour_start": 8, "hour_end": 16, "er_min": 0.15}
-    check("both hold", bot._rule_matches(rule, 10, 0.20, None, None, None, None))
-    check("hour holds, ER too low", not bot._rule_matches(rule, 10, 0.05, None, None, None, None))
-    check("ER holds, hour outside range", not bot._rule_matches(rule, 20, 0.20, None, None, None, None))
+    check("both hold", bot._rule_matches(rule, 10, 0.20, None, None, None, None, None))
+    check("hour holds, ER too low", not bot._rule_matches(rule, 10, 0.05, None, None, None, None, None))
+    check("ER holds, hour outside range", not bot._rule_matches(rule, 20, 0.20, None, None, None, None, None))
 
 
 async def t_rule_matches_vol_wiggle_ratio_condition():
@@ -6173,10 +6173,46 @@ async def t_rule_matches_vol_wiggle_ratio_condition():
     ex = FakeExchange()
     bot = make_bot(ex)
     rule = {"vol_wiggle_ratio_max": 0.30}
-    check("below the max", bot._rule_matches(rule, 0, None, None, None, None, 0.20))
-    check("at the max (inclusive)", bot._rule_matches(rule, 0, None, None, None, None, 0.30))
-    check("above the max", not bot._rule_matches(rule, 0, None, None, None, None, 0.45))
-    check("no reading available -- fails closed", not bot._rule_matches(rule, 0, None, None, None, None, None))
+    check("below the max", bot._rule_matches(rule, 0, None, None, None, None, 0.20, None))
+    check("at the max (inclusive)", bot._rule_matches(rule, 0, None, None, None, None, 0.30, None))
+    check("above the max", not bot._rule_matches(rule, 0, None, None, None, None, 0.45, None))
+    check("no reading available -- fails closed", not bot._rule_matches(rule, 0, None, None, None, None, None, None))
+
+
+async def t_rule_matches_vol_wiggle_product_condition():
+    print("\n[_rule_matches: volume*wiggle PRODUCT min/max -- direct request: \"below 90 you trade\"]")
+    ex = FakeExchange()
+    bot = make_bot(ex)
+    rule = {"vol_wiggle_product_max": 90}
+    check("below the max", bot._rule_matches(rule, 0, None, None, None, None, None, 60))
+    check("at the max (inclusive)", bot._rule_matches(rule, 0, None, None, None, None, None, 90))
+    check("above the max", not bot._rule_matches(rule, 0, None, None, None, None, None, 91))
+    check("no reading available -- fails closed", not bot._rule_matches(rule, 0, None, None, None, None, None, None))
+
+
+async def t_apply_schedule_rules_computes_vol_wiggle_product_as_volume_times_wiggle():
+    print("\n[_apply_schedule_rules: vol_wiggle_product is literally volume*wiggle, no separate compute]")
+    ex = FakeExchange()
+    # _schedule_candles(volume=2.5) -> wiggle = sqrt(2) (see t_schedule_rules_vol_wiggle_ratio
+    # end-to-end test) -> product ~= 2.5 * 1.41421 ~= 3.5355
+    bot = make_bot(ex, candles=_schedule_candles(volume=2.5), schedule_rules_enabled=True,
+                    schedule_rules_bot_key="worker1")
+    matching_rule = {"vol_wiggle_product_min": 3.0, "vol_wiggle_product_max": 4.0,
+                      "worker1": {"sl_pct": 0.11}}
+    bot.sb = _schedule_sb([matching_rule])
+    await bot._apply_schedule_rules(bot.state_row)
+    check("rule matched on the real computed product -- settings applied",
+          bot.state_row.get("override_sl_pct") == 0.11)
+
+    ex2 = FakeExchange()
+    bot2 = make_bot(ex2, candles=_schedule_candles(volume=2.5), schedule_rules_enabled=True,
+                     schedule_rules_bot_key="worker1")
+    non_matching_rule = {"vol_wiggle_product_max": 1.0,  # below the real ~3.5 product
+                          "worker1": {"sl_pct": 0.11}}
+    bot2.sb = _schedule_sb([non_matching_rule])
+    await bot2._apply_schedule_rules(bot2.state_row)
+    check("rule did NOT match -- the real product is above this bound",
+          "override_sl_pct" not in bot2.state_row)
 
 
 async def t_schedule_current_hour_is_miami_not_utc():
@@ -6680,6 +6716,8 @@ async def main():
               t_rule_matches_missing_reading_fails_closed,
               t_rule_matches_combined_hour_and_conditions,
               t_rule_matches_vol_wiggle_ratio_condition,
+              t_rule_matches_vol_wiggle_product_condition,
+              t_apply_schedule_rules_computes_vol_wiggle_product_as_volume_times_wiggle,
               t_schedule_current_hour_is_miami_not_utc,
               t_schedule_rules_off_by_default_schema_flag,
               t_schedule_rules_off_without_bot_key,

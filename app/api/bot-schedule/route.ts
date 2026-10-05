@@ -68,6 +68,7 @@ const CONDITION_PAIRS = [
   ["er_min", "er_max"], ["volume_min", "volume_max"],
   ["wiggle_min", "wiggle_max"], ["rate_min", "rate_max"],
   ["vol_wiggle_ratio_min", "vol_wiggle_ratio_max"],
+  ["vol_wiggle_product_min", "vol_wiggle_product_max"],
 ] as const;
 
 function validateRule(rule: unknown, idx: number): string | null {
