@@ -4308,33 +4308,16 @@ function MasterSchedulePanel({
         ) : matchedRule == null ? (
           <p className="text-[11px] text-amber-400">No rule matches right now -- both bots will turn OFF on the next check.</p>
         ) : (
-          <>
-            <p className="text-[11px] text-white font-bold mb-1">
-              Rule {matchedRuleIdx + 1}
-              <span className={`ml-1.5 text-[9px] font-bold px-1 rounded ${matchedRule.worker1_enabled !== false ? "bg-green-500/20 text-green-400" : "bg-red-500/20 text-red-400"}`}>
-                W1 {matchedRule.worker1_enabled !== false ? "ON" : "OFF"}
-              </span>
-              <span className={`ml-1 text-[9px] font-bold px-1 rounded ${matchedRule.hedge_enabled !== false ? "bg-green-500/20 text-green-400" : "bg-red-500/20 text-red-400"}`}>
-                Hedge {matchedRule.hedge_enabled !== false ? "ON" : "OFF"}
-              </span>
-            </p>
-            <p className="text-[10px] text-blue-300 leading-snug mb-1">
-              <span className="text-gray-600">If:</span>{" "}
-              {formatConditionsLine(matchedRule) || <span className="text-gray-600">always (no hour or condition set)</span>}
-            </p>
-            {matchedRule.worker1_enabled !== false && (
-              <p className="text-[10px] text-gray-300 leading-snug">
-                <span className="text-gray-500">W1:</span>{" "}
-                {formatSettingsLine(matchedRule.worker1, WORKER1_SETTINGS_LABELS) || "no settings set -- leaving current values alone"}
-              </p>
-            )}
-            {matchedRule.hedge_enabled !== false && (
-              <p className="text-[10px] text-gray-300 leading-snug">
-                <span className="text-gray-500">Hedge:</span>{" "}
-                {formatSettingsLine(matchedRule.hedge, HEDGE_SETTINGS_LABELS) || "no settings set -- leaving current values alone"}
-              </p>
-            )}
-          </>
+          <p className="text-[11px] text-white font-bold">
+            Rule {matchedRuleIdx + 1}
+            <span className={`ml-1.5 text-[9px] font-bold px-1 rounded ${matchedRule.worker1_enabled !== false ? "bg-green-500/20 text-green-400" : "bg-red-500/20 text-red-400"}`}>
+              W1 {matchedRule.worker1_enabled !== false ? "ON" : "OFF"}
+            </span>
+            <span className={`ml-1 text-[9px] font-bold px-1 rounded ${matchedRule.hedge_enabled !== false ? "bg-green-500/20 text-green-400" : "bg-red-500/20 text-red-400"}`}>
+              Hedge {matchedRule.hedge_enabled !== false ? "ON" : "OFF"}
+            </span>
+            <span className="text-[10px] font-normal text-gray-500 ml-1.5">see the rule below</span>
+          </p>
         )}
       </div>
 
