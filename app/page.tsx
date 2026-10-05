@@ -4383,7 +4383,7 @@ function MasterSchedulePanel({
           <div className="bg-gray-900/50 rounded-lg p-1.5">
             <p className="text-gray-500 text-[8px] uppercase leading-tight">Zebra</p>
             <p className="font-bold text-xs tabular-nums text-gray-300">{liveZebra != null ? liveZebra.toFixed(1) : "—"}</p>
-            <p className="text-gray-500 text-[8px] leading-tight mt-0.5">How often the last 5 candles actually flipped color back and forth -- the real zig-zag pattern.</p>
+            <p className="text-gray-500 text-[8px] leading-tight mt-0.5">Not 0-100 -- flips ÷ avg candle size, so tiny candles inflate it. Low = grinding one way. ~600-1000 historically best (low-confidence). Very high = tiny noisy candles.</p>
           </div>
           <div className="bg-gray-900/50 rounded-lg p-1.5">
             <p className="text-gray-500 text-[8px] uppercase leading-tight">Color bal</p>
