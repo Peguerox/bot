@@ -4191,12 +4191,12 @@ function MasterSchedulePanel({
             <p className="text-gray-600 text-[8px] leading-tight">$ price swing</p>
           </div>
           <div>
-            <p className="text-gray-600 text-[9px] uppercase">Rate</p>
+            <p className="text-gray-600 text-[9px] uppercase">Vol Rate</p>
             <p className={liveRate == null ? "text-gray-500" : liveRate > 0.05 ? "text-green-400" : liveRate < -0.05 ? "text-red-400" : "text-gray-300"}>
               {liveRate != null ? liveRate.toFixed(2) : "—"}
             </p>
             <p className="text-gray-600 text-[8px] leading-tight">
-              {liveRate == null ? "" : liveRate > 0.05 ? "ramping up" : liveRate < -0.05 ? "cooling off" : "flat"}
+              {liveRate == null ? "" : liveRate > 0.05 ? "volume ↑ speeding up" : liveRate < -0.05 ? "volume ↓ slowing down" : "volume steady"}
             </p>
           </div>
           <div>
@@ -4267,7 +4267,7 @@ function MasterSchedulePanel({
                     {condField("ER 2h", i, "er_min", "er_max", rule)}
                     {condField("Volume", i, "volume_min", "volume_max", rule)}
                     {condField("Wiggle", i, "wiggle_min", "wiggle_max", rule)}
-                    {condField("Rate", i, "rate_min", "rate_max", rule)}
+                    {condField("Vol Rate", i, "rate_min", "rate_max", rule)}
                     {condField("Vol/Wiggle", i, "vol_wiggle_ratio_min", "vol_wiggle_ratio_max", rule)}
                     {condField("Vol×Wiggle", i, "vol_wiggle_product_min", "vol_wiggle_product_max", rule)}
                   </div>
