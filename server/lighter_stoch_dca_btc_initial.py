@@ -439,6 +439,12 @@ CONFIG = BotConfig(
     # lighter_btc_initial_regime_overrides.sql. See BotConfig.schema_has_regime_overrides /
     # StochBot._regime_controls.
     schema_has_regime_overrides=True,
+    # 2026-10-04, direct request: the master schedule panel that drives both this bot and the
+    # hedge from one place, by hour and/or live ER/volume/wiggle/rate conditions. "worker1" says
+    # which half of each shared rule applies to this bot. Requires bot_schedule_rules.sql. See
+    # BotConfig.schedule_rules_enabled / StochBot._apply_schedule_rules.
+    schedule_rules_enabled=True,
+    schedule_rules_bot_key="worker1",
     # 2026-10-03, direct request ("make sure we are collecting all that data... what settings
     # won for what conditions"): Worker 1 never had entry_k/balance_index/vol_pct/dispersion
     # snapshotting at all -- the hedge legs have had this since 2026-10-01. Purely descriptive,

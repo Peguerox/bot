@@ -269,6 +269,13 @@ LONG_CONFIG = BotConfig(
     volume_jump_lookback=10,
     volume_jump_pause_seconds=1800.0,
     schema_has_regime_overrides=True,
+    # 2026-10-04, direct request: the master schedule panel that drives both this bot and
+    # Worker 1 from one place, by hour and/or live ER/volume/wiggle/rate conditions. "hedge"
+    # says which half of each shared rule applies to this leg -- both legs read the SAME rules
+    # row independently and apply the same "hedge" settings object, same reasoning as every
+    # other both-legs-identical override. Requires bot_schedule_rules.sql.
+    schedule_rules_enabled=True,
+    schedule_rules_bot_key="hedge",
 )
 
 SHORT_CONFIG = BotConfig(
@@ -333,6 +340,9 @@ SHORT_CONFIG = BotConfig(
     volume_jump_lookback=10,
     volume_jump_pause_seconds=1800.0,
     schema_has_regime_overrides=True,
+    # See LONG_CONFIG's docstring -- same shared rules row, "hedge" settings object.
+    schedule_rules_enabled=True,
+    schedule_rules_bot_key="hedge",
 )
 
 

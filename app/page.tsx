@@ -1,6 +1,6 @@
 "use client";
 
-import { useEffect, useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import { getSupabase } from "@/lib/supabase";
 import PnLChart from "@/components/PnLChart";
 import HedgeEntryFilters from "./components/HedgeEntryFilters";
@@ -3918,6 +3918,313 @@ function LighterStochDcaBtcPanel({
   );
 }
 
+// ── Master schedule panel ─────────────────────────────────────────────────
+// 2026-10-04, direct request: "a third panel that can control both... by hour... if this
+// volume do this, if this wiggle and volume do this." One shared row (bot_schedule_rules)
+// drives StochBot._apply_schedule_rules on Worker 1 and both hedge legs -- see that method's
+// docstring in server/stoch_bot_core.py for the full read-side contract (first fully-matching
+// rule wins, no match is a no-op, writes land in the exact same override_* columns the manual
+// panels already use). This panel is pure read/write of that shared row plus the two existing
+// toggle endpoints -- no new trading logic lives here.
+const EMPTY_RULE = {
+  hour_start: null, hour_end: null,
+  er_min: null, er_max: null, volume_min: null, volume_max: null,
+  wiggle_min: null, wiggle_max: null, rate_min: null, rate_max: null,
+  worker1: { sl_pct: null, trigger_pct: null, trail_pct: null, tp_pct: null, dwell_seconds: null,
+             band_lo: null, band_hi: null, reversal_lo: null, reversal_hi: null, window: null },
+  hedge: { sl_pct: null, trigger_pct: null, trail_pct: null, tp_pct: null, dwell_seconds: null },
+};
+
+function numOrNull(v: string): number | null {
+  if (v.trim() === "") return null;
+  const n = Number(v);
+  return Number.isFinite(n) ? n : null;
+}
+
+function MasterSchedulePanel({
+  scheduleState, worker1State, hedgeLongState, loading, onToggled,
+}: {
+  scheduleState: any; worker1State: any; hedgeLongState: any; loading: boolean; onToggled: () => void;
+}) {
+  const [rules, setRules] = useState<any[]>([]);
+  const [expanded, setExpanded] = useState<number | null>(null);
+  const [saving, setSaving] = useState(false);
+  const [togglingBoth, setTogglingBoth] = useState(false);
+  const loadedOnce = useRef(false);
+
+  useEffect(() => {
+    if (!loadedOnce.current && scheduleState) {
+      setRules(Array.isArray(scheduleState.rules) ? scheduleState.rules : []);
+      loadedOnce.current = true;
+    }
+  }, [scheduleState]);
+
+  const scheduleEnabled: boolean = scheduleState?.enabled ?? false;
+  const worker1On = worker1State?.enabled ?? false;
+  const hedgeOn = hedgeLongState?.enabled ?? false;
+
+  async function postSchedule(body: Record<string, unknown>) {
+    const res = await fetch("/api/bot-schedule", {
+      method: "POST", headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(body),
+    });
+    if (!res.ok) {
+      const b = await res.json().catch(() => ({}));
+      alert(b.error || "Could not save.");
+      return false;
+    }
+    return true;
+  }
+
+  async function handleToggleSchedule() {
+    if (!confirm(`Turn the automatic schedule ${scheduleEnabled ? "OFF" : "ON"}? ${scheduleEnabled ? "" : "Matching rules will start overwriting the manual settings boxes on both panels within ~30s."}`)) return;
+    setSaving(true);
+    await postSchedule({ enabled: !scheduleEnabled });
+    await onToggled();
+    setSaving(false);
+  }
+
+  async function handleSaveRules() {
+    if (!confirm(`Save ${rules.length} rule(s)? Takes effect within ~30s if the schedule is on.`)) return;
+    setSaving(true);
+    const ok = await postSchedule({ rules });
+    if (ok) await onToggled();
+    setSaving(false);
+  }
+
+  async function handleBothOn() {
+    if (!confirm("Turn BOTH Worker 1 and the hedge ON?")) return;
+    setTogglingBoth(true);
+    const calls = [];
+    if (!worker1On) calls.push(fetch("/api/lighter-btc-toggle", {
+      method: "POST", headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ table: "lighter_btc_initial_state" }),
+    }));
+    if (!hedgeOn) calls.push(fetch("/api/lighter-hedge-toggle", { method: "POST" }));
+    await Promise.all(calls);
+    await onToggled();
+    setTogglingBoth(false);
+  }
+
+  async function handleBothOff() {
+    if (!confirm("Turn BOTH Worker 1 and the hedge OFF? This only blocks new entries, it never closes an open position.")) return;
+    setTogglingBoth(true);
+    const calls = [];
+    if (worker1On) calls.push(fetch("/api/lighter-btc-toggle", {
+      method: "POST", headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ table: "lighter_btc_initial_state" }),
+    }));
+    if (hedgeOn) calls.push(fetch("/api/lighter-hedge-toggle", { method: "POST" }));
+    await Promise.all(calls);
+    await onToggled();
+    setTogglingBoth(false);
+  }
+
+  function addRule() {
+    setRules((r) => [...r, JSON.parse(JSON.stringify(EMPTY_RULE))]);
+    setExpanded(rules.length);
+  }
+  function removeRule(i: number) {
+    if (!confirm(`Remove rule ${i + 1}?`)) return;
+    setRules((r) => r.filter((_, idx) => idx !== i));
+    setExpanded(null);
+  }
+  function moveRule(i: number, dir: -1 | 1) {
+    setRules((r) => {
+      const j = i + dir;
+      if (j < 0 || j >= r.length) return r;
+      const copy = [...r];
+      [copy[i], copy[j]] = [copy[j], copy[i]];
+      return copy;
+    });
+  }
+  function patchRule(i: number, patch: Record<string, unknown>) {
+    setRules((r) => r.map((rule, idx) => (idx === i ? { ...rule, ...patch } : rule)));
+  }
+  function patchRuleBot(i: number, bot: "worker1" | "hedge", patch: Record<string, unknown>) {
+    setRules((r) => r.map((rule, idx) => (idx === i ? { ...rule, [bot]: { ...rule[bot], ...patch } } : rule)));
+  }
+
+  const liveEr = worker1State?.live_er_2h ?? null;
+  const liveVolume = worker1State?.live_candle_volume ?? null;
+  const liveWiggle = worker1State?.live_wiggle ?? null;
+  const liveRate = worker1State?.live_volume_jump_rate ?? null;
+
+  const condField = (label: string, i: number, loKey: string, hiKey: string, rule: any, unit = "") => (
+    <div className="flex-1 min-w-[90px]">
+      <p className="text-gray-500 text-[9px] uppercase">{label}</p>
+      <div className="flex gap-1">
+        <input
+          value={rule[loKey] ?? ""}
+          onChange={(e) => patchRule(i, { [loKey]: numOrNull(e.target.value) })}
+          placeholder="min"
+          inputMode="decimal"
+          className="w-full bg-gray-900 border border-gray-700 rounded px-1 py-1 text-[11px] text-white tabular-nums focus:outline-none focus:border-blue-500"
+        />
+        <input
+          value={rule[hiKey] ?? ""}
+          onChange={(e) => patchRule(i, { [hiKey]: numOrNull(e.target.value) })}
+          placeholder="max"
+          inputMode="decimal"
+          className="w-full bg-gray-900 border border-gray-700 rounded px-1 py-1 text-[11px] text-white tabular-nums focus:outline-none focus:border-blue-500"
+        />
+      </div>
+    </div>
+  );
+
+  const settingsField = (label: string, i: number, bot: "worker1" | "hedge", key: string, rule: any) => (
+    <div className="flex-1 min-w-[70px]">
+      <p className="text-gray-500 text-[9px] uppercase">{label}</p>
+      <input
+        value={rule[bot]?.[key] ?? ""}
+        onChange={(e) => patchRuleBot(i, bot, { [key]: numOrNull(e.target.value) })}
+        placeholder="—"
+        inputMode="decimal"
+        className="w-full bg-gray-900 border border-gray-700 rounded px-1 py-1 text-[11px] text-white tabular-nums focus:outline-none focus:border-blue-500"
+      />
+    </div>
+  );
+
+  return (
+    <div className="bg-gray-900 rounded-xl p-4 space-y-3">
+      <div className="flex items-center justify-between">
+        <h3 className="text-white font-bold text-sm">Master Schedule</h3>
+        <div className="flex gap-1.5">
+          <button onClick={handleBothOn} disabled={togglingBoth || loading}
+            className="text-xs font-bold px-2.5 py-1 rounded-full bg-green-500/20 text-green-400 hover:bg-green-500/30 disabled:opacity-40">
+            {togglingBoth ? "…" : "Both ON"}
+          </button>
+          <button onClick={handleBothOff} disabled={togglingBoth || loading}
+            className="text-xs font-bold px-2.5 py-1 rounded-full bg-red-500/20 text-red-400 hover:bg-red-500/30 disabled:opacity-40">
+            {togglingBoth ? "…" : "Both OFF"}
+          </button>
+        </div>
+      </div>
+      <p className="text-gray-600 text-[10px] leading-snug">
+        Controls Worker 1 and the hedge together. When the schedule below is ON, the first rule
+        whose hour range and/or ER/volume/wiggle/rate conditions match overwrites both bots'
+        manual SL/Trigger/Trail/etc. boxes automatically, within ~30s. No match = whatever is
+        currently live stays as-is.
+      </p>
+
+      <div className="bg-gray-800/60 rounded-lg p-2 flex items-center justify-between">
+        <div>
+          <p className="text-gray-500 text-[10px] uppercase">Schedule automation</p>
+          <p className={`font-bold text-sm ${scheduleEnabled ? "text-green-400" : "text-gray-500"}`}>
+            {scheduleEnabled ? "ON" : "OFF"}
+          </p>
+        </div>
+        <button onClick={handleToggleSchedule} disabled={saving || loading}
+          className={`text-xs font-bold px-2.5 py-1 rounded disabled:opacity-30 ${
+            scheduleEnabled ? "bg-green-500/20 text-green-400" : "bg-gray-700/50 text-gray-500"}`}>
+          {saving ? "…" : scheduleEnabled ? "Turn OFF" : "Turn ON"}
+        </button>
+      </div>
+
+      <div className="bg-gray-800/60 rounded-lg p-2">
+        <p className="text-gray-500 text-[10px] uppercase mb-1">Live readings (Worker 1's feed)</p>
+        <div className="grid grid-cols-4 gap-1.5 text-[10px] tabular-nums">
+          <div><p className="text-gray-600 text-[9px] uppercase">ER 2h</p>{liveEr != null ? liveEr.toFixed(3) : "—"}</div>
+          <div><p className="text-gray-600 text-[9px] uppercase">Volume</p>{liveVolume != null ? liveVolume.toFixed(2) : "—"}</div>
+          <div><p className="text-gray-600 text-[9px] uppercase">Wiggle</p>{liveWiggle != null ? liveWiggle.toFixed(2) : "—"}</div>
+          <div><p className="text-gray-600 text-[9px] uppercase">Rate</p>{liveRate != null ? liveRate.toFixed(2) : "—"}</div>
+        </div>
+      </div>
+
+      <div className="space-y-1.5">
+        {rules.map((rule, i) => (
+          <div key={i} className="bg-gray-800/60 rounded-lg p-2">
+            <div className="flex items-center justify-between cursor-pointer" onClick={() => setExpanded(expanded === i ? null : i)}>
+              <p className="text-xs font-bold text-white">
+                Rule {i + 1}
+                <span className="text-[10px] font-normal text-gray-500 ml-1.5">
+                  {rule.hour_start != null && rule.hour_end != null ? `hour ${rule.hour_start}-${rule.hour_end}` : ""}
+                  {(rule.er_min != null || rule.er_max != null) ? " · ER bound" : ""}
+                  {(rule.volume_min != null || rule.volume_max != null) ? " · volume bound" : ""}
+                  {(rule.wiggle_min != null || rule.wiggle_max != null) ? " · wiggle bound" : ""}
+                  {(rule.rate_min != null || rule.rate_max != null) ? " · rate bound" : ""}
+                </span>
+              </p>
+              <div className="flex items-center gap-1">
+                <button onClick={(e) => { e.stopPropagation(); moveRule(i, -1); }} disabled={i === 0}
+                  className="text-gray-500 hover:text-white disabled:opacity-20 px-1">↑</button>
+                <button onClick={(e) => { e.stopPropagation(); moveRule(i, 1); }} disabled={i === rules.length - 1}
+                  className="text-gray-500 hover:text-white disabled:opacity-20 px-1">↓</button>
+                <button onClick={(e) => { e.stopPropagation(); removeRule(i); }}
+                  className="text-red-400 hover:text-red-300 px-1 text-xs">✕</button>
+                <span className="text-gray-500 text-xs px-1">{expanded === i ? "▲" : "▼"}</span>
+              </div>
+            </div>
+            {expanded === i && (
+              <div className="mt-2 space-y-2">
+                <div>
+                  <p className="text-gray-500 text-[9px] uppercase mb-1">Hour range (UTC, 0-23, optional)</p>
+                  <div className="flex gap-1">
+                    <input value={rule.hour_start ?? ""} onChange={(e) => patchRule(i, { hour_start: numOrNull(e.target.value) })}
+                      placeholder="start" inputMode="numeric"
+                      className="w-full bg-gray-900 border border-gray-700 rounded px-1.5 py-1 text-[11px] text-white tabular-nums focus:outline-none focus:border-blue-500" />
+                    <input value={rule.hour_end ?? ""} onChange={(e) => patchRule(i, { hour_end: numOrNull(e.target.value) })}
+                      placeholder="end" inputMode="numeric"
+                      className="w-full bg-gray-900 border border-gray-700 rounded px-1.5 py-1 text-[11px] text-white tabular-nums focus:outline-none focus:border-blue-500" />
+                  </div>
+                </div>
+                <div>
+                  <p className="text-gray-500 text-[9px] uppercase mb-1">Conditions (blank = no bound)</p>
+                  <div className="flex gap-1.5 flex-wrap">
+                    {condField("ER 2h", i, "er_min", "er_max", rule)}
+                    {condField("Volume", i, "volume_min", "volume_max", rule)}
+                    {condField("Wiggle", i, "wiggle_min", "wiggle_max", rule)}
+                    {condField("Rate", i, "rate_min", "rate_max", rule)}
+                  </div>
+                </div>
+                <div>
+                  <p className="text-gray-500 text-[9px] uppercase mb-1">Worker 1 settings (blank = leave alone)</p>
+                  <div className="flex gap-1.5 flex-wrap">
+                    {settingsField("SL", i, "worker1", "sl_pct", rule)}
+                    {settingsField("Trig", i, "worker1", "trigger_pct", rule)}
+                    {settingsField("Trail", i, "worker1", "trail_pct", rule)}
+                    {settingsField("TP", i, "worker1", "tp_pct", rule)}
+                    {settingsField("Dwell", i, "worker1", "dwell_seconds", rule)}
+                  </div>
+                  <div className="flex gap-1.5 flex-wrap mt-1.5">
+                    {settingsField("Band lo", i, "worker1", "band_lo", rule)}
+                    {settingsField("Band hi", i, "worker1", "band_hi", rule)}
+                    {settingsField("Rev lo", i, "worker1", "reversal_lo", rule)}
+                    {settingsField("Rev hi", i, "worker1", "reversal_hi", rule)}
+                    {settingsField("Window", i, "worker1", "window", rule)}
+                  </div>
+                </div>
+                <div>
+                  <p className="text-gray-500 text-[9px] uppercase mb-1">Hedge settings (blank = leave alone)</p>
+                  <div className="flex gap-1.5 flex-wrap">
+                    {settingsField("SL", i, "hedge", "sl_pct", rule)}
+                    {settingsField("Trig", i, "hedge", "trigger_pct", rule)}
+                    {settingsField("Trail", i, "hedge", "trail_pct", rule)}
+                    {settingsField("TP", i, "hedge", "tp_pct", rule)}
+                    {settingsField("Dwell", i, "hedge", "dwell_seconds", rule)}
+                  </div>
+                </div>
+              </div>
+            )}
+          </div>
+        ))}
+        {rules.length === 0 && <p className="text-gray-600 text-[11px]">No rules yet.</p>}
+      </div>
+
+      <div className="flex gap-1.5">
+        <button onClick={addRule} disabled={loading}
+          className="flex-1 text-xs font-bold px-2.5 py-1.5 rounded bg-gray-700/50 text-gray-300 hover:bg-gray-700 disabled:opacity-30">
+          + Add rule
+        </button>
+        <button onClick={handleSaveRules} disabled={saving || loading}
+          className="flex-1 text-xs font-bold px-2.5 py-1.5 rounded bg-blue-500/20 text-blue-400 hover:bg-blue-500/30 disabled:opacity-30">
+          {saving ? "Saving…" : "Save rules"}
+        </button>
+      </div>
+    </div>
+  );
+}
+
 // ── Dashboard ───────────────────────────────────────────────────────────────
 
 export default function Dashboard() {
@@ -3962,6 +4269,7 @@ export default function Dashboard() {
   const [optimalBtcTrades, setOptimalBtcTrades] = useState<any[]>([]);
   const [optimalBtcRuns,   setOptimalBtcRuns]   = useState<any[]>([]);
   const [hedgeEnvironmentRun, setHedgeEnvironmentRun] = useState<any>(null);
+  const [scheduleState, setScheduleState] = useState<any>(null);
   // True lifetime trade/win counts -- the trades arrays above are capped at 200 rows for
   // display purposes, which silently froze the win-rate % and trade count once any worker
   // passed 200 real trades (Worker 2 hit this first, at 606 real trades and counting).
@@ -4003,6 +4311,7 @@ export default function Dashboard() {
       { count: rsiPaperWins },
       { data: rsiPaperPnlRows },
       { data: hedgeEnvironmentRows },
+      { data: scheduleSt },
     ] = await Promise.all([
       getSupabase().from("surfer_state").select("*").eq("id", 1).single(),
       getSupabase().from("surfer_trades").select("*").order("exit_time", { ascending: false }).limit(5000),
@@ -4042,6 +4351,7 @@ export default function Dashboard() {
       getSupabase().from("lighter_btc_rsi_paper_trades").select("id", { count: "exact", head: true }).eq("worker_id", "worker1").gt("pnl_pct", 0),
       getSupabase().from("lighter_btc_rsi_paper_trades").select("pnl_pct").eq("worker_id", "worker1"),
       getSupabase().from("lighter_btc_optimal_runs").select("ran_at,detail").eq("action", "environment_er").order("id", { ascending: false }).limit(1),
+      getSupabase().from("bot_schedule_rules").select("*").eq("id", 1).single(),
     ]);
     setSurferState(surferSt ?? null);
     setSurferTrades(surferTr ?? []);
@@ -4065,6 +4375,7 @@ export default function Dashboard() {
     setOptimalBtcTrades(optimalBtcTr ?? []);
     setOptimalBtcRuns(optimalBtcRs ?? []);
     setHedgeEnvironmentRun(hedgeEnvironmentRows?.[0] ?? null);
+    setScheduleState(scheduleSt ?? null);
     setDcaBtcStats({ total: dcaBtcTotal ?? 0, wins: dcaBtcWins ?? 0 });
     setInitialBtcStats({ total: initialBtcTotal ?? 0, wins: initialBtcWins ?? 0 });
     setOptimalBtcStats({ total: optimalBtcTotal ?? 0, wins: optimalBtcWins ?? 0 });
@@ -4251,6 +4562,14 @@ export default function Dashboard() {
         <div className="flex items-center justify-between">
           <h1 className="text-2xl font-bold text-white">TradeBot Dashboard</h1>
         </div>
+
+        <MasterSchedulePanel
+          scheduleState={scheduleState}
+          worker1State={initialBtcState}
+          hedgeLongState={optimalBtcState}
+          loading={loading}
+          onToggled={load}
+        />
 
         {/* ── Lighter BTC Stochastic5: 3-worker comparison, real money, $100 each */}
         <div className="grid grid-cols-1 sm:grid-cols-3 gap-3">

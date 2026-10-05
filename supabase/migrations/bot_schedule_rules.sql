@@ -1,0 +1,27 @@
+-- Master schedule panel -- 2026-10-04. Run in the Supabase SQL Editor.
+-- One shared row drives both Worker 1 and the hedge, by hour and/or live ER/volume/wiggle/rate
+-- conditions. `rules` is an ORDERED JSONB array; the first rule whose hour range (if set) AND
+-- every set min/max condition both hold wins -- no match is a no-op (settings stay as last
+-- applied, never revert to compiled defaults). Each rule shape:
+--   { "hour_start": 0-23 | null, "hour_end": 0-23 | null,
+--     "er_min": number | null, "er_max": number | null,
+--     "volume_min": number | null, "volume_max": number | null,
+--     "wiggle_min": number | null, "wiggle_max": number | null,
+--     "rate_min": number | null, "rate_max": number | null,
+--     "worker1": { "sl_pct", "trigger_pct", "trail_pct", "tp_pct", "dwell_seconds",
+--                  "band_lo", "band_hi", "reversal_lo", "reversal_hi", "window" },
+--     "hedge": { "sl_pct", "trigger_pct", "trail_pct", "tp_pct", "dwell_seconds" } }
+-- See StochBot._apply_schedule_rules / StochBot._rule_matches in server/stoch_bot_core.py.
+CREATE TABLE IF NOT EXISTS public.bot_schedule_rules (
+  id BIGINT PRIMARY KEY,
+  enabled BOOLEAN NOT NULL DEFAULT false,
+  rules JSONB NOT NULL DEFAULT '[]'::jsonb,
+  updated_at TIMESTAMPTZ NOT NULL DEFAULT now()
+);
+
+INSERT INTO public.bot_schedule_rules (id, enabled, rules)
+VALUES (1, false, '[]'::jsonb)
+ON CONFLICT (id) DO NOTHING;
+
+ALTER TABLE public.bot_schedule_rules ENABLE ROW LEVEL SECURITY;
+CREATE POLICY "anon_read" ON public.bot_schedule_rules FOR SELECT TO anon USING (true);

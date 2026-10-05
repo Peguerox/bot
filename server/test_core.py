@@ -6090,6 +6090,233 @@ async def t_er_2h_readout_off_without_schema_flag():
           "live_er_2h" not in bot.state_row, bot.state_row.get("live_er_2h"))
 
 
+def _schedule_candles(volume=2.5):
+    c = _trending_candles_122()
+    for bar in c:
+        bar["v"] = volume
+    return c  # ER ~1.0 (pure uptrend), volume=`volume`, rate~0.0 (uniform volume), some wiggle>0
+
+
+def _schedule_sb(rules, enabled=True, calls=None):
+    async def fake_sb(method, path, body=None, extra_headers=None):
+        if calls is not None:
+            calls.append(path)
+        if path.startswith("bot_schedule_rules"):
+            return [{"enabled": enabled, "rules": rules}]
+        raise AssertionError(f"unexpected sb call: {method} {path}")
+    return fake_sb
+
+
+async def t_rule_matches_hour_range_basic():
+    print("\n[_rule_matches: a plain hour range matches inside, not outside]")
+    ex = FakeExchange()
+    bot = make_bot(ex)
+    rule = {"hour_start": 8, "hour_end": 16}
+    check("inside the range", bot._rule_matches(rule, 10, None, None, None, None))
+    check("at the start boundary (inclusive)", bot._rule_matches(rule, 8, None, None, None, None))
+    check("at the end boundary (exclusive)", not bot._rule_matches(rule, 16, None, None, None, None))
+    check("outside the range", not bot._rule_matches(rule, 20, None, None, None, None))
+
+
+async def t_rule_matches_hour_range_wraps_midnight():
+    print("\n[_rule_matches: hour_start > hour_end wraps past midnight]")
+    ex = FakeExchange()
+    bot = make_bot(ex)
+    rule = {"hour_start": 22, "hour_end": 6}
+    check("23:00 matches (after wrap start)", bot._rule_matches(rule, 23, None, None, None, None))
+    check("02:00 matches (before wrap end)", bot._rule_matches(rule, 2, None, None, None, None))
+    check("12:00 does not match (outside the overnight span)",
+          not bot._rule_matches(rule, 12, None, None, None, None))
+
+
+async def t_rule_matches_no_hour_range_matches_any_hour():
+    print("\n[_rule_matches: no hour range set -- matches regardless of the current hour]")
+    ex = FakeExchange()
+    bot = make_bot(ex)
+    rule = {"er_min": 0.1}
+    check("matches at hour 3", bot._rule_matches(rule, 3, 0.2, None, None, None))
+    check("matches at hour 19", bot._rule_matches(rule, 19, 0.2, None, None, None))
+
+
+async def t_rule_matches_condition_bounds():
+    print("\n[_rule_matches: min/max bounds on a live metric]")
+    ex = FakeExchange()
+    bot = make_bot(ex)
+    rule = {"volume_min": 2.0, "volume_max": 5.0}
+    check("inside bounds", bot._rule_matches(rule, 0, None, 3.0, None, None))
+    check("at the min (inclusive)", bot._rule_matches(rule, 0, None, 2.0, None, None))
+    check("at the max (inclusive)", bot._rule_matches(rule, 0, None, 5.0, None, None))
+    check("below the min", not bot._rule_matches(rule, 0, None, 1.9, None, None))
+    check("above the max", not bot._rule_matches(rule, 0, None, 5.1, None, None))
+
+
+async def t_rule_matches_missing_reading_fails_closed():
+    print("\n[_rule_matches: a condition is set but there's no reading yet -- fails, never guesses]")
+    ex = FakeExchange()
+    bot = make_bot(ex)
+    rule = {"wiggle_max": 50.0}
+    check("no wiggle reading available -- does not match", not bot._rule_matches(rule, 0, None, None, None, None))
+
+
+async def t_rule_matches_combined_hour_and_conditions():
+    print("\n[_rule_matches: hour range AND conditions must BOTH hold]")
+    ex = FakeExchange()
+    bot = make_bot(ex)
+    rule = {"hour_start": 8, "hour_end": 16, "er_min": 0.15}
+    check("both hold", bot._rule_matches(rule, 10, 0.20, None, None, None))
+    check("hour holds, ER too low", not bot._rule_matches(rule, 10, 0.05, None, None, None))
+    check("ER holds, hour outside range", not bot._rule_matches(rule, 20, 0.20, None, None, None))
+
+
+async def t_schedule_rules_off_by_default_schema_flag():
+    print("\n[schedule rules: schedule_rules_enabled=False -- never fetches, never writes]")
+    ex = FakeExchange()
+    calls = []
+    bot = make_bot(ex, candles=_schedule_candles(), schedule_rules_enabled=False,
+                    schedule_rules_bot_key="worker1")
+    bot.sb = _schedule_sb([{"worker1": {"sl_pct": 0.5}}], calls=calls)
+    await bot._apply_schedule_rules()
+    check("never fetched the shared schedule row", calls == [], calls)
+    check("no override written", "override_sl_pct" not in bot.state_row)
+
+
+async def t_schedule_rules_off_without_bot_key():
+    print("\n[schedule rules: enabled but no bot_key configured -- defensive no-op]")
+    ex = FakeExchange()
+    calls = []
+    bot = make_bot(ex, candles=_schedule_candles(), schedule_rules_enabled=True,
+                    schedule_rules_bot_key=None)
+    bot.sb = _schedule_sb([{"worker1": {"sl_pct": 0.5}}], calls=calls)
+    await bot._apply_schedule_rules()
+    check("never fetched -- no bot_key means nothing to apply", calls == [], calls)
+
+
+async def t_schedule_rules_row_disabled_no_write():
+    print("\n[schedule rules: the shared row's own enabled=False -- no write even with matching rules]")
+    ex = FakeExchange()
+    bot = make_bot(ex, candles=_schedule_candles(), schedule_rules_enabled=True,
+                    schedule_rules_bot_key="worker1")
+    bot.sb = _schedule_sb([{"worker1": {"sl_pct": 0.5}}], enabled=False)
+    await bot._apply_schedule_rules()
+    check("no override written -- schedule system itself is off", "override_sl_pct" not in bot.state_row)
+
+
+async def t_schedule_rules_applies_worker1_fields():
+    print("\n[schedule rules: a matching rule writes Worker 1's full override field set]")
+    ex = FakeExchange()
+    bot = make_bot(ex, candles=_schedule_candles(volume=3.0), schedule_rules_enabled=True,
+                    schedule_rules_bot_key="worker1")
+    rule = {"hour_start": 0, "hour_end": 24,
+            "worker1": {"sl_pct": 0.20, "trigger_pct": 0.05, "trail_pct": 0.03, "tp_pct": 0.12,
+                        "dwell_seconds": 15, "band_lo": 15, "band_hi": 85,
+                        "reversal_lo": 10, "reversal_hi": 90, "window": 8}}
+    bot.sb = _schedule_sb([rule])
+    await bot._apply_schedule_rules()
+    check("sl written", bot.state_row.get("override_sl_pct") == 0.20)
+    check("trigger written", bot.state_row.get("override_profit_lock_trigger") == 0.05)
+    check("trail written", bot.state_row.get("override_profit_lock_trail") == 0.03)
+    check("tp written", bot.state_row.get("override_tp_pct") == 0.12)
+    check("dwell written", bot.state_row.get("override_dwell_seconds") == 15)
+    check("entry band written", bot.state_row.get("override_stoch_band_lo") == 15
+          and bot.state_row.get("override_stoch_band_hi") == 85)
+    check("reversal band written", bot.state_row.get("override_stoch_reversal_lo") == 10
+          and bot.state_row.get("override_stoch_reversal_hi") == 90)
+    check("window written", bot.state_row.get("override_stoch_window") == 8)
+
+
+async def t_schedule_rules_applies_hedge_fields_only():
+    print("\n[schedule rules: a matching rule writes only the hedge's smaller exit-lever set]")
+    ex = FakeExchange()
+    bot = make_bot(ex, candles=_schedule_candles(volume=3.0), schedule_rules_enabled=True,
+                    schedule_rules_bot_key="hedge")
+    rule = {"hour_start": 0, "hour_end": 24,
+            "worker1": {"sl_pct": 0.99},  # must be ignored -- this bot is "hedge"
+            "hedge": {"sl_pct": 0.04, "trigger_pct": 0.04, "trail_pct": 0.02, "tp_pct": 0.10,
+                      "dwell_seconds": 20}}
+    bot.sb = _schedule_sb([rule])
+    await bot._apply_schedule_rules()
+    check("hedge sl written, not worker1's", bot.state_row.get("override_sl_pct") == 0.04)
+    check("hedge trigger/trail/tp/dwell written",
+          bot.state_row.get("override_profit_lock_trigger") == 0.04
+          and bot.state_row.get("override_profit_lock_trail") == 0.02
+          and bot.state_row.get("override_tp_pct") == 0.10
+          and bot.state_row.get("override_dwell_seconds") == 20)
+    check("no stoch-band fields written -- not part of the hedge's field set",
+          "override_stoch_band_lo" not in bot.state_row)
+
+
+async def t_schedule_rules_no_match_is_a_noop():
+    print("\n[schedule rules: no rule matches -- nothing written, nothing crashes]")
+    ex = FakeExchange()
+    bot = make_bot(ex, candles=_schedule_candles(), schedule_rules_enabled=True,
+                    schedule_rules_bot_key="worker1")
+    rule = {"hour_start": 0, "hour_end": 24, "er_min": 2.0,  # impossible -- ER never reaches 2.0
+            "worker1": {"sl_pct": 0.5}}
+    bot.sb = _schedule_sb([rule])
+    await bot._apply_schedule_rules()
+    check("no override written", "override_sl_pct" not in bot.state_row)
+
+
+async def t_schedule_rules_first_match_wins():
+    print("\n[schedule rules: list order is precedence -- the first matching rule wins]")
+    ex = FakeExchange()
+    bot = make_bot(ex, candles=_schedule_candles(), schedule_rules_enabled=True,
+                    schedule_rules_bot_key="worker1")
+    rules = [
+        {"hour_start": 0, "hour_end": 24, "worker1": {"sl_pct": 0.11}},
+        {"hour_start": 0, "hour_end": 24, "worker1": {"sl_pct": 0.22}},
+    ]
+    bot.sb = _schedule_sb(rules)
+    await bot._apply_schedule_rules()
+    check("the FIRST matching rule's value wins", bot.state_row.get("override_sl_pct") == 0.11)
+
+
+async def t_schedule_rules_unchanged_match_does_not_rewrite():
+    print("\n[schedule rules: the same matched rule twice in a row does not re-write]")
+    ex = FakeExchange()
+    calls = []
+    bot = make_bot(ex, candles=_schedule_candles(), schedule_rules_enabled=True,
+                    schedule_rules_bot_key="worker1")
+    rule = {"hour_start": 0, "hour_end": 24, "worker1": {"sl_pct": 0.11}}
+    bot.sb = _schedule_sb([rule], calls=calls)
+    bot._schedule_rules_last_fetch_ts = 0.0
+    await bot._apply_schedule_rules()
+    check("first call wrote the value", bot.state_row.get("override_sl_pct") == 0.11)
+    write_count_after_first = len(bot.runs)
+    # Force a second fetch (bypass the 30s throttle) with the SAME rule content.
+    bot._schedule_rules_last_fetch_ts = 0.0
+    bot.state_row.pop("override_sl_pct")  # prove a second write would be detectable if it happened
+    await bot._apply_schedule_rules()
+    check("second call with the unchanged rule did not re-write",
+          "override_sl_pct" not in bot.state_row)
+    check("no new schedule_rule_applied run logged on the unchanged match",
+          len(bot.runs) == write_count_after_first, (len(bot.runs), write_count_after_first))
+
+
+async def t_schedule_rules_fetch_is_throttled():
+    print("\n[schedule rules: the shared row is fetched at most every 30s, not every call]")
+    ex = FakeExchange()
+    calls = []
+    bot = make_bot(ex, candles=_schedule_candles(), schedule_rules_enabled=True,
+                    schedule_rules_bot_key="worker1")
+    rule = {"hour_start": 0, "hour_end": 24, "worker1": {"sl_pct": 0.11}}
+    bot.sb = _schedule_sb([rule], calls=calls)
+    await bot._apply_schedule_rules()
+    check("first call fetches", len(calls) == 1, calls)
+    await bot._apply_schedule_rules()
+    check("second call within 30s does not re-fetch", len(calls) == 1, calls)
+
+
+async def t_schedule_rules_malformed_data_fails_closed():
+    print("\n[schedule rules: malformed/empty rules never crash the tick]")
+    ex = FakeExchange()
+    bot = make_bot(ex, candles=_schedule_candles(), schedule_rules_enabled=True,
+                    schedule_rules_bot_key="worker1")
+    bot.sb = _schedule_sb(None)  # rules is None, not a list
+    await bot._apply_schedule_rules()  # must not raise
+    check("no override written with rules=None", "override_sl_pct" not in bot.state_row)
+
+
 async def t_volume_switch_uses_flip_above_threshold():
     print("\n[volume regime switch: at/above threshold, flip signal wins and gates are bypassed]")
     side = await _volume_switch_case(candle_volume=5.0, threshold=2.0)
@@ -6310,6 +6537,22 @@ async def main():
               t_er_2h_readout_written_on_tick,
               t_er_2h_readout_skipped_without_enough_history,
               t_er_2h_readout_off_without_schema_flag,
+              t_rule_matches_hour_range_basic,
+              t_rule_matches_hour_range_wraps_midnight,
+              t_rule_matches_no_hour_range_matches_any_hour,
+              t_rule_matches_condition_bounds,
+              t_rule_matches_missing_reading_fails_closed,
+              t_rule_matches_combined_hour_and_conditions,
+              t_schedule_rules_off_by_default_schema_flag,
+              t_schedule_rules_off_without_bot_key,
+              t_schedule_rules_row_disabled_no_write,
+              t_schedule_rules_applies_worker1_fields,
+              t_schedule_rules_applies_hedge_fields_only,
+              t_schedule_rules_no_match_is_a_noop,
+              t_schedule_rules_first_match_wins,
+              t_schedule_rules_unchanged_match_does_not_rewrite,
+              t_schedule_rules_fetch_is_throttled,
+              t_schedule_rules_malformed_data_fails_closed,
               t_volume_switch_uses_flip_above_threshold,
               t_volume_switch_keeps_normal_path_below_threshold,
               t_volume_switch_off_by_default,

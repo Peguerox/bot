@@ -361,6 +361,14 @@ class BotConfig:
     # so it reacts (both locking AND releasing) as fast as a fresh candle allows. None (default)
     # is off. See compute_volume_wiggle_ratio / _volume_wiggle_allows_cycle.
     volume_wiggle_lock_threshold: Optional[float] = None
+    # Schedule rules (2026-10-04, direct request: a master panel controlling Worker 1 and the
+    # hedge together, by hour and/or live ER/volume/wiggle/rate conditions). Compiled opt-in,
+    # same convention as every other feature this session -- False means zero behavior change.
+    # bot_key says which half of each rule (JSONB "worker1" or "hedge") applies to THIS bot --
+    # set explicitly per bot file, never inferred, so a config mistake fails loud, not by guessing.
+    # See StochBot._apply_schedule_rules.
+    schedule_rules_enabled: bool = False
+    schedule_rules_bot_key: Optional[str] = None  # "worker1" or "hedge"
     # Low-volatility entry gate (2026-09-29, direct request): the OPPOSITE direction from the
     # pair above -- blocks new entries (and a reversal's reopen leg, never TP/SL/exits) when
     # the market is TOO QUIET rather than too spiky. Built to test a real finding from 844 real
@@ -1723,6 +1731,14 @@ class StochBot:
         self._last_volume_jump_ratio = None  # see _update_volume_jump_guard, _entry_settings_snapshot
         self._last_volume_wiggle_ratio = None  # see _update_volume_wiggle_lock
         self._volume_wiggle_locked = False
+        # Schedule rules (2026-10-04, direct request: a master panel that applies different
+        # Worker 1 / hedge settings automatically by hour and/or live ER/volume/wiggle/rate
+        # conditions). See _apply_schedule_rules. Cache is a throttled copy of the shared
+        # bot_schedule_rules row; last_applied_key is the matched rule's own content, not just
+        # its index, so an edited rule that happens to land at the same index is still re-applied.
+        self._schedule_rules_last_fetch_ts = 0.0
+        self._schedule_rules_cache = None
+        self._schedule_rules_last_applied_key = None
         # Whichever peak the ACTIVE release_mode is tracking, for the dashboard -- direct
         # report: "I only see the timer" with no way to tell whether a wiggle/volume/rate
         # release is close or far. None when release_mode is off/unset. See
@@ -3142,6 +3158,108 @@ class StochBot:
         consult entry_signal' reasoning as _volume_jump_allows_cycle. self._volume_wiggle_locked
         is set earlier in the SAME tick."""
         return not self._volume_wiggle_locked
+
+    def _rule_matches(self, rule, hour, er, volume, wiggle, rate):
+        """True if `rule`'s conditions all hold right now. Every field is independently optional
+        -- a rule can be pure-hour, pure-condition, or both. hour_start/hour_end wrap past
+        midnight when start > end (e.g. 22 -> 6 means 22:00-05:59 UTC). A condition bound that
+        IS set but has no live reading to check against (not enough candle history yet) fails
+        the match rather than guessing -- same fail-closed contract as every other gate here."""
+        hs, he = rule.get("hour_start"), rule.get("hour_end")
+        if hs is not None and he is not None:
+            if hs <= he:
+                if not (hs <= hour < he):
+                    return False
+            elif not (hour >= hs or hour < he):
+                return False
+        for value, lo_key, hi_key in ((er, "er_min", "er_max"),
+                                       (volume, "volume_min", "volume_max"),
+                                       (wiggle, "wiggle_min", "wiggle_max"),
+                                       (rate, "rate_min", "rate_max")):
+            lo, hi = rule.get(lo_key), rule.get(hi_key)
+            if lo is None and hi is None:
+                continue
+            if value is None:
+                return False
+            if lo is not None and value < lo:
+                return False
+            if hi is not None and value > hi:
+                return False
+        return True
+
+    async def _apply_schedule_rules(self):
+        """Master-panel automation (2026-10-04, direct request): "a third panel that can control
+        both... by hour... if this volume do this, if this wiggle and volume do this". Off unless
+        cfg.schedule_rules_enabled is compiled on for this bot AND the shared bot_schedule_rules
+        row's own `enabled` is True.
+
+        The shared row is fetched at most every 30s (not every tick) -- a GET to a table this
+        bot doesn't otherwise touch, same throttle philosophy as _refresh_environment. A fetch
+        failure keeps the last-known cache rather than going blind for one tick.
+
+        Rules are evaluated top to bottom; the FIRST one whose hour range (if set) contains the
+        current UTC hour AND whose every set min/max condition holds against this bot's own live
+        candle readings wins -- list order is the user's precedence control. No match is a no-op:
+        whatever is currently live (manually set or from an earlier rule) is left alone, never
+        reverted to the compiled default.
+
+        The actual effect is a WRITE to this bot's own override_* columns -- the exact same
+        columns the manual dashboard panels already write. This method is just a second,
+        automatic caller of that mechanism; it never touches any trading/exit logic directly.
+        Only writes when the matched rule's own content changed since the last write, so a
+        steady match doesn't re-PATCH the same values every 30s."""
+        cfg = self.cfg
+        if not cfg.schedule_rules_enabled or not cfg.schedule_rules_bot_key:
+            return
+        now = time.time()
+        if now - self._schedule_rules_last_fetch_ts >= 30.0:
+            self._schedule_rules_last_fetch_ts = now
+            try:
+                rows = await self.sb("GET", "bot_schedule_rules?select=enabled,rules&id=eq.1")
+                self._schedule_rules_cache = rows[0] if rows else None
+            except Exception:
+                pass  # keep the previous cache rather than going blind on one failed fetch
+        cache = self._schedule_rules_cache
+        if not cache or not cache.get("enabled"):
+            return
+        rules = cache.get("rules") or []
+        er, _ = compute_er_and_direction(self.candles, 120)
+        volume = compute_candle_volume_avg(self.candles, 10)
+        wiggle = compute_intrabar_dispersion(self.candles, 5)
+        rate = compute_candle_volume_rate(self.candles, 10)
+        hour = datetime.now(timezone.utc).hour
+        matched = None
+        for rule in rules:
+            if self._rule_matches(rule, hour, er, volume, wiggle, rate):
+                matched = rule
+                break
+        if matched is None:
+            return
+        settings = matched.get(cfg.schedule_rules_bot_key)
+        if not settings:
+            return
+        key = jsonlib.dumps(settings, sort_keys=True)
+        if key == self._schedule_rules_last_applied_key:
+            return
+        if cfg.schedule_rules_bot_key == "worker1":
+            field_map = [("sl_pct", "override_sl_pct"), ("trigger_pct", "override_profit_lock_trigger"),
+                         ("trail_pct", "override_profit_lock_trail"), ("tp_pct", "override_tp_pct"),
+                         ("dwell_seconds", "override_dwell_seconds"), ("band_lo", "override_stoch_band_lo"),
+                         ("band_hi", "override_stoch_band_hi"), ("reversal_lo", "override_stoch_reversal_lo"),
+                         ("reversal_hi", "override_stoch_reversal_hi"), ("window", "override_stoch_window")]
+        else:
+            field_map = [("sl_pct", "override_sl_pct"), ("trigger_pct", "override_profit_lock_trigger"),
+                         ("trail_pct", "override_profit_lock_trail"), ("tp_pct", "override_tp_pct"),
+                         ("dwell_seconds", "override_dwell_seconds")]
+        patch = {col: settings[src] for src, col in field_map if settings.get(src) is not None}
+        if not patch:
+            return
+        try:
+            await self.update_state(patch)
+            self._schedule_rules_last_applied_key = key
+            await self.log_run("schedule_rule_applied", {"patch": patch})
+        except Exception:
+            pass
 
     def _volume_jump_allows_cycle(self):
         """2026-10-03, "build the same guard for worker 2": a fixed_direction bot (the hedge)
@@ -4964,6 +5082,7 @@ class StochBot:
         holds_lock = await self._acquire_instance_lock()
         self._refresh_hedge_entry_filters(state, holds_lock)
         await self._refresh_environment(holds_lock)
+        await self._apply_schedule_rules()
 
         if cfg.self_lock_enabled and cfg.self_lock_relocks_on_boot:
             # Covers the one gap _load_self_lock_state's own boot-time re-lock can't: the user
