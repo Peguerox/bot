@@ -4031,6 +4031,31 @@ function formatSettingsLine(settings: any, labels: [string, string][]): string {
     .join(" · ");
 }
 
+// The actual filter NUMBERS (not just "which fields are set") -- direct report: "you have a lot
+// of space there... put the filter number... whatever the rule we created". >=X / <=Y / X-Y
+// when both bounds are set on the same metric.
+const CONDITION_LABELS: [string, string, string][] = [
+  ["ER", "er_min", "er_max"], ["Volume", "volume_min", "volume_max"],
+  ["Wiggle", "wiggle_min", "wiggle_max"], ["Rate", "rate_min", "rate_max"],
+  ["Vol/Wiggle", "vol_wiggle_ratio_min", "vol_wiggle_ratio_max"],
+  ["Vol×Wiggle", "vol_wiggle_product_min", "vol_wiggle_product_max"],
+];
+
+function formatConditionsLine(rule: any): string {
+  const parts: string[] = [];
+  if (rule.hour_start != null && rule.hour_end != null) {
+    parts.push(`Hour ${rule.hour_start}-${rule.hour_end} (Miami)`);
+  }
+  for (const [label, loKey, hiKey] of CONDITION_LABELS) {
+    const lo = rule[loKey], hi = rule[hiKey];
+    if (lo == null && hi == null) continue;
+    if (lo != null && hi != null) parts.push(`${label} ${lo}-${hi}`);
+    else if (lo != null) parts.push(`${label} ≥${lo}`);
+    else parts.push(`${label} ≤${hi}`);
+  }
+  return parts.join(" · ");
+}
+
 function MasterSchedulePanel({
   scheduleState, worker1State, hedgeLongState, loading, onToggled,
 }: {
@@ -4293,6 +4318,10 @@ function MasterSchedulePanel({
                 Hedge {matchedRule.hedge_enabled !== false ? "ON" : "OFF"}
               </span>
             </p>
+            <p className="text-[10px] text-blue-300 leading-snug mb-1">
+              <span className="text-gray-600">If:</span>{" "}
+              {formatConditionsLine(matchedRule) || <span className="text-gray-600">always (no hour or condition set)</span>}
+            </p>
             {matchedRule.worker1_enabled !== false && (
               <p className="text-[10px] text-gray-300 leading-snug">
                 <span className="text-gray-500">W1:</span>{" "}
@@ -4321,15 +4350,6 @@ function MasterSchedulePanel({
                 <span className={`ml-1 text-[9px] font-bold px-1 rounded ${rule.hedge_enabled !== false ? "bg-green-500/20 text-green-400" : "bg-red-500/20 text-red-400"}`}>
                   Hedge {rule.hedge_enabled !== false ? "ON" : "OFF"}
                 </span>
-                <span className="text-[10px] font-normal text-gray-500 ml-1.5">
-                  {rule.hour_start != null && rule.hour_end != null ? `hour ${rule.hour_start}-${rule.hour_end} (Miami)` : ""}
-                  {(rule.er_min != null || rule.er_max != null) ? " · ER bound" : ""}
-                  {(rule.volume_min != null || rule.volume_max != null) ? " · volume bound" : ""}
-                  {(rule.wiggle_min != null || rule.wiggle_max != null) ? " · wiggle bound" : ""}
-                  {(rule.rate_min != null || rule.rate_max != null) ? " · rate bound" : ""}
-                  {(rule.vol_wiggle_ratio_min != null || rule.vol_wiggle_ratio_max != null) ? " · vol/wiggle bound" : ""}
-                  {(rule.vol_wiggle_product_min != null || rule.vol_wiggle_product_max != null) ? " · vol×wiggle bound" : ""}
-                </span>
               </p>
               <div className="flex items-center gap-1">
                 <button onClick={(e) => { e.stopPropagation(); moveRule(i, -1); }} disabled={i === 0}
@@ -4341,6 +4361,10 @@ function MasterSchedulePanel({
                 <span className="text-gray-500 text-xs px-1">{expanded === i ? "▲" : "▼"}</span>
               </div>
             </div>
+            <p className="text-[10px] text-blue-300 leading-snug mt-1">
+              <span className="text-gray-600">If:</span>{" "}
+              {formatConditionsLine(rule) || <span className="text-gray-600">always (no hour or condition set)</span>}
+            </p>
             {rule.worker1_enabled !== false && (
               <p className="text-[10px] text-gray-400 leading-snug mt-1">
                 <span className="text-gray-600">W1:</span>{" "}
