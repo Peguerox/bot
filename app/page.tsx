@@ -4172,7 +4172,7 @@ function MasterSchedulePanel({
 
       <div className="bg-gray-800/60 rounded-lg p-2">
         <p className="text-gray-500 text-[10px] uppercase mb-1">Live readings (Worker 1's feed)</p>
-        <div className="grid grid-cols-4 gap-1.5 text-[10px] tabular-nums">
+        <div className="grid grid-cols-6 gap-1.5 text-[10px] tabular-nums">
           <div><p className="text-gray-600 text-[9px] uppercase">ER 2h</p>{liveEr != null ? liveEr.toFixed(3) : "—"}</div>
           <div><p className="text-gray-600 text-[9px] uppercase">Volume</p>{liveVolume != null ? liveVolume.toFixed(2) : "—"}</div>
           <div><p className="text-gray-600 text-[9px] uppercase">Wiggle</p>{liveWiggle != null ? liveWiggle.toFixed(2) : "—"}</div>
