@@ -4015,6 +4015,22 @@ function ruleConditionsMatch(rule: any, hour: number, metrics: Record<string, nu
   return true;
 }
 
+const WORKER1_SETTINGS_LABELS: [string, string][] = [
+  ["SL", "sl_pct"], ["Trig", "trigger_pct"], ["Trail", "trail_pct"], ["TP", "tp_pct"],
+  ["Dwell", "dwell_seconds"], ["BandLo", "band_lo"], ["BandHi", "band_hi"],
+  ["RevLo", "reversal_lo"], ["RevHi", "reversal_hi"], ["Window", "window"],
+];
+const HEDGE_SETTINGS_LABELS: [string, string][] = [
+  ["SL", "sl_pct"], ["Trig", "trigger_pct"], ["Trail", "trail_pct"], ["TP", "tp_pct"], ["Dwell", "dwell_seconds"],
+];
+
+function formatSettingsLine(settings: any, labels: [string, string][]): string {
+  return labels
+    .filter(([, k]) => settings?.[k] != null)
+    .map(([label, k]) => `${label} ${settings[k]}`)
+    .join(" · ");
+}
+
 function MasterSchedulePanel({
   scheduleState, worker1State, hedgeLongState, loading, onToggled,
 }: {
@@ -4280,21 +4296,13 @@ function MasterSchedulePanel({
             {matchedRule.worker1_enabled !== false && (
               <p className="text-[10px] text-gray-300 leading-snug">
                 <span className="text-gray-500">W1:</span>{" "}
-                {[["SL", "sl_pct"], ["Trig", "trigger_pct"], ["Trail", "trail_pct"], ["TP", "tp_pct"],
-                  ["Dwell", "dwell_seconds"], ["BandLo", "band_lo"], ["BandHi", "band_hi"],
-                  ["RevLo", "reversal_lo"], ["RevHi", "reversal_hi"], ["Window", "window"]]
-                  .filter(([, k]) => matchedRule.worker1?.[k] != null)
-                  .map(([label, k]) => `${label} ${matchedRule.worker1[k]}`).join(" · ")
-                  || "no settings set -- leaving current values alone"}
+                {formatSettingsLine(matchedRule.worker1, WORKER1_SETTINGS_LABELS) || "no settings set -- leaving current values alone"}
               </p>
             )}
             {matchedRule.hedge_enabled !== false && (
               <p className="text-[10px] text-gray-300 leading-snug">
                 <span className="text-gray-500">Hedge:</span>{" "}
-                {[["SL", "sl_pct"], ["Trig", "trigger_pct"], ["Trail", "trail_pct"], ["TP", "tp_pct"], ["Dwell", "dwell_seconds"]]
-                  .filter(([, k]) => matchedRule.hedge?.[k] != null)
-                  .map(([label, k]) => `${label} ${matchedRule.hedge[k]}`).join(" · ")
-                  || "no settings set -- leaving current values alone"}
+                {formatSettingsLine(matchedRule.hedge, HEDGE_SETTINGS_LABELS) || "no settings set -- leaving current values alone"}
               </p>
             )}
           </>
@@ -4333,6 +4341,18 @@ function MasterSchedulePanel({
                 <span className="text-gray-500 text-xs px-1">{expanded === i ? "▲" : "▼"}</span>
               </div>
             </div>
+            {rule.worker1_enabled !== false && (
+              <p className="text-[10px] text-gray-400 leading-snug mt-1">
+                <span className="text-gray-600">W1:</span>{" "}
+                {formatSettingsLine(rule.worker1, WORKER1_SETTINGS_LABELS) || <span className="text-gray-600">no settings set</span>}
+              </p>
+            )}
+            {rule.hedge_enabled !== false && (
+              <p className="text-[10px] text-gray-400 leading-snug">
+                <span className="text-gray-600">Hedge:</span>{" "}
+                {formatSettingsLine(rule.hedge, HEDGE_SETTINGS_LABELS) || <span className="text-gray-600">no settings set</span>}
+              </p>
+            )}
             {expanded === i && (
               <div className="mt-2 space-y-2">
                 <div>
