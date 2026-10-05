@@ -6322,6 +6322,58 @@ async def t_schedule_rules_match_turns_bot_on():
     check("settings applied too", bot.state_row.get("override_sl_pct") == 0.15)
 
 
+async def t_schedule_rules_per_bot_enabled_flag_independent_of_settings():
+    print("\n[schedule rules: {bot}_enabled decides ON/OFF, independent of that bot having settings]")
+    # Direct follow-up: "maybe with this rule I want 1 on and the other off... I need a little
+    # switch". The same rule carries a non-empty settings object for BOTH bots, but only
+    # worker1_enabled is true -- hedge must still end up OFF despite having its own settings.
+    rule = {"hour_start": 0, "hour_end": 24,
+            "worker1_enabled": True, "hedge_enabled": False,
+            "worker1": {"sl_pct": 0.15}, "hedge": {"sl_pct": 0.05}}
+
+    ex1 = FakeExchange()
+    bot1 = make_bot(ex1, candles=_schedule_candles(), schedule_rules_enabled=True,
+                     schedule_rules_bot_key="worker1")
+    bot1.sb = _schedule_sb([rule])
+    await bot1._apply_schedule_rules(bot1.state_row)
+    check("worker1_enabled=True -- Worker 1 turns ON", bot1.state_row["enabled"] is True)
+
+    ex2 = FakeExchange()
+    bot2 = make_bot(ex2, candles=_schedule_candles(), schedule_rules_enabled=True,
+                     schedule_rules_bot_key="hedge")
+    bot2.sb = _schedule_sb([rule])
+    await bot2._apply_schedule_rules(bot2.state_row)
+    check("hedge_enabled=False -- hedge turns OFF despite having its own settings on this rule",
+          bot2.state_row["enabled"] is False)
+
+
+async def t_schedule_rules_enabled_flag_defaults_true_when_absent():
+    print("\n[schedule rules: no explicit {bot}_enabled field -- defaults to True (old behavior)]")
+    ex = FakeExchange()
+    bot = make_bot(ex, candles=_schedule_candles(), schedule_rules_enabled=True,
+                    schedule_rules_bot_key="worker1")
+    bot.state_row["enabled"] = False
+    rule = {"hour_start": 0, "hour_end": 24, "worker1": {"sl_pct": 0.15}}  # no worker1_enabled key
+    bot.sb = _schedule_sb([rule])
+    await bot._apply_schedule_rules(bot.state_row)
+    check("defaults to enabled when the flag is simply absent", bot.state_row["enabled"] is True)
+
+
+async def t_schedule_rules_settings_still_applied_while_bot_held_off():
+    print("\n[schedule rules: settings pre-stage even while {bot}_enabled holds the bot OFF]")
+    ex = FakeExchange()
+    bot = make_bot(ex, candles=_schedule_candles(), schedule_rules_enabled=True,
+                    schedule_rules_bot_key="hedge")
+    rule = {"hour_start": 0, "hour_end": 24, "hedge_enabled": False,
+            "hedge": {"sl_pct": 0.07, "trigger_pct": 0.04}}
+    bot.sb = _schedule_sb([rule])
+    await bot._apply_schedule_rules(bot.state_row)
+    check("hedge held OFF", bot.state_row["enabled"] is False)
+    check("but its settings are still pre-staged for whenever it next turns on",
+          bot.state_row.get("override_sl_pct") == 0.07
+          and bot.state_row.get("override_profit_lock_trigger") == 0.04)
+
+
 async def t_schedule_rules_enabled_sync_overrides_manual_change_every_cycle():
     print("\n[schedule rules: a manual ON/OFF click gets overridden back every cycle, not just on a new match]")
     ex = FakeExchange()
@@ -6637,6 +6689,9 @@ async def main():
               t_schedule_rules_applies_hedge_fields_only,
               t_schedule_rules_no_match_turns_bot_off,
               t_schedule_rules_match_turns_bot_on,
+              t_schedule_rules_per_bot_enabled_flag_independent_of_settings,
+              t_schedule_rules_enabled_flag_defaults_true_when_absent,
+              t_schedule_rules_settings_still_applied_while_bot_held_off,
               t_schedule_rules_enabled_sync_overrides_manual_change_every_cycle,
               t_schedule_rules_first_match_wins,
               t_schedule_rules_unchanged_match_does_not_rewrite,

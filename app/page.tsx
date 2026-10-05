@@ -3931,6 +3931,10 @@ const EMPTY_RULE = {
   er_min: null, er_max: null, volume_min: null, volume_max: null,
   wiggle_min: null, wiggle_max: null, rate_min: null, rate_max: null,
   vol_wiggle_ratio_min: null, vol_wiggle_ratio_max: null,
+  // Per-bot ON/OFF switch, independent of that bot having a settings object on the same rule --
+  // direct request: "maybe with this rule I want 1 on and the other off... I need a little
+  // switch". Default true (both run) -- see normalizeRuleForSave / StochBot._apply_schedule_rules.
+  worker1_enabled: true, hedge_enabled: true,
   worker1: { sl_pct: null, trigger_pct: null, trail_pct: null, tp_pct: null, dwell_seconds: null,
              band_lo: null, band_hi: null, reversal_lo: null, reversal_hi: null, window: null },
   hedge: { sl_pct: null, trigger_pct: null, trail_pct: null, tp_pct: null, dwell_seconds: null },
@@ -3963,6 +3967,8 @@ const BOT_NUMERIC_FIELDS = [
 function normalizeRuleForSave(rule: any): any {
   const out: any = {};
   for (const key of RULE_NUMERIC_FIELDS) out[key] = numOrNull(rule[key]);
+  out.worker1_enabled = rule.worker1_enabled !== false;
+  out.hedge_enabled = rule.hedge_enabled !== false;
   for (const bot of ["worker1", "hedge"] as const) {
     const botOut: any = {};
     for (const key of BOT_NUMERIC_FIELDS) {
@@ -4174,6 +4180,12 @@ function MasterSchedulePanel({
             <div className="flex items-center justify-between cursor-pointer" onClick={() => setExpanded(expanded === i ? null : i)}>
               <p className="text-xs font-bold text-white">
                 Rule {i + 1}
+                <span className={`ml-1.5 text-[9px] font-bold px-1 rounded ${rule.worker1_enabled !== false ? "bg-green-500/20 text-green-400" : "bg-red-500/20 text-red-400"}`}>
+                  W1 {rule.worker1_enabled !== false ? "ON" : "OFF"}
+                </span>
+                <span className={`ml-1 text-[9px] font-bold px-1 rounded ${rule.hedge_enabled !== false ? "bg-green-500/20 text-green-400" : "bg-red-500/20 text-red-400"}`}>
+                  Hedge {rule.hedge_enabled !== false ? "ON" : "OFF"}
+                </span>
                 <span className="text-[10px] font-normal text-gray-500 ml-1.5">
                   {rule.hour_start != null && rule.hour_end != null ? `hour ${rule.hour_start}-${rule.hour_end} (Miami)` : ""}
                   {(rule.er_min != null || rule.er_max != null) ? " · ER bound" : ""}
@@ -4217,7 +4229,15 @@ function MasterSchedulePanel({
                   </div>
                 </div>
                 <div>
-                  <p className="text-gray-500 text-[9px] uppercase mb-1">Worker 1 settings (blank = leave alone)</p>
+                  <div className="flex items-center justify-between mb-1">
+                    <p className="text-gray-500 text-[9px] uppercase">Worker 1 settings (blank = leave alone)</p>
+                    <button
+                      onClick={() => patchRule(i, { worker1_enabled: !(rule.worker1_enabled !== false) })}
+                      className={`text-[9px] font-bold px-1.5 py-0.5 rounded ${
+                        rule.worker1_enabled !== false ? "bg-green-500/20 text-green-400" : "bg-red-500/20 text-red-400"}`}>
+                      {rule.worker1_enabled !== false ? "ON when matched" : "OFF when matched"}
+                    </button>
+                  </div>
                   <div className="flex gap-1.5 flex-wrap">
                     {settingsField("SL", i, "worker1", "sl_pct", rule)}
                     {settingsField("Trig", i, "worker1", "trigger_pct", rule)}
@@ -4234,7 +4254,15 @@ function MasterSchedulePanel({
                   </div>
                 </div>
                 <div>
-                  <p className="text-gray-500 text-[9px] uppercase mb-1">Hedge settings (blank = leave alone)</p>
+                  <div className="flex items-center justify-between mb-1">
+                    <p className="text-gray-500 text-[9px] uppercase">Hedge settings (blank = leave alone)</p>
+                    <button
+                      onClick={() => patchRule(i, { hedge_enabled: !(rule.hedge_enabled !== false) })}
+                      className={`text-[9px] font-bold px-1.5 py-0.5 rounded ${
+                        rule.hedge_enabled !== false ? "bg-green-500/20 text-green-400" : "bg-red-500/20 text-red-400"}`}>
+                      {rule.hedge_enabled !== false ? "ON when matched" : "OFF when matched"}
+                    </button>
+                  </div>
                   <div className="flex gap-1.5 flex-wrap">
                     {settingsField("SL", i, "hedge", "sl_pct", rule)}
                     {settingsField("Trig", i, "hedge", "trigger_pct", rule)}

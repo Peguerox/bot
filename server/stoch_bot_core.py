@@ -3216,17 +3216,22 @@ class StochBot:
 
         ON/OFF is owned by the schedule too (revised same day, direct follow-up: "the rules
         should override whatever the bot is doing, if off turn it on... once the rules finish
-        turn it off... I want to know for sure it will be applied"). A matched rule that defines
-        a settings object for THIS bot turns it on; no match (or a matched rule with nothing for
-        this bot) turns it off. Checked every cycle, not just when the match changes -- a manual
-        click on the plain ON/OFF button gets overridden back within ~30s while the schedule is
-        on, by design. Same safe contract as every other enabled toggle in this file: flips
-        `enabled` only, NEVER closes a position already open.
+        turn it off"). A matched rule's `{bot_key}_enabled` flag decides -- e.g. "worker1_enabled"
+        for Worker 1 -- defaulting True when absent (an older saved rule with no opinion still
+        turns the bot on, the pre-this-revision behavior). THIS IS INDEPENDENT of whether that
+        rule also carries settings for this bot (further direct follow-up: "maybe with this rule
+        I want 1 on and the other off... I need a little switch" -- a settings object existing,
+        even full of blanks, used to force the bot on with no way to say otherwise). No match
+        turns the bot off. Checked every cycle, not just when the match changes -- a manual click
+        on the plain ON/OFF button gets overridden back within ~30s while the schedule is on, by
+        design. Same safe contract as every other enabled toggle in this file: flips `enabled`
+        only, NEVER closes a position already open.
 
         The settings themselves still land in this bot's own override_* columns -- the exact
-        same columns the manual dashboard panels already write -- and still only re-write when
-        the matched rule's own content changed, so a steady match doesn't re-PATCH identical
-        values every 30s."""
+        same columns the manual dashboard panels already write -- regardless of the enabled flag
+        above (so a bot held off by a rule still has the right settings pre-staged for whenever
+        it next turns on), and still only re-write when the matched rule's own content changed,
+        so a steady match doesn't re-PATCH identical values every 30s."""
         cfg = self.cfg
         if not cfg.schedule_rules_enabled or not cfg.schedule_rules_bot_key:
             return
@@ -3255,7 +3260,7 @@ class StochBot:
                 break
         settings = matched.get(cfg.schedule_rules_bot_key) if matched else None
         patch = {}
-        desired_enabled = bool(settings)
+        desired_enabled = bool(matched) and bool(matched.get(f"{cfg.schedule_rules_bot_key}_enabled", True))
         if bool(state.get("enabled", True)) != desired_enabled:
             patch["enabled"] = desired_enabled
         new_key = None

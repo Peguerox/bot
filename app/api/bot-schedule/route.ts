@@ -92,6 +92,14 @@ function validateRule(rule: unknown, idx: number): string | null {
       return `Rule ${idx + 1}: ${loKey} must not exceed ${hiKey}.`;
     }
   }
+  // Per-bot ON/OFF switch, independent of that bot having a settings object on the same rule --
+  // direct request: "maybe with this rule I want 1 on and the other off... I need a little
+  // switch". Default true (both run) when absent.
+  for (const key of ["worker1_enabled", "hedge_enabled"] as const) {
+    const v = r[key];
+    if (v === undefined || v === null) continue;
+    if (typeof v !== "boolean") return `Rule ${idx + 1}: ${key} must be true or false.`;
+  }
   const err1 = validateSettings(r.worker1, `Rule ${idx + 1}.worker1`, true);
   if (err1) return err1;
   const err2 = validateSettings(r.hedge, `Rule ${idx + 1}.hedge`, false);
