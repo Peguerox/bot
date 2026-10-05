@@ -2723,6 +2723,42 @@ async def t_exit_mode_no_sl_native_stop_cancelled_after_partner_closes():
           len(ex.sl_orders) == orders_before, (len(ex.sl_orders), orders_before))
 
 
+async def t_exit_mode_no_sl_real_reversal_closes_the_survivor():
+    print("\n[exit_mode no_sl: a REAL stochastic reversal (not the dead fixed_direction one) actually closes it]")
+    print("  direct report: \"i see the stochastic already pointing upward and it long and it does not come out\"")
+    entry = 86000.0
+    ex = FakeExchange(position=round(10.0 / entry, 5), collateral=10.0)
+    partner = {"side": None, "realized_pnl_usd": -0.003}  # partner already closed
+    state = _breakeven_state(entry, 10.0)
+    state["override_exit_mode"] = "no_sl"
+    # candles_kind="short" pushes K near 100 -- compute_stoch_signal reads that as a "short"
+    # signal (entry_hi=75 default), the opposite of this leg's own "long" side.
+    bot = _breakeven_bot(ex, state, partner, breakeven_floor_enabled=False,
+                          candles_kind="short", profit_lock_trigger_pct=10.0,  # trail unreachable
+                          schema_has_exit_overrides=True)
+    await _tick_at(bot, entry)  # flat price -- would never trip SL/TP/trail on its own
+    check("closed via NO_SL_REVERSAL -- the real stochastic reading, not the dead fixed_direction one",
+          bot.state_row["side"] is None, bot.state_row["side"])
+    check("reason is NO_SL_REVERSAL",
+          any(a == "closed" and d.get("reason") == "NO_SL_REVERSAL" for a, d in bot.runs),
+          [(a, d.get("reason")) for a, d in bot.runs if a == "closed"])
+
+
+async def t_exit_mode_no_sl_reversal_check_waits_for_partner_to_close():
+    print("\n[exit_mode no_sl: the real-reversal check only applies once the partner has actually closed]")
+    entry = 86000.0
+    ex = FakeExchange(position=round(10.0 / entry, 5), collateral=10.0)
+    partner = {"side": "short", "realized_pnl_usd": 0.0}  # partner STILL open
+    state = _breakeven_state(entry, 10.0)
+    state["override_exit_mode"] = "no_sl"
+    bot = _breakeven_bot(ex, state, partner, breakeven_floor_enabled=False,
+                          candles_kind="short", profit_lock_trigger_pct=10.0,
+                          schema_has_exit_overrides=True)
+    await _tick_at(bot, entry)
+    check("still open -- partner hasn't closed yet, so no_sl's reversal check hasn't armed",
+          bot.state_row["side"] == "long", bot.state_row["side"])
+
+
 async def t_trail_dwell_blocks_a_single_touch():
     print("\n[trail mode + dwell: a single pullback past trigger-trail does not close yet]")
     entry = 86000.0
@@ -7264,6 +7300,8 @@ async def main():
               t_exit_mode_no_sl_sl_suppressed_after_partner_closes,
               t_exit_mode_no_sl_trail_still_protects_the_survivor,
               t_exit_mode_no_sl_native_stop_cancelled_after_partner_closes,
+              t_exit_mode_no_sl_real_reversal_closes_the_survivor,
+              t_exit_mode_no_sl_reversal_check_waits_for_partner_to_close,
               t_trail_dwell_blocks_a_single_touch,
               t_trail_dwell_fires_once_elapsed,
               t_trail_dwell_resets_on_a_new_peak,

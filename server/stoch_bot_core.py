@@ -2460,11 +2460,19 @@ class StochBot:
         same as today -- that structural mechanic is untouched. Only once the partner is gone does
         this (now-surviving) leg's own SL check, and its native exchange-side stop order (see
         _sync_native_exits), get skipped -- from that point on the ONLY things that can close it
-        are a stochastic signal reversal (reversal_ready, unaffected by exit_mode) or its own
-        profit-lock trail (trail_enabled stays on throughout no_sl mode, same as "trail"; TP stays
-        suppressed). This removes the hard bound on the SURVIVING leg's loss between its partner
-        closing and whichever of those two fires -- opt-in, off by default, real-money risk the
-        user explicitly asked for.
+        are a signal reversal or its own profit-lock trail (trail_enabled stays on throughout
+        no_sl mode, same as "trail"; TP stays suppressed). The reversal check is NOT the ordinary
+        reversal_ready below -- a fixed_direction leg's own reversal_signal always equals its own
+        side (compute_fixed_direction_signal's docstring: "reversal exits never fire"), so that
+        path is structurally dead for the hedge. Found live (direct report: "i see the stochastic
+        already pointing upward and it long and it does not come out") after shipping the first
+        version of this mode with that dead path as its only non-trail exit. Fixed by computing a
+        REAL stochastic/z-score reading independent of entry (_compute_pressure_source_signal,
+        the same number shown on the dashboard as live K) and closing with reason
+        "NO_SL_REVERSAL" when it points against this leg's side -- see that check, just before
+        reversal_ready below. This removes the hard bound on the SURVIVING leg's loss between its
+        partner closing and whichever of trail/NO_SL_REVERSAL fires -- opt-in, off by default,
+        real-money risk the user explicitly asked for.
 
         dwell_seconds (2026-10-03, direct request: "a dwell strategy") -- requires the trail's
         pullback (in "trail" mode) or the armed floor's trigger (in "floor" mode) to stay
@@ -6283,6 +6291,21 @@ class StochBot:
                                   else 100 * (ae - check_price) / ae)
                 if self._check_book_opposition_exit(side, unrealized_pct, age_s):
                     gap_hit = "BOOK_OPPOSITION"
+
+            if gap_hit is None and exit_mode == "no_sl" and no_sl_skip:
+                # Real bug found live (direct report: "i see the stochastic already pointing
+                # upward and it long and it does not come out") -- a fixed_direction leg's own
+                # reversal_signal ALWAYS equals its own side (see compute_fixed_direction_signal's
+                # docstring: "reversal exits never fire"), so the reversal_ready check below is
+                # structurally dead for the hedge. no_sl's promised "signal reversal" exit needs a
+                # REAL stochastic/z-score reading instead -- reuses the exact same computation the
+                # entry-pressure gate already does (_compute_pressure_source_signal, the same
+                # number shown on the dashboard as live K), independent of this leg's fixed entry
+                # signal. Only checked once the partner has already closed (no_sl_skip), matching
+                # when SL itself comes off -- before that, SL is still this leg's protection.
+                _no_sl_sig, _no_sl_reversal, _ = self._compute_pressure_source_signal()
+                if _no_sl_reversal is not None and _no_sl_reversal != side:
+                    gap_hit = "NO_SL_REVERSAL"
 
             reversal_ready = reversal_signal is not None and reversal_signal != side
             if cfg.use_joint_adaptive:
