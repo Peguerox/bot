@@ -4102,9 +4102,11 @@ function MasterSchedulePanel({
       </div>
       <p className="text-gray-600 text-[10px] leading-snug">
         Controls Worker 1 and the hedge together. When the schedule below is ON, the first rule
-        whose hour range and/or ER/volume/wiggle/rate conditions match overwrites both bots'
-        manual SL/Trigger/Trail/etc. boxes automatically, within ~30s. No match = whatever is
-        currently live stays as-is.
+        whose hour range and/or ER/volume/wiggle/rate conditions match applies its settings AND
+        turns that bot ON -- no match turns it OFF. This overrides the plain ON/OFF buttons and
+        manual SL/Trigger/Trail/etc. boxes every ~30s for as long as the schedule is on, even if
+        you click something manually in between. Never closes a position already open, only
+        blocks/allows new entries, same as every other ON/OFF switch here.
       </p>
 
       <div className="bg-gray-800/60 rounded-lg p-2 flex items-center justify-between">

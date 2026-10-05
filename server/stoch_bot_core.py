@@ -3187,7 +3187,7 @@ class StochBot:
                 return False
         return True
 
-    async def _apply_schedule_rules(self):
+    async def _apply_schedule_rules(self, state):
         """Master-panel automation (2026-10-04, direct request): "a third panel that can control
         both... by hour... if this volume do this, if this wiggle and volume do this". Off unless
         cfg.schedule_rules_enabled is compiled on for this bot AND the shared bot_schedule_rules
@@ -3199,15 +3199,21 @@ class StochBot:
 
         Rules are evaluated top to bottom; the FIRST one whose hour range (if set) contains the
         current UTC hour AND whose every set min/max condition holds against this bot's own live
-        candle readings wins -- list order is the user's precedence control. No match is a no-op:
-        whatever is currently live (manually set or from an earlier rule) is left alone, never
-        reverted to the compiled default.
+        candle readings wins -- list order is the user's precedence control.
 
-        The actual effect is a WRITE to this bot's own override_* columns -- the exact same
-        columns the manual dashboard panels already write. This method is just a second,
-        automatic caller of that mechanism; it never touches any trading/exit logic directly.
-        Only writes when the matched rule's own content changed since the last write, so a
-        steady match doesn't re-PATCH the same values every 30s."""
+        ON/OFF is owned by the schedule too (revised same day, direct follow-up: "the rules
+        should override whatever the bot is doing, if off turn it on... once the rules finish
+        turn it off... I want to know for sure it will be applied"). A matched rule that defines
+        a settings object for THIS bot turns it on; no match (or a matched rule with nothing for
+        this bot) turns it off. Checked every cycle, not just when the match changes -- a manual
+        click on the plain ON/OFF button gets overridden back within ~30s while the schedule is
+        on, by design. Same safe contract as every other enabled toggle in this file: flips
+        `enabled` only, NEVER closes a position already open.
+
+        The settings themselves still land in this bot's own override_* columns -- the exact
+        same columns the manual dashboard panels already write -- and still only re-write when
+        the matched rule's own content changed, so a steady match doesn't re-PATCH identical
+        values every 30s."""
         cfg = self.cfg
         if not cfg.schedule_rules_enabled or not cfg.schedule_rules_bot_key:
             return
@@ -3233,30 +3239,32 @@ class StochBot:
             if self._rule_matches(rule, hour, er, volume, wiggle, rate):
                 matched = rule
                 break
-        if matched is None:
-            return
-        settings = matched.get(cfg.schedule_rules_bot_key)
-        if not settings:
-            return
-        key = jsonlib.dumps(settings, sort_keys=True)
-        if key == self._schedule_rules_last_applied_key:
-            return
-        if cfg.schedule_rules_bot_key == "worker1":
-            field_map = [("sl_pct", "override_sl_pct"), ("trigger_pct", "override_profit_lock_trigger"),
-                         ("trail_pct", "override_profit_lock_trail"), ("tp_pct", "override_tp_pct"),
-                         ("dwell_seconds", "override_dwell_seconds"), ("band_lo", "override_stoch_band_lo"),
-                         ("band_hi", "override_stoch_band_hi"), ("reversal_lo", "override_stoch_reversal_lo"),
-                         ("reversal_hi", "override_stoch_reversal_hi"), ("window", "override_stoch_window")]
-        else:
-            field_map = [("sl_pct", "override_sl_pct"), ("trigger_pct", "override_profit_lock_trigger"),
-                         ("trail_pct", "override_profit_lock_trail"), ("tp_pct", "override_tp_pct"),
-                         ("dwell_seconds", "override_dwell_seconds")]
-        patch = {col: settings[src] for src, col in field_map if settings.get(src) is not None}
+        settings = matched.get(cfg.schedule_rules_bot_key) if matched else None
+        patch = {}
+        desired_enabled = bool(settings)
+        if bool(state.get("enabled", True)) != desired_enabled:
+            patch["enabled"] = desired_enabled
+        new_key = None
+        if settings:
+            new_key = jsonlib.dumps(settings, sort_keys=True)
+            if new_key != self._schedule_rules_last_applied_key:
+                if cfg.schedule_rules_bot_key == "worker1":
+                    field_map = [("sl_pct", "override_sl_pct"), ("trigger_pct", "override_profit_lock_trigger"),
+                                 ("trail_pct", "override_profit_lock_trail"), ("tp_pct", "override_tp_pct"),
+                                 ("dwell_seconds", "override_dwell_seconds"), ("band_lo", "override_stoch_band_lo"),
+                                 ("band_hi", "override_stoch_band_hi"), ("reversal_lo", "override_stoch_reversal_lo"),
+                                 ("reversal_hi", "override_stoch_reversal_hi"), ("window", "override_stoch_window")]
+                else:
+                    field_map = [("sl_pct", "override_sl_pct"), ("trigger_pct", "override_profit_lock_trigger"),
+                                 ("trail_pct", "override_profit_lock_trail"), ("tp_pct", "override_tp_pct"),
+                                 ("dwell_seconds", "override_dwell_seconds")]
+                patch.update({col: settings[src] for src, col in field_map if settings.get(src) is not None})
         if not patch:
             return
         try:
             await self.update_state(patch)
-            self._schedule_rules_last_applied_key = key
+            if new_key is not None and len(patch) > (1 if "enabled" in patch else 0):
+                self._schedule_rules_last_applied_key = new_key
             await self.log_run("schedule_rule_applied", {"patch": patch})
         except Exception:
             pass
@@ -5082,7 +5090,7 @@ class StochBot:
         holds_lock = await self._acquire_instance_lock()
         self._refresh_hedge_entry_filters(state, holds_lock)
         await self._refresh_environment(holds_lock)
-        await self._apply_schedule_rules()
+        await self._apply_schedule_rules(state)
 
         if cfg.self_lock_enabled and cfg.self_lock_relocks_on_boot:
             # Covers the one gap _load_self_lock_state's own boot-time re-lock can't: the user

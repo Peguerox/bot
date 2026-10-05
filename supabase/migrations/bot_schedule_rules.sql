@@ -1,8 +1,10 @@
 -- Master schedule panel -- 2026-10-04. Run in the Supabase SQL Editor.
 -- One shared row drives both Worker 1 and the hedge, by hour and/or live ER/volume/wiggle/rate
 -- conditions. `rules` is an ORDERED JSONB array; the first rule whose hour range (if set) AND
--- every set min/max condition both hold wins -- no match is a no-op (settings stay as last
--- applied, never revert to compiled defaults). Each rule shape:
+-- every set min/max condition both hold wins. A match turns that bot ON and applies its
+-- settings; no match turns it OFF -- re-checked every ~30s, overriding manual ON/OFF clicks for
+-- as long as this row's own `enabled` stays true. Never closes an open position, only
+-- blocks/allows new entries, same as every other ON/OFF switch in this project. Each rule shape:
 --   { "hour_start": 0-23 | null, "hour_end": 0-23 | null,
 --     "er_min": number | null, "er_max": number | null,
 --     "volume_min": number | null, "volume_max": number | null,

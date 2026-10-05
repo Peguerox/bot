@@ -6175,9 +6175,10 @@ async def t_schedule_rules_off_by_default_schema_flag():
     bot = make_bot(ex, candles=_schedule_candles(), schedule_rules_enabled=False,
                     schedule_rules_bot_key="worker1")
     bot.sb = _schedule_sb([{"worker1": {"sl_pct": 0.5}}], calls=calls)
-    await bot._apply_schedule_rules()
+    await bot._apply_schedule_rules(bot.state_row)
     check("never fetched the shared schedule row", calls == [], calls)
     check("no override written", "override_sl_pct" not in bot.state_row)
+    check("enabled untouched", bot.state_row["enabled"] is True)
 
 
 async def t_schedule_rules_off_without_bot_key():
@@ -6187,7 +6188,7 @@ async def t_schedule_rules_off_without_bot_key():
     bot = make_bot(ex, candles=_schedule_candles(), schedule_rules_enabled=True,
                     schedule_rules_bot_key=None)
     bot.sb = _schedule_sb([{"worker1": {"sl_pct": 0.5}}], calls=calls)
-    await bot._apply_schedule_rules()
+    await bot._apply_schedule_rules(bot.state_row)
     check("never fetched -- no bot_key means nothing to apply", calls == [], calls)
 
 
@@ -6197,8 +6198,9 @@ async def t_schedule_rules_row_disabled_no_write():
     bot = make_bot(ex, candles=_schedule_candles(), schedule_rules_enabled=True,
                     schedule_rules_bot_key="worker1")
     bot.sb = _schedule_sb([{"worker1": {"sl_pct": 0.5}}], enabled=False)
-    await bot._apply_schedule_rules()
+    await bot._apply_schedule_rules(bot.state_row)
     check("no override written -- schedule system itself is off", "override_sl_pct" not in bot.state_row)
+    check("enabled untouched -- schedule system itself is off", bot.state_row["enabled"] is True)
 
 
 async def t_schedule_rules_applies_worker1_fields():
@@ -6211,7 +6213,7 @@ async def t_schedule_rules_applies_worker1_fields():
                         "dwell_seconds": 15, "band_lo": 15, "band_hi": 85,
                         "reversal_lo": 10, "reversal_hi": 90, "window": 8}}
     bot.sb = _schedule_sb([rule])
-    await bot._apply_schedule_rules()
+    await bot._apply_schedule_rules(bot.state_row)
     check("sl written", bot.state_row.get("override_sl_pct") == 0.20)
     check("trigger written", bot.state_row.get("override_profit_lock_trigger") == 0.05)
     check("trail written", bot.state_row.get("override_profit_lock_trail") == 0.03)
@@ -6222,6 +6224,8 @@ async def t_schedule_rules_applies_worker1_fields():
     check("reversal band written", bot.state_row.get("override_stoch_reversal_lo") == 10
           and bot.state_row.get("override_stoch_reversal_hi") == 90)
     check("window written", bot.state_row.get("override_stoch_window") == 8)
+    check("already enabled -- stays enabled, no redundant enabled patch needed",
+          bot.state_row["enabled"] is True)
 
 
 async def t_schedule_rules_applies_hedge_fields_only():
@@ -6234,7 +6238,7 @@ async def t_schedule_rules_applies_hedge_fields_only():
             "hedge": {"sl_pct": 0.04, "trigger_pct": 0.04, "trail_pct": 0.02, "tp_pct": 0.10,
                       "dwell_seconds": 20}}
     bot.sb = _schedule_sb([rule])
-    await bot._apply_schedule_rules()
+    await bot._apply_schedule_rules(bot.state_row)
     check("hedge sl written, not worker1's", bot.state_row.get("override_sl_pct") == 0.04)
     check("hedge trigger/trail/tp/dwell written",
           bot.state_row.get("override_profit_lock_trigger") == 0.04
@@ -6245,16 +6249,48 @@ async def t_schedule_rules_applies_hedge_fields_only():
           "override_stoch_band_lo" not in bot.state_row)
 
 
-async def t_schedule_rules_no_match_is_a_noop():
-    print("\n[schedule rules: no rule matches -- nothing written, nothing crashes]")
+async def t_schedule_rules_no_match_turns_bot_off():
+    print("\n[schedule rules: no rule matches -- turns the bot OFF, writes no settings]")
     ex = FakeExchange()
     bot = make_bot(ex, candles=_schedule_candles(), schedule_rules_enabled=True,
                     schedule_rules_bot_key="worker1")
     rule = {"hour_start": 0, "hour_end": 24, "er_min": 2.0,  # impossible -- ER never reaches 2.0
             "worker1": {"sl_pct": 0.5}}
     bot.sb = _schedule_sb([rule])
-    await bot._apply_schedule_rules()
-    check("no override written", "override_sl_pct" not in bot.state_row)
+    await bot._apply_schedule_rules(bot.state_row)
+    check("no settings written", "override_sl_pct" not in bot.state_row)
+    check("bot turned OFF -- no match, direct request: \"once the rules finish turn it off\"",
+          bot.state_row["enabled"] is False)
+
+
+async def t_schedule_rules_match_turns_bot_on():
+    print("\n[schedule rules: a matching rule turns the bot ON even if it was off]")
+    ex = FakeExchange()
+    bot = make_bot(ex, candles=_schedule_candles(), schedule_rules_enabled=True,
+                    schedule_rules_bot_key="worker1")
+    bot.state_row["enabled"] = False
+    rule = {"hour_start": 0, "hour_end": 24, "worker1": {"sl_pct": 0.15}}
+    bot.sb = _schedule_sb([rule])
+    await bot._apply_schedule_rules(bot.state_row)
+    check("bot turned ON -- direct request: \"if off turn it on\"", bot.state_row["enabled"] is True)
+    check("settings applied too", bot.state_row.get("override_sl_pct") == 0.15)
+
+
+async def t_schedule_rules_enabled_sync_overrides_manual_change_every_cycle():
+    print("\n[schedule rules: a manual ON/OFF click gets overridden back every cycle, not just on a new match]")
+    ex = FakeExchange()
+    bot = make_bot(ex, candles=_schedule_candles(), schedule_rules_enabled=True,
+                    schedule_rules_bot_key="worker1")
+    rule = {"hour_start": 0, "hour_end": 24, "worker1": {"sl_pct": 0.15}}
+    bot.sb = _schedule_sb([rule])
+    await bot._apply_schedule_rules(bot.state_row)
+    check("first cycle: enabled", bot.state_row["enabled"] is True)
+    # Simulate a manual OFF click in between schedule cycles -- the SAME rule still matches.
+    bot.state_row["enabled"] = False
+    bot._schedule_rules_last_fetch_ts = 0.0  # force the throttle to allow a second check
+    await bot._apply_schedule_rules(bot.state_row)
+    check("second cycle: re-asserted ON despite the manual OFF, rule content unchanged",
+          bot.state_row["enabled"] is True)
 
 
 async def t_schedule_rules_first_match_wins():
@@ -6267,12 +6303,12 @@ async def t_schedule_rules_first_match_wins():
         {"hour_start": 0, "hour_end": 24, "worker1": {"sl_pct": 0.22}},
     ]
     bot.sb = _schedule_sb(rules)
-    await bot._apply_schedule_rules()
+    await bot._apply_schedule_rules(bot.state_row)
     check("the FIRST matching rule's value wins", bot.state_row.get("override_sl_pct") == 0.11)
 
 
 async def t_schedule_rules_unchanged_match_does_not_rewrite():
-    print("\n[schedule rules: the same matched rule twice in a row does not re-write]")
+    print("\n[schedule rules: the same matched rule twice in a row does not re-write the SETTINGS]")
     ex = FakeExchange()
     calls = []
     bot = make_bot(ex, candles=_schedule_candles(), schedule_rules_enabled=True,
@@ -6280,16 +6316,17 @@ async def t_schedule_rules_unchanged_match_does_not_rewrite():
     rule = {"hour_start": 0, "hour_end": 24, "worker1": {"sl_pct": 0.11}}
     bot.sb = _schedule_sb([rule], calls=calls)
     bot._schedule_rules_last_fetch_ts = 0.0
-    await bot._apply_schedule_rules()
+    await bot._apply_schedule_rules(bot.state_row)
     check("first call wrote the value", bot.state_row.get("override_sl_pct") == 0.11)
     write_count_after_first = len(bot.runs)
-    # Force a second fetch (bypass the 30s throttle) with the SAME rule content.
+    # Force a second fetch (bypass the 30s throttle) with the SAME rule content; already enabled,
+    # so this cycle's patch would be empty (settings unchanged, enabled unchanged) -- no write.
     bot._schedule_rules_last_fetch_ts = 0.0
     bot.state_row.pop("override_sl_pct")  # prove a second write would be detectable if it happened
-    await bot._apply_schedule_rules()
-    check("second call with the unchanged rule did not re-write",
+    await bot._apply_schedule_rules(bot.state_row)
+    check("second call with the unchanged rule did not re-write the settings",
           "override_sl_pct" not in bot.state_row)
-    check("no new schedule_rule_applied run logged on the unchanged match",
+    check("no new schedule_rule_applied run logged on the fully-unchanged cycle",
           len(bot.runs) == write_count_after_first, (len(bot.runs), write_count_after_first))
 
 
@@ -6301,20 +6338,21 @@ async def t_schedule_rules_fetch_is_throttled():
                     schedule_rules_bot_key="worker1")
     rule = {"hour_start": 0, "hour_end": 24, "worker1": {"sl_pct": 0.11}}
     bot.sb = _schedule_sb([rule], calls=calls)
-    await bot._apply_schedule_rules()
+    await bot._apply_schedule_rules(bot.state_row)
     check("first call fetches", len(calls) == 1, calls)
-    await bot._apply_schedule_rules()
+    await bot._apply_schedule_rules(bot.state_row)
     check("second call within 30s does not re-fetch", len(calls) == 1, calls)
 
 
 async def t_schedule_rules_malformed_data_fails_closed():
-    print("\n[schedule rules: malformed/empty rules never crash the tick]")
+    print("\n[schedule rules: malformed rules (None, not a list) never crash -- treated as empty]")
     ex = FakeExchange()
     bot = make_bot(ex, candles=_schedule_candles(), schedule_rules_enabled=True,
                     schedule_rules_bot_key="worker1")
     bot.sb = _schedule_sb(None)  # rules is None, not a list
-    await bot._apply_schedule_rules()  # must not raise
-    check("no override written with rules=None", "override_sl_pct" not in bot.state_row)
+    await bot._apply_schedule_rules(bot.state_row)  # must not raise
+    check("no settings written with rules=None", "override_sl_pct" not in bot.state_row)
+    check("treated as no match -- bot turned off, same as any other no-match", bot.state_row["enabled"] is False)
 
 
 async def t_volume_switch_uses_flip_above_threshold():
@@ -6548,7 +6586,9 @@ async def main():
               t_schedule_rules_row_disabled_no_write,
               t_schedule_rules_applies_worker1_fields,
               t_schedule_rules_applies_hedge_fields_only,
-              t_schedule_rules_no_match_is_a_noop,
+              t_schedule_rules_no_match_turns_bot_off,
+              t_schedule_rules_match_turns_bot_on,
+              t_schedule_rules_enabled_sync_overrides_manual_change_every_cycle,
               t_schedule_rules_first_match_wins,
               t_schedule_rules_unchanged_match_does_not_rewrite,
               t_schedule_rules_fetch_is_throttled,
