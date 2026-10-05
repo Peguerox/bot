@@ -276,6 +276,10 @@ LONG_CONFIG = BotConfig(
     # other both-legs-identical override. Requires bot_schedule_rules.sql.
     schedule_rules_enabled=True,
     schedule_rules_bot_key="hedge",
+    # 2026-10-05, bug fix: this leg never published its own volume/wiggle, so the dashboard's
+    # "Currently governing" box fell back to Worker 1's readings -- wrong whenever Worker 1 is
+    # off. Requires bot_schedule_live_metrics.sql.
+    schema_has_schedule_metrics=True,
 )
 
 SHORT_CONFIG = BotConfig(
@@ -343,6 +347,7 @@ SHORT_CONFIG = BotConfig(
     # See LONG_CONFIG's docstring -- same shared rules row, "hedge" settings object.
     schedule_rules_enabled=True,
     schedule_rules_bot_key="hedge",
+    schema_has_schedule_metrics=True,
 )
 
 

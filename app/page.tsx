@@ -4160,27 +4160,38 @@ function MasterSchedulePanel({
     setRules((r) => r.map((rule, idx) => (idx === i ? { ...rule, [bot]: { ...rule[bot], ...patch } } : rule)));
   }
 
-  const liveEr = worker1State?.live_er_2h ?? null;
-  const liveVolume = worker1State?.live_candle_volume ?? null;
-  const liveWiggle = worker1State?.live_wiggle ?? null;
-  const liveRate = worker1State?.live_volume_jump_rate ?? null;
-  const liveVolWiggleRatio = worker1State?.live_volume_wiggle_ratio ?? null;
-  // Volume x wiggle PRODUCT (2026-10-04, direct request: "volume and wiggle product can be a
-  // filter as well"). No new live column -- same two numbers already shown above, multiplied
-  // client-side; the backend computes the same product independently at rule-evaluation time
-  // (StochBot._apply_schedule_rules), never from this display value.
-  const liveVolWiggleProduct = liveVolume != null && liveWiggle != null ? liveVolume * liveWiggle : null;
+  // 2026-10-05 bug fix: this used to read ONLY Worker 1's live_candle_volume/live_wiggle for
+  // BOTH bots' "currently governing" display -- the hedge never published those, so whenever
+  // Worker 1 was off the box showed Worker 1's (irrelevant) match, not the hedge's real one.
+  // live_schedule_* is the exact same number _apply_schedule_rules just matched against,
+  // published separately by each bot (StochBot.schema_has_schedule_metrics) -- so each bot's
+  // match below is computed from that bot's own reading, never borrowed from the other.
+  const liveEr = worker1State?.live_schedule_er ?? null;
+  const liveVolume = worker1State?.live_schedule_volume ?? null;
+  const liveWiggle = worker1State?.live_schedule_wiggle ?? null;
+  const liveRate = worker1State?.live_schedule_rate ?? null;
+  const liveVolWiggleRatio = worker1State?.live_schedule_vol_wiggle_ratio ?? null;
+  const liveVolWiggleProduct = worker1State?.live_schedule_vol_wiggle_product ?? null;
 
-  // Which saved rule is actually governing the bots right now (or none) -- first in list order
-  // whose hour range + conditions all hold against the live readings above. Display only; the
-  // real match is decided independently server-side on each bot's own candle feed.
   const liveMiamiHour = getMiamiHour();
-  const liveMetrics = { er: liveEr, volume: liveVolume, wiggle: liveWiggle, rate: liveRate,
-                         volWiggleRatio: liveVolWiggleRatio, volWiggleProduct: liveVolWiggleProduct };
-  const matchedRuleIdx = scheduleEnabled
-    ? rules.findIndex((r) => ruleConditionsMatch(r, liveMiamiHour, liveMetrics))
-    : -1;
-  const matchedRule = matchedRuleIdx >= 0 ? rules[matchedRuleIdx] : null;
+  const worker1Metrics = { er: liveEr, volume: liveVolume, wiggle: liveWiggle, rate: liveRate,
+                            volWiggleRatio: liveVolWiggleRatio, volWiggleProduct: liveVolWiggleProduct };
+  const hedgeMetrics = {
+    er: hedgeLongState?.live_schedule_er ?? null,
+    volume: hedgeLongState?.live_schedule_volume ?? null,
+    wiggle: hedgeLongState?.live_schedule_wiggle ?? null,
+    rate: hedgeLongState?.live_schedule_rate ?? null,
+    volWiggleRatio: hedgeLongState?.live_schedule_vol_wiggle_ratio ?? null,
+    volWiggleProduct: hedgeLongState?.live_schedule_vol_wiggle_product ?? null,
+  };
+  // Each bot evaluates the same saved rules against its OWN candle feed server-side, so they
+  // can genuinely land on different rules -- shown separately below, never collapsed into one.
+  const worker1MatchedIdx = scheduleEnabled
+    ? rules.findIndex((r) => ruleConditionsMatch(r, liveMiamiHour, worker1Metrics)) : -1;
+  const hedgeMatchedIdx = scheduleEnabled
+    ? rules.findIndex((r) => ruleConditionsMatch(r, liveMiamiHour, hedgeMetrics)) : -1;
+  const worker1MatchedRule = worker1MatchedIdx >= 0 ? rules[worker1MatchedIdx] : null;
+  const hedgeMatchedRule = hedgeMatchedIdx >= 0 ? rules[hedgeMatchedIdx] : null;
 
   const condField = (label: string, i: number, loKey: string, hiKey: string, rule: any, unit = "") => (
     <div className="flex-1 min-w-[90px]">
@@ -4305,19 +4316,21 @@ function MasterSchedulePanel({
         <p className="text-gray-500 text-[10px] uppercase mb-1">Currently governing</p>
         {!scheduleEnabled ? (
           <p className="text-[11px] text-gray-500">Schedule automation is off -- rules aren't applying anything.</p>
-        ) : matchedRule == null ? (
-          <p className="text-[11px] text-amber-400">No rule matches right now -- both bots will turn OFF on the next check.</p>
         ) : (
-          <p className="text-[11px] text-white font-bold">
-            Rule {matchedRuleIdx + 1}
-            <span className={`ml-1.5 text-[9px] font-bold px-1 rounded ${matchedRule.worker1_enabled !== false ? "bg-green-500/20 text-green-400" : "bg-red-500/20 text-red-400"}`}>
-              W1 {matchedRule.worker1_enabled !== false ? "ON" : "OFF"}
-            </span>
-            <span className={`ml-1 text-[9px] font-bold px-1 rounded ${matchedRule.hedge_enabled !== false ? "bg-green-500/20 text-green-400" : "bg-red-500/20 text-red-400"}`}>
-              Hedge {matchedRule.hedge_enabled !== false ? "ON" : "OFF"}
-            </span>
-            <span className="text-[10px] font-normal text-gray-500 ml-1.5">see the rule below</span>
-          </p>
+          <div className="flex items-center gap-4">
+            <div>
+              <p className="text-gray-500 text-[9px] uppercase">Worker 1</p>
+              <p className="text-white font-bold text-2xl leading-tight">
+                {worker1MatchedRule == null ? "OFF" : worker1MatchedIdx + 1}
+              </p>
+            </div>
+            <div>
+              <p className="text-gray-500 text-[9px] uppercase">Hedge</p>
+              <p className="text-white font-bold text-2xl leading-tight">
+                {hedgeMatchedRule == null ? "OFF" : hedgeMatchedIdx + 1}
+              </p>
+            </div>
+          </div>
         )}
       </div>
 

@@ -6489,6 +6489,64 @@ async def t_schedule_rules_malformed_data_fails_closed():
     check("treated as no match -- bot turned off, same as any other no-match", bot.state_row["enabled"] is False)
 
 
+async def t_schedule_rules_metrics_not_published_without_schema_flag():
+    print("\n[schedule rules: schema_has_schedule_metrics=False (default) -- never publishes live_schedule_*]")
+    ex = FakeExchange()
+    bot = make_bot(ex, candles=_schedule_candles(volume=2.5), schedule_rules_enabled=True,
+                    schedule_rules_bot_key="worker1")  # schema_has_schedule_metrics defaults False
+    bot.sb = _schedule_sb([{"worker1": {"sl_pct": 0.11}}])
+    await bot._apply_schedule_rules(bot.state_row)
+    check("settings still applied", bot.state_row.get("override_sl_pct") == 0.11)
+    check("no live_schedule_* columns written", "live_schedule_volume" not in bot.state_row
+          and "live_schedule_wiggle" not in bot.state_row)
+
+
+async def t_schedule_rules_publishes_live_metrics_with_schema_flag():
+    print("\n[schedule rules: schema_has_schedule_metrics=True -- publishes the exact numbers matched against]")
+    ex = FakeExchange()
+    # _schedule_candles(volume=2.5) -> wiggle = sqrt(2), ratio ~= 1.7678, product ~= 3.5355
+    # (same deterministic setup as t_rule_matches_vol_wiggle_ratio_condition).
+    bot = make_bot(ex, candles=_schedule_candles(volume=2.5), schedule_rules_enabled=True,
+                    schedule_rules_bot_key="worker1", schema_has_schedule_metrics=True)
+    bot.sb = _schedule_sb([{"worker1": {"sl_pct": 0.11}}])
+    await bot._apply_schedule_rules(bot.state_row)
+    check("volume published", bot.state_row.get("live_schedule_volume") == 2.5)
+    check("wiggle published", abs(bot.state_row.get("live_schedule_wiggle") - 1.41421356) < 1e-4)
+    check("vol_wiggle_ratio published", abs(bot.state_row.get("live_schedule_vol_wiggle_ratio") - 1.76777) < 1e-3)
+    check("vol_wiggle_product published", abs(bot.state_row.get("live_schedule_vol_wiggle_product") - 3.53553) < 1e-3)
+    check("er published (not None)", bot.state_row.get("live_schedule_er") is not None)
+    check("rate published (not None)", bot.state_row.get("live_schedule_rate") is not None)
+
+
+async def t_schedule_rules_metrics_publish_is_isolated_from_settings_patch():
+    print("\n[schedule rules: a bot with no settings for its key still publishes live metrics]")
+    ex = FakeExchange()
+    bot = make_bot(ex, candles=_schedule_candles(volume=2.5), schedule_rules_enabled=True,
+                    schedule_rules_bot_key="worker1", schema_has_schedule_metrics=True)
+    # Rule matches (no conditions set) but carries no "worker1" settings object at all.
+    bot.sb = _schedule_sb([{}])
+    await bot._apply_schedule_rules(bot.state_row)
+    check("no settings columns written", "override_sl_pct" not in bot.state_row)
+    check("metrics still published independently", bot.state_row.get("live_schedule_volume") == 2.5)
+
+
+async def t_schedule_rules_metrics_publish_throttled():
+    print("\n[schedule rules: live metrics re-published immediately, but not forced -- a second call this soon still writes fresh values]")
+    ex = FakeExchange()
+    bot = make_bot(ex, candles=_schedule_candles(volume=2.5), schedule_rules_enabled=True,
+                    schedule_rules_bot_key="worker1", schema_has_schedule_metrics=True)
+    bot.sb = _schedule_sb([{"worker1": {"sl_pct": 0.11}}])
+    await bot._apply_schedule_rules(bot.state_row)
+    first_ts = bot._schedule_metrics_last_persist_ts
+    check("persist timestamp stamped on first call", first_ts > 0)
+    bot.state_row.pop("live_schedule_volume")
+    await bot._apply_schedule_rules(bot.state_row)
+    check("throttled -- immediate second call does not re-publish within 5s",
+          "live_schedule_volume" not in bot.state_row)
+    check("throttle timestamp unchanged on the throttled call",
+          bot._schedule_metrics_last_persist_ts == first_ts)
+
+
 async def t_volume_switch_uses_flip_above_threshold():
     print("\n[volume regime switch: at/above threshold, flip signal wins and gates are bypassed]")
     side = await _volume_switch_case(candle_volume=5.0, threshold=2.0)
@@ -6735,6 +6793,10 @@ async def main():
               t_schedule_rules_unchanged_match_does_not_rewrite,
               t_schedule_rules_fetch_is_throttled,
               t_schedule_rules_malformed_data_fails_closed,
+              t_schedule_rules_metrics_not_published_without_schema_flag,
+              t_schedule_rules_publishes_live_metrics_with_schema_flag,
+              t_schedule_rules_metrics_publish_is_isolated_from_settings_patch,
+              t_schedule_rules_metrics_publish_throttled,
               t_volume_switch_uses_flip_above_threshold,
               t_volume_switch_keeps_normal_path_below_threshold,
               t_volume_switch_off_by_default,

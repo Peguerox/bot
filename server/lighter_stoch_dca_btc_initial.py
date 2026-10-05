@@ -445,6 +445,11 @@ CONFIG = BotConfig(
     # BotConfig.schedule_rules_enabled / StochBot._apply_schedule_rules.
     schedule_rules_enabled=True,
     schedule_rules_bot_key="worker1",
+    # 2026-10-05, bug fix: the dashboard's "Currently governing" box was reading Worker 1's
+    # own live_candle_volume/live_wiggle, which are fine for Worker 1 but don't exist for the
+    # hedge -- publishes the exact numbers _apply_schedule_rules matches against so the panel
+    # is never guessing. Requires bot_schedule_live_metrics.sql.
+    schema_has_schedule_metrics=True,
     # 2026-10-03, direct request ("make sure we are collecting all that data... what settings
     # won for what conditions"): Worker 1 never had entry_k/balance_index/vol_pct/dispersion
     # snapshotting at all -- the hedge legs have had this since 2026-10-01. Purely descriptive,

@@ -375,6 +375,13 @@ class BotConfig:
     # See StochBot._apply_schedule_rules.
     schedule_rules_enabled: bool = False
     schedule_rules_bot_key: Optional[str] = None  # "worker1" or "hedge"
+    # Publishes the exact live ER/volume/wiggle/rate/vol-wiggle numbers _apply_schedule_rules
+    # just matched against, so the dashboard's "Currently governing" box can show each bot's
+    # OWN real match instead of guessing from Worker 1's readings (2026-10-05 bug: the hedge
+    # never published its own volume, so the panel silently fell back to Worker 1's -- wrong
+    # whenever Worker 1 is off and only the hedge is live). Requires the migration adding the
+    # live_schedule_* columns; needs schedule_rules_enabled too.
+    schema_has_schedule_metrics: bool = False
     # Low-volatility entry gate (2026-09-29, direct request): the OPPOSITE direction from the
     # pair above -- blocks new entries (and a reversal's reopen leg, never TP/SL/exits) when
     # the market is TOO QUIET rather than too spiky. Built to test a real finding from 844 real
@@ -1745,6 +1752,7 @@ class StochBot:
         self._schedule_rules_last_fetch_ts = 0.0
         self._schedule_rules_cache = None
         self._schedule_rules_last_applied_key = None
+        self._schedule_metrics_last_persist_ts = 0.0
         # Whichever peak the ACTIVE release_mode is tracking, for the dashboard -- direct
         # report: "I only see the timer" with no way to tell whether a wiggle/volume/rate
         # release is close or far. None when release_mode is off/unset. See
@@ -3256,9 +3264,23 @@ class StochBot:
         # Volume x wiggle PRODUCT (2026-10-04, direct request: "volume and wiggle product can be
         # a filter as well... below 90 you trade") -- deliberately NOT a dedicated compute_*
         # function, since it's just the two readings already computed above multiplied together;
-        # no new candle math, no new live-readout column needed (the dashboard shows the same
-        # product client-side from the two numbers it already displays).
+        # no new candle math needed.
         vol_wiggle_product = volume * wiggle if volume is not None and wiggle is not None else None
+        if cfg.schema_has_schedule_metrics and now - self._schedule_metrics_last_persist_ts >= 5.0:
+            self._schedule_metrics_last_persist_ts = now
+            # Isolated best-effort write, same reasoning as live_candle_volume elsewhere: a
+            # missing column (migration not yet run) must never cost the settings patch below,
+            # which it would if merged into that same dict -- PostgREST rejects the whole
+            # update on one unknown column.
+            try:
+                await self.update_state({
+                    "live_schedule_er": er, "live_schedule_volume": volume,
+                    "live_schedule_wiggle": wiggle, "live_schedule_rate": rate,
+                    "live_schedule_vol_wiggle_ratio": vol_wiggle_ratio,
+                    "live_schedule_vol_wiggle_product": vol_wiggle_product,
+                })
+            except Exception:
+                pass
         hour = self._schedule_current_hour()
         matched = None
         for rule in rules:
