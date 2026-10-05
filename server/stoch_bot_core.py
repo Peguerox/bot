@@ -3283,9 +3283,6 @@ class StochBot:
             except Exception:
                 pass  # keep the previous cache rather than going blind on one failed fetch
         cache = self._schedule_rules_cache
-        if not cache or not cache.get("enabled"):
-            return
-        rules = cache.get("rules") or []
         er, _ = compute_er_and_direction(self.candles, 120)
         volume = compute_candle_volume_avg(self.candles, 10)
         wiggle = compute_intrabar_dispersion(self.candles, 5)
@@ -3321,6 +3318,9 @@ class StochBot:
                 })
             except Exception:
                 pass
+        if not cache or not cache.get("enabled"):
+            return
+        rules = cache.get("rules") or []
         hour = self._schedule_current_hour()
         matched = None
         for rule in rules:
