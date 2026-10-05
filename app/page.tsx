@@ -1780,14 +1780,16 @@ function CompactStochBtcPanel({
 
   // Volume/wiggle lock (2026-10-03, direct request after a live "market manipulation" concern
   // -- "we need something to detect very quickly so we can lock in the bot and get out"). Ratio
-  // = volume_avg / wiggle (intrabar dispersion); unlike the jump guard above this is a pure
-  // instant reading with no peak-tracking or pause timer -- it blocks new entries only while
-  // the ratio stays above the threshold, and releases the instant it drops back down.
+  // = wiggle (intrabar dispersion) / volume_avg -- flipped 2026-10-05 ("rechange the calculation
+  // of volume/wiggle to wiggle/volume"), so LOW now means chop (little price movement per unit
+  // of volume) and the lock fires BELOW the threshold, not above. Unlike the jump guard above
+  // this is a pure instant reading with no peak-tracking or pause timer -- it blocks new entries
+  // only while the ratio stays below the threshold, and releases the instant it rises back up.
   const liveWiggleRatio: number | null = state?.live_volume_wiggle_ratio ?? null;
   const curWiggleLockThreshold: number | null = state?.override_volume_wiggle_lock_threshold ?? null;
   const curWiggleLockEnabled: boolean = state?.override_volume_wiggle_lock_enabled ?? true;
   const wiggleLocked = curWiggleLockEnabled && curWiggleLockThreshold != null
-    && liveWiggleRatio != null && liveWiggleRatio > curWiggleLockThreshold;
+    && liveWiggleRatio != null && liveWiggleRatio < curWiggleLockThreshold;
   const [wiggleLockThresholdIn, setWiggleLockThresholdIn] = useState("");
 
   async function handleSetWiggleLockThreshold() {
@@ -2584,9 +2586,9 @@ function CompactStochBtcPanel({
       {showLevers && !loading && (
         <div className="bg-gray-800/60 rounded-lg p-2">
           {/* 2026-10-03, direct request after a live "market manipulation" concern -- ratio of
-              volume to wiggle (intrabar dispersion). Instant reading, no pause timer: blocks
-              new entries only while the ratio stays above the threshold, releases the moment
-              it drops. */}
+              wiggle (intrabar dispersion) to volume, flipped 2026-10-05. Instant reading, no
+              pause timer: blocks new entries only while the ratio stays below the threshold,
+              releases the moment it rises back up. */}
           <div className="flex items-baseline justify-between">
             <p className="text-gray-500 text-[10px] uppercase">Volume/wiggle lock</p>
             <button
@@ -2636,8 +2638,8 @@ function CompactStochBtcPanel({
             </button>
           </div>
           <p className="text-gray-600 text-[9px] leading-snug mt-1">
-            Volume ÷ wiggle. Instant reading, no pause timer -- blocks new entries only while
-            above the threshold, releases the moment it drops back down.
+            Wiggle ÷ volume. Instant reading, no pause timer -- blocks new entries only while
+            below the threshold, releases the moment it rises back up.
           </p>
         </div>
       )}
@@ -2954,14 +2956,15 @@ function HedgeDualLegPanel({
     setSavingJump(null);
   }
 
-  // Volume/wiggle lock -- see Worker 1's panel for the full reasoning. Pure instant reading, no
+  // Volume/wiggle lock -- see Worker 1's panel for the full reasoning. Ratio = wiggle/volume
+  // (flipped 2026-10-05); lock fires BELOW the threshold now, not above. Pure instant reading, no
   // peak-tracking or pause timer. LONG leg is the live-readout owner, same convention as the
   // jump guard above; overrides are written identically to both legs.
   const liveWiggleRatio: number | null = longState?.live_volume_wiggle_ratio ?? null;
   const curWiggleLockThreshold: number | null = longState?.override_volume_wiggle_lock_threshold ?? null;
   const curWiggleLockEnabled: boolean = longState?.override_volume_wiggle_lock_enabled ?? true;
   const wiggleLocked = curWiggleLockEnabled && curWiggleLockThreshold != null
-    && liveWiggleRatio != null && liveWiggleRatio > curWiggleLockThreshold;
+    && liveWiggleRatio != null && liveWiggleRatio < curWiggleLockThreshold;
   const [wiggleLockThresholdIn, setWiggleLockThresholdIn] = useState("");
   const [savingWiggleLock, setSavingWiggleLock] = useState<string | null>(null);
 
@@ -3604,9 +3607,10 @@ function HedgeDualLegPanel({
             </div>
             <div className="bg-gray-800/60 rounded-lg p-2 col-span-2">
               {/* 2026-10-03, direct request after a live "market manipulation" concern -- ratio
-                  of volume to wiggle (intrabar dispersion), same mechanism as Worker 1's panel.
-                  Instant reading, no pause timer: blocks new paired cycles only while the ratio
-                  stays above the threshold, releases the moment it drops. */}
+                  of wiggle (intrabar dispersion) to volume, flipped 2026-10-05, same mechanism
+                  as Worker 1's panel. Instant reading, no pause timer: blocks new paired cycles
+                  only while the ratio stays below the threshold, releases the moment it rises
+                  back up. */}
               <div className="flex items-baseline justify-between">
                 <p className="text-gray-500 text-[10px] uppercase">Volume/wiggle lock (both legs)</p>
                 <button
@@ -3656,8 +3660,8 @@ function HedgeDualLegPanel({
                 </button>
               </div>
               <p className="text-gray-600 text-[9px] leading-snug mt-1">
-                Volume ÷ wiggle. Instant reading, no pause timer -- blocks new paired cycles only
-                while above the threshold, releases the moment it drops back down.
+                Wiggle ÷ volume. Instant reading, no pause timer -- blocks new paired cycles only
+                while below the threshold, releases the moment it rises back up.
               </p>
             </div>
           </div>
@@ -4037,7 +4041,7 @@ function formatSettingsLine(settings: any, labels: [string, string][]): string {
 const CONDITION_LABELS: [string, string, string][] = [
   ["ER", "er_min", "er_max"], ["Volume", "volume_min", "volume_max"],
   ["Wiggle", "wiggle_min", "wiggle_max"], ["Rate", "rate_min", "rate_max"],
-  ["Vol/Wiggle", "vol_wiggle_ratio_min", "vol_wiggle_ratio_max"],
+  ["Wiggle/Vol", "vol_wiggle_ratio_min", "vol_wiggle_ratio_max"],
   ["Vol×Wiggle", "vol_wiggle_product_min", "vol_wiggle_product_max"],
 ];
 
@@ -4335,12 +4339,12 @@ function MasterSchedulePanel({
             <p className="text-gray-600 text-[8px] leading-tight">$ price swing</p>
           </div>
           <div>
-            <p className="text-gray-600 text-[9px] uppercase">Vol/Wiggle</p>
-            <p className={liveVolWiggleRatio == null ? "text-gray-500" : liveVolWiggleRatio >= 0.30 ? "text-amber-400" : "text-gray-300"}>
+            <p className="text-gray-600 text-[9px] uppercase">Wiggle/Vol</p>
+            <p className={liveVolWiggleRatio == null ? "text-gray-500" : liveVolWiggleRatio <= 3.33 ? "text-amber-400" : "text-gray-300"}>
               {liveVolWiggleRatio != null ? liveVolWiggleRatio.toFixed(3) : "—"}
             </p>
             <p className="text-gray-600 text-[8px] leading-tight">
-              {liveVolWiggleRatio == null ? "" : liveVolWiggleRatio >= 0.30 ? "watch -- thin?" : "normal"}
+              {liveVolWiggleRatio == null ? "" : liveVolWiggleRatio <= 3.33 ? "watch -- thin?" : "normal"}
             </p>
           </div>
           <div>
@@ -4446,7 +4450,7 @@ function MasterSchedulePanel({
                     {condField("Volume", i, "volume_min", "volume_max", rule)}
                     {condField("Wiggle", i, "wiggle_min", "wiggle_max", rule)}
                     {condField("Vol Rate", i, "rate_min", "rate_max", rule)}
-                    {condField("Vol/Wiggle", i, "vol_wiggle_ratio_min", "vol_wiggle_ratio_max", rule)}
+                    {condField("Wiggle/Vol", i, "vol_wiggle_ratio_min", "vol_wiggle_ratio_max", rule)}
                     {condField("Vol×Wiggle", i, "vol_wiggle_product_min", "vol_wiggle_product_max", rule)}
                   </div>
                 </div>

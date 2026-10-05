@@ -1278,21 +1278,29 @@ def compute_candle_volume_rate(candles, window=10):
 
 
 def compute_volume_wiggle_ratio(candles, vol_window=10, wiggle_window=5):
-    """compute_candle_volume_avg / compute_intrabar_dispersion -- traded BTC relative to how
-    much price is actually dispersing. 2026-10-04, direct request during a real live
+    """compute_intrabar_dispersion / compute_candle_volume_avg -- how much price is actually
+    dispersing relative to traded BTC. 2026-10-04, direct request during a real live
     investigation ("someone increasing and decreasing volume on command"): a LOT of volume with
     LITTLE price movement is exactly "chop/wiggle" -- a lot of trading activity not translating
     into real price discovery -- which plain volume or plain wiggle alone can't tell apart from
-    a normal trending move (where volume and wiggle both rise together). Checked against the
-    real incident: the choppy hour measured 0.56, the highest of the full prior 24h window
-    (mean 0.34, median 0.24) -- a genuine, elevated reading, not a hunch. None if either
-    component is None, or if wiggle is exactly 0 (nothing to divide by -- a flat, dispersion-
-    free market, which this ratio isn't meaningful for anyway)."""
+    a normal trending move (where volume and wiggle both rise together). LOW readings are the
+    chop signal under this formula (little price movement per unit of volume); checked against
+    the real incident, the choppy hour measured ~1.79 (reciprocal of the original 0.56 reading),
+    the LOWEST of the full prior 24h window.
+
+    2026-10-05, direct request ("rechange the calculation of volume/wiggle to wiggle/volume"):
+    flipped from vol/wig to wig/vol -- inverts both this readout AND
+    BotConfig.volume_wiggle_lock_threshold's comparison (now ratio < threshold locks, was ratio >
+    threshold; see _update_volume_wiggle_lock). The live override threshold on all three bots was
+    converted to its reciprocal (0.4 -> 2.5) at the same time so the real-world lock trigger
+    point is mathematically unchanged, not just relabeled.
+
+    None if either component is None, or if volume is exactly 0 (nothing to divide by)."""
     vol = compute_candle_volume_avg(candles, vol_window)
     wig = compute_intrabar_dispersion(candles, wiggle_window)
-    if vol is None or wig is None or wig == 0:
+    if vol is None or wig is None or vol == 0:
         return None
-    return vol / wig
+    return wig / vol
 
 
 def compute_live_flip_streak(candles, lookback=20):
@@ -3143,7 +3151,7 @@ class StochBot:
                 pass  # Dashboard logging cannot interrupt stops/exits.
 
     def _update_volume_wiggle_lock(self, state):
-        """Instant volume/wiggle ratio vs a live-adjustable threshold -- 2026-10-04, direct
+        """Instant wiggle/volume ratio vs a live-adjustable threshold -- 2026-10-04, direct
         request during a real live investigation ("lock the bots when this ratio is above .30
         ... something to detect very quickly"). Deliberately simpler than the volume-jump guard
         above: no peak-tracking, no pause timer, no release mode -- just the CURRENT candle's
@@ -3160,7 +3168,14 @@ class StochBot:
         override_volume_wiggle_lock_enabled (direct follow-up: "give me an on and off switch
         too") -- a SEPARATE boolean from the threshold number, so flipping it off doesn't lose
         whatever threshold was dialed in. Defaults True (enabled) whenever a threshold is
-        configured, matching the behavior before this switch existed."""
+        configured, matching the behavior before this switch existed.
+
+        2026-10-05, direct request ("rechange the calculation of volume/wiggle to wiggle/volume"):
+        compute_volume_wiggle_ratio now returns wig/vol instead of vol/wig, so LOW readings are
+        the chop signal (little price movement per unit of volume), not high ones -- the
+        comparison flipped from ratio > threshold to ratio < threshold. The live override
+        threshold on all three bots was converted to its reciprocal (0.4 -> 2.5) at the same time
+        so the real-world lock trigger point is unchanged, not just relabeled."""
         cfg = self.cfg
         threshold = cfg.volume_wiggle_lock_threshold
         enabled = True
@@ -3173,7 +3188,7 @@ class StochBot:
                 enabled = bool(o)
         ratio = compute_volume_wiggle_ratio(self.candles)
         self._last_volume_wiggle_ratio = ratio
-        locked = enabled and threshold is not None and ratio is not None and ratio > threshold
+        locked = enabled and threshold is not None and ratio is not None and ratio < threshold
         self._volume_wiggle_locked = locked
         return locked
 
