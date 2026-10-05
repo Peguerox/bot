@@ -3258,7 +3258,12 @@ class StochBot:
         if now - self._schedule_rules_last_fetch_ts >= 30.0:
             self._schedule_rules_last_fetch_ts = now
             try:
-                rows = await self.sb("GET", "bot_schedule_rules?select=enabled,rules,min_hold_minutes&id=eq.1")
+                # select=* (not named columns): a column whose migration hasn't run yet must
+                # never error the WHOLE fetch -- PostgREST rejects an explicit select naming an
+                # unknown column outright, which would have broken schedule automation entirely
+                # (not just the new min_hold_minutes field) until bot_schedule_min_hold.sql runs.
+                # Same lesson as the settings API route's select("*") -- see CLAUDE.md.
+                rows = await self.sb("GET", "bot_schedule_rules?select=*&id=eq.1")
                 self._schedule_rules_cache = rows[0] if rows else None
             except Exception:
                 pass  # keep the previous cache rather than going blind on one failed fetch
