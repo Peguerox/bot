@@ -4204,6 +4204,11 @@ function MasterSchedulePanel({
   const liveZebra = worker1State?.live_schedule_zebra ?? null;
   const liveVolWiggleRatio = worker1State?.live_schedule_vol_wiggle_ratio ?? null;
   const liveVolWiggleProduct = worker1State?.live_schedule_vol_wiggle_product ?? null;
+  // Color-weighted BALANCE index (net balance, 0-100) -- already published as live_zebra_index
+  // on Worker 1's state row for its own entry gate (65-75 band). Different metric from the
+  // alternation-counting Zebra column above; added here per direct request ("put this one at
+  // the top too").
+  const liveColorBalance = worker1State?.live_zebra_index ?? null;
 
   const liveMiamiHour = getMiamiHour();
   const worker1Metrics = {
@@ -4320,7 +4325,7 @@ function MasterSchedulePanel({
 
       <div className="bg-gray-800/60 rounded-lg p-2">
         <p className="text-gray-500 text-[10px] uppercase mb-1">Live readings (Worker 1's feed)</p>
-        <div className="grid grid-cols-7 gap-1.5 text-[10px] tabular-nums">
+        <div className="grid grid-cols-8 gap-1.5 text-[10px] tabular-nums">
           <div>
             <p className="text-gray-600 text-[9px] uppercase">ER 2h</p>
             <p className={liveEr == null ? "text-gray-500" : liveEr >= 0.15 ? "text-amber-400" : "text-gray-300"}>
@@ -4365,6 +4370,17 @@ function MasterSchedulePanel({
             <p className="text-gray-600 text-[9px] uppercase">Zebra</p>
             <p className="text-gray-300">{liveZebra != null ? liveZebra.toFixed(1) : "—"}</p>
             <p className="text-gray-600 text-[8px] leading-tight">color flips -- zigzag, no trend</p>
+          </div>
+          <div>
+            <p className="text-gray-600 text-[9px] uppercase">Color balance</p>
+            <p className={liveColorBalance == null ? "text-gray-500"
+              : liveColorBalance >= 65 && liveColorBalance <= 75 ? "text-green-400" : "text-amber-400"}>
+              {liveColorBalance != null ? liveColorBalance.toFixed(0) : "—"}
+            </p>
+            <p className="text-gray-600 text-[8px] leading-tight">
+              {liveColorBalance == null ? "" : liveColorBalance >= 65 && liveColorBalance <= 75 ? "in band"
+                : liveColorBalance < 65 ? "too trendy" : "too flat"}
+            </p>
           </div>
         </div>
       </div>
