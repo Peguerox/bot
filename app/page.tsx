@@ -4065,11 +4065,16 @@ function MasterSchedulePanel({
   const [expanded, setExpanded] = useState<number | null>(null);
   const [saving, setSaving] = useState(false);
   const [togglingBoth, setTogglingBoth] = useState(false);
+  // 2026-10-05, direct request: "it needs to stay there for so amount of minutes in order to
+  // apply the rule" -- raw string, same decimal-input pattern as every rule field (parsed only
+  // at save time) so typing "5." doesn't get snapped back to "5" mid-keystroke.
+  const [minHoldMinutes, setMinHoldMinutes] = useState<string>("0");
   const loadedOnce = useRef(false);
 
   useEffect(() => {
     if (!loadedOnce.current && scheduleState) {
       setRules(Array.isArray(scheduleState.rules) ? scheduleState.rules : []);
+      setMinHoldMinutes(String(scheduleState.min_hold_minutes ?? 0));
       loadedOnce.current = true;
     }
   }, [scheduleState]);
@@ -4102,7 +4107,10 @@ function MasterSchedulePanel({
   async function handleSaveRules() {
     if (!confirm(`Save ${rules.length} rule(s)? Takes effect within ~30s if the schedule is on.`)) return;
     setSaving(true);
-    const ok = await postSchedule({ rules: rules.map(normalizeRuleForSave) });
+    const ok = await postSchedule({
+      rules: rules.map(normalizeRuleForSave),
+      min_hold_minutes: numOrNull(minHoldMinutes) ?? 0,
+    });
     if (ok) await onToggled();
     setSaving(false);
   }
@@ -4273,6 +4281,25 @@ function MasterSchedulePanel({
             scheduleEnabled ? "bg-green-500/20 text-green-400" : "bg-gray-700/50 text-gray-500"}`}>
           {saving ? "…" : scheduleEnabled ? "Turn OFF" : "Turn ON"}
         </button>
+      </div>
+
+      <div className="bg-gray-800/60 rounded-lg p-2 flex items-center justify-between gap-2">
+        <div>
+          <p className="text-gray-500 text-[10px] uppercase">Minimum hold before switching</p>
+          <p className="text-gray-600 text-[9px] leading-tight">
+            A rule only takes effect once it's been the match for this long -- stops fast flip-flopping. 0 = switch instantly (old behavior).
+          </p>
+        </div>
+        <div className="flex items-center gap-1 shrink-0">
+          <input
+            value={minHoldMinutes}
+            onChange={(e) => setMinHoldMinutes(e.target.value)}
+            placeholder="0"
+            inputMode="decimal"
+            className="w-16 bg-gray-900 border border-gray-700 rounded px-1.5 py-1 text-[11px] text-white tabular-nums text-right focus:outline-none focus:border-blue-500"
+          />
+          <span className="text-gray-500 text-[10px]">min</span>
+        </div>
       </div>
 
       <div className="bg-gray-800/60 rounded-lg p-2">

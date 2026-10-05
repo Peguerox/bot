@@ -1753,6 +1753,16 @@ class StochBot:
         self._schedule_rules_cache = None
         self._schedule_rules_last_applied_key = None
         self._schedule_metrics_last_persist_ts = 0.0
+        # Minimum-hold debounce (2026-10-05, direct request: "it needs to stay there for so
+        # amount of minutes in order to apply the rule" -- a real-money incident showed the top
+        # match flipping across rule boundaries every 1-2 minutes, each flip opening/closing a
+        # hedge cycle). See _apply_schedule_rules: _candidate_key/_candidate_since track whichever
+        # rule is CURRENTLY the top match and when it started being so; _effective_rule is the
+        # last one that actually cleared the hold and took effect (what tick() keeps using while
+        # a newer candidate is still waiting out its hold).
+        self._schedule_candidate_key = None
+        self._schedule_candidate_since = None
+        self._schedule_effective_rule = None
         # Whichever peak the ACTIVE release_mode is tracking, for the dashboard -- direct
         # report: "I only see the timer" with no way to tell whether a wiggle/volume/rate
         # release is close or far. None when release_mode is off/unset. See
@@ -3248,7 +3258,7 @@ class StochBot:
         if now - self._schedule_rules_last_fetch_ts >= 30.0:
             self._schedule_rules_last_fetch_ts = now
             try:
-                rows = await self.sb("GET", "bot_schedule_rules?select=enabled,rules&id=eq.1")
+                rows = await self.sb("GET", "bot_schedule_rules?select=enabled,rules,min_hold_minutes&id=eq.1")
                 self._schedule_rules_cache = rows[0] if rows else None
             except Exception:
                 pass  # keep the previous cache rather than going blind on one failed fetch
@@ -3287,9 +3297,25 @@ class StochBot:
             if self._rule_matches(rule, hour, er, volume, wiggle, rate, vol_wiggle_ratio, vol_wiggle_product):
                 matched = rule
                 break
-        settings = matched.get(cfg.schedule_rules_bot_key) if matched else None
+        # Minimum-hold debounce: `matched` is just "whichever rule the live numbers satisfy THIS
+        # instant" -- `effective` below is what actually governs, which only moves to a new
+        # candidate once it has been the top match continuously for min_hold_minutes. A candidate
+        # that flips (to a different rule, or to no-match) before clearing its hold restarts the
+        # timer and never takes effect; `effective` just keeps whatever was last actually applied.
+        matched_key = jsonlib.dumps(matched, sort_keys=True) if matched is not None else None
+        if matched_key != self._schedule_candidate_key or self._schedule_candidate_since is None:
+            self._schedule_candidate_key = matched_key
+            self._schedule_candidate_since = now
+        hold_seconds = (cache.get("min_hold_minutes") or 0) * 60.0
+        held_for = now - self._schedule_candidate_since
+        if hold_seconds > 0 and held_for < hold_seconds:
+            effective = self._schedule_effective_rule
+        else:
+            effective = matched
+            self._schedule_effective_rule = matched
+        settings = effective.get(cfg.schedule_rules_bot_key) if effective else None
         patch = {}
-        desired_enabled = bool(matched) and bool(matched.get(f"{cfg.schedule_rules_bot_key}_enabled", True))
+        desired_enabled = bool(effective) and bool(effective.get(f"{cfg.schedule_rules_bot_key}_enabled", True))
         if bool(state.get("enabled", True)) != desired_enabled:
             patch["enabled"] = desired_enabled
         new_key = None
