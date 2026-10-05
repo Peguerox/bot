@@ -67,11 +67,14 @@ function validateSettings(obj: unknown, label: string, worker1: boolean): string
 const CONDITION_PAIRS = [
   ["er_min", "er_max"], ["volume_min", "volume_max"],
   ["wiggle_min", "wiggle_max"], ["rate_min", "rate_max"],
+  ["vol_wiggle_ratio_min", "vol_wiggle_ratio_max"],
 ] as const;
 
 function validateRule(rule: unknown, idx: number): string | null {
   if (typeof rule !== "object" || rule === null) return `Rule ${idx + 1} must be an object.`;
   const r = rule as Record<string, unknown>;
+  // hour_start/hour_end are Miami local time (America/New_York, DST-aware) -- direct request,
+  // "you have to convert it not me". See StochBot._schedule_current_hour.
   const hs = r.hour_start, he = r.hour_end;
   for (const [key, v] of [["hour_start", hs], ["hour_end", he]] as const) {
     if (v === undefined || v === null) continue;

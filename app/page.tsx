@@ -3930,6 +3930,7 @@ const EMPTY_RULE = {
   hour_start: null, hour_end: null,
   er_min: null, er_max: null, volume_min: null, volume_max: null,
   wiggle_min: null, wiggle_max: null, rate_min: null, rate_max: null,
+  vol_wiggle_ratio_min: null, vol_wiggle_ratio_max: null,
   worker1: { sl_pct: null, trigger_pct: null, trail_pct: null, tp_pct: null, dwell_seconds: null,
              band_lo: null, band_hi: null, reversal_lo: null, reversal_hi: null, window: null },
   hedge: { sl_pct: null, trigger_pct: null, trail_pct: null, tp_pct: null, dwell_seconds: null },
@@ -4049,6 +4050,7 @@ function MasterSchedulePanel({
   const liveVolume = worker1State?.live_candle_volume ?? null;
   const liveWiggle = worker1State?.live_wiggle ?? null;
   const liveRate = worker1State?.live_volume_jump_rate ?? null;
+  const liveVolWiggleRatio = worker1State?.live_volume_wiggle_ratio ?? null;
 
   const condField = (label: string, i: number, loKey: string, hiKey: string, rule: any, unit = "") => (
     <div className="flex-1 min-w-[90px]">
@@ -4130,6 +4132,7 @@ function MasterSchedulePanel({
           <div><p className="text-gray-600 text-[9px] uppercase">Volume</p>{liveVolume != null ? liveVolume.toFixed(2) : "—"}</div>
           <div><p className="text-gray-600 text-[9px] uppercase">Wiggle</p>{liveWiggle != null ? liveWiggle.toFixed(2) : "—"}</div>
           <div><p className="text-gray-600 text-[9px] uppercase">Rate</p>{liveRate != null ? liveRate.toFixed(2) : "—"}</div>
+          <div><p className="text-gray-600 text-[9px] uppercase">Vol/Wiggle</p>{liveVolWiggleRatio != null ? liveVolWiggleRatio.toFixed(3) : "—"}</div>
         </div>
       </div>
 
@@ -4140,11 +4143,12 @@ function MasterSchedulePanel({
               <p className="text-xs font-bold text-white">
                 Rule {i + 1}
                 <span className="text-[10px] font-normal text-gray-500 ml-1.5">
-                  {rule.hour_start != null && rule.hour_end != null ? `hour ${rule.hour_start}-${rule.hour_end}` : ""}
+                  {rule.hour_start != null && rule.hour_end != null ? `hour ${rule.hour_start}-${rule.hour_end} (Miami)` : ""}
                   {(rule.er_min != null || rule.er_max != null) ? " · ER bound" : ""}
                   {(rule.volume_min != null || rule.volume_max != null) ? " · volume bound" : ""}
                   {(rule.wiggle_min != null || rule.wiggle_max != null) ? " · wiggle bound" : ""}
                   {(rule.rate_min != null || rule.rate_max != null) ? " · rate bound" : ""}
+                  {(rule.vol_wiggle_ratio_min != null || rule.vol_wiggle_ratio_max != null) ? " · vol/wiggle bound" : ""}
                 </span>
               </p>
               <div className="flex items-center gap-1">
@@ -4160,7 +4164,7 @@ function MasterSchedulePanel({
             {expanded === i && (
               <div className="mt-2 space-y-2">
                 <div>
-                  <p className="text-gray-500 text-[9px] uppercase mb-1">Hour range (UTC, 0-23, optional)</p>
+                  <p className="text-gray-500 text-[9px] uppercase mb-1">Hour range (Miami time, 0-23, optional)</p>
                   <div className="flex gap-1">
                     <input value={rule.hour_start ?? ""} onChange={(e) => patchRule(i, { hour_start: numOrNull(e.target.value) })}
                       placeholder="start" inputMode="numeric"
@@ -4177,6 +4181,7 @@ function MasterSchedulePanel({
                     {condField("Volume", i, "volume_min", "volume_max", rule)}
                     {condField("Wiggle", i, "wiggle_min", "wiggle_max", rule)}
                     {condField("Rate", i, "rate_min", "rate_max", rule)}
+                    {condField("Vol/Wiggle", i, "vol_wiggle_ratio_min", "vol_wiggle_ratio_max", rule)}
                   </div>
                 </div>
                 <div>

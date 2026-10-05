@@ -45,6 +45,7 @@ import uuid
 import json as jsonlib
 from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
+from zoneinfo import ZoneInfo
 from typing import Optional, Union
 
 import aiohttp
@@ -121,6 +122,11 @@ NATIVE_STOP_BAND_PCT = 0.3
 
 SUPABASE_URL = os.environ["NEXT_PUBLIC_SUPABASE_URL"]
 SUPABASE_KEY = os.environ["SUPABASE_SERVICE_ROLE_KEY"]
+# 2026-10-04, direct request: schedule-rule hours are entered and evaluated in Miami local time
+# (the user's own timezone), not UTC -- "you have to convert it, not me". DST-aware via zoneinfo
+# (America/New_York covers Miami -- Florida doesn't observe a separate zone). See
+# StochBot._schedule_current_hour.
+SCHEDULE_TZ = ZoneInfo("America/New_York")
 
 
 @dataclass
@@ -3159,12 +3165,18 @@ class StochBot:
         is set earlier in the SAME tick."""
         return not self._volume_wiggle_locked
 
-    def _rule_matches(self, rule, hour, er, volume, wiggle, rate):
+    def _schedule_current_hour(self):
+        """The current hour in Miami local time (0-23), DST-aware. A seam (own method, not
+        inlined) so tests can pin a deterministic hour instead of depending on when they run."""
+        return datetime.now(SCHEDULE_TZ).hour
+
+    def _rule_matches(self, rule, hour, er, volume, wiggle, rate, vol_wiggle_ratio):
         """True if `rule`'s conditions all hold right now. Every field is independently optional
-        -- a rule can be pure-hour, pure-condition, or both. hour_start/hour_end wrap past
-        midnight when start > end (e.g. 22 -> 6 means 22:00-05:59 UTC). A condition bound that
-        IS set but has no live reading to check against (not enough candle history yet) fails
-        the match rather than guessing -- same fail-closed contract as every other gate here."""
+        -- a rule can be pure-hour, pure-condition, or both. `hour` is Miami local time (see
+        _schedule_current_hour); hour_start/hour_end wrap past midnight when start > end (e.g.
+        22 -> 6 means 22:00-05:59 Miami time). A condition bound that IS set but has no live
+        reading to check against (not enough candle history yet) fails the match rather than
+        guessing -- same fail-closed contract as every other gate here."""
         hs, he = rule.get("hour_start"), rule.get("hour_end")
         if hs is not None and he is not None:
             if hs <= he:
@@ -3175,7 +3187,8 @@ class StochBot:
         for value, lo_key, hi_key in ((er, "er_min", "er_max"),
                                        (volume, "volume_min", "volume_max"),
                                        (wiggle, "wiggle_min", "wiggle_max"),
-                                       (rate, "rate_min", "rate_max")):
+                                       (rate, "rate_min", "rate_max"),
+                                       (vol_wiggle_ratio, "vol_wiggle_ratio_min", "vol_wiggle_ratio_max")):
             lo, hi = rule.get(lo_key), rule.get(hi_key)
             if lo is None and hi is None:
                 continue
@@ -3198,7 +3211,7 @@ class StochBot:
         failure keeps the last-known cache rather than going blind for one tick.
 
         Rules are evaluated top to bottom; the FIRST one whose hour range (if set) contains the
-        current UTC hour AND whose every set min/max condition holds against this bot's own live
+        current Miami-local hour AND whose every set min/max condition holds against this bot's own live
         candle readings wins -- list order is the user's precedence control.
 
         ON/OFF is owned by the schedule too (revised same day, direct follow-up: "the rules
@@ -3233,10 +3246,11 @@ class StochBot:
         volume = compute_candle_volume_avg(self.candles, 10)
         wiggle = compute_intrabar_dispersion(self.candles, 5)
         rate = compute_candle_volume_rate(self.candles, 10)
-        hour = datetime.now(timezone.utc).hour
+        vol_wiggle_ratio = compute_volume_wiggle_ratio(self.candles)
+        hour = self._schedule_current_hour()
         matched = None
         for rule in rules:
-            if self._rule_matches(rule, hour, er, volume, wiggle, rate):
+            if self._rule_matches(rule, hour, er, volume, wiggle, rate, vol_wiggle_ratio):
                 matched = rule
                 break
         settings = matched.get(cfg.schedule_rules_bot_key) if matched else None
