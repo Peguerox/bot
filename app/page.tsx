@@ -4794,8 +4794,16 @@ export default function Dashboard() {
     const ch6 = sb.channel("lighter-btc-rsi-paper")
       .on("postgres_changes", { event: "INSERT", schema: "public", table: "lighter_btc_rsi_paper_trades" }, debouncedLoad)
       .subscribe();
+    // The three live Lighter state tables aren't on realtime at all (every tick would fire a
+    // reload -- too chatty), so a plain metrics write (live_schedule_*, live_wiggle, etc.) with
+    // no accompanying trade/settings change never triggers a reload. That let the Master
+    // Schedule panel's "Currently governing" box go stale between real events -- direct report,
+    // a screenshot showing Worker 1 still matched to a rule its OWN live number had already
+    // moved past. A plain poll bounds that staleness to ~15s without subscribing to every tick.
+    const pollId = setInterval(load, 15_000);
     return () => {
       if (debounceTimer) clearTimeout(debounceTimer);
+      clearInterval(pollId);
       sb.removeChannel(ch1); sb.removeChannel(ch2); sb.removeChannel(ch3); sb.removeChannel(ch4); sb.removeChannel(ch5);
       sb.removeChannel(ch6);
     };
