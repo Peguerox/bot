@@ -4367,10 +4367,10 @@ function MasterSchedulePanel({
           </div>
           <div className="bg-gray-900/50 rounded-lg p-1.5">
             <p className="text-gray-500 text-[8px] uppercase leading-tight">Color bal</p>
-            <p className={`font-bold text-xs tabular-nums ${liveColorBalance == null ? "text-gray-500" : liveColorBalance >= 65 && liveColorBalance <= 75 ? "text-green-400" : "text-amber-400"}`}>
+            <p className={`font-bold text-xs tabular-nums ${liveColorBalance == null ? "text-gray-500" : liveColorBalance < 50 ? "text-amber-400" : "text-gray-300"}`}>
               {liveColorBalance != null ? liveColorBalance.toFixed(0) : "—"}
             </p>
-            <p className="text-gray-500 text-[8px] leading-tight mt-0.5">Whether the last 5 candles' ups and downs cancel out or lean one way. Worker 1 only enters at 65-75.</p>
+            <p className="text-gray-500 text-[8px] leading-tight mt-0.5">Whether the last 5 candles' ups and downs cancel out (high = balanced) or lean one way (low = trending).</p>
           </div>
         </div>
       </div>
