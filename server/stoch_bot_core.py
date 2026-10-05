@@ -6051,6 +6051,16 @@ class StochBot:
                         self._no_sl_partner_checked_at = now_s
                         if await self._partner_is_flat():
                             self._no_sl_partner_closed = True
+                            # Visibility fix (direct report: "im not sure is working" -- there was
+                            # no log entry anywhere confirming this actually happened). Logged
+                            # once, the instant the transition is detected, before the native
+                            # cancel below even runs.
+                            _px = best_bid if side == "long" else best_ask
+                            unrealized_pct = (100 * (_px - ae) / ae if side == "long"
+                                              else 100 * (ae - _px) / ae) if ae and _px else None
+                            await self.log_run("no_sl_protection_removed", {
+                                "side": side, "unrealized_pct": round(unrealized_pct, 5) if unrealized_pct is not None else None,
+                            })
                 no_sl_skip = self._no_sl_partner_closed
             if cfg.native_stop_loss_enabled or cfg.native_take_profit_enabled:
                 qty_now = total_qty(legs)

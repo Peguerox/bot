@@ -2674,6 +2674,9 @@ async def t_exit_mode_no_sl_sl_suppressed_after_partner_closes():
     await _tick_at(bot, entry * (1 - 1.0 / 100))  # a full 1% underwater -- SL would have fired long ago
     check("still open even far underwater -- no_sl means no SL, by design",
           bot.state_row["side"] == "long", bot.state_row["side"])
+    check("transition is logged -- visibility fix, direct report \"im not sure is working\"",
+          any(a == "no_sl_protection_removed" for a, d in bot.runs),
+          [a for a, d in bot.runs])
 
 
 async def t_exit_mode_no_sl_trail_still_protects_the_survivor():
