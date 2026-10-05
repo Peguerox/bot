@@ -4330,16 +4330,19 @@ function MasterSchedulePanel({
               {liveEr != null ? liveEr.toFixed(3) : "—"}
             </p>
             <p className="text-gray-600 text-[8px] leading-tight">{liveEr == null ? "" : liveEr >= 0.15 ? "trending" : "chop"}</p>
+            <p className="text-gray-600 text-[8px] leading-tight mt-1">net move ÷ total move over 2h. High = trending, low = chop.</p>
           </div>
           <div>
             <p className="text-gray-600 text-[9px] uppercase">Volume</p>
             <p className="text-gray-300">{liveVolume != null ? liveVolume.toFixed(2) : "—"}</p>
             <p className="text-gray-600 text-[8px] leading-tight">BTC/min avg</p>
+            <p className="text-gray-600 text-[8px] leading-tight mt-1">average BTC traded per minute, last 10 candles.</p>
           </div>
           <div>
             <p className="text-gray-600 text-[9px] uppercase">Wiggle</p>
             <p className="text-gray-300">{liveWiggle != null ? liveWiggle.toFixed(2) : "—"}</p>
             <p className="text-gray-600 text-[8px] leading-tight">$ price swing</p>
+            <p className="text-gray-600 text-[8px] leading-tight mt-1">average $ swing (high−low) per candle, last 5 candles.</p>
           </div>
           <div>
             <p className="text-gray-600 text-[9px] uppercase">Wiggle/Vol</p>
@@ -4349,11 +4352,13 @@ function MasterSchedulePanel({
             <p className="text-gray-600 text-[8px] leading-tight">
               {liveVolWiggleRatio == null ? "" : liveVolWiggleRatio <= 3.33 ? "watch -- thin?" : "normal"}
             </p>
+            <p className="text-gray-600 text-[8px] leading-tight mt-1">swing relative to volume. Low = price moving without much volume behind it.</p>
           </div>
           <div>
             <p className="text-gray-600 text-[9px] uppercase">Vol×Wiggle</p>
             <p className="text-gray-300">{liveVolWiggleProduct != null ? liveVolWiggleProduct.toFixed(1) : "—"}</p>
             <p className="text-gray-600 text-[8px] leading-tight">volume × swing</p>
+            <p className="text-gray-600 text-[8px] leading-tight mt-1">volume and wiggle combined into one activity number.</p>
           </div>
           <div>
             <p className="text-gray-600 text-[9px] uppercase">Vol Rate</p>
@@ -4363,11 +4368,13 @@ function MasterSchedulePanel({
             <p className="text-gray-600 text-[8px] leading-tight">
               {liveRate == null ? "" : liveRate > 0.05 ? "volume ↑ speeding up" : liveRate < -0.05 ? "volume ↓ slowing down" : "volume steady"}
             </p>
+            <p className="text-gray-600 text-[8px] leading-tight mt-1">whether volume is speeding up or slowing down vs its own recent pace.</p>
           </div>
           <div>
             <p className="text-gray-600 text-[9px] uppercase">Zebra</p>
             <p className="text-gray-300">{liveZebra != null ? liveZebra.toFixed(1) : "—"}</p>
             <p className="text-gray-600 text-[8px] leading-tight">color flips -- zigzag, no trend</p>
+            <p className="text-gray-600 text-[8px] leading-tight mt-1">% of last 5 candles that flipped color in a row -- real alternation.</p>
           </div>
           <div>
             <p className="text-gray-600 text-[9px] uppercase">Color bal</p>
@@ -4376,17 +4383,8 @@ function MasterSchedulePanel({
               {liveColorBalance != null ? liveColorBalance.toFixed(0) : "—"}
             </p>
             <p className="text-gray-600 text-[8px] leading-tight">net balance, Worker 1 gate 65-75</p>
+            <p className="text-gray-600 text-[8px] leading-tight mt-1">net color balance, 5 candles, 0-100. 100 = perfectly balanced.</p>
           </div>
-        </div>
-        <div className="mt-2 pt-2 border-t border-gray-700/50 space-y-0.5 text-[9px] leading-snug">
-          <p className="text-gray-500"><span className="text-gray-400 font-bold">ER 2h</span> -- how straight vs choppy the last 2h move was (net move ÷ total movement). High = trending, low = chop.</p>
-          <p className="text-gray-500"><span className="text-gray-400 font-bold">Volume</span> -- average BTC traded per minute, last 10 candles.</p>
-          <p className="text-gray-500"><span className="text-gray-400 font-bold">Wiggle</span> -- average price swing (high−low) per candle, last 5 candles, in dollars.</p>
-          <p className="text-gray-500"><span className="text-gray-400 font-bold">Wiggle/Vol</span> -- swing relative to volume. Low = price moving without much volume behind it (thin).</p>
-          <p className="text-gray-500"><span className="text-gray-400 font-bold">Vol×Wiggle</span> -- volume and wiggle combined into one activity number.</p>
-          <p className="text-gray-500"><span className="text-gray-400 font-bold">Vol Rate</span> -- whether volume is speeding up or slowing down right now vs its own recent pace.</p>
-          <p className="text-gray-500"><span className="text-gray-400 font-bold">Zebra</span> -- % of the last 5 candles that flipped color in a row (real alternation/zigzag, not net direction).</p>
-          <p className="text-gray-500"><span className="text-gray-400 font-bold">Color bal</span> -- net color balance over 5 candles, 0-100. 100 = perfectly balanced, 0 = fully one-sided. Worker 1's entry gate wants 65-75.</p>
         </div>
       </div>
 
