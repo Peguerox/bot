@@ -3936,6 +3936,8 @@ const EMPTY_RULE = {
   wiggle_min: null, wiggle_max: null, rate_min: null, rate_max: null,
   vol_wiggle_ratio_min: null, vol_wiggle_ratio_max: null,
   vol_wiggle_product_min: null, vol_wiggle_product_max: null,
+  zebra_min: null, zebra_max: null,
+  color_balance_min: null, color_balance_max: null,
   // Per-bot ON/OFF switch, independent of that bot having a settings object on the same rule --
   // direct request: "maybe with this rule I want 1 on and the other off... I need a little
   // switch". Default true (both run) -- see normalizeRuleForSave / StochBot._apply_schedule_rules.
@@ -3964,6 +3966,7 @@ const RULE_NUMERIC_FIELDS = [
   "wiggle_min", "wiggle_max", "rate_min", "rate_max",
   "vol_wiggle_ratio_min", "vol_wiggle_ratio_max",
   "vol_wiggle_product_min", "vol_wiggle_product_max",
+  "zebra_min", "zebra_max", "color_balance_min", "color_balance_max",
 ] as const;
 const BOT_NUMERIC_FIELDS = [
   "sl_pct", "trigger_pct", "trail_pct", "tp_pct", "dwell_seconds",
@@ -4008,6 +4011,8 @@ function ruleConditionsMatch(rule: any, hour: number, metrics: Record<string, nu
     [metrics.wiggle, "wiggle_min", "wiggle_max"], [metrics.rate, "rate_min", "rate_max"],
     [metrics.volWiggleRatio, "vol_wiggle_ratio_min", "vol_wiggle_ratio_max"],
     [metrics.volWiggleProduct, "vol_wiggle_product_min", "vol_wiggle_product_max"],
+    [metrics.zebra, "zebra_min", "zebra_max"],
+    [metrics.colorBalance, "color_balance_min", "color_balance_max"],
   ];
   for (const [value, loKey, hiKey] of pairs) {
     const lo = rule[loKey], hi = rule[hiKey];
@@ -4043,6 +4048,8 @@ const CONDITION_LABELS: [string, string, string][] = [
   ["Wiggle", "wiggle_min", "wiggle_max"], ["Rate", "rate_min", "rate_max"],
   ["Wiggle/Vol", "vol_wiggle_ratio_min", "vol_wiggle_ratio_max"],
   ["Vol×Wiggle", "vol_wiggle_product_min", "vol_wiggle_product_max"],
+  ["Zebra", "zebra_min", "zebra_max"],
+  ["Color bal", "color_balance_min", "color_balance_max"],
 ];
 
 function formatConditionsLine(rule: any): string {
@@ -4204,14 +4211,19 @@ function MasterSchedulePanel({
   const liveZebra = worker1State?.live_schedule_zebra ?? null;
   const liveVolWiggleRatio = worker1State?.live_schedule_vol_wiggle_ratio ?? null;
   const liveVolWiggleProduct = worker1State?.live_schedule_vol_wiggle_product ?? null;
-  // Color-weighted BALANCE index (net balance, 0-100) -- same live_zebra_index column as
-  // Worker 1's own 65-75 entry gate. Direct request to show it here too.
-  const liveColorBalance = worker1State?.live_zebra_index ?? null;
+  // Color-weighted BALANCE index (net balance, 0-100) -- 2026-10-05, now published unconditionally
+  // by every bot as live_schedule_color_balance (same metric Worker 1's own 65-75 entry gate
+  // reads), replacing the older live_zebra_index column which only Worker 1 ever wrote (gated
+  // behind that bot's own color_balance_index_min/max being configured -- the hedge has neither
+  // set, so it never had a live reading at all). Needed so both bots can use it as a schedule
+  // rule condition, not just Worker 1's panel.
+  const liveColorBalance = worker1State?.live_schedule_color_balance ?? null;
 
   const liveMiamiHour = getMiamiHour();
   const worker1Metrics = {
     er: liveEr, volume: liveVolume, wiggle: liveWiggle, rate: liveRate,
     volWiggleRatio: liveVolWiggleRatio, volWiggleProduct: liveVolWiggleProduct,
+    zebra: liveZebra, colorBalance: liveColorBalance,
   };
   const hedgeMetrics = {
     er: hedgeLongState?.live_schedule_er ?? null,
@@ -4220,6 +4232,8 @@ function MasterSchedulePanel({
     rate: hedgeLongState?.live_schedule_rate ?? null,
     volWiggleRatio: hedgeLongState?.live_schedule_vol_wiggle_ratio ?? null,
     volWiggleProduct: hedgeLongState?.live_schedule_vol_wiggle_product ?? null,
+    zebra: hedgeLongState?.live_schedule_zebra ?? null,
+    colorBalance: hedgeLongState?.live_schedule_color_balance ?? null,
   };
   // Each bot evaluates the same saved rules against its OWN candle feed server-side, so they
   // can genuinely land on different rules -- shown separately below, never collapsed into one.
@@ -4458,6 +4472,8 @@ function MasterSchedulePanel({
                     {condField("Vol Rate", i, "rate_min", "rate_max", rule)}
                     {condField("Wiggle/Vol", i, "vol_wiggle_ratio_min", "vol_wiggle_ratio_max", rule)}
                     {condField("Vol×Wiggle", i, "vol_wiggle_product_min", "vol_wiggle_product_max", rule)}
+                    {condField("Zebra", i, "zebra_min", "zebra_max", rule)}
+                    {condField("Color bal", i, "color_balance_min", "color_balance_max", rule)}
                   </div>
                 </div>
                 <div>

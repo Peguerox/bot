@@ -3203,7 +3203,8 @@ class StochBot:
         inlined) so tests can pin a deterministic hour instead of depending on when they run."""
         return datetime.now(SCHEDULE_TZ).hour
 
-    def _rule_matches(self, rule, hour, er, volume, wiggle, rate, vol_wiggle_ratio, vol_wiggle_product):
+    def _rule_matches(self, rule, hour, er, volume, wiggle, rate, vol_wiggle_ratio, vol_wiggle_product,
+                       zebra=None, color_balance=None):
         """True if `rule`'s conditions all hold right now. Every field is independently optional
         -- a rule can be pure-hour, pure-condition, or both. `hour` is Miami local time (see
         _schedule_current_hour); hour_start/hour_end wrap past midnight when start > end (e.g.
@@ -3222,7 +3223,9 @@ class StochBot:
                                        (wiggle, "wiggle_min", "wiggle_max"),
                                        (rate, "rate_min", "rate_max"),
                                        (vol_wiggle_ratio, "vol_wiggle_ratio_min", "vol_wiggle_ratio_max"),
-                                       (vol_wiggle_product, "vol_wiggle_product_min", "vol_wiggle_product_max")):
+                                       (vol_wiggle_product, "vol_wiggle_product_min", "vol_wiggle_product_max"),
+                                       (zebra, "zebra_min", "zebra_max"),
+                                       (color_balance, "color_balance_min", "color_balance_max")):
             lo, hi = rule.get(lo_key), rule.get(hi_key)
             if lo is None and hi is None:
                 continue
@@ -3302,6 +3305,15 @@ class StochBot:
         # can read "balanced" without real alternation. Display-only readout here -- does not
         # gate anything, same as every other live_schedule_* field.
         zebra = compute_zebra_size_index(self.candles, 5)
+        # Color-weighted BALANCE index (2026-10-05, direct request: "put the color bar zebra and
+        # all that in the rules panel so we can select depending on those too") -- same metric
+        # Worker 1's own entry gate reads (compute_color_weighted_balance_index), but published
+        # here unconditionally for EVERY bot regardless of that bot's own gate config, unlike the
+        # older live_zebra_index column (only written when color_balance_index_min/max or
+        # zebra_index_min/max is compiled on for that bot -- the hedge has neither, so it never
+        # wrote one). Universal readout + rule condition, same pattern as every other
+        # live_schedule_* field.
+        color_balance = compute_color_weighted_balance_index(self.candles, 5)
         if cfg.schema_has_schedule_metrics and now - self._schedule_metrics_last_persist_ts >= 5.0:
             self._schedule_metrics_last_persist_ts = now
             # Isolated best-effort write, same reasoning as live_candle_volume elsewhere: a
@@ -3315,6 +3327,7 @@ class StochBot:
                     "live_schedule_vol_wiggle_ratio": vol_wiggle_ratio,
                     "live_schedule_vol_wiggle_product": vol_wiggle_product,
                     "live_schedule_zebra": zebra,
+                    "live_schedule_color_balance": color_balance,
                 })
             except Exception:
                 pass
@@ -3324,7 +3337,8 @@ class StochBot:
         hour = self._schedule_current_hour()
         matched = None
         for rule in rules:
-            if self._rule_matches(rule, hour, er, volume, wiggle, rate, vol_wiggle_ratio, vol_wiggle_product):
+            if self._rule_matches(rule, hour, er, volume, wiggle, rate, vol_wiggle_ratio, vol_wiggle_product,
+                                   zebra, color_balance):
                 matched = rule
                 break
         # Minimum-hold debounce: `matched` is just "whichever rule the live numbers satisfy THIS

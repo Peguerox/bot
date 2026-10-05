@@ -6645,6 +6645,53 @@ async def t_schedule_rules_publishes_zebra_alternation_index():
           zebra is not None and abs(zebra - 100.0) < 1.0, zebra)
 
 
+async def t_schedule_rules_publishes_color_balance_index():
+    print("\n[schedule rules: live_schedule_color_balance is published, universal for every bot]")
+    ex = FakeExchange()
+    base_t = 1700000000000
+    bodies = [(995, 1005), (1005, 995), (995, 1005), (1005, 995), (995, 1005), (1005, 995)]
+    candles = [{"t": base_t + i * 60000, "o": o, "c": c, "h": max(o, c), "l": min(o, c), "v": 1.0}
+               for i, (o, c) in enumerate(bodies)]
+    bot = make_bot(ex, candles=candles, schedule_rules_enabled=True,
+                    schedule_rules_bot_key="hedge", schema_has_schedule_metrics=True)
+    bot.sb = _schedule_sb([{}])
+    await bot._apply_schedule_rules(bot.state_row)
+    cb = bot.state_row.get("live_schedule_color_balance")
+    check("color balance published, in range (not gated behind that bot's own entry config)",
+          cb is not None and 0 <= cb <= 100, cb)
+
+
+async def t_schedule_rules_zebra_and_color_balance_conditions_match():
+    print("\n[schedule rules: zebra_min/max and color_balance_min/max actually gate a match]")
+    base_t = 1700000000000
+    bodies = [(995, 1005), (1005, 995), (995, 1005), (1005, 995), (995, 1005), (1005, 995)]
+    candles = [{"t": base_t + i * 60000, "o": o, "c": c, "h": max(o, c), "l": min(o, c), "v": 1.0}
+               for i, (o, c) in enumerate(bodies)]
+    ex = FakeExchange()
+    bot = make_bot(ex, candles=candles, schedule_rules_enabled=True, schedule_rules_bot_key="worker1")
+    matching_rule = {"zebra_min": 90, "worker1": {"sl_pct": 0.21}}  # real reading is ~100.1
+    bot.sb = _schedule_sb([matching_rule])
+    await bot._apply_schedule_rules(bot.state_row)
+    check("zebra_min condition matched the real alternation reading",
+          bot.state_row.get("override_sl_pct") == 0.21)
+
+    ex2 = FakeExchange()
+    bot2 = make_bot(ex2, candles=candles, schedule_rules_enabled=True, schedule_rules_bot_key="worker1")
+    non_matching_rule = {"zebra_min": 150, "worker1": {"sl_pct": 0.21}}
+    bot2.sb = _schedule_sb([non_matching_rule])
+    await bot2._apply_schedule_rules(bot2.state_row)
+    check("zebra_min above the real ~100.1 reading did NOT match",
+          "override_sl_pct" not in bot2.state_row)
+
+    ex3 = FakeExchange()
+    bot3 = make_bot(ex3, candles=candles, schedule_rules_enabled=True, schedule_rules_bot_key="worker1")
+    non_matching_cb_rule = {"color_balance_min": 0, "color_balance_max": 0.01, "worker1": {"sl_pct": 0.21}}
+    bot3.sb = _schedule_sb([non_matching_cb_rule])
+    await bot3._apply_schedule_rules(bot3.state_row)
+    check("an impossibly tight color_balance bound did NOT match",
+          "override_sl_pct" not in bot3.state_row)
+
+
 async def t_schedule_rules_metrics_publish_is_isolated_from_settings_patch():
     print("\n[schedule rules: a bot with no settings for its key still publishes live metrics]")
     ex = FakeExchange()
@@ -6928,6 +6975,8 @@ async def main():
               t_schedule_rules_metrics_not_published_without_schema_flag,
               t_schedule_rules_publishes_live_metrics_with_schema_flag,
               t_schedule_rules_publishes_zebra_alternation_index,
+              t_schedule_rules_publishes_color_balance_index,
+              t_schedule_rules_zebra_and_color_balance_conditions_match,
               t_schedule_rules_metrics_publish_is_isolated_from_settings_patch,
               t_schedule_rules_metrics_publish_throttled,
               t_volume_switch_uses_flip_above_threshold,
