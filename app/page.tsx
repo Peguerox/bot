@@ -3936,10 +3936,42 @@ const EMPTY_RULE = {
   hedge: { sl_pct: null, trigger_pct: null, trail_pct: null, tp_pct: null, dwell_seconds: null },
 };
 
-function numOrNull(v: string): number | null {
+function numOrNull(v: string | number | null | undefined): number | null {
+  if (v === null || v === undefined) return null;
+  if (typeof v === "number") return Number.isFinite(v) ? v : null;
   if (v.trim() === "") return null;
   const n = Number(v);
   return Number.isFinite(n) ? n : null;
+}
+
+// Rules are edited as raw strings (not parsed to a number on every keystroke) -- a controlled
+// input whose value is re-derived from a PARSED number clobbers whatever the user just typed
+// the instant it isn't yet a complete number (a lone "0.", or "0.40" before the trailing zero
+// matters), which made it impossible to type a decimal point at all. Direct report: "you dont
+// let me put 0.4 only full numbers". Parsing to number|null happens once, here, right before
+// the save POST -- not on every keystroke.
+const RULE_NUMERIC_FIELDS = [
+  "hour_start", "hour_end", "er_min", "er_max", "volume_min", "volume_max",
+  "wiggle_min", "wiggle_max", "rate_min", "rate_max",
+  "vol_wiggle_ratio_min", "vol_wiggle_ratio_max",
+] as const;
+const BOT_NUMERIC_FIELDS = [
+  "sl_pct", "trigger_pct", "trail_pct", "tp_pct", "dwell_seconds",
+  "band_lo", "band_hi", "reversal_lo", "reversal_hi", "window",
+] as const;
+
+function normalizeRuleForSave(rule: any): any {
+  const out: any = {};
+  for (const key of RULE_NUMERIC_FIELDS) out[key] = numOrNull(rule[key]);
+  for (const bot of ["worker1", "hedge"] as const) {
+    const botOut: any = {};
+    for (const key of BOT_NUMERIC_FIELDS) {
+      if (bot === "hedge" && !["sl_pct", "trigger_pct", "trail_pct", "tp_pct", "dwell_seconds"].includes(key)) continue;
+      botOut[key] = numOrNull(rule[bot]?.[key]);
+    }
+    out[bot] = botOut;
+  }
+  return out;
 }
 
 function MasterSchedulePanel({
@@ -3988,7 +4020,7 @@ function MasterSchedulePanel({
   async function handleSaveRules() {
     if (!confirm(`Save ${rules.length} rule(s)? Takes effect within ~30s if the schedule is on.`)) return;
     setSaving(true);
-    const ok = await postSchedule({ rules });
+    const ok = await postSchedule({ rules: rules.map(normalizeRuleForSave) });
     if (ok) await onToggled();
     setSaving(false);
   }
@@ -4058,14 +4090,14 @@ function MasterSchedulePanel({
       <div className="flex gap-1">
         <input
           value={rule[loKey] ?? ""}
-          onChange={(e) => patchRule(i, { [loKey]: numOrNull(e.target.value) })}
+          onChange={(e) => patchRule(i, { [loKey]: e.target.value })}
           placeholder="min"
           inputMode="decimal"
           className="w-full bg-gray-900 border border-gray-700 rounded px-1 py-1 text-[11px] text-white tabular-nums focus:outline-none focus:border-blue-500"
         />
         <input
           value={rule[hiKey] ?? ""}
-          onChange={(e) => patchRule(i, { [hiKey]: numOrNull(e.target.value) })}
+          onChange={(e) => patchRule(i, { [hiKey]: e.target.value })}
           placeholder="max"
           inputMode="decimal"
           className="w-full bg-gray-900 border border-gray-700 rounded px-1 py-1 text-[11px] text-white tabular-nums focus:outline-none focus:border-blue-500"
@@ -4079,7 +4111,7 @@ function MasterSchedulePanel({
       <p className="text-gray-500 text-[9px] uppercase">{label}</p>
       <input
         value={rule[bot]?.[key] ?? ""}
-        onChange={(e) => patchRuleBot(i, bot, { [key]: numOrNull(e.target.value) })}
+        onChange={(e) => patchRuleBot(i, bot, { [key]: e.target.value })}
         placeholder="—"
         inputMode="decimal"
         className="w-full bg-gray-900 border border-gray-700 rounded px-1 py-1 text-[11px] text-white tabular-nums focus:outline-none focus:border-blue-500"
