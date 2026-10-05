@@ -4191,15 +4191,6 @@ function MasterSchedulePanel({
             <p className="text-gray-600 text-[8px] leading-tight">$ price swing</p>
           </div>
           <div>
-            <p className="text-gray-600 text-[9px] uppercase">Vol Rate</p>
-            <p className={liveRate == null ? "text-gray-500" : liveRate > 0.05 ? "text-green-400" : liveRate < -0.05 ? "text-red-400" : "text-gray-300"}>
-              {liveRate != null ? liveRate.toFixed(2) : "—"}
-            </p>
-            <p className="text-gray-600 text-[8px] leading-tight">
-              {liveRate == null ? "" : liveRate > 0.05 ? "volume ↑ speeding up" : liveRate < -0.05 ? "volume ↓ slowing down" : "volume steady"}
-            </p>
-          </div>
-          <div>
             <p className="text-gray-600 text-[9px] uppercase">Vol/Wiggle</p>
             <p className={liveVolWiggleRatio == null ? "text-gray-500" : liveVolWiggleRatio >= 0.30 ? "text-amber-400" : "text-gray-300"}>
               {liveVolWiggleRatio != null ? liveVolWiggleRatio.toFixed(3) : "—"}
@@ -4212,6 +4203,15 @@ function MasterSchedulePanel({
             <p className="text-gray-600 text-[9px] uppercase">Vol×Wiggle</p>
             <p className="text-gray-300">{liveVolWiggleProduct != null ? liveVolWiggleProduct.toFixed(1) : "—"}</p>
             <p className="text-gray-600 text-[8px] leading-tight">volume × swing</p>
+          </div>
+          <div>
+            <p className="text-gray-600 text-[9px] uppercase">Vol Rate</p>
+            <p className={liveRate == null ? "text-gray-500" : liveRate > 0.05 ? "text-green-400" : liveRate < -0.05 ? "text-red-400" : "text-gray-300"}>
+              {liveRate != null ? liveRate.toFixed(2) : "—"}
+            </p>
+            <p className="text-gray-600 text-[8px] leading-tight">
+              {liveRate == null ? "" : liveRate > 0.05 ? "volume ↑ speeding up" : liveRate < -0.05 ? "volume ↓ slowing down" : "volume steady"}
+            </p>
           </div>
         </div>
       </div>
