@@ -6611,6 +6611,25 @@ async def t_schedule_rules_publishes_live_metrics_with_schema_flag():
     check("rate published (not None)", bot.state_row.get("live_schedule_rate") is not None)
 
 
+async def t_schedule_rules_publishes_zebra_alternation_index():
+    print("\n[schedule rules: live_schedule_zebra -- perfect color alternation reads close to 100]")
+    ex = FakeExchange()
+    # 6 candles (5 closed + 1 forming), perfectly alternating green/red/green/red/green around a
+    # fixed 995<->1005 range -- color flips on every consecutive pair (zebra_pct=100) with a
+    # consistent ~1% body size, so zebra_pct/size_pct lands close to 100.
+    base_t = 1700000000000
+    bodies = [(995, 1005), (1005, 995), (995, 1005), (1005, 995), (995, 1005), (1005, 995)]
+    candles = [{"t": base_t + i * 60000, "o": o, "c": c, "h": max(o, c), "l": min(o, c), "v": 1.0}
+               for i, (o, c) in enumerate(bodies)]
+    bot = make_bot(ex, candles=candles, schedule_rules_enabled=True,
+                    schedule_rules_bot_key="worker1", schema_has_schedule_metrics=True)
+    bot.sb = _schedule_sb([{}])  # matches unconditionally, no settings needed for this check
+    await bot._apply_schedule_rules(bot.state_row)
+    zebra = bot.state_row.get("live_schedule_zebra")
+    check("zebra published and close to 100 (perfect alternation, ~1% consistent body size)",
+          zebra is not None and abs(zebra - 100.0) < 1.0, zebra)
+
+
 async def t_schedule_rules_metrics_publish_is_isolated_from_settings_patch():
     print("\n[schedule rules: a bot with no settings for its key still publishes live metrics]")
     ex = FakeExchange()
@@ -6893,6 +6912,7 @@ async def main():
               t_schedule_rules_mutates_local_state_dict_immediately,
               t_schedule_rules_metrics_not_published_without_schema_flag,
               t_schedule_rules_publishes_live_metrics_with_schema_flag,
+              t_schedule_rules_publishes_zebra_alternation_index,
               t_schedule_rules_metrics_publish_is_isolated_from_settings_patch,
               t_schedule_rules_metrics_publish_throttled,
               t_volume_switch_uses_flip_above_threshold,

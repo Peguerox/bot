@@ -4193,6 +4193,11 @@ function MasterSchedulePanel({
   const liveVolume = worker1State?.live_schedule_volume ?? null;
   const liveWiggle = worker1State?.live_schedule_wiggle ?? null;
   const liveRate = worker1State?.live_schedule_rate ?? null;
+  // True alternation-counting zebra index (2026-10-05, direct request) -- color flips over the
+  // last 5 candles / average candle size. Distinct from the "zebra index" label elsewhere on the
+  // dashboard, which is actually the color-weighted BALANCE index (net color balance, can read
+  // "balanced" without real alternation) -- this one matches literal zigzag/no-trend chop.
+  const liveZebra = worker1State?.live_schedule_zebra ?? null;
   const liveVolWiggleRatio = worker1State?.live_schedule_vol_wiggle_ratio ?? null;
   const liveVolWiggleProduct = worker1State?.live_schedule_vol_wiggle_product ?? null;
 
@@ -4311,7 +4316,7 @@ function MasterSchedulePanel({
 
       <div className="bg-gray-800/60 rounded-lg p-2">
         <p className="text-gray-500 text-[10px] uppercase mb-1">Live readings (Worker 1's feed)</p>
-        <div className="grid grid-cols-6 gap-1.5 text-[10px] tabular-nums">
+        <div className="grid grid-cols-7 gap-1.5 text-[10px] tabular-nums">
           <div>
             <p className="text-gray-600 text-[9px] uppercase">ER 2h</p>
             <p className={liveEr == null ? "text-gray-500" : liveEr >= 0.15 ? "text-amber-400" : "text-gray-300"}>
@@ -4351,6 +4356,11 @@ function MasterSchedulePanel({
             <p className="text-gray-600 text-[8px] leading-tight">
               {liveRate == null ? "" : liveRate > 0.05 ? "volume ↑ speeding up" : liveRate < -0.05 ? "volume ↓ slowing down" : "volume steady"}
             </p>
+          </div>
+          <div>
+            <p className="text-gray-600 text-[9px] uppercase">Zebra</p>
+            <p className="text-gray-300">{liveZebra != null ? liveZebra.toFixed(1) : "—"}</p>
+            <p className="text-gray-600 text-[8px] leading-tight">color flips -- zigzag, no trend</p>
           </div>
         </div>
       </div>

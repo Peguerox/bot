@@ -3281,6 +3281,15 @@ class StochBot:
         # function, since it's just the two readings already computed above multiplied together;
         # no new candle math needed.
         vol_wiggle_product = volume * wiggle if volume is not None and wiggle is not None else None
+        # True zebra/alternation index (2026-10-05, direct request: "put it in the measurements
+        # with the top volume and wiggle and all that, the last one") -- compute_zebra_size_index
+        # counts how often consecutive candles FLIP color over the last 5 bars, divided by
+        # average candle size: the literal "zigzag, no net trend" pattern, distinct from
+        # compute_color_weighted_balance_index (the one actually gating Worker 1's entries right
+        # now under the same "zebra index" dashboard label) which measures net color balance and
+        # can read "balanced" without real alternation. Display-only readout here -- does not
+        # gate anything, same as every other live_schedule_* field.
+        zebra = compute_zebra_size_index(self.candles, 5)
         if cfg.schema_has_schedule_metrics and now - self._schedule_metrics_last_persist_ts >= 5.0:
             self._schedule_metrics_last_persist_ts = now
             # Isolated best-effort write, same reasoning as live_candle_volume elsewhere: a
@@ -3293,6 +3302,7 @@ class StochBot:
                     "live_schedule_wiggle": wiggle, "live_schedule_rate": rate,
                     "live_schedule_vol_wiggle_ratio": vol_wiggle_ratio,
                     "live_schedule_vol_wiggle_product": vol_wiggle_product,
+                    "live_schedule_zebra": zebra,
                 })
             except Exception:
                 pass
