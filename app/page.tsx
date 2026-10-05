@@ -4204,6 +4204,9 @@ function MasterSchedulePanel({
   const liveZebra = worker1State?.live_schedule_zebra ?? null;
   const liveVolWiggleRatio = worker1State?.live_schedule_vol_wiggle_ratio ?? null;
   const liveVolWiggleProduct = worker1State?.live_schedule_vol_wiggle_product ?? null;
+  // Color-weighted BALANCE index (net balance, 0-100) -- same live_zebra_index column as
+  // Worker 1's own 65-75 entry gate. Direct request to show it here too.
+  const liveColorBalance = worker1State?.live_zebra_index ?? null;
 
   const liveMiamiHour = getMiamiHour();
   const worker1Metrics = {
@@ -4320,7 +4323,7 @@ function MasterSchedulePanel({
 
       <div className="bg-gray-800/60 rounded-lg p-2">
         <p className="text-gray-500 text-[10px] uppercase mb-1">Live readings (Worker 1's feed)</p>
-        <div className="grid grid-cols-7 gap-1.5 text-[10px] tabular-nums">
+        <div className="grid grid-cols-8 gap-1.5 text-[10px] tabular-nums">
           <div>
             <p className="text-gray-600 text-[9px] uppercase">ER 2h</p>
             <p className={liveEr == null ? "text-gray-500" : liveEr >= 0.15 ? "text-amber-400" : "text-gray-300"}>
@@ -4366,6 +4369,24 @@ function MasterSchedulePanel({
             <p className="text-gray-300">{liveZebra != null ? liveZebra.toFixed(1) : "—"}</p>
             <p className="text-gray-600 text-[8px] leading-tight">color flips -- zigzag, no trend</p>
           </div>
+          <div>
+            <p className="text-gray-600 text-[9px] uppercase">Color bal</p>
+            <p className={liveColorBalance == null ? "text-gray-500"
+              : liveColorBalance >= 65 && liveColorBalance <= 75 ? "text-green-400" : "text-amber-400"}>
+              {liveColorBalance != null ? liveColorBalance.toFixed(0) : "—"}
+            </p>
+            <p className="text-gray-600 text-[8px] leading-tight">net balance, Worker 1 gate 65-75</p>
+          </div>
+        </div>
+        <div className="mt-2 pt-2 border-t border-gray-700/50 space-y-0.5 text-[9px] leading-snug">
+          <p className="text-gray-500"><span className="text-gray-400 font-bold">ER 2h</span> -- how straight vs choppy the last 2h move was (net move ÷ total movement). High = trending, low = chop.</p>
+          <p className="text-gray-500"><span className="text-gray-400 font-bold">Volume</span> -- average BTC traded per minute, last 10 candles.</p>
+          <p className="text-gray-500"><span className="text-gray-400 font-bold">Wiggle</span> -- average price swing (high−low) per candle, last 5 candles, in dollars.</p>
+          <p className="text-gray-500"><span className="text-gray-400 font-bold">Wiggle/Vol</span> -- swing relative to volume. Low = price moving without much volume behind it (thin).</p>
+          <p className="text-gray-500"><span className="text-gray-400 font-bold">Vol×Wiggle</span> -- volume and wiggle combined into one activity number.</p>
+          <p className="text-gray-500"><span className="text-gray-400 font-bold">Vol Rate</span> -- whether volume is speeding up or slowing down right now vs its own recent pace.</p>
+          <p className="text-gray-500"><span className="text-gray-400 font-bold">Zebra</span> -- % of the last 5 candles that flipped color in a row (real alternation/zigzag, not net direction).</p>
+          <p className="text-gray-500"><span className="text-gray-400 font-bold">Color bal</span> -- net color balance over 5 candles, 0-100. 100 = perfectly balanced, 0 = fully one-sided. Worker 1's entry gate wants 65-75.</p>
         </div>
       </div>
 
