@@ -1570,6 +1570,12 @@ function CompactStochBtcPanel({
   // mode) -- SL is never delayed. 0 (default) is instant, same as before this existed.
   const curDwell: number = state?.override_dwell_seconds ?? 0;
   const [dwellIn, setDwellIn] = useState("");
+  // SL dwell (2026-10-06, direct request after backtesting it against real trades: "lets do 30
+  // seconds... leave it open so we can change it manually later"). Separate from the dwell
+  // above -- that one never touches SL, this one ONLY touches the plain SL (not the escalated
+  // tiers' hard cap, which stays instant on purpose). 0 (default) is instant, unchanged.
+  const curSlDwell: number = state?.override_sl_dwell_seconds ?? 0;
+  const [slDwellIn, setSlDwellIn] = useState("");
 
   async function handleSetExitMode(mode: "trail" | "tp") {
     // "floor" (partner-cut breakeven floor) is deliberately NOT offered here -- it only ever
@@ -1899,6 +1905,7 @@ function CompactStochBtcPanel({
     if (trailIn.trim()) payload.trail = trailIn.trim();
     if (tpIn.trim()) payload.tp = tpIn.trim();
     if (dwellIn.trim()) payload.dwell = dwellIn.trim();
+    if (slDwellIn.trim()) payload.slDwell = slDwellIn.trim();
     if (Object.keys(payload).length === 0) return;
     if (!confirm(
       `Apply to ${title}?\n\n`
@@ -1906,7 +1913,8 @@ function CompactStochBtcPanel({
       + `Trigger ${payload.trigger ?? "(unchanged)"}%\n`
       + `Trail   ${payload.trail ?? "(unchanged)"}%\n`
       + `TP      ${payload.tp ?? "(unchanged)"}%\n`
-      + `Dwell   ${payload.dwell ?? "(unchanged)"}s\n\n`
+      + `Dwell   ${payload.dwell ?? "(unchanged)"}s\n`
+      + `SL Dwell ${payload.slDwell ?? "(unchanged)"}s\n\n`
       + `Takes effect immediately, including on an open position.`
     )) return;
     setSavingSettings(true);
@@ -1917,7 +1925,7 @@ function CompactStochBtcPanel({
     if (!res.ok) {
       const b = await res.json().catch(() => ({}));
       alert(b.error || "Could not apply settings.");
-    } else { setSlIn(""); setTrigIn(""); setTrailIn(""); setTpIn(""); setDwellIn(""); }
+    } else { setSlIn(""); setTrigIn(""); setTrailIn(""); setTpIn(""); setDwellIn(""); setSlDwellIn(""); }
     await onToggled();
     setSavingSettings(false);
   }
@@ -2780,12 +2788,13 @@ function CompactStochBtcPanel({
               -0.12% is the hard cap regardless. The SL box below is ignored while this is on.
             </p>
           </div>
-          <div className="grid grid-cols-5 gap-1.5">
+          <div className="grid grid-cols-3 gap-1.5">
             {([["SL", slIn, setSlIn, curSl, "%"],
                ["Trigger", trigIn, setTrigIn, curTrig, "%"],
                ["Trail", trailIn, setTrailIn, curTrail, "%"],
                ["TP", tpIn, setTpIn, curTp, "%"],
-               ["Dwell", dwellIn, setDwellIn, curDwell, "s"]] as const).map(([label, val, set, cur, unit]) => (
+               ["Dwell", dwellIn, setDwellIn, curDwell, "s"],
+               ["SL Dwell", slDwellIn, setSlDwellIn, curSlDwell, "s"]] as const).map(([label, val, set, cur, unit]) => (
               <div key={label}>
                 <p className="text-gray-500 text-[9px] uppercase">{label}</p>
                 <p className="text-gray-600 text-[9px]">now {cur != null ? cur + unit : "—"}</p>
@@ -2799,9 +2808,14 @@ function CompactStochBtcPanel({
               </div>
             ))}
           </div>
+          <p className="text-gray-600 text-[9px] leading-snug">
+            SL Dwell: the plain SL above must stay continuously past its level for this many
+            seconds before actually closing -- backtested against real trades (30s was best).
+            Never applies to the escalated SL tiers above, which always stay instant.
+          </p>
           <button
             onClick={handleApplySettings}
-            disabled={savingSettings || loading || (!slIn.trim() && !trigIn.trim() && !trailIn.trim() && !tpIn.trim() && !dwellIn.trim())}
+            disabled={savingSettings || loading || (!slIn.trim() && !trigIn.trim() && !trailIn.trim() && !tpIn.trim() && !dwellIn.trim() && !slDwellIn.trim())}
             className="w-full text-xs font-bold px-2.5 py-1 rounded bg-blue-500/20 text-blue-400 hover:bg-blue-500/30 disabled:opacity-30"
           >
             {savingSettings ? "Applying…" : "Apply"}
@@ -4000,6 +4014,7 @@ const EMPTY_RULE = {
   // switch". Default true (both run) -- see normalizeRuleForSave / StochBot._apply_schedule_rules.
   worker1_enabled: true, hedge_enabled: true,
   worker1: { sl_pct: null, trigger_pct: null, trail_pct: null, tp_pct: null, dwell_seconds: null,
+             sl_dwell_seconds: null,
              band_lo: null, band_hi: null, reversal_lo: null, reversal_hi: null, window: null,
              // Tri-state (2026-10-06, direct request: "the automation panel needs this option
              // too") -- null = leave whatever's currently live alone, true/false = set it. Not
@@ -4030,7 +4045,7 @@ const RULE_NUMERIC_FIELDS = [
   "zebra_min", "zebra_max", "color_balance_min", "color_balance_max",
 ] as const;
 const BOT_NUMERIC_FIELDS = [
-  "sl_pct", "trigger_pct", "trail_pct", "tp_pct", "dwell_seconds",
+  "sl_pct", "trigger_pct", "trail_pct", "tp_pct", "dwell_seconds", "sl_dwell_seconds",
   "band_lo", "band_hi", "reversal_lo", "reversal_hi", "window",
 ] as const;
 
@@ -4093,7 +4108,7 @@ function ruleConditionsMatch(rule: any, hour: number, metrics: Record<string, nu
 
 const WORKER1_SETTINGS_LABELS: [string, string][] = [
   ["SL", "sl_pct"], ["Trig", "trigger_pct"], ["Trail", "trail_pct"], ["TP", "tp_pct"],
-  ["Dwell", "dwell_seconds"], ["BandLo", "band_lo"], ["BandHi", "band_hi"],
+  ["Dwell", "dwell_seconds"], ["SLDwell", "sl_dwell_seconds"], ["BandLo", "band_lo"], ["BandHi", "band_hi"],
   ["RevLo", "reversal_lo"], ["RevHi", "reversal_hi"], ["Window", "window"],
   ["EscSL", "escalated_sl_enabled"],
 ];
@@ -4560,6 +4575,7 @@ function MasterSchedulePanel({
                     {settingsField("Trail", i, "worker1", "trail_pct", rule)}
                     {settingsField("TP", i, "worker1", "tp_pct", rule)}
                     {settingsField("Dwell", i, "worker1", "dwell_seconds", rule)}
+                    {settingsField("SL Dwell", i, "worker1", "sl_dwell_seconds", rule)}
                   </div>
                   <div className="flex gap-1.5 flex-wrap mt-1.5">
                     {settingsField("Band lo", i, "worker1", "band_lo", rule)}

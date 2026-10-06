@@ -33,6 +33,15 @@ function validateSettings(obj: unknown, label: string, worker1: boolean): string
       return `${label}.dwell_seconds must be between ${DWELL_LIMITS.min} and ${DWELL_LIMITS.max}.`;
     }
   }
+  // 2026-10-06, direct request: SL dwell, same bounds/shape as the winner-exit dwell above --
+  // see StochBot/BotConfig.sl_dwell_seconds's docstring. Worker 1 only (field_map in
+  // _apply_schedule_rules doesn't include it for the hedge).
+  if (o.sl_dwell_seconds !== undefined && o.sl_dwell_seconds !== null) {
+    const v = o.sl_dwell_seconds;
+    if (typeof v !== "number" || v < DWELL_LIMITS.min || v > DWELL_LIMITS.max) {
+      return `${label}.sl_dwell_seconds must be between ${DWELL_LIMITS.min} and ${DWELL_LIMITS.max}.`;
+    }
+  }
   const trig = o.trigger_pct as number | undefined;
   const trail = o.trail_pct as number | undefined;
   if (typeof trig === "number" && typeof trail === "number" && trail > trig) {

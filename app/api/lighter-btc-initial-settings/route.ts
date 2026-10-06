@@ -29,6 +29,10 @@ const LIMITS = {
   jumpPause: { min: 0, max: 1800, label: "volume-jump pause (seconds)" },
   tp: { min: 0.01, max: 1.0, label: "take-profit" },
   dwell: { min: 0, max: 300, label: "dwell (seconds)" },
+  // 2026-10-06, direct request after backtesting it against real trades: "lets do 30 seconds...
+  // leave it open so we can change it manually later." Plain-SL-only dwell -- see
+  // StochBot/BotConfig.sl_dwell_seconds's docstring. Never applies to the escalated SL tiers.
+  slDwell: { min: 0, max: 300, label: "SL dwell (seconds)" },
   wiggleLock: { min: 0.01, max: 50, label: "volume/wiggle lock threshold" },
   // 2026-10-04, direct request: "change the window of stochastic for worker 1". Integer candle
   // count; governs both the entry and reversal bands (see StochBot._stoch_window_control).
@@ -52,6 +56,7 @@ export async function POST(req: NextRequest) {
     ["jumpPause", "override_volume_jump_pause_seconds"],
     ["tp", "override_tp_pct"],
     ["dwell", "override_dwell_seconds"],
+    ["slDwell", "override_sl_dwell_seconds"],
     ["wiggleLock", "override_volume_wiggle_lock_threshold"],
     ["stochWindow", "override_stoch_window"],
   ] as const) {

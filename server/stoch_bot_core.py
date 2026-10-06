@@ -772,6 +772,11 @@ class BotConfig:
     # Dwell (2026-10-03, direct request: "a dwell strategy... used in both fixed TP and trail").
     # 0 (default) is instant, exactly the old behavior. See _exit_params / _dwell_ready.
     dwell_seconds: float = 0.0
+    # SL dwell (2026-10-06, direct request after backtesting it: "lets do 30 seconds... leave it
+    # open so we can change it manually later"). 0 (default) is instant, unchanged from before
+    # this existed -- live-tunable via override_sl_dwell_seconds, not meant to be a fixed
+    # compiled default yet. See _exit_params / _sl_dwell_ready.
+    sl_dwell_seconds: float = 0.0
     # 2026-09-30, direct request: a fixed pause after THIS leg goes flat, before it will declare
     # itself ready for the next cycle -- "once you finish a trade, wait N seconds, then another
     # trade." Built to test hypertrading with require_pressure_to_enter off: with nothing else
@@ -1655,6 +1660,7 @@ class StochBot:
         # mutually exclusive per position (exit_mode), so only one of TP/PROFIT_LOCK's dwell
         # checks ever runs for a given open position. See BotConfig.dwell_seconds / _dwell_ready.
         self._dwell_touch_at = None
+        self._sl_dwell_touch_at = None  # see BotConfig.sl_dwell_seconds / _sl_dwell_ready
         self._last_reversal_close_at = None  # see BotConfig.post_reversal_cooldown_seconds
         # Breakeven floor (see BotConfig.breakeven_floor_enabled). Same arrangement as the
         # profit-lock trail: in-process state is authoritative, the DB column only exists so a
@@ -2506,15 +2512,30 @@ class StochBot:
         pullback (in "trail" mode) or the armed floor's trigger (in "floor" mode) to stay
         continuously true for this many seconds before actually closing, instead of firing on
         the very first touch. 0 (default) reproduces the old instant-fire behavior exactly.
-        Deliberately NEVER applied to TP ("if you get to the TP you want to get out") or to SL
-        or any other protection exit -- those always stay instant. Backed by
-        research/codex-worker2/quiet_exit_study/dwell_test.py: real data showed dwell measurably
-        reduces whipsaw on the mechanisms it was tested against, but didn't conclusively beat
-        the plain no-dwell candidate either way -- this is a live experiment, not a proven edge."""
+        Deliberately NEVER applied to TP ("if you get to the TP you want to get out") -- those
+        always stay instant. Backed by research/codex-worker2/quiet_exit_study/dwell_test.py:
+        real data showed dwell measurably reduces whipsaw on the mechanisms it was tested
+        against, but didn't conclusively beat the plain no-dwell candidate either way -- this is
+        a live experiment, not a proven edge.
+
+        sl_dwell_seconds (2026-10-06, direct request after backtesting it against real Worker 1
+        trades: "lets do 30 seconds... leave it open so we can change it manually later") -- the
+        ONE exception to "SL... always stays instant" above. Same continuous-touch contract as
+        dwell_seconds, but for the plain SL specifically (separate tracker,
+        self._sl_dwell_touch_at, so it can never interact with the TP/trail dwell tracker).
+        0 (default) is instant, unchanged from before this existed. Does NOT apply to the
+        escalated-SL tiers (ESCALATED_SL_TIER1/2/3) or no_sl's NO_SL_REVERSAL -- those are
+        separate mechanisms with their own contracts. Backtest on 65 real trades (the ones a
+        3-rule ER/K-band filter would have taken): instant SL netted +$0.30, every dwell from
+        5-60s tested notably better (30s best at +$0.62), using REAL tick prices at confirmation
+        (not an idealized exact-threshold fill) -- still a live experiment on one night's data,
+        not a proven edge, which is why this is a live-tunable override, not a new compiled
+        default."""
         cfg = self.cfg
         sl, trig, trail, tp = cfg.sl_pct, cfg.profit_lock_trigger_pct, cfg.profit_lock_trail_pct, cfg.tp_pct
         exit_mode = "trail"
         dwell = cfg.dwell_seconds
+        sl_dwell = cfg.sl_dwell_seconds
         if cfg.schema_has_exit_overrides:
             o = state.get("override_sl_pct")
             if o is not None: sl = float(o)
@@ -2528,7 +2549,9 @@ class StochBot:
             if o in ("trail", "tp", "floor", "no_sl"): exit_mode = o
             o = state.get("override_dwell_seconds")
             if o is not None: dwell = float(o)
-        return sl, trig, trail, tp, exit_mode, dwell
+            o = state.get("override_sl_dwell_seconds")
+            if o is not None: sl_dwell = float(o)
+        return sl, trig, trail, tp, exit_mode, dwell, sl_dwell
 
     def _dwell_ready(self, touched, dwell_seconds):
         """Requires `touched` to stay True for dwell_seconds of continuous wall-clock time
@@ -2547,6 +2570,23 @@ class StochBot:
             self._dwell_touch_at = now_s
             return False
         return now_s - self._dwell_touch_at >= dwell_seconds
+
+    def _sl_dwell_ready(self, touched, dwell_seconds):
+        """Same continuous-touch contract as _dwell_ready, for the plain SL specifically -- see
+        BotConfig.sl_dwell_seconds' docstring in _exit_params. Separate tracker
+        (self._sl_dwell_touch_at) from the TP/trail one on purpose: SL and a winner-exit can in
+        principle both be "touched" in the same tick on a wide-enough band, and sharing a
+        tracker would let one's dwell clock silently reset the other's."""
+        if not touched:
+            self._sl_dwell_touch_at = None
+            return False
+        if dwell_seconds <= 0:
+            return True
+        now_s = time.time()
+        if self._sl_dwell_touch_at is None:
+            self._sl_dwell_touch_at = now_s
+            return False
+        return now_s - self._sl_dwell_touch_at >= dwell_seconds
 
     def _measure_vol_pct(self, lookback):
         """Mean 1-min (high-low)/close%, trailing `lookback` CLOSED candles -- the same
@@ -2979,6 +3019,7 @@ class StochBot:
         # profit_lock_peak_pct resets, not a replacement for them (the trail's own dwell usage
         # has nothing to do with the breakeven floor and must stay covered either way).
         self._dwell_touch_at = None
+        self._sl_dwell_touch_at = None
         # Same "every position-close point" reasoning for exit_mode="no_sl" -- see its own
         # comment in __init__. Independent of the breakeven floor, but this is the established
         # shared reset point for per-cycle state.
@@ -3440,7 +3481,10 @@ class StochBot:
                                  # option too" -- a rule can now turn escalated SL on/off for
                                  # Worker 1 the same way it does every other lever. Worker 1
                                  # only -- the hedge has no escalated_sl_enabled compiled flag.
-                                 ("escalated_sl_enabled", "override_escalated_sl_enabled")]
+                                 ("escalated_sl_enabled", "override_escalated_sl_enabled"),
+                                 # 2026-10-06, direct request: "leave it open so we can change it
+                                 # manually later" -- SL dwell, live-tunable from a rule too.
+                                 ("sl_dwell_seconds", "override_sl_dwell_seconds")]
                 else:
                     field_map = [("sl_pct", "override_sl_pct"), ("trigger_pct", "override_profit_lock_trigger"),
                                  ("trail_pct", "override_profit_lock_trail"), ("tp_pct", "override_tp_pct"),
@@ -3656,7 +3700,7 @@ class StochBot:
         volume-jump guard's settings and live ratio, and now volume+ER, not a repeat of what
         entry_vol_pct/entry_dispersion already cover."""
         cfg = self.cfg
-        sl, trig, trail, tp, exit_mode, dwell = self._exit_params(state)
+        sl, trig, trail, tp, exit_mode, dwell, sl_dwell = self._exit_params(state)
         jump_ratio_threshold = cfg.volume_jump_ratio
         jump_pause_seconds = cfg.volume_jump_pause_seconds
         jump_release_mode = cfg.volume_jump_release_mode
@@ -3671,7 +3715,7 @@ class StochBot:
         er_2h, er_2h_direction = compute_er_and_direction(self.candles, 120)
         return {
             "exit_mode": exit_mode, "sl_pct": sl, "tp_pct": tp,
-            "trigger_pct": trig, "trail_pct": trail, "dwell_seconds": dwell,
+            "trigger_pct": trig, "trail_pct": trail, "dwell_seconds": dwell, "sl_dwell_seconds": sl_dwell,
             "jump_ratio_threshold": jump_ratio_threshold, "jump_pause_seconds": jump_pause_seconds,
             "jump_release_mode": jump_release_mode, "jump_ratio_now": self._last_volume_jump_ratio,
             "volume_now": volume_now, "er_2h": er_2h, "er_2h_direction": er_2h_direction,
@@ -4300,6 +4344,7 @@ class StochBot:
         self.profit_lock_peak_pct = None
         self._saving_trough_pct = None
         self._dwell_touch_at = None
+        self._sl_dwell_touch_at = None
         if self.cfg.schema_has_profit_lock:
             try:
                 await self.update_state({"profit_lock_peak_pct": None})
@@ -4593,6 +4638,7 @@ class StochBot:
         self.profit_lock_peak_pct = None
         self._saving_trough_pct = None
         self._dwell_touch_at = None
+        self._sl_dwell_touch_at = None
         if self.cfg.schema_has_profit_lock:
             try:
                 await self.update_state({"profit_lock_peak_pct": None})
@@ -5950,6 +5996,7 @@ class StochBot:
             await self.update_state(ext_patch)
             self.profit_lock_peak_pct = None
             self._dwell_touch_at = None
+            self._sl_dwell_touch_at = None
             if cfg.schema_has_profit_lock:
                 try:
                     await self.update_state({"profit_lock_peak_pct": None})
@@ -6080,7 +6127,7 @@ class StochBot:
             pos_tp = state.get("position_tp_pct") if bands else None
             pos_sl = state.get("position_sl_pct") if bands else None
             # Manual exit levers win over both the recorded band and the compiled-in default.
-            ov_sl, ov_trig, ov_trail, ov_tp, exit_mode, dwell_seconds = self._exit_params(state)
+            ov_sl, ov_trig, ov_trail, ov_tp, exit_mode, dwell_seconds, sl_dwell_seconds = self._exit_params(state)
             # exit_mode (2026-10-03, direct request: "a panel where i can change between trail
             # and TP so i can test multiple strategies") -- "trail" (default) is unchanged
             # behavior: disable_literal_tp / profit_lock_enabled exactly as compiled. "tp" flips
@@ -6163,13 +6210,22 @@ class StochBot:
                     gap_hit = "ESCALATED_SL_TIER1"
                 elif unrealized_pct <= -cfg.escalated_sl_tier2_pct and thin:
                     gap_hit = "ESCALATED_SL_TIER2"
+            # sl_dwell_seconds: see _exit_params' docstring. Tracker is updated unconditionally
+            # (not short-circuited behind escalated_active) so it never carries stale state if a
+            # live override ever flips escalated mode mid-position. Tier 3 stays instant on
+            # purpose -- it's the unconditional hard cap, dwell never applies to it, same as it
+            # never applies to TP.
             if gap_hit is None and side == "long":
-                if not no_sl_skip and check_price <= sl:
+                sl_touched = check_price <= sl
+                dwell_ok = self._sl_dwell_ready(sl_touched, sl_dwell_seconds)
+                if not no_sl_skip and sl_touched and (escalated_active or dwell_ok):
                     gap_hit = "ESCALATED_SL_TIER3" if escalated_active else "SL"
                 elif tp_enabled and check_price >= tp:
                     gap_hit = "TP"
             elif gap_hit is None:
-                if not no_sl_skip and check_price >= sl:
+                sl_touched = check_price >= sl
+                dwell_ok = self._sl_dwell_ready(sl_touched, sl_dwell_seconds)
+                if not no_sl_skip and sl_touched and (escalated_active or dwell_ok):
                     gap_hit = "ESCALATED_SL_TIER3" if escalated_active else "SL"
                 elif tp_enabled and check_price <= tp:
                     gap_hit = "TP"

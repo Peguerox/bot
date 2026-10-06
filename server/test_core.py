@@ -7256,6 +7256,78 @@ async def t_native_sync_backoff_clears_on_success():
     check("native stop actually resting now", len(getattr(ex, "sl_orders", [])) >= 1, getattr(ex, "sl_orders", None))
 
 
+async def t_sl_dwell_zero_is_instant_unchanged():
+    print("\n[SL dwell: 0 (default) fires instantly, same as before this existed]")
+    entry = 86000.0
+    ex = FakeExchange(position=round(10.0 / entry, 5), collateral=10.0)
+    state = _native_sl_state(entry)
+    bot = make_bot(ex, state=state, candles_kind="mid", sl_pct=0.11)
+    await _tick_at(bot, entry * (1 - 0.11 / 100) - 1.0)
+    check("closed instantly, no dwell applied", bot.state_row["side"] is None, bot.state_row["side"])
+    check("reason is SL", any(a == "closed" and d.get("reason") == "SL" for a, d in bot.runs),
+          [(a, d.get("reason")) for a, d in bot.runs if a == "closed"])
+
+
+async def t_sl_dwell_blocks_a_single_touch():
+    print("\n[SL dwell: a single tick past SL does not close yet -- direct request: \"lets do 30 seconds\"]")
+    entry = 86000.0
+    ex = FakeExchange(position=round(10.0 / entry, 5), collateral=10.0)
+    state = _native_sl_state(entry)
+    state["override_sl_dwell_seconds"] = 30.0
+    bot = make_bot(ex, state=state, candles_kind="mid", sl_pct=0.11, schema_has_exit_overrides=True)
+    await _tick_at(bot, entry * (1 - 0.11 / 100) - 1.0)
+    check("still open -- touched SL but hasn't dwelled 30s yet",
+          bot.state_row["side"] == "long", bot.state_row["side"])
+
+
+async def t_sl_dwell_fires_once_elapsed():
+    print("\n[SL dwell: fires once continuously past SL for the full dwell window]")
+    entry = 86000.0
+    ex = FakeExchange(position=round(10.0 / entry, 5), collateral=10.0)
+    state = _native_sl_state(entry)
+    state["override_sl_dwell_seconds"] = 30.0
+    bot = make_bot(ex, state=state, candles_kind="mid", sl_pct=0.11, schema_has_exit_overrides=True)
+    await _tick_at(bot, entry * (1 - 0.11 / 100) - 1.0)
+    check("still open on first touch", bot.state_row["side"] == "long", bot.state_row["side"])
+    bot._sl_dwell_touch_at = time.time() - 35.0  # pretend it's been standing there 35s
+    await _tick_at(bot, entry * (1 - 0.11 / 100) - 1.0)
+    check("closed via SL once the dwell elapsed", bot.state_row["side"] is None, bot.state_row["side"])
+    check("reason is SL", any(a == "closed" and d.get("reason") == "SL" for a, d in bot.runs),
+          [(a, d.get("reason")) for a, d in bot.runs if a == "closed"])
+
+
+async def t_sl_dwell_resets_on_a_bounce():
+    print("\n[SL dwell: a bounce back above the SL level resets the timer -- no credit for the first touch]")
+    entry = 86000.0
+    ex = FakeExchange(position=round(10.0 / entry, 5), collateral=10.0)
+    state = _native_sl_state(entry)
+    state["override_sl_dwell_seconds"] = 30.0
+    bot = make_bot(ex, state=state, candles_kind="mid", sl_pct=0.11, schema_has_exit_overrides=True)
+    await _tick_at(bot, entry * (1 - 0.11 / 100) - 1.0)  # touch 1
+    bot._sl_dwell_touch_at = time.time() - 35.0  # backdate as if it's been 35s already
+    await _tick_at(bot, entry)  # price recovers above SL -- should reset the timer
+    check("still open -- the bounce reset the dwell timer", bot.state_row["side"] == "long", bot.state_row["side"])
+    check("tracker cleared by the bounce", bot._sl_dwell_touch_at is None, bot._sl_dwell_touch_at)
+    await _tick_at(bot, entry * (1 - 0.11 / 100) - 1.0)  # touch again, fresh
+    check("still open -- this is a brand new touch, not credited with the old 35s",
+          bot.state_row["side"] == "long", bot.state_row["side"])
+
+
+async def t_sl_dwell_does_not_apply_to_escalated_tier3_hard_cap():
+    print("\n[SL dwell: tier 3's hard cap stays instant regardless -- dwell is a plain-SL-only feature]")
+    entry = 86000.0
+    ex = FakeExchange(position=round(10.0 / entry, 5), collateral=10.0)
+    state = _escalated_state(entry, age_s=600)
+    state["override_sl_dwell_seconds"] = 30.0
+    bot = _escalated_bot(ex, state, _vol_candles(50.0))
+    await _tick_at(bot, entry * (1 - 0.13 / 100))  # past the 0.12% tier-3 hard cap
+    check("closed instantly via tier 3 -- dwell never applies to the hard cap",
+          bot.state_row["side"] is None, bot.state_row["side"])
+    check("reason is ESCALATED_SL_TIER3",
+          any(a == "closed" and d.get("reason") == "ESCALATED_SL_TIER3" for a, d in bot.runs),
+          [(a, d.get("reason")) for a, d in bot.runs if a == "closed"])
+
+
 async def main():
     for t in (t_hedge_volatility_filters, t_hedge_entry_filters, t_environment_two_binary_switches,
               t_environment_er_hysteresis_and_freshness,
@@ -7563,6 +7635,11 @@ async def main():
               t_native_sync_backoff_does_not_retry_within_the_window,
               t_native_sync_backoff_retries_once_the_window_elapses,
               t_native_sync_backoff_clears_on_success,
+              t_sl_dwell_zero_is_instant_unchanged,
+              t_sl_dwell_blocks_a_single_touch,
+              t_sl_dwell_fires_once_elapsed,
+              t_sl_dwell_resets_on_a_bounce,
+              t_sl_dwell_does_not_apply_to_escalated_tier3_hard_cap,
               t_trail_dwell_blocks_a_single_touch,
               t_trail_dwell_fires_once_elapsed,
               t_trail_dwell_resets_on_a_new_peak,
