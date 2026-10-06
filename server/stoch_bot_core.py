@@ -1760,6 +1760,9 @@ class StochBot:
         # believe nothing is resting (just closed, just restarted).
         self._native_stop_synced = None  # (trigger_price, qty) last confirmed resting, or None
         self._native_tp_synced = None    # same, for native_take_profit_enabled
+        # Backoff on repeated native order placement failure -- see _sync_native_exits' comment.
+        self._native_sync_consecutive_failures = 0
+        self._native_sync_retry_at = 0.0
         self._burned_signal = None  # see BotConfig.red_exit_burns_signal
         # See _regime_controls -- defaults match that method's own defaults, in case
         # _prior_candle_signal is ever read before the first tick has run.
@@ -4113,12 +4116,13 @@ class StochBot:
             )
             if err:
                 await self.log_run("native_stop_place_failed", {"error": str(err)[:200]})
-                return
+                return False
         except Exception as e:
             await self.log_run("native_stop_place_failed", {"error": str(e)[:200]})
-            return
+            return False
         self._native_stop_synced = desired
         await self.log_run("native_stop_synced", {"side": side, "trigger": trigger_price})
+        return True
 
     async def _place_native_tp(self, side, qty, trigger_price):
         """TP sibling of _place_native_stop -- see _sync_native_exits for the only caller."""
@@ -4141,12 +4145,13 @@ class StochBot:
             )
             if err:
                 await self.log_run("native_tp_place_failed", {"error": str(err)[:200]})
-                return
+                return False
         except Exception as e:
             await self.log_run("native_tp_place_failed", {"error": str(e)[:200]})
-            return
+            return False
         self._native_tp_synced = desired
         await self.log_run("native_tp_synced", {"side": side, "trigger": trigger_price})
+        return True
 
     async def _sync_native_exits(self, side, qty, sl_trigger, tp_trigger, suppress_sl=False):
         """Keep whichever native orders are enabled resting at the current trigger levels, sized
@@ -4184,13 +4189,34 @@ class StochBot:
         desired_tp = (tp_trigger, q) if want_tp else None
         if desired_sl == self._native_stop_synced and desired_tp == self._native_tp_synced:
             return
+        # Backoff on repeated placement failure (2026-10-06, direct request after finding 6,603
+        # "OrderPrice should not be less than 1" failures since Oct 1 -- the exchange sometimes
+        # transiently rejects a re-place right after a cancel). Without this, a failure left
+        # _native_stop_synced at None, so the very next tick (≈1s later) saw "nothing synced"
+        # and retried immediately -- cancel_all() + place, every tick, 17-59 times in a row in
+        # two incidents the same night, hammering the exchange for up to 89s straight each time.
+        # Same exponential curve already used for tick-error retries elsewhere (1s,2s,4s,...60s
+        # cap). Does NOT widen the real protection gap: this only throttles how often we RETRY
+        # placing the native order, it never touches the internal gap_hit SL/TP check, which
+        # keeps running on its own 0.5s tick regardless and is the real backstop while no native
+        # order is resting.
+        now_s = time.time()
+        if now_s < self._native_sync_retry_at:
+            return
         await self.cancel_all()
         self._native_stop_synced = None
         self._native_tp_synced = None
+        ok = True
         if want_sl:
-            await self._place_native_stop(side, qty, sl_trigger)
+            ok = await self._place_native_stop(side, qty, sl_trigger) and ok
         if want_tp:
-            await self._place_native_tp(side, qty, tp_trigger)
+            ok = await self._place_native_tp(side, qty, tp_trigger) and ok
+        if ok:
+            self._native_sync_consecutive_failures = 0
+            self._native_sync_retry_at = 0.0
+        else:
+            self._native_sync_consecutive_failures += 1
+            self._native_sync_retry_at = now_s + tick_error_backoff_seconds(self._native_sync_consecutive_failures)
 
     async def emergency_flatten(self, reason, detail):
         """Real position is larger than anything we asked for. Get flat immediately -- this is the
@@ -4496,6 +4522,10 @@ class StochBot:
             await self.cancel_all()
             self._native_stop_synced = None
             self._native_tp_synced = None
+            # Fresh position cycle starting next -- don't carry over a backoff delay earned by
+            # this position's own native-order troubles.
+            self._native_sync_consecutive_failures = 0
+            self._native_sync_retry_at = 0.0
         prior_collateral = state.get("collateral_before_entry")
         # Close what is really open. Closing only the tracked legs would leave a residual
         # position running whenever a phantom fill made the real size larger.
@@ -5903,6 +5933,8 @@ class StochBot:
                 self._native_stop_synced = None
             if cfg.native_take_profit_enabled:
                 self._native_tp_synced = None
+            self._native_sync_consecutive_failures = 0
+            self._native_sync_retry_at = 0.0
             prior = state.get("collateral_before_entry")
             pnl = (collateral - prior) if (prior is not None and collateral is not None) else 0.0
             ae = avg_entry(legs) or state.get("first_entry_price")

@@ -31,6 +31,7 @@ class FakeExchange:
         self.fills_when_erroring = False
         self.hang_order = False
         self.orders = []
+        self.sl_order_error = None   # simulate create_sl_order failing (e.g. "OrderPrice..." )
 
     async def create_market_order(self, market_index, client_order_index, base_amount,
                                   avg_execution_price, is_ask, reduce_only=False, **kw):
@@ -58,6 +59,9 @@ class FakeExchange:
 
     async def create_sl_order(self, market_index, client_order_index, base_amount,
                               trigger_price, price, is_ask, reduce_only=False, **kw):
+        self.sl_order_attempts = getattr(self, "sl_order_attempts", 0) + 1
+        if self.sl_order_error:
+            return None, None, self.sl_order_error
         self.sl_orders = getattr(self, "sl_orders", [])
         self.sl_orders.append({"qty": base_amount / 1e5, "trigger": trigger_price,
                                "price": price, "is_ask": is_ask, "reduce_only": reduce_only})
@@ -7191,6 +7195,67 @@ async def t_escalated_sl_native_stop_reflects_tier3_not_old_sl_pct():
           abs(actual_trigger - expected_trigger) < 10.0, (actual_trigger, expected_trigger))
 
 
+def _native_sl_state(entry, usd=10.0, side="long"):
+    return {
+        "id": 1, "side": side, "legs": [{"price": entry, "usd_size": usd}],
+        "first_entry_price": entry, "first_entry_time": 1700000000000, "dca_level": 0,
+        "seed_usd": usd, "realized_pnl_usd": 0.0, "collateral_before_entry": usd,
+        "enabled": True, "consecutive_entry_failures": 0, "last_processed_candle_ts": 0,
+    }
+
+
+async def t_native_sync_backoff_does_not_retry_within_the_window():
+    print("\n[native order backoff: a failure does NOT retry on the very next tick]")
+    print("  direct report: 6,603 'OrderPrice should not be less than 1' failures since Oct 1,")
+    print("  retrying every tick (~1s) for up to 89s straight in a single incident")
+    entry = 86000.0
+    ex = FakeExchange(position=round(10.0 / entry, 5), collateral=10.0)
+    ex.sl_order_error = "OrderPrice should not be less than 1"
+    state = _native_sl_state(entry)
+    bot = make_bot(ex, state=state, candles_kind="mid", sl_pct=0.11, native_stop_loss_enabled=True)
+    bot.live.order_book = {"bids": [{"price": str(entry)}], "asks": [{"price": str(entry + 1)}]}
+    await bot.tick()
+    check("first attempt was made and failed", ex.sl_order_attempts == 1, ex.sl_order_attempts)
+    check("backoff armed after a failure", bot._native_sync_retry_at > time.time(), bot._native_sync_retry_at)
+    await bot.tick()
+    check("no second attempt yet -- still inside the backoff window",
+          ex.sl_order_attempts == 1, ex.sl_order_attempts)
+
+
+async def t_native_sync_backoff_retries_once_the_window_elapses():
+    print("\n[native order backoff: retries again once the backoff window has passed]")
+    entry = 86000.0
+    ex = FakeExchange(position=round(10.0 / entry, 5), collateral=10.0)
+    ex.sl_order_error = "OrderPrice should not be less than 1"
+    state = _native_sl_state(entry)
+    bot = make_bot(ex, state=state, candles_kind="mid", sl_pct=0.11, native_stop_loss_enabled=True)
+    bot.live.order_book = {"bids": [{"price": str(entry)}], "asks": [{"price": str(entry + 1)}]}
+    await bot.tick()
+    check("first attempt failed", ex.sl_order_attempts == 1, ex.sl_order_attempts)
+    bot._native_sync_retry_at = time.time() - 1.0  # pretend the backoff already elapsed
+    await bot.tick()
+    check("retried now that the window elapsed", ex.sl_order_attempts == 2, ex.sl_order_attempts)
+
+
+async def t_native_sync_backoff_clears_on_success():
+    print("\n[native order backoff: a successful placement clears the failure count and backoff]")
+    entry = 86000.0
+    ex = FakeExchange(position=round(10.0 / entry, 5), collateral=10.0)
+    ex.sl_order_error = "OrderPrice should not be less than 1"
+    state = _native_sl_state(entry)
+    bot = make_bot(ex, state=state, candles_kind="mid", sl_pct=0.11, native_stop_loss_enabled=True)
+    bot.live.order_book = {"bids": [{"price": str(entry)}], "asks": [{"price": str(entry + 1)}]}
+    await bot.tick()
+    check("failed once", bot._native_sync_consecutive_failures == 1, bot._native_sync_consecutive_failures)
+    bot._native_sync_retry_at = time.time() - 1.0
+    ex.sl_order_error = None  # exchange recovers
+    await bot.tick()
+    check("failure count cleared after success", bot._native_sync_consecutive_failures == 0,
+          bot._native_sync_consecutive_failures)
+    check("backoff cleared after success", bot._native_sync_retry_at == 0.0, bot._native_sync_retry_at)
+    check("native stop actually resting now", len(getattr(ex, "sl_orders", [])) >= 1, getattr(ex, "sl_orders", None))
+
+
 async def main():
     for t in (t_hedge_volatility_filters, t_hedge_entry_filters, t_environment_two_binary_switches,
               t_environment_er_hysteresis_and_freshness,
@@ -7495,6 +7560,9 @@ async def main():
               t_escalated_sl_replaces_the_plain_sl_entirely,
               t_escalated_sl_off_by_default_keeps_plain_sl_behavior,
               t_escalated_sl_native_stop_reflects_tier3_not_old_sl_pct,
+              t_native_sync_backoff_does_not_retry_within_the_window,
+              t_native_sync_backoff_retries_once_the_window_elapses,
+              t_native_sync_backoff_clears_on_success,
               t_trail_dwell_blocks_a_single_touch,
               t_trail_dwell_fires_once_elapsed,
               t_trail_dwell_resets_on_a_new_peak,
