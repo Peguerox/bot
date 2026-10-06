@@ -60,6 +60,13 @@ function validateSettings(obj: unknown, label: string, worker1: boolean): string
         return `${label}.window must be between ${WINDOW_LIMITS.min} and ${WINDOW_LIMITS.max}.`;
       }
     }
+    // 2026-10-06, direct request: "the automation panel needs this option too" -- tri-state,
+    // null means leave it alone, true/false sets it. Worker 1 only (StochBot.escalated_sl_enabled
+    // doesn't exist as a compiled flag on the hedge).
+    if (o.escalated_sl_enabled !== undefined && o.escalated_sl_enabled !== null
+        && typeof o.escalated_sl_enabled !== "boolean") {
+      return `${label}.escalated_sl_enabled must be true, false, or null.`;
+    }
   }
   return null;
 }

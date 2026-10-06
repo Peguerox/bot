@@ -1595,6 +1595,34 @@ function CompactStochBtcPanel({
     await onToggled();
     setSavingExitMode(false);
   }
+  // Escalated/leveled SL (2026-10-06, direct request after digging into real trade data: "i
+  // have lost 2 times since i put SL... build it"). Off by default, REPLACES the plain SL
+  // entirely when on -- see StochBot/BotConfig.escalated_sl_enabled's docstring.
+  const escalatedSlOn: boolean = state?.override_escalated_sl_enabled ?? false;
+  const [savingEscalatedSl, setSavingEscalatedSl] = useState(false);
+  async function handleToggleEscalatedSl() {
+    const next = !escalatedSlOn;
+    if (!confirm(
+      next
+        ? `Turn ON escalated SL? This REPLACES the plain SL entirely:\n\n`
+          + `- -0.05% within 2 min AND live volume < 3 BTC/min -> exit\n`
+          + `- -0.10% AND volume < 3 -> exit\n`
+          + `- -0.12% -> hard cap, exits regardless\n\n`
+          + `Takes effect immediately, including on an open position.`
+        : `Turn OFF escalated SL? Goes back to the plain SL/Trigger/Trail boxes below. Takes effect immediately, including on an open position.`
+    )) return;
+    setSavingEscalatedSl(true);
+    const res = await fetch("/api/lighter-btc-initial-settings", {
+      method: "POST", headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ escalatedSlEnabled: next }),
+    });
+    if (!res.ok) {
+      const b = await res.json().catch(() => ({}));
+      alert(b.error || "Could not toggle escalated SL.");
+    }
+    await onToggled();
+    setSavingEscalatedSl(false);
+  }
   // Signal on/off toggles -- NULL on the row means "use the compiled default", which is True
   // for all three signal toggles. Must match BotConfig's own defaults in _regime_controls.
   const stochasticOn = state?.override_stochastic_enabled ?? true;
@@ -2733,6 +2761,23 @@ function CompactStochBtcPanel({
               Trail: the profit-lock trigger/trail below governs winners (current behavior).
               Fixed TP: the trail is suppressed -- only SL and the TP level below close a
               winner. SL always stays active either way.
+            </p>
+          </div>
+          <div className="bg-gray-800/60 rounded-lg p-2">
+            <div className="flex items-center justify-between">
+              <p className="text-gray-500 text-[9px] uppercase">
+                Escalated SL <span className={escalatedSlOn ? "text-green-400" : "text-gray-600"}>{escalatedSlOn ? "ON" : "OFF"}</span>
+              </p>
+              <button onClick={handleToggleEscalatedSl} disabled={savingEscalatedSl || loading}
+                className={`text-[11px] font-bold px-2.5 py-1 rounded disabled:opacity-30 ${
+                  escalatedSlOn ? "bg-green-500/20 text-green-400" : "bg-gray-700/50 text-gray-500"}`}>
+                {savingEscalatedSl ? "…" : escalatedSlOn ? "Turn OFF" : "Turn ON"}
+              </button>
+            </div>
+            <p className="text-gray-600 text-[9px] leading-snug mt-1">
+              Replaces the plain SL below with 3 tiers, built from real trade data: -0.05% within
+              2 min AND volume under 3 BTC/min exits early; -0.10% AND volume under 3 also exits;
+              -0.12% is the hard cap regardless. The SL box below is ignored while this is on.
             </p>
           </div>
           <div className="grid grid-cols-5 gap-1.5">
@@ -3955,7 +4000,11 @@ const EMPTY_RULE = {
   // switch". Default true (both run) -- see normalizeRuleForSave / StochBot._apply_schedule_rules.
   worker1_enabled: true, hedge_enabled: true,
   worker1: { sl_pct: null, trigger_pct: null, trail_pct: null, tp_pct: null, dwell_seconds: null,
-             band_lo: null, band_hi: null, reversal_lo: null, reversal_hi: null, window: null },
+             band_lo: null, band_hi: null, reversal_lo: null, reversal_hi: null, window: null,
+             // Tri-state (2026-10-06, direct request: "the automation panel needs this option
+             // too") -- null = leave whatever's currently live alone, true/false = set it. Not
+             // in BOT_NUMERIC_FIELDS since it's a boolean, not a percentage/count.
+             escalated_sl_enabled: null },
   hedge: { sl_pct: null, trigger_pct: null, trail_pct: null, tp_pct: null, dwell_seconds: null },
 };
 
@@ -3995,6 +4044,12 @@ function normalizeRuleForSave(rule: any): any {
     for (const key of BOT_NUMERIC_FIELDS) {
       if (bot === "hedge" && !["sl_pct", "trigger_pct", "trail_pct", "tp_pct", "dwell_seconds"].includes(key)) continue;
       botOut[key] = numOrNull(rule[bot]?.[key]);
+    }
+    if (bot === "worker1") {
+      // Tri-state, not numeric -- true/false are valid "set it" values, only undefined/null
+      // means "leave alone."
+      const v = rule.worker1?.escalated_sl_enabled;
+      botOut.escalated_sl_enabled = v === true || v === false ? v : null;
     }
     out[bot] = botOut;
   }
@@ -4040,6 +4095,7 @@ const WORKER1_SETTINGS_LABELS: [string, string][] = [
   ["SL", "sl_pct"], ["Trig", "trigger_pct"], ["Trail", "trail_pct"], ["TP", "tp_pct"],
   ["Dwell", "dwell_seconds"], ["BandLo", "band_lo"], ["BandHi", "band_hi"],
   ["RevLo", "reversal_lo"], ["RevHi", "reversal_hi"], ["Window", "window"],
+  ["EscSL", "escalated_sl_enabled"],
 ];
 const HEDGE_SETTINGS_LABELS: [string, string][] = [
   ["SL", "sl_pct"], ["Trig", "trigger_pct"], ["Trail", "trail_pct"], ["TP", "tp_pct"], ["Dwell", "dwell_seconds"],
@@ -4511,6 +4567,21 @@ function MasterSchedulePanel({
                     {settingsField("Rev lo", i, "worker1", "reversal_lo", rule)}
                     {settingsField("Rev hi", i, "worker1", "reversal_hi", rule)}
                     {settingsField("Window", i, "worker1", "window", rule)}
+                  </div>
+                  <div className="mt-1.5">
+                    <p className="text-gray-500 text-[9px] uppercase">Escalated SL</p>
+                    <div className="flex gap-1 mt-0.5">
+                      {([[null, "Leave alone"], [true, "Turn ON"], [false, "Turn OFF"]] as const).map(([val, label]) => (
+                        <button key={String(val)}
+                          onClick={() => patchRuleBot(i, "worker1", { escalated_sl_enabled: val })}
+                          className={`text-[10px] font-bold px-2 py-1 rounded ${
+                            (rule.worker1?.escalated_sl_enabled ?? null) === val
+                              ? "bg-blue-500/30 text-blue-300" : "bg-gray-700/50 text-gray-500 hover:bg-gray-700"
+                          }`}>
+                          {label}
+                        </button>
+                      ))}
+                    </div>
                   </div>
                 </div>
                 <div>

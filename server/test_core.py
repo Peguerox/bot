@@ -6426,7 +6426,8 @@ async def t_schedule_rules_applies_worker1_fields():
     rule = {"hour_start": 0, "hour_end": 24,
             "worker1": {"sl_pct": 0.20, "trigger_pct": 0.05, "trail_pct": 0.03, "tp_pct": 0.12,
                         "dwell_seconds": 15, "band_lo": 15, "band_hi": 85,
-                        "reversal_lo": 10, "reversal_hi": 90, "window": 8}}
+                        "reversal_lo": 10, "reversal_hi": 90, "window": 8,
+                        "escalated_sl_enabled": True}}
     bot.sb = _schedule_sb([rule])
     await bot._apply_schedule_rules(bot.state_row)
     check("sl written", bot.state_row.get("override_sl_pct") == 0.20)
@@ -6439,8 +6440,32 @@ async def t_schedule_rules_applies_worker1_fields():
     check("reversal band written", bot.state_row.get("override_stoch_reversal_lo") == 10
           and bot.state_row.get("override_stoch_reversal_hi") == 90)
     check("window written", bot.state_row.get("override_stoch_window") == 8)
+    check("escalated SL written", bot.state_row.get("override_escalated_sl_enabled") is True)
     check("already enabled -- stays enabled, no redundant enabled patch needed",
           bot.state_row["enabled"] is True)
+
+
+async def t_schedule_rules_escalated_sl_false_is_explicitly_written():
+    print("\n[schedule rules: escalated_sl_enabled=False is a real write, not treated as unset]")
+    ex = FakeExchange()
+    bot = make_bot(ex, candles=_schedule_candles(volume=3.0), schedule_rules_enabled=True,
+                    schedule_rules_bot_key="worker1")
+    rule = {"worker1": {"sl_pct": 0.08, "escalated_sl_enabled": False}}
+    bot.sb = _schedule_sb([rule])
+    await bot._apply_schedule_rules(bot.state_row)
+    check("escalated SL explicitly turned off",
+          bot.state_row.get("override_escalated_sl_enabled") is False)
+
+
+async def t_schedule_rules_escalated_sl_absent_leaves_it_alone():
+    print("\n[schedule rules: no escalated_sl_enabled in the rule -- untouched]")
+    ex = FakeExchange()
+    bot = make_bot(ex, candles=_schedule_candles(volume=3.0), schedule_rules_enabled=True,
+                    schedule_rules_bot_key="worker1")
+    rule = {"worker1": {"sl_pct": 0.08}}
+    bot.sb = _schedule_sb([rule])
+    await bot._apply_schedule_rules(bot.state_row)
+    check("escalated SL key never written", "override_escalated_sl_enabled" not in bot.state_row)
 
 
 async def t_schedule_rules_applies_hedge_fields_only():
@@ -7009,6 +7034,163 @@ async def t_hedge_volatility_filters():
     check("missing ATR/BandWidth history never blocks an existing exit",opened.state_row["side"] is None and any(o["reduce_only"] for o in ex.orders))
 
 
+def _vol_candles(v, n=15, base=86000.0):
+    """n candles at a constant price with volume `v` on each -- enough (n>=11) for
+    compute_candle_volume_avg's 10-closed-candle window to read exactly `v`."""
+    t0 = 1700000000000
+    return [{"t": t0 + i * 60000, "o": base, "h": base + 1, "l": base - 1, "c": base, "v": v}
+            for i in range(n)]
+
+
+def _escalated_state(entry, age_s, side="long", usd=10.0):
+    return {
+        "id": 1, "side": side, "legs": [{"price": entry, "usd_size": usd}],
+        "first_entry_price": entry, "first_entry_time": int(time.time() * 1000) - int(age_s * 1000),
+        "dca_level": 0, "seed_usd": usd, "realized_pnl_usd": 0.0, "collateral_before_entry": usd,
+        "enabled": True, "consecutive_entry_failures": 0, "last_processed_candle_ts": 0,
+        "override_escalated_sl_enabled": True,
+    }
+
+
+def _escalated_bot(ex, state, candles, **over):
+    kwargs = dict(sl_pct=0.11, tp_pct=0.10, escalated_sl_enabled=True, schema_has_exit_overrides=True)
+    kwargs.update(over)
+    return make_bot(ex, state=state, candles=candles, **kwargs)
+
+
+async def t_escalated_sl_tier1_fires_fast_and_thin():
+    print("\n[escalated SL tier 1: -0.05% within 2min AND volume<3 -> exits]")
+    entry = 86000.0
+    ex = FakeExchange(position=round(10.0 / entry, 5), collateral=10.0)
+    state = _escalated_state(entry, age_s=60)  # well under 120s
+    bot = _escalated_bot(ex, state, _vol_candles(2.0))  # volume 2.0 < 3
+    bot.live.order_book = {"bids": [{"price": str(entry * (1 - 0.06 / 100))}],
+                           "asks": [{"price": str(entry * (1 - 0.06 / 100) + 1)}]}
+    await bot.tick()
+    check("closed via ESCALATED_SL_TIER1", bot.state_row["side"] is None, bot.state_row["side"])
+    check("reason is ESCALATED_SL_TIER1",
+          any(a == "closed" and d.get("reason") == "ESCALATED_SL_TIER1" for a, d in bot.runs),
+          [(a, d.get("reason")) for a, d in bot.runs if a == "closed"])
+
+
+async def t_escalated_sl_tier1_does_not_fire_past_2_minutes():
+    print("\n[escalated SL tier 1: same drop, but past 2 minutes -- does not fire]")
+    entry = 86000.0
+    ex = FakeExchange(position=round(10.0 / entry, 5), collateral=10.0)
+    state = _escalated_state(entry, age_s=150)  # over 120s
+    bot = _escalated_bot(ex, state, _vol_candles(2.0))
+    bot.live.order_book = {"bids": [{"price": str(entry * (1 - 0.06 / 100))}],
+                           "asks": [{"price": str(entry * (1 - 0.06 / 100) + 1)}]}
+    await bot.tick()
+    check("still open -- tier 1's time window already closed, tier 2 needs -0.10%",
+          bot.state_row["side"] == "long", bot.state_row["side"])
+
+
+async def t_escalated_sl_tier1_does_not_fire_when_volume_is_normal():
+    print("\n[escalated SL tier 1: same fast drop, but volume is NOT thin -- does not fire]")
+    entry = 86000.0
+    ex = FakeExchange(position=round(10.0 / entry, 5), collateral=10.0)
+    state = _escalated_state(entry, age_s=60)
+    bot = _escalated_bot(ex, state, _vol_candles(5.0))  # volume 5.0, not thin
+    bot.live.order_book = {"bids": [{"price": str(entry * (1 - 0.06 / 100))}],
+                           "asks": [{"price": str(entry * (1 - 0.06 / 100) + 1)}]}
+    await bot.tick()
+    check("still open -- volume is normal, tier 1 requires thin volume too",
+          bot.state_row["side"] == "long", bot.state_row["side"])
+
+
+async def t_escalated_sl_tier2_fires_regardless_of_age():
+    print("\n[escalated SL tier 2: -0.10% AND volume<3 -> exits, no time limit]")
+    entry = 86000.0
+    ex = FakeExchange(position=round(10.0 / entry, 5), collateral=10.0)
+    state = _escalated_state(entry, age_s=600)  # well past tier 1's window
+    bot = _escalated_bot(ex, state, _vol_candles(2.5))
+    bot.live.order_book = {"bids": [{"price": str(entry * (1 - 0.11 / 100))}],
+                           "asks": [{"price": str(entry * (1 - 0.11 / 100) + 1)}]}
+    await bot.tick()
+    check("closed via ESCALATED_SL_TIER2", bot.state_row["side"] is None, bot.state_row["side"])
+    check("reason is ESCALATED_SL_TIER2",
+          any(a == "closed" and d.get("reason") == "ESCALATED_SL_TIER2" for a, d in bot.runs),
+          [(a, d.get("reason")) for a, d in bot.runs if a == "closed"])
+
+
+async def t_escalated_sl_tier2_does_not_fire_when_volume_is_normal():
+    print("\n[escalated SL tier 2: -0.10% but volume is NOT thin -- does not fire, waits for the hard cap]")
+    entry = 86000.0
+    ex = FakeExchange(position=round(10.0 / entry, 5), collateral=10.0)
+    state = _escalated_state(entry, age_s=600)
+    bot = _escalated_bot(ex, state, _vol_candles(5.0))
+    bot.live.order_book = {"bids": [{"price": str(entry * (1 - 0.11 / 100))}],
+                           "asks": [{"price": str(entry * (1 - 0.11 / 100) + 1)}]}
+    await bot.tick()
+    check("still open -- waiting for the unconditional -0.12% hard cap instead",
+          bot.state_row["side"] == "long", bot.state_row["side"])
+
+
+async def t_escalated_sl_tier3_hard_cap_fires_unconditionally():
+    print("\n[escalated SL tier 3: -0.12% closes regardless of volume -- the hard cap]")
+    entry = 86000.0
+    ex = FakeExchange(position=round(10.0 / entry, 5), collateral=10.0)
+    state = _escalated_state(entry, age_s=600)
+    bot = _escalated_bot(ex, state, _vol_candles(50.0))  # heavy volume -- doesn't matter at tier 3
+    bot.live.order_book = {"bids": [{"price": str(entry * (1 - 0.13 / 100))}],
+                           "asks": [{"price": str(entry * (1 - 0.13 / 100) + 1)}]}
+    await bot.tick()
+    check("closed via ESCALATED_SL_TIER3", bot.state_row["side"] is None, bot.state_row["side"])
+    check("reason is ESCALATED_SL_TIER3",
+          any(a == "closed" and d.get("reason") == "ESCALATED_SL_TIER3" for a, d in bot.runs),
+          [(a, d.get("reason")) for a, d in bot.runs if a == "closed"])
+
+
+async def t_escalated_sl_replaces_the_plain_sl_entirely():
+    print("\n[escalated SL: the plain override_sl_pct is ignored while this is on]")
+    entry = 86000.0
+    ex = FakeExchange(position=round(10.0 / entry, 5), collateral=10.0)
+    state = _escalated_state(entry, age_s=600)
+    state["override_sl_pct"] = 0.02  # would have closed this long ago under plain SL
+    bot = _escalated_bot(ex, state, _vol_candles(50.0))  # not thin -- tiers 1/2 don't apply either
+    bot.live.order_book = {"bids": [{"price": str(entry * (1 - 0.08 / 100))}],
+                           "asks": [{"price": str(entry * (1 - 0.08 / 100) + 1)}]}
+    await bot.tick()
+    check("still open at -0.08% -- override_sl_pct (0.02) is ignored, tier 3 cap is 0.12%",
+          bot.state_row["side"] == "long", bot.state_row["side"])
+
+
+async def t_escalated_sl_off_by_default_keeps_plain_sl_behavior():
+    print("\n[escalated SL: off (default) -- the plain SL still works exactly as before]")
+    entry = 86000.0
+    ex = FakeExchange(position=round(10.0 / entry, 5), collateral=10.0)
+    state = _escalated_state(entry, age_s=600)
+    state["override_escalated_sl_enabled"] = False
+    state["override_sl_pct"] = 0.02
+    bot = _escalated_bot(ex, state, _vol_candles(50.0))
+    bot.live.order_book = {"bids": [{"price": str(entry * (1 - 0.03 / 100))}],
+                           "asks": [{"price": str(entry * (1 - 0.03 / 100) + 1)}]}
+    await bot.tick()
+    check("closed via plain SL -- escalated mode is off, old behavior unchanged",
+          bot.state_row["side"] is None, bot.state_row["side"])
+    check("reason is plain SL, not an escalated tier",
+          any(a == "closed" and d.get("reason") == "SL" for a, d in bot.runs),
+          [(a, d.get("reason")) for a, d in bot.runs if a == "closed"])
+
+
+async def t_escalated_sl_native_stop_reflects_tier3_not_old_sl_pct():
+    print("\n[escalated SL: the native exchange-side stop syncs to the 0.12% tier-3 level, not override_sl_pct]")
+    entry = 86000.0
+    ex = FakeExchange(position=round(10.0 / entry, 5), collateral=10.0)
+    state = _escalated_state(entry, age_s=600)
+    state["override_sl_pct"] = 0.02
+    bot = _escalated_bot(ex, state, _vol_candles(50.0), native_stop_loss_enabled=True)
+    bot.live.order_book = {"bids": [{"price": str(entry)}], "asks": [{"price": str(entry + 1)}]}
+    await bot.tick()
+    check("native stop placed", len(getattr(ex, "sl_orders", [])) >= 1, getattr(ex, "sl_orders", None))
+    # price_decimals defaults to 1 -- native order triggers are recorded int-scaled by 10**that.
+    expected_trigger = entry * (1 - 0.12 / 100) * 10
+    actual_trigger = ex.sl_orders[-1]["trigger"]
+    check("native stop trigger matches the 0.12% tier-3 level, not the 0.02% override",
+          abs(actual_trigger - expected_trigger) < 10.0, (actual_trigger, expected_trigger))
+
+
 async def main():
     for t in (t_hedge_volatility_filters, t_hedge_entry_filters, t_environment_two_binary_switches,
               t_environment_er_hysteresis_and_freshness,
@@ -7074,6 +7256,8 @@ async def main():
               t_schedule_rules_row_disabled_no_write,
               t_schedule_rules_vol_wiggle_ratio_condition_end_to_end,
               t_schedule_rules_applies_worker1_fields,
+              t_schedule_rules_escalated_sl_false_is_explicitly_written,
+              t_schedule_rules_escalated_sl_absent_leaves_it_alone,
               t_schedule_rules_applies_hedge_fields_only,
               t_schedule_rules_no_match_turns_bot_off,
               t_schedule_rules_match_turns_bot_on,
@@ -7302,6 +7486,15 @@ async def main():
               t_exit_mode_no_sl_native_stop_cancelled_after_partner_closes,
               t_exit_mode_no_sl_real_reversal_closes_the_survivor,
               t_exit_mode_no_sl_reversal_check_waits_for_partner_to_close,
+              t_escalated_sl_tier1_fires_fast_and_thin,
+              t_escalated_sl_tier1_does_not_fire_past_2_minutes,
+              t_escalated_sl_tier1_does_not_fire_when_volume_is_normal,
+              t_escalated_sl_tier2_fires_regardless_of_age,
+              t_escalated_sl_tier2_does_not_fire_when_volume_is_normal,
+              t_escalated_sl_tier3_hard_cap_fires_unconditionally,
+              t_escalated_sl_replaces_the_plain_sl_entirely,
+              t_escalated_sl_off_by_default_keeps_plain_sl_behavior,
+              t_escalated_sl_native_stop_reflects_tier3_not_old_sl_pct,
               t_trail_dwell_blocks_a_single_touch,
               t_trail_dwell_fires_once_elapsed,
               t_trail_dwell_resets_on_a_new_peak,

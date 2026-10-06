@@ -423,6 +423,11 @@ CONFIG = BotConfig(
     # order on the exchange. See BotConfig.native_stop_loss_enabled / native_take_profit_enabled.
     native_stop_loss_enabled=True,
     native_take_profit_enabled=True,
+    # Escalated/leveled SL (2026-10-06, direct request): compiled opt-in for the live
+    # override_escalated_sl_enabled toggle -- see BotConfig.escalated_sl_enabled's docstring for
+    # the full 3-tier design and the real trade data it was built from. False by default even
+    # with this flag on; the dashboard toggle is what actually turns it on.
+    escalated_sl_enabled=True,
     # 2026-10-01: Render runs the old and new container together for ~30-60s on every deploy, and
     # Worker 1 had no lock -- at 14:40 UTC both copies entered the same candle (0.00234 BTC vs
     # 0.00117 intended) and the oversize guard emergency-flattened it. Only the lock holder may

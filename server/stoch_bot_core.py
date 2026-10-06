@@ -732,6 +732,31 @@ class BotConfig:
     # bot like Worker 1: both its exits are static price levels with no trail or partner-pnl
     # dependency, so BOTH sides can be backed by a real exchange order with nothing lost.
     native_take_profit_enabled: bool = False
+    # Escalated/leveled SL (2026-10-06, direct request after real digging into Worker 1's trade
+    # data: "i have lost 2 times since i put SL... we have the following... 0.05 we check volume
+    # and timing, then 0.1 we check volume again, then 0.12 hard cap"). Replaces the plain SL
+    # entirely with a 3-tier check, opt-in via override_escalated_sl_enabled (live, gated behind
+    # this compiled flag AND schema_has_exit_overrides -- same two-gate contract as every other
+    # feature here). Root-caused from real trade data: of Worker 1's first 17 trades after a
+    # reset, the 2 big losses were both reached their partner checkpoints at low live volume
+    # (<3 BTC/min, 10-candle avg) while every winner that reached the same drawdown level had
+    # volume well above that -- see the analysis conversation for the full table.
+    #   Tier 1: unrealized <= -tier1_pct AND age <= tier1_seconds AND volume < volume_threshold
+    #           -- a fast, thin-volume drop. Both real losses hit this (32s/1.22 and 99s/2.08).
+    #   Tier 2: unrealized <= -tier2_pct AND volume < volume_threshold -- same thin-volume read,
+    #           no time limit (a slower bleed that's still thin).
+    #   Tier 3: unrealized <= -tier3_pct, unconditional -- the hard cap, REPLACES the plain SL
+    #           (pos_sl gets set to this value when escalated mode is active, so the existing
+    #           SL check below does double duty as tier 3 and also re-syncs the native
+    #           exchange-side stop to this level, not whatever override_sl_pct says).
+    # 0.12 (not 0.10) specifically because the one winner in that sample that dipped deepest
+    # bottomed at -0.103% before recovering -- 0.10 would have cut it, 0.12 leaves it margin.
+    escalated_sl_enabled: bool = False
+    escalated_sl_tier1_pct: float = 0.05
+    escalated_sl_tier1_seconds: float = 120.0
+    escalated_sl_tier2_pct: float = 0.10
+    escalated_sl_tier3_pct: float = 0.12
+    escalated_sl_volume_threshold: float = 3.0
     # Single-instance lock (2026-09-30) -- see LOCK_REFRESH_EVERY/LOCK_STALE_AFTER and
     # _acquire_instance_lock. Requires the lock_owner/lock_heartbeat column migration. False
     # (default) leaves every bot that hasn't had that migration run behaving exactly as before.
@@ -3407,7 +3432,12 @@ class StochBot:
                                  ("trail_pct", "override_profit_lock_trail"), ("tp_pct", "override_tp_pct"),
                                  ("dwell_seconds", "override_dwell_seconds"), ("band_lo", "override_stoch_band_lo"),
                                  ("band_hi", "override_stoch_band_hi"), ("reversal_lo", "override_stoch_reversal_lo"),
-                                 ("reversal_hi", "override_stoch_reversal_hi"), ("window", "override_stoch_window")]
+                                 ("reversal_hi", "override_stoch_reversal_hi"), ("window", "override_stoch_window"),
+                                 # 2026-10-06, direct request: "the automation panel needs this
+                                 # option too" -- a rule can now turn escalated SL on/off for
+                                 # Worker 1 the same way it does every other lever. Worker 1
+                                 # only -- the hedge has no escalated_sl_enabled compiled flag.
+                                 ("escalated_sl_enabled", "override_escalated_sl_enabled")]
                 else:
                     field_map = [("sl_pct", "override_sl_pct"), ("trigger_pct", "override_profit_lock_trigger"),
                                  ("trail_pct", "override_profit_lock_trail"), ("tp_pct", "override_tp_pct"),
@@ -6042,6 +6072,15 @@ class StochBot:
             pos_sl = pos_sl if pos_sl is not None else ov_sl
             if cfg.schema_has_exit_overrides and state.get("override_sl_pct") is not None:
                 pos_sl = ov_sl
+            # Escalated/leveled SL -- see BotConfig.escalated_sl_enabled's docstring. Tier 3 (the
+            # hard cap) REPLACES the plain SL entirely: overriding pos_sl here means the ordinary
+            # SL check and the native exchange-side stop sync just below both automatically pick
+            # up the tier-3 level instead of whatever override_sl_pct says, with no separate
+            # suppress/skip machinery needed for that tier.
+            escalated_active = (cfg.escalated_sl_enabled and cfg.schema_has_exit_overrides
+                                and bool(state.get("override_escalated_sl_enabled")))
+            if escalated_active:
+                pos_sl = cfg.escalated_sl_tier3_pct
             tp = round_trigger(ae * (1 + pos_tp / 100 if side == "long" else 1 - pos_tp / 100),
                                up=(side == "long"))
             sl = round_trigger(state["first_entry_price"] * (1 - pos_sl / 100 if side == "long"
@@ -6076,14 +6115,30 @@ class StochBot:
                     await self._sync_native_exits(side, qty_now, sl, tp, suppress_sl=no_sl_skip)
             check_price = best_bid if side == "long" else best_ask
             gap_hit = None
-            if side == "long":
+            if gap_hit is None and escalated_active and ae:
+                # Tiers 1 and 2 -- tier 3 is handled by the plain SL check right below (pos_sl
+                # was already overridden to escalated_sl_tier3_pct above). See
+                # BotConfig.escalated_sl_enabled's docstring for the full reasoning/evidence.
+                unrealized_pct = (100 * (check_price - ae) / ae if side == "long"
+                                  else 100 * (ae - check_price) / ae)
+                live_vol = compute_candle_volume_avg(self.candles, 10)
+                thin = live_vol is not None and live_vol < cfg.escalated_sl_volume_threshold
+                entry_time = state.get("first_entry_time")
+                age_s = ((self._entry_clock_ms() - entry_time) / 1000
+                         if entry_time is not None else None)
+                if (unrealized_pct <= -cfg.escalated_sl_tier1_pct and thin
+                        and age_s is not None and age_s <= cfg.escalated_sl_tier1_seconds):
+                    gap_hit = "ESCALATED_SL_TIER1"
+                elif unrealized_pct <= -cfg.escalated_sl_tier2_pct and thin:
+                    gap_hit = "ESCALATED_SL_TIER2"
+            if gap_hit is None and side == "long":
                 if not no_sl_skip and check_price <= sl:
-                    gap_hit = "SL"
+                    gap_hit = "ESCALATED_SL_TIER3" if escalated_active else "SL"
                 elif tp_enabled and check_price >= tp:
                     gap_hit = "TP"
-            else:
+            elif gap_hit is None:
                 if not no_sl_skip and check_price >= sl:
-                    gap_hit = "SL"
+                    gap_hit = "ESCALATED_SL_TIER3" if escalated_active else "SL"
                 elif tp_enabled and check_price <= tp:
                     gap_hit = "TP"
 
@@ -6330,7 +6385,9 @@ class StochBot:
             if gap_hit:
                 closed_ok = await self.close_all(gap_hit, state, side, legs, best_bid, best_ask,
                                                  candle_ts, known_pos=real_pos)
-                if closed_ok and gap_hit in ("SL", "BOOK_OPPOSITION") and cfg.self_lock_enabled:
+                if closed_ok and gap_hit in (
+                        "SL", "BOOK_OPPOSITION", "ESCALATED_SL_TIER1", "ESCALATED_SL_TIER2",
+                        "ESCALATED_SL_TIER3") and cfg.self_lock_enabled:
                     await self._lock_real_trading()
                 if closed_ok and cfg.red_exit_burns_signal:
                     # SL/BOOK_OPPOSITION are always red by construction; STOCH_TURN can go
@@ -6338,7 +6395,10 @@ class StochBot:
                     # one. TP/PROFIT_LOCK never burn -- structurally can't be red.
                     # SAVING_LOCK burns too: the signal already went bad once, so wait for a
                     # genuinely new one instead of re-entering the same read at the same price.
-                    gap_hit_red = gap_hit in ("SL", "BOOK_OPPOSITION", "SAVING_LOCK") or (
+                    # ESCALATED_SL_TIER1/2/3 are always red too -- same construction as SL.
+                    gap_hit_red = gap_hit in (
+                        "SL", "BOOK_OPPOSITION", "SAVING_LOCK", "ESCALATED_SL_TIER1",
+                        "ESCALATED_SL_TIER2", "ESCALATED_SL_TIER3") or (
                         gap_hit == "STOCH_TURN" and ae
                         and ((check_price - ae) / ae if side == "long" else (ae - check_price) / ae) <= 0)
                     if gap_hit_red:

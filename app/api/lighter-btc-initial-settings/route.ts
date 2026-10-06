@@ -124,6 +124,16 @@ export async function POST(req: NextRequest) {
     out["override_exit_mode"] = em;
   }
 
+  // Escalated/leveled SL (2026-10-06, direct request after digging into real trade data --
+  // see StochBot/BotConfig.escalated_sl_enabled's docstring in stoch_bot_core.py). When on,
+  // REPLACES the plain SL entirely with the 3-tier check. Off by default.
+  if (body.escalatedSlEnabled !== undefined) {
+    if (typeof body.escalatedSlEnabled !== "boolean") {
+      return NextResponse.json({ error: "escalatedSlEnabled must be true or false." }, { status: 400 });
+    }
+    out["override_escalated_sl_enabled"] = body.escalatedSlEnabled;
+  }
+
   if (Object.keys(out).length === 0) {
     return NextResponse.json({ error: "Nothing to change." }, { status: 400 });
   }
