@@ -4503,11 +4503,15 @@ function MasterSchedulePanel({
             <div className="flex items-center justify-between cursor-pointer" onClick={() => setExpanded(expanded === i ? null : i)}>
               <p className="text-xs font-bold text-white">
                 Rule {i + 1}
-                <span className={`ml-1.5 text-[9px] font-bold px-1 rounded ${rule.worker1_enabled !== false ? "bg-green-500/20 text-green-400" : "bg-red-500/20 text-red-400"}`}>
-                  W1 {rule.worker1_enabled !== false ? "ON" : "OFF"}
+                <span className={`ml-1.5 text-[9px] font-bold px-1 rounded ${
+                  rule.worker1_enabled === null ? "bg-gray-500/20 text-gray-400"
+                    : rule.worker1_enabled !== false ? "bg-green-500/20 text-green-400" : "bg-red-500/20 text-red-400"}`}>
+                  W1 {rule.worker1_enabled === null ? "Don't touch" : rule.worker1_enabled !== false ? "ON" : "OFF"}
                 </span>
-                <span className={`ml-1 text-[9px] font-bold px-1 rounded ${rule.hedge_enabled !== false ? "bg-green-500/20 text-green-400" : "bg-red-500/20 text-red-400"}`}>
-                  Hedge {rule.hedge_enabled !== false ? "ON" : "OFF"}
+                <span className={`ml-1 text-[9px] font-bold px-1 rounded ${
+                  rule.hedge_enabled === null ? "bg-gray-500/20 text-gray-400"
+                    : rule.hedge_enabled !== false ? "bg-green-500/20 text-green-400" : "bg-red-500/20 text-red-400"}`}>
+                  Hedge {rule.hedge_enabled === null ? "Don't touch" : rule.hedge_enabled !== false ? "ON" : "OFF"}
                 </span>
               </p>
               <div className="flex items-center gap-1">
