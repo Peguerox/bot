@@ -3440,8 +3440,22 @@ class StochBot:
             return
         rules = cache.get("rules") or []
         hour = self._schedule_current_hour()
+        # Per-bot relevance filter (2026-10-07, direct request): a rule whose {bot_key}_enabled
+        # is explicitly null is "do not touch" for THIS bot -- it has no opinion at all, so it
+        # must not even compete for "the matched rule" on this bot's behalf. Without this, a
+        # do-not-touch rule placed earlier in the list (e.g. Rules 1-3, which don't care about
+        # the hedge) could still win the match purely on its own conditions and silently freeze
+        # the hedge at whatever it last was, starving Rule 4 of ever being checked. Each bot
+        # effectively sees its own filtered rule list -- Worker 1 only ever considers rules 1-3,
+        # the hedge only ever considers rule 4 -- so "Rule 1 unmatched" can never fight "Rule 2
+        # matched": Rule 1 isn't even a candidate once something else relevant is matched, and
+        # only falls back to OFF (below) when NOTHING relevant to this bot matches at all.
+        enabled_key = f"{cfg.schedule_rules_bot_key}_enabled"
         matched = None
         for rule in rules:
+            bot_enabled_opt = rule[enabled_key] if enabled_key in rule else True
+            if bot_enabled_opt is None:
+                continue
             if self._rule_matches(rule, hour, er, volume, wiggle, rate, vol_wiggle_ratio, vol_wiggle_product,
                                    zebra, color_balance):
                 matched = rule
@@ -3464,25 +3478,21 @@ class StochBot:
             self._schedule_effective_rule = matched
         settings = effective.get(cfg.schedule_rules_bot_key) if effective else None
         patch = {}
-        # Tri-state (2026-10-06, direct request: "we need to put 3 options on off or leave
-        # alone") -- a rule whose {bot_key}_enabled is explicitly null has no opinion on
-        # on/off at all and must not touch `enabled` either way, so a rule built purely for
-        # the OTHER bot (e.g. a hedge-only Rule 4 placed first) can be a true no-op for this
-        # one -- not even forcing it back on. Absent key (an older saved rule, pre-tri-state)
-        # still defaults True, the exact pre-revision behavior.
-        # No match at all now turns the bot ON (2026-10-06, direct request "both ons") --
-        # previously OFF. Flipped because the real 4-rule set has a gap (wiggle>50 with ER<0.05,
-        # or wiggle>50 with vol_wiggle_product outside rule 4's band) where nothing matches, and
-        # the user wants both bots left trading through that gap rather than shut down.
+        # Tri-state (2026-10-06/07, direct request: "turn on when matched / turn off when
+        # matched / do not touch" -- each rule is symmetric on its own: matched -> its value,
+        # not matched -> the opposite, never a second rule needed for the "off" side). Because
+        # `effective` was already filtered to rules relevant to THIS bot above, its enabled_key
+        # is always non-null here (or absent, defaulting True for pre-tri-state saved rules).
+        # No relevant rule currently matching (`effective is None`) is the symmetric "not
+        # matched" case for every relevant rule at once -> OFF, same as a single rule's own
+        # not-matched side, not a special separate fallback.
         if effective is not None:
-            enabled_key = f"{cfg.schedule_rules_bot_key}_enabled"
             bot_enabled_opt = effective[enabled_key] if enabled_key in effective else True
-            if bot_enabled_opt is not None:
-                desired_enabled = bool(bot_enabled_opt)
-                if bool(state.get("enabled", True)) != desired_enabled:
-                    patch["enabled"] = desired_enabled
-        elif not state.get("enabled", True):
-            patch["enabled"] = True
+            desired_enabled = bool(bot_enabled_opt)
+            if bool(state.get("enabled", True)) != desired_enabled:
+                patch["enabled"] = desired_enabled
+        elif state.get("enabled", True):
+            patch["enabled"] = False
         new_key = None
         if settings:
             new_key = jsonlib.dumps(settings, sort_keys=True)

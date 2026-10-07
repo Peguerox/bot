@@ -6493,34 +6493,19 @@ async def t_schedule_rules_applies_hedge_fields_only():
           "override_stoch_band_lo" not in bot.state_row)
 
 
-async def t_schedule_rules_no_match_turns_bot_on():
-    print("\n[schedule rules: no rule matches -- turns the bot ON, writes no settings]")
+async def t_schedule_rules_no_match_turns_bot_off():
+    print("\n[schedule rules: no rule matches -- turns the bot OFF, writes no settings]")
     ex = FakeExchange()
     bot = make_bot(ex, candles=_schedule_candles(), schedule_rules_enabled=True,
                     schedule_rules_bot_key="worker1")
-    bot.state_row["enabled"] = False
     rule = {"hour_start": 0, "hour_end": 24, "er_min": 2.0,  # impossible -- ER never reaches 2.0
             "worker1": {"sl_pct": 0.5}}
     bot.sb = _schedule_sb([rule])
     await bot._apply_schedule_rules(bot.state_row)
     check("no settings written", "override_sl_pct" not in bot.state_row)
-    check("bot turned ON -- no match, direct request: \"both ons\" (real rule set has a gap "
-          "where nothing matches, and the bot must keep trading through it, not shut down)",
-          bot.state_row["enabled"] is True)
-
-
-async def t_schedule_rules_no_match_leaves_an_already_on_bot_on():
-    print("\n[schedule rules: no rule matches and bot is already ON -- no redundant write]")
-    ex = FakeExchange()
-    bot = make_bot(ex, candles=_schedule_candles(), schedule_rules_enabled=True,
-                    schedule_rules_bot_key="worker1")
-    bot.state_row["enabled"] = True
-    rule = {"hour_start": 0, "hour_end": 24, "er_min": 2.0,
-            "worker1": {"sl_pct": 0.5}}
-    bot.sb = _schedule_sb([rule])
-    await bot._apply_schedule_rules(bot.state_row)
-    check("no settings written", "override_sl_pct" not in bot.state_row)
-    check("stays ON, no spurious patch", bot.state_row["enabled"] is True)
+    check("bot turned OFF -- no match is symmetric with a rule's own on/off: the one rule "
+          "that could turn it on isn't met, so it goes off, same as any no-rules-at-all case",
+          bot.state_row["enabled"] is False)
 
 
 async def t_schedule_rules_match_turns_bot_on():
@@ -6573,60 +6558,106 @@ async def t_schedule_rules_enabled_flag_defaults_true_when_absent():
     check("defaults to enabled when the flag is simply absent", bot.state_row["enabled"] is True)
 
 
-async def t_schedule_rules_enabled_null_leaves_it_untouched_when_currently_on():
-    print("\n[schedule rules: {bot}_enabled explicitly null -- \"Don't change\", leaves enabled alone]")
-    print("  direct request: \"we need to put another option Dont change when matched -- so")
-    print("  whatever is happening in 1 rule does not touch the other rules\"")
+async def t_schedule_rules_enabled_null_rule_is_fully_invisible_to_that_bot():
+    print("\n[schedule rules: {bot}_enabled=null -- this rule is not a candidate for this bot at all]")
+    print("  Direct request, 2026-10-07, after a real live incident: \"do not touch\" means this")
+    print("  rule has ZERO opinion on this bot -- it can't even win the match on this bot's")
+    print("  behalf, so if it's the ONLY rule, this bot has no relevant rule at all and falls to")
+    print("  the same OFF default as a true no-match (settings are skipped too -- fully invisible,")
+    print("  not \"visible for settings, silent on enabled\").")
     ex = FakeExchange()
     bot = make_bot(ex, candles=_schedule_candles(), schedule_rules_enabled=True,
                     schedule_rules_bot_key="worker1")
     bot.state_row["enabled"] = True
-    rule = {"hour_start": 0, "hour_end": 24, "worker1_enabled": None}  # explicit null, not absent
+    rule = {"hour_start": 0, "hour_end": 24, "worker1_enabled": None, "worker1": {"sl_pct": 0.15}}
     bot.sb = _schedule_sb([rule])
     await bot._apply_schedule_rules(bot.state_row)
-    check("still enabled, untouched", bot.state_row["enabled"] is True)
-
-
-async def t_schedule_rules_enabled_null_leaves_it_untouched_when_currently_off():
-    print("\n[schedule rules: {bot}_enabled=null does NOT turn a currently-off bot back on]")
-    ex = FakeExchange()
-    bot = make_bot(ex, candles=_schedule_candles(), schedule_rules_enabled=True,
-                    schedule_rules_bot_key="worker1")
-    bot.state_row["enabled"] = False
-    rule = {"hour_start": 0, "hour_end": 24, "worker1_enabled": None,
-            "worker1": {"sl_pct": 0.15}}  # settings present, but enabled is still "don't touch"
-    bot.sb = _schedule_sb([rule])
-    await bot._apply_schedule_rules(bot.state_row)
-    check("stays OFF -- null means no opinion, settings existing on the rule doesn't force it on",
+    check("turned OFF -- no rule relevant to worker1 matched, symmetric no-match default",
           bot.state_row["enabled"] is False)
-    check("settings still pre-staged though -- only the on/off decision is skipped",
-          bot.state_row.get("override_sl_pct") == 0.15)
+    check("settings also skipped -- the rule is invisible to worker1, not partially visible",
+          "override_sl_pct" not in bot.state_row)
 
 
-async def t_schedule_rules_enabled_null_lets_one_bots_rule_ignore_the_other_bot():
-    print("\n[schedule rules: a hedge-only rule with worker1_enabled=null never touches Worker 1]")
-    # The exact real-money scenario this was built for: a hedge rule placed first in the list
-    # must be able to match without forcing Worker 1 on OR off -- true no-op for the other bot.
-    rule = {"hour_start": 0, "hour_end": 24,
-            "worker1_enabled": None, "hedge_enabled": True,
-            "hedge": {"sl_pct": 0.04}}
+async def t_schedule_rules_null_rule_never_blocks_a_real_rule_for_this_bot():
+    print("\n[schedule rules: a null-for-this-bot rule placed FIRST never shadows a real rule after it]")
+    # The exact real-money scenario this was built for, and the exact bug it fixes: with Rule 4
+    # (hedge-only, worker1_enabled=null) placed anywhere in the list alongside a real worker1
+    # rule, worker1 must be governed by its OWN rule -- the null rule must never even be a
+    # candidate for worker1's match, regardless of list order.
+    hedge_only_rule = {"hour_start": 0, "hour_end": 24,
+                        "worker1_enabled": None, "hedge_enabled": True,
+                        "hedge": {"sl_pct": 0.04}}
+    worker1_rule = {"hour_start": 0, "hour_end": 24,
+                     "worker1_enabled": True, "hedge_enabled": None,
+                     "worker1": {"sl_pct": 0.15}}
 
     ex1 = FakeExchange()
     bot1 = make_bot(ex1, candles=_schedule_candles(), schedule_rules_enabled=True,
                      schedule_rules_bot_key="worker1")
-    bot1.state_row["enabled"] = True
-    bot1.sb = _schedule_sb([rule])
+    bot1.sb = _schedule_sb([hedge_only_rule, worker1_rule])  # null-for-worker1 rule listed FIRST
     await bot1._apply_schedule_rules(bot1.state_row)
-    check("Worker 1 untouched -- stays enabled, this rule has no opinion on it",
-          bot1.state_row["enabled"] is True and "override_sl_pct" not in bot1.state_row)
+    check("Worker 1 skips the hedge-only rule and is governed by its own rule instead",
+          bot1.state_row["enabled"] is True and bot1.state_row.get("override_sl_pct") == 0.15)
 
     ex2 = FakeExchange()
     bot2 = make_bot(ex2, candles=_schedule_candles(), schedule_rules_enabled=True,
                      schedule_rules_bot_key="hedge")
-    bot2.sb = _schedule_sb([rule])
+    bot2.sb = _schedule_sb([hedge_only_rule, worker1_rule])
     await bot2._apply_schedule_rules(bot2.state_row)
-    check("hedge turns ON with its own settings as normal",
+    check("hedge skips the worker1-only rule and is governed by its own rule instead",
           bot2.state_row["enabled"] is True and bot2.state_row.get("override_sl_pct") == 0.04)
+
+
+async def t_schedule_rules_unmatched_rule_does_not_fight_a_matched_one_for_same_bot():
+    print("\n[schedule rules: Rule 1 unmatched does not force OFF when Rule 2 is matched for the same bot]")
+    # Direct request, 2026-10-07: "make sure that the unmatched=off of rule one will not
+    # interfere with the matched=on of rule 2 ... it only turns off if no other rules are met".
+    # _schedule_candles() has ER ~1.0 -- rule1 (er_max=0.5) can never match it, rule2 (er_min=0.5)
+    # always does. Rule1 being unmatched must not be consulted at all once rule2 wins the match.
+    rule1 = {"er_max": 0.5, "worker1_enabled": True, "worker1": {"sl_pct": 0.11}}
+    rule2 = {"er_min": 0.5, "worker1_enabled": True, "worker1": {"sl_pct": 0.22}}
+    ex = FakeExchange()
+    bot = make_bot(ex, candles=_schedule_candles(), schedule_rules_enabled=True,
+                    schedule_rules_bot_key="worker1")
+    bot.state_row["enabled"] = False
+    bot.sb = _schedule_sb([rule1, rule2])
+    await bot._apply_schedule_rules(bot.state_row)
+    check("rule 2 wins the match and turns worker1 ON", bot.state_row["enabled"] is True)
+    check("rule 2's own settings applied, not rule 1's unmatched settings",
+          bot.state_row.get("override_sl_pct") == 0.22)
+
+
+async def t_schedule_rules_hedge_governed_purely_by_its_own_rule_regardless_of_worker1_match():
+    print("\n[schedule rules: hedge's on/off tracks ONLY its own rule, ignoring which worker1 rule wins]")
+    # The real production bug, fixed 2026-10-07: rules 1-3 are "do not touch" for hedge
+    # (hedge_enabled=None) and rule 4 is the ONLY rule with a hedge opinion. Whichever of
+    # rules 1-3 wins the match for worker1's sake must have zero bearing on hedge -- hedge must
+    # evaluate rule 4's own condition directly, on or off, independent of that.
+    rule1 = {"er_max": 0.5, "worker1_enabled": True, "hedge_enabled": None, "worker1": {"sl_pct": 0.11}}
+    rule4 = {"er_min": 0.5, "worker1_enabled": None, "hedge_enabled": True, "hedge": {"sl_pct": 0.04}}
+
+    # ER ~1.0 -> rule1 (er_max=0.5) is unmatched; rule4 (er_min=0.5) is the only match at all,
+    # and it's hedge-relevant -- hedge must turn ON from rule4 alone.
+    ex1 = FakeExchange()
+    bot1 = make_bot(ex1, candles=_schedule_candles(), schedule_rules_enabled=True,
+                     schedule_rules_bot_key="hedge")
+    bot1.sb = _schedule_sb([rule1, rule4])
+    await bot1._apply_schedule_rules(bot1.state_row)
+    check("hedge ON purely from rule4's own condition", bot1.state_row["enabled"] is True)
+    check("hedge's own settings applied", bot1.state_row.get("override_sl_pct") == 0.04)
+
+    # Now make rule4 itself unmatched too (er_min=2.0, impossible) while rule1 still can't match
+    # either (er_max=0.5) -- no rule relevant to hedge matches -> hedge must turn OFF, not freeze
+    # ON just because rule1 (irrelevant to hedge) is sitting there unmatched.
+    rule4_unreachable = {"er_min": 2.0, "worker1_enabled": None, "hedge_enabled": True, "hedge": {"sl_pct": 0.04}}
+    ex2 = FakeExchange()
+    bot2 = make_bot(ex2, candles=_schedule_candles(), schedule_rules_enabled=True,
+                     schedule_rules_bot_key="hedge")
+    bot2.state_row["enabled"] = True
+    bot2.sb = _schedule_sb([rule1, rule4_unreachable])
+    await bot2._apply_schedule_rules(bot2.state_row)
+    check("hedge turns OFF once its own rule stops matching, regardless of rule1's state",
+          bot2.state_row["enabled"] is False)
 
 
 async def t_schedule_rules_settings_still_applied_while_bot_held_off():
@@ -6791,7 +6822,7 @@ async def t_schedule_rules_malformed_data_fails_closed():
     bot.sb = _schedule_sb(None)  # rules is None, not a list
     await bot._apply_schedule_rules(bot.state_row)  # must not raise
     check("no settings written with rules=None", "override_sl_pct" not in bot.state_row)
-    check("treated as no match -- bot turned on, same as any other no-match", bot.state_row["enabled"] is True)
+    check("treated as no match -- bot turned off, same as any other no-match", bot.state_row["enabled"] is False)
 
 
 async def t_schedule_rules_mutates_local_state_dict_immediately():
@@ -7468,14 +7499,14 @@ async def main():
               t_schedule_rules_escalated_sl_false_is_explicitly_written,
               t_schedule_rules_escalated_sl_absent_leaves_it_alone,
               t_schedule_rules_applies_hedge_fields_only,
-              t_schedule_rules_no_match_turns_bot_on,
-              t_schedule_rules_no_match_leaves_an_already_on_bot_on,
+              t_schedule_rules_no_match_turns_bot_off,
               t_schedule_rules_match_turns_bot_on,
               t_schedule_rules_per_bot_enabled_flag_independent_of_settings,
               t_schedule_rules_enabled_flag_defaults_true_when_absent,
-              t_schedule_rules_enabled_null_leaves_it_untouched_when_currently_on,
-              t_schedule_rules_enabled_null_leaves_it_untouched_when_currently_off,
-              t_schedule_rules_enabled_null_lets_one_bots_rule_ignore_the_other_bot,
+              t_schedule_rules_enabled_null_rule_is_fully_invisible_to_that_bot,
+              t_schedule_rules_null_rule_never_blocks_a_real_rule_for_this_bot,
+              t_schedule_rules_unmatched_rule_does_not_fight_a_matched_one_for_same_bot,
+              t_schedule_rules_hedge_governed_purely_by_its_own_rule_regardless_of_worker1_match,
               t_schedule_rules_settings_still_applied_while_bot_held_off,
               t_schedule_rules_enabled_sync_overrides_manual_change_every_cycle,
               t_schedule_rules_first_match_wins,
