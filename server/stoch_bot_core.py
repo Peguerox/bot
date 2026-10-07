@@ -52,10 +52,12 @@ import aiohttp
 import lighter
 
 # ── Network safety budget ───────────────────────────────────────────────────────────────────
-# Worst-case pathological tick is bounded by these: reconcile confirm (~17s) + close (~61s)
-# + re-entry (~61s) ~= 139s, comfortably under TICK_WATCHDOG (see confirm_fill()'s docstring
+# Worst-case pathological tick is bounded by these: reconcile confirm (~17s) + close (~30s)
+# + re-entry (~30s) ~= 77s, comfortably under TICK_WATCHDOG (see confirm_fill()'s docstring
 # for how tries/delay were chosen -- there's a real tradeoff here between speed and this
-# margin, not just a free win). A normal tick is ~0.5s.
+# margin, not just a free win; confirm_fill's own tries default is the authoritative number --
+# t_timeout_constants in test_core.py recomputes this from it directly, so it never goes
+# stale here the way this comment's own numbers can). A normal tick is ~0.5s.
 REST_TIMEOUT = 8.0        # per Lighter REST read (SDK default would be 300s)
 ORDER_TIMEOUT = 12.0      # per order placement / cancel-all
 SB_TIMEOUT = 10.0         # per Supabase call
@@ -4061,7 +4063,7 @@ class StochBot:
                 return self._pos_cache
             raise
 
-    async def confirm_fill(self, want_nonzero, expect_qty=None, tries=6, delay=0.25,
+    async def confirm_fill(self, want_nonzero, expect_qty=None, tries=3, delay=0.25,
                            require_consecutive=1):
         """Authoritative REST answer to 'what is the real position right now'.
 
@@ -4078,9 +4080,22 @@ class StochBot:
         tries=8/delay=0.25 (10/10 trials, mean 1.375s -> 0.778s, max 1.86s -> 1.07s) --
         but 8 tries doubles the worst-case wait if the exchange were ever genuinely
         unresponsive (each try can cost up to REST_TIMEOUT), which left only ~8s of
-        margin under TICK_WATCHDOG instead of the ~70s the design assumed. tries=6 keeps
-        essentially all the measured speedup (nothing here ever needed more than 2
-        tries) while keeping a real safety margin (~40s) under the watchdog.
+        margin under TICK_WATCHDOG instead of the ~70s the design assumed. tries=6 kept
+        essentially all the measured speedup (nothing here ever needed more than 2 tries)
+        while keeping a real safety margin (~40s) under the watchdog.
+
+        tries=6 -> 3 (2026-10-07, direct request after a real WAF-rate-limit incident):
+        the hedge's two legs cycling every 20-90s during extreme volatility turned this
+        loop into the dominant source of request volume against Lighter's account-read
+        endpoint, which started intermittently 405/WAF-blocking it. The 2026-09-22
+        measurement above already showed nothing here ever needed more than 2 tries in
+        practice -- tries 3-6 were pure headroom for a genuinely slow exchange, not
+        normal-path need. Dropping to 3 keeps that headroom (one full try beyond the
+        measured worst case) while roughly halving both the worst-case request burst per
+        fill and the worst-case tick duration (see the REST_TIMEOUT comment block's
+        close/re-entry budget, ~61s -> ~30s each) -- more watchdog margin, not less.
+        t_timeout_constants in test_core.py reads this default dynamically, so it
+        re-validates the new margin automatically rather than needing its own update.
         """
         pos, coll = 0.0, None
         # Distinguishes "read fine, nothing there" from "could not read at all" -- see
