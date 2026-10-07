@@ -3524,6 +3524,18 @@ class StochBot:
             except Exception:
                 pass
         if not cache or not cache.get("enabled"):
+            # Real bug fixed 2026-10-07 (direct report): active_governing_rule_id used to be
+            # left at whatever it last was when the master switch turns off, so a manual trade
+            # made while automation is OFF still copied a stale rule's id onto its own entry
+            # snapshot (_entry_settings_snapshot reads this unconditionally). Clear it here too,
+            # isolated/best-effort like every other schema-gated column -- a missing migration
+            # must never cost the rest of this early return.
+            if cfg.schema_has_schedule_rule_tracking and state.get("active_governing_rule_id") is not None:
+                state["active_governing_rule_id"] = None
+                try:
+                    await self.update_state({"active_governing_rule_id": None})
+                except Exception:
+                    pass
             return
         rules = cache.get("rules") or []
         hour = self._schedule_current_hour()
@@ -4451,6 +4463,42 @@ class StochBot:
                                    reduce_only=True, ref_price=ref)
             await asyncio.sleep(1.0)
         pos_after, coll_after, flat = await self.confirm_fill(want_nonzero=False)
+        # Repeat-tracking and the entry cooldown run regardless of whether this attempt actually
+        # got flat -- "an emergency flatten was needed" is the signal worth counting either way,
+        # and pausing new entries is harmless (this leg's own `side` isn't cleared below unless
+        # flat, so it never takes the no-new-entries-needed fast path that blocking fresh entries
+        # would otherwise protect).
+        now = time.time()
+        self._emergency_flattens = [t for t in self._emergency_flattens
+                                    if now - t < EMERGENCY_REPEAT_WINDOW]
+        self._emergency_flattens.append(now)
+        repeat = len(self._emergency_flattens) >= EMERGENCY_REPEAT_LIMIT
+        self._entry_cooldown_until = now + EMERGENCY_COOLDOWN
+        await self.log_run("emergency_flatten_outcome", {
+            "reason": reason, "repeats_in_window": len(self._emergency_flattens),
+            "disabled": repeat, "flat": flat, "residual": pos_after,
+            "cooldown_s": None if repeat else EMERGENCY_COOLDOWN})
+        if repeat:
+            # Never leave enabled=False paired with a cleared side on a position that is NOT
+            # actually flat -- that combination is exactly what lets a bot skip the exchange
+            # entirely on every later tick (see the disabled-and-flat fast path in tick()).
+            # Disabling is still safe here precisely because `side` stays untouched below when
+            # !flat, so that fast path's `side is None` half of the check can never be satisfied
+            # by a position this method failed to actually close.
+            await self.update_state({"enabled": False})
+        if not flat:
+            # Real-money bug fixed 2026-10-07: this used to unconditionally clear side/legs and
+            # reset every position-scoped tracker below, regardless of whether confirm_fill
+            # actually agreed the position was gone. A flatten that failed (no book, repeated
+            # order rejections, still-unconfirmed after 3 tries) was then reported as resolved --
+            # the bot believed it was flat while a real position sat open and, if `repeat` also
+            # disabled it, stopped checking the exchange on every subsequent tick (the
+            # disabled-and-flat fast path above). Leaving side/legs and every tracker alone here
+            # means next tick's own oversize/reconcile check runs again against the SAME real
+            # position and retries -- same as any other tick that hasn't resolved yet.
+            await self.log_run("emergency_flatten", {"reason": reason, "flat": flat,
+                                                     "residual": pos_after})
+            return
         # Record the closed position like any other exit. Without this the trade table silently
         # loses a leg -- which is exactly how a properly-hedged cycle came to be displayed as
         # UNHEDGED on 2026-09-30: the partner leg existed and was flattened here, but never got a
@@ -4479,22 +4527,10 @@ class StochBot:
                     "realized_pnl_usd": (state_before.get("realized_pnl_usd") or 0.0) + pnl})
             except Exception as e:
                 await self.log_run("emergency_flatten_log_failed", {"error": str(e)[:200]})
-        now = time.time()
-        self._emergency_flattens = [t for t in self._emergency_flattens
-                                    if now - t < EMERGENCY_REPEAT_WINDOW]
-        self._emergency_flattens.append(now)
-        repeat = len(self._emergency_flattens) >= EMERGENCY_REPEAT_LIMIT
-        self._entry_cooldown_until = now + EMERGENCY_COOLDOWN
-        await self.log_run("emergency_flatten_outcome", {
-            "reason": reason, "repeats_in_window": len(self._emergency_flattens),
-            "disabled": repeat,
-            "cooldown_s": None if repeat else EMERGENCY_COOLDOWN})
         patch = {
             "side": None, "legs": [], "first_entry_price": None,
             "first_entry_time": None, "dca_level": 0,
         }
-        if repeat:
-            patch["enabled"] = False
         if self.cfg.schema_has_position_bands:
             patch["position_tp_pct"] = None
             patch["position_sl_pct"] = None
@@ -4718,19 +4754,35 @@ class StochBot:
         await self.log_run("entered", entry_detail)
         return True
 
+    async def _cancel_native_exits_after_confirmed_flat(self):
+        """Cancel any resting native SL/TP now that we have just CONFIRMED the position is
+        flat -- see close_all's docstring note for why this no longer happens up front.
+        cancel_all() already logs and swallows its own failures rather than raising -- the
+        position is genuinely closed either way, and a resting reduce_only order with nothing
+        left to reduce is inert, not unsafe."""
+        if not (self.cfg.native_stop_loss_enabled or self.cfg.native_take_profit_enabled):
+            return
+        await self.cancel_all()
+        self._native_stop_synced = None
+        self._native_tp_synced = None
+        self._native_sync_consecutive_failures = 0
+        self._native_sync_retry_at = 0.0
+
     async def close_all(self, reason, state, side, legs, best_bid, best_ask, candle_ts,
                         known_pos=None):
-        if self.cfg.native_stop_loss_enabled or self.cfg.native_take_profit_enabled:
-            # We are about to close ourselves -- clear whatever native order(s) are resting first
-            # so neither can fire into a position that's already flat (or, worse, a fresh one
-            # from the next cycle). Safe even if nothing is resting (cancel_all is a no-op then).
-            await self.cancel_all()
-            self._native_stop_synced = None
-            self._native_tp_synced = None
-            # Fresh position cycle starting next -- don't carry over a backoff delay earned by
-            # this position's own native-order troubles.
-            self._native_sync_consecutive_failures = 0
-            self._native_sync_retry_at = 0.0
+        # Real-money bug fixed 2026-10-07 (direct report, with real tick data proving it): this
+        # used to cancel the resting native stop/TP FIRST, before even attempting our own close
+        # -- so if our own close then couldn't be confirmed (the exact WAF-blocked-reads failure
+        # mode this file already has extensive handling for elsewhere), the position was left
+        # with NO protection at all, native or otherwise, for as long as confirmation stayed
+        # blocked. Observed live: price crossed a 0.03% SL at 11:33:39, and with the native stop
+        # already cancelled and our own close stuck unconfirmable, price drifted to +0.065%
+        # adverse before a read finally succeeded and the close confirmed, over a minute later.
+        # Fix: only cancel the native order(s) once OUR OWN close is actually confirmed (or the
+        # position is confirmed already flat) -- the native stop now stays live as backup
+        # protection for the entire time we're trying to confirm our own close, not just before
+        # we start trying. Both orders are reduce_only, so there is no real risk of the two
+        # stacking past flat if they ever did fire near each other.
         prior_collateral = state.get("collateral_before_entry")
         # Close what is really open. Closing only the tracked legs would leave a residual
         # position running whenever a phantom fill made the real size larger.
@@ -4750,12 +4802,13 @@ class StochBot:
                 return False
         qty = abs(real_pos)
         if qty <= QTY_EPS:
+            await self._cancel_native_exits_after_confirmed_flat()
             return True  # already flat; the reconcile branch books it next tick
         is_ask = real_pos > 0
-        # No cancel_all() here: these bots only ever place reduce_only market orders, never
-        # a resting/limit order, so there is structurally nothing to cancel. Confirmed live
-        # (zero active orders on all 3 real accounts) and measured -- it cost ~0.37s of pure
-        # overhead on every close for no benefit (2026-09-22).
+        # No cancel_all() here for the CLOSE order itself: these bots only ever place
+        # reduce_only market orders, never a resting/limit order, so there is structurally
+        # nothing OF OURS to cancel. The native stop/TP are deliberately left alone until the
+        # close below is confirmed -- see the function docstring note above.
         err = await self.place_order(is_ask=is_ask, base_amount=qty, reduce_only=True,
                                      ref_price=(best_bid if is_ask else best_ask))
         pos_after, coll_after, confirmed = await self.confirm_fill(want_nonzero=False)
@@ -4768,8 +4821,15 @@ class StochBot:
                                    ref_price=(best_bid if pos_after > 0 else best_ask))
             pos_after, coll_after, confirmed = await self.confirm_fill(want_nonzero=False)
         if not confirmed:
+            # Still not confirmed -- leave the native stop/TP exactly as they are (untouched
+            # this whole function) and let the caller retry next tick. The resting native order
+            # is the ONLY thing still protecting this position right now; cancelling it here on
+            # a mere confirmation failure is exactly the bug this fix removes.
             await self.log_run("close_incomplete", {"reason": reason, "remaining_qty": pos_after})
             return False
+        # Confirmed flat -- now safe to clear the native order(s): neither can fire into this
+        # (just-closed) position, or worse, a fresh one from the next cycle.
+        await self._cancel_native_exits_after_confirmed_flat()
         pnl = (coll_after - prior_collateral) if (prior_collateral is not None and coll_after is not None) else 0.0
         ae = avg_entry(legs) or state.get("first_entry_price")
         if ae and qty > 0:
@@ -6187,6 +6247,31 @@ class StochBot:
             candidates = [(r, t) for r, t in candidates if t is not None]
             ext_reason = (min(candidates, key=lambda c: abs(implied_exit - c[1]))[0]
                          if candidates else "EXTERNAL")
+            # Signal burn (2026-10-07, real-money bug): red_exit_burns_signal was only ever
+            # applied in close_all()'s OWN internal gap_hit path, never here -- but a native
+            # stop firing on the exchange is the NORMAL way almost every SL now happens, so
+            # this path is the common case, not the rare one, and the burn was essentially
+            # dead. Confirmed live 2026-10-07: two trades re-entered the exact same K within
+            # 20-49s of a native-stop loss and lost again. PROFIT_LOCK never reaches this path
+            # (it's never a native order, always closed by the bot's own close_all), so there
+            # is no profit_lock_burns_signal equivalent to add here -- only red. Judged by the
+            # real realized pnl, not the inferred "SL"/"TP" label, same reasoning close_all
+            # uses for STOCH_TURN's ambiguous case (a label can be wrong about WHICH native
+            # order fired; the money never is).
+            if cfg.red_exit_burns_signal and pnl <= 0:
+                self._burned_signal = side
+                self._burned_signal_via = "red"
+                self._burned_signal_k = None
+                # This reconcile can fall through into THIS SAME tick's entry logic below
+                # (side was just set to None a few lines up) -- that entry_signal was computed
+                # at the top of this tick, before the burn above existed, so the ordinary
+                # "signal_burned" check (which only runs once per tick, earlier than this
+                # point) never saw it. Null it here too, or a burn-worthy close can still
+                # reopen the exact same signal in the very same tick it was just burned in.
+                if entry_signal == side:
+                    entry_signal = None
+                if reversal_signal == side:
+                    reversal_signal = None
             if cfg.schema_has_cycle_id and ext_cycle_id is not None:
                 try:
                     await self.update_state({"cycle_id": None})
@@ -6354,10 +6439,27 @@ class StochBot:
             # rate-limit. Don't send it.
             if pos_sl >= NO_STOP_SL_PCT:
                 no_sl_skip = True
+            # SL dwell and a native stop are structurally incompatible (2026-10-07, direct
+            # decision after finding dwell had no real effect live): the exchange fires a
+            # resting stop on the FIRST touch, with no concept of "wait and see if this
+            # holds" -- it was racing the in-process dwell check and winning almost every
+            # time, so the configured dwell_seconds was never actually being honoured.
+            # Direct instruction: whenever dwell is configured, go back to the pre-native-
+            # stop behaviour (checked in _exit_params' own history, "it was ok") -- the native
+            # SL is off for the life of this position, and only the in-process dwell-gated
+            # check can close it. This trades the native stop's measured execution-quality
+            # edge (0.004-0.016 points, see LONG_CONFIG's docstring) for dwell actually
+            # working, and it means a hung/crashed process has NO stop-loss protection at all
+            # on this position -- known and accepted, not an oversight.
+            # Native-only suppression -- deliberately NOT folded into no_sl_skip, which also
+            # gates the in-process check below (`not no_sl_skip and sl_touched...`). Dwell
+            # needs the OPPOSITE of what no_sl_skip means everywhere else: keep the in-process,
+            # dwell-gated check fully live, suppress only the native order racing ahead of it.
+            suppress_native_sl = no_sl_skip or sl_dwell_seconds > 0
             if cfg.native_stop_loss_enabled or cfg.native_take_profit_enabled:
                 qty_now = total_qty(legs)
                 if qty_now > 0:
-                    await self._sync_native_exits(side, qty_now, sl, tp, suppress_sl=no_sl_skip)
+                    await self._sync_native_exits(side, qty_now, sl, tp, suppress_sl=suppress_native_sl)
             check_price = best_bid if side == "long" else best_ask
             gap_hit = None
             if gap_hit is None and escalated_active and ae:

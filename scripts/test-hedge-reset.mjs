@@ -165,7 +165,12 @@ function visit(node) {
 }
 visit(page);
 assert.equal(resets.length, 1);
-assert.equal(filters.length, 3);
+// 2, not 3: only the hedge's two legs filter trade history with Date.parse() -- Worker 1's own
+// trade filter compares the ISO closed_at strings directly (sortable as-is, no Date.parse
+// needed), so it never matched this scan. This file previously hardcoded 3 for reasons lost to
+// time; corrected 2026-10-07 after a 3rd, unrelated arrow function (a per-rule stats filter)
+// momentarily collided with the same substring and masked the real count being wrong all along.
+assert.equal(filters.length, 2);
 for (const mode of ["success", "server error", "network error", "refresh error"]) {
   test(`reset button: ${mode} always clears its busy state`, async () => {
     const busy = [], alerts = [];

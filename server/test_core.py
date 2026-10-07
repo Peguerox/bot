@@ -4244,6 +4244,58 @@ async def t_emergency_flatten_records_the_trade():
               bot.trades[-1][5])
 
 
+async def t_emergency_flatten_failure_never_clears_an_unconfirmed_position():
+    print("\n[emergency flatten: a FAILED flatten must never report the position as gone]")
+    print("  real-money bug fixed 2026-10-07: confirm_fill's own `flat` result was computed and")
+    print("  then never checked -- side/legs got cleared (and enabled=False on a repeat) even")
+    print("  when the exchange never actually confirmed zero, which combined with the disabled-")
+    print("  and-flat fast path to make the bot stop checking the exchange on a real open position.")
+    entry = 86000.0
+    ex = FakeExchange(position=round(30.0 / entry, 5), collateral=20.0)  # 3x tracked -> oversize
+    ex.order_error = "boom"       # every reduce-only close attempt fails
+    ex.fills_when_erroring = False  # ...and genuinely does not reduce the position
+    state = {
+        "id": 1, "side": "long", "legs": [{"price": entry, "usd_size": 10.0}],
+        "first_entry_price": entry, "first_entry_time": 1700000000000, "dca_level": 0,
+        "seed_usd": 20.0, "realized_pnl_usd": 0.0, "collateral_before_entry": 20.0,
+        "enabled": True, "consecutive_entry_failures": 0, "last_processed_candle_ts": 0,
+    }
+    bot = make_bot(ex, state=state, candles_kind="mid")
+    await bot.tick()
+    check("oversize detected", any(a == "oversize_detected" for a, _ in bot.runs))
+    check("flatten reported itself as NOT flat", bot.state_row.get("enabled") is True
+          and any(a == "emergency_flatten_outcome" and d.get("flat") is False
+                  for a, d in bot.runs), bot.runs)
+    check("side was NOT cleared -- the real position is still open and must stay tracked",
+          bot.state_row["side"] == "long", bot.state_row["side"])
+    check("legs were NOT cleared", bot.state_row["legs"], bot.state_row["legs"])
+    check("no EMERGENCY_FLATTEN trade logged -- nothing actually closed",
+          not any(t[5] == "EMERGENCY_FLATTEN" for t in bot.trades), bot.trades)
+
+
+async def t_emergency_flatten_failure_plus_repeat_disables_without_the_dangerous_combo():
+    print("\n[emergency flatten: a repeat can still disable, but never alongside a cleared side]")
+    entry = 86000.0
+    ex = FakeExchange(position=round(30.0 / entry, 5), collateral=20.0)
+    ex.order_error = "boom"
+    ex.fills_when_erroring = False
+    state = {
+        "id": 1, "side": "long", "legs": [{"price": entry, "usd_size": 10.0}],
+        "first_entry_price": entry, "first_entry_time": 1700000000000, "dca_level": 0,
+        "seed_usd": 20.0, "realized_pnl_usd": 0.0, "collateral_before_entry": 20.0,
+        "enabled": True, "consecutive_entry_failures": 0, "last_processed_candle_ts": 0,
+    }
+    bot = make_bot(ex, state=state, candles_kind="mid")
+    now = time.time()
+    bot._emergency_flattens = [now - 10, now - 5]   # two already in the window -> this is the 3rd
+    await bot.emergency_flatten("tracked_size_mismatch", {"test": True})
+    check("disabled on the repeat, same as always", bot.state_row.get("enabled") is False,
+          bot.state_row.get("enabled"))
+    check("but side was still NOT cleared -- the dangerous disabled+flat combo never happens "
+          "for a position that was never actually confirmed flat",
+          bot.state_row["side"] == "long", bot.state_row["side"])
+
+
 async def t_repeated_emergency_flattens_do_hard_disable():
     print("\n[emergency flatten: a REPEAT within the window still hard-disables (20x guard intact)]")
     ex = FakeExchange()
@@ -4389,8 +4441,12 @@ async def t_native_stop_noop_when_unchanged():
     check("still open (never hit the SL)", bot.state_row["side"] == "long")
 
 
-async def t_native_stop_cancelled_before_our_own_close():
-    print("\n[native stop: cleared before close_all places its own closing order]")
+async def t_native_stop_cancelled_only_after_our_own_close_confirms():
+    print("\n[native stop: cancelled AFTER our own close confirms, not before attempting it]")
+    print("  real-money bug fixed 2026-10-07, with real tick data: cancelling first used to")
+    print("  leave a position with NO protection at all -- neither native nor a confirmed close")
+    print("  -- for as long as confirm_fill stayed blocked (observed live: price drifted to")
+    print("  +0.065% adverse, over a minute, before a read finally succeeded).")
     entry = 86000.0
     ex = FakeExchange(position=round(20.0 / entry, 5), collateral=20.0)
     state = {
@@ -4403,8 +4459,38 @@ async def t_native_stop_cancelled_before_our_own_close():
     bot._native_stop_synced = (85000.0, 20.0 / entry)  # pretend one is already resting
     ok = await bot.close_all("SL", dict(state), "long", state["legs"], 85000.0, 85001.0, 1)
     check("close succeeded", ok is True)
-    check("cancel_all was called before closing", getattr(ex, "cancel_all_calls", 0) == 1)
-    check("tracking cleared", bot._native_stop_synced is None)
+    check("cancel_all was called exactly once, on the way OUT (not up front)",
+          getattr(ex, "cancel_all_calls", 0) == 1)
+    check("tracking cleared now that we're confirmed flat", bot._native_stop_synced is None)
+
+
+async def t_native_stop_survives_a_close_that_cannot_confirm():
+    print("\n[native stop: a close that CANNOT confirm must leave the native stop untouched]")
+    print("  this is the actual regression test for the 2026-10-07 incident: a position stays")
+    print("  protected by its resting native stop for as long as our own close is unconfirmed,")
+    print("  instead of being left naked the moment confirmation fails.")
+    entry = 86000.0
+    ex = FakeExchange(position=round(20.0 / entry, 5), collateral=20.0)
+    state = {
+        "id": 1, "side": "long", "legs": [{"price": entry, "usd_size": 20.0}],
+        "first_entry_price": entry, "first_entry_time": 1700000000000, "dca_level": 0,
+        "seed_usd": 20.0, "realized_pnl_usd": 0.0, "collateral_before_entry": 20.0,
+        "enabled": True, "consecutive_entry_failures": 0, "last_processed_candle_ts": 0,
+    }
+    bot = make_bot(ex, state=state, candles_kind="mid", native_stop_loss_enabled=True)
+    bot._native_stop_synced = (85000.0, 20.0 / entry)  # a real native stop is genuinely resting
+
+    async def blocked_get_position_rest():
+        raise RuntimeError("(405) WAF blocked -- simulated")
+    bot.get_position_rest = blocked_get_position_rest
+
+    ok = await bot.close_all("SL", dict(state), "long", state["legs"], 85000.0, 85001.0, 1,
+                             known_pos=round(20.0 / entry, 5))  # force past the known_pos shortcut
+    check("close reported as NOT done", ok is False)
+    check("native stop tracking was NEVER cleared -- it is still the only protection resting",
+          bot._native_stop_synced == (85000.0, 20.0 / entry), bot._native_stop_synced)
+    check("cancel_all was never called -- nothing was ever removed",
+          getattr(ex, "cancel_all_calls", 0) == 0, getattr(ex, "cancel_all_calls", None))
 
 
 async def t_native_stop_resyncs_when_sl_override_changes():
@@ -4455,6 +4541,103 @@ async def t_external_close_tagged_sl_when_native_stop_enabled():
         await bot.tick()
     check("booked as a closed position", bot.state_row["side"] is None, bot.state_row["side"])
     check("tagged SL, not EXTERNAL", bot.trades and bot.trades[-1][5] == "SL", bot.trades)
+
+
+async def t_resolved_externally_burns_signal_on_a_red_close():
+    print("\n[resolved_externally: a native-stop (red) close burns the signal, blocking instant re-entry]")
+    print("  real incident, 2026-10-07: two trades re-entered the exact same K within 20-49s")
+    print("  of a native-stop loss and lost again -- the burn only ever fired in close_all's")
+    print("  OWN internal path, never here, even though this IS the normal way SL now happens.")
+    entry = 86000.0
+    ex = FakeExchange(position=round(20.0 / entry, 5), collateral=20.0)
+    state = {
+        "id": 1, "side": "long", "legs": [{"price": entry, "usd_size": 20.0}],
+        "first_entry_price": entry, "first_entry_time": 1700000000000, "dca_level": 0,
+        "seed_usd": 20.0, "realized_pnl_usd": 0.0, "collateral_before_entry": 20.0,
+        "enabled": True, "consecutive_entry_failures": 0, "last_processed_candle_ts": 0,
+    }
+    bot = make_bot(ex, state=state, candles_kind="long", native_stop_loss_enabled=True,
+                   require_fresh_signal=False, self_lock_enabled=False, use_joint_adaptive=False,
+                   red_exit_burns_signal=True)
+    bot.live.order_book = {"bids": [{"price": "86001.0"}], "asks": [{"price": "86002.0"}]}
+    await bot.tick()  # sync the native stop while genuinely open
+    check("native stop synced", bot._native_stop_synced is not None)
+    ex.position = 0.0        # the resting native stop firing, outside our own close_all
+    ex.collateral = 19.97    # a real loss
+    bot._pos_cache_at = 0
+    for _ in range(3):       # 3 agreeing flat reads required before booking an external close
+        await bot.tick()
+    check("booked as a closed position", bot.state_row["side"] is None, bot.state_row["side"])
+    check("tagged SL", bot.trades and bot.trades[-1][5] == "SL", bot.trades)
+    check("signal burned on the losing external close",
+          bot._burned_signal == "long" and bot._burned_signal_via == "red",
+          (bot._burned_signal, bot._burned_signal_via))
+    orders_before = len(ex.orders)
+    await bot.tick()  # candles_kind="long" keeps raising the same "long" signal
+    check("burned signal blocked the instant re-entry",
+          bot.state_row["side"] is None and len(ex.orders) == orders_before,
+          (bot.state_row["side"], len(ex.orders), orders_before))
+
+
+async def t_resolved_externally_does_not_burn_on_a_winning_close():
+    print("\n[resolved_externally: a native-TP (winning) close does NOT burn the signal]")
+    entry = 86000.0
+    ex = FakeExchange(position=round(20.0 / entry, 5), collateral=20.0)
+    state = {
+        "id": 1, "side": "long", "legs": [{"price": entry, "usd_size": 20.0}],
+        "first_entry_price": entry, "first_entry_time": 1700000000000, "dca_level": 0,
+        "seed_usd": 20.0, "realized_pnl_usd": 0.0, "collateral_before_entry": 20.0,
+        "enabled": True, "consecutive_entry_failures": 0, "last_processed_candle_ts": 0,
+    }
+    bot = make_bot(ex, state=state, candles_kind="long", native_stop_loss_enabled=True,
+                   require_fresh_signal=False, self_lock_enabled=False, use_joint_adaptive=False,
+                   red_exit_burns_signal=True)
+    bot.live.order_book = {"bids": [{"price": "86001.0"}], "asks": [{"price": "86002.0"}]}
+    await bot.tick()
+    ex.position = 0.0
+    ex.collateral = 20.05   # a real win
+    bot._pos_cache_at = 0
+    for _ in range(3):
+        await bot.tick()
+    # No burn on a win -> entry_signal was never nulled, so this reconcile falls straight
+    # through into the SAME tick's entry logic and re-enters immediately -- that's correct,
+    # not a bug (see the burn-only null in the red-close path above for the contrast).
+    # Reason label defaults to "SL" here regardless of pnl sign -- only native_stop_loss is
+    # configured, so "SL" is the only candidate label _ever_ available (see ext_reason's own
+    # comment). The burn decision deliberately does NOT trust that label -- it uses the real
+    # pnl directly, which is the actual point of this test.
+    check("the winning close was logged with a real positive pnl", bot.trades and bot.trades[0][4] > 0,
+          bot.trades)
+    check("signal NOT burned on a winning external close despite the 'SL' label",
+          bot._burned_signal is None, bot._burned_signal)
+    check("free to re-enter immediately, same tick", bot.state_row["side"] == "long",
+          bot.state_row["side"])
+
+
+async def t_sl_dwell_active_skips_the_native_stop():
+    print("\n[SL dwell + native stop are incompatible: dwell active -> no native SL is placed]")
+    print("  direct decision, 2026-10-07: a resting native stop fires on the first touch with")
+    print("  no concept of dwell, so it was racing the in-process dwell check and winning --")
+    print("  dwell was never actually being honoured live. Chosen fix: go back to pre-native-")
+    print("  stop behaviour whenever dwell is configured, not a wider backstop.")
+    ex = FakeExchange()
+    bot = make_bot(ex, candles_kind="long", native_stop_loss_enabled=True,
+                   sl_pct=0.06, sl_dwell_seconds=5.0)
+    await bot.tick()
+    await bot.tick()  # native sync runs on the tick AFTER entry
+    check("no native SL order placed while dwell is active",
+          len(getattr(ex, "sl_orders", [])) == 0, getattr(ex, "sl_orders", None))
+
+
+async def t_sl_dwell_zero_keeps_the_native_stop():
+    print("\n[SL dwell off (0, default): native stop placed as normal -- no regression]")
+    ex = FakeExchange()
+    bot = make_bot(ex, candles_kind="long", native_stop_loss_enabled=True,
+                   sl_pct=0.06, sl_dwell_seconds=0.0)
+    await bot.tick()
+    await bot.tick()
+    check("native SL order placed as usual", len(getattr(ex, "sl_orders", [])) == 1,
+          getattr(ex, "sl_orders", None))
 
 
 async def t_native_exits_both_placed_with_a_single_cancel():
@@ -7748,7 +7931,11 @@ async def t_sl_dwell_does_not_apply_to_escalated_tier3_hard_cap():
 
 
 async def main():
-    for t in (t_account_hub_activates_and_serves_both_legs_in_one_request,
+    for t in (t_resolved_externally_burns_signal_on_a_red_close,
+              t_resolved_externally_does_not_burn_on_a_winning_close,
+              t_sl_dwell_active_skips_the_native_stop,
+              t_sl_dwell_zero_keeps_the_native_stop,
+              t_account_hub_activates_and_serves_both_legs_in_one_request,
               t_account_hub_never_answers_a_fresh_read_with_an_older_request,
               t_account_hub_joins_a_request_started_after_the_caller,
               t_account_hub_missing_account_is_an_error_not_flat,
@@ -8108,6 +8295,8 @@ async def main():
               t_single_flat_read_cannot_condemn_a_live_position,
               t_genuine_external_close_still_books,
               t_emergency_flatten_records_the_trade,
+              t_emergency_flatten_failure_never_clears_an_unconfirmed_position,
+              t_emergency_flatten_failure_plus_repeat_disables_without_the_dangerous_combo,
               t_repeated_emergency_flattens_do_hard_disable,
               t_cooldown_blocks_entry_then_expires,
               t_cycle_gap_blocks_instant_reentry,
@@ -8116,7 +8305,8 @@ async def main():
               t_native_stop_off_by_default_never_places_order,
               t_native_stop_places_order_on_entry_when_enabled,
               t_native_stop_noop_when_unchanged,
-              t_native_stop_cancelled_before_our_own_close,
+              t_native_stop_cancelled_only_after_our_own_close_confirms,
+              t_native_stop_survives_a_close_that_cannot_confirm,
               t_native_stop_resyncs_when_sl_override_changes,
               t_external_close_tagged_sl_when_native_stop_enabled,
               t_native_exits_both_placed_with_a_single_cancel,

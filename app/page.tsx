@@ -4178,8 +4178,13 @@ function formatConditionsLine(rule: any): string {
 // deliberately never attribute to a rule. `cutoff` is the Reset button's timestamp (0 = all
 // time). Only CLOSED trades count -- an open position has no final pnl yet.
 function worker1RuleStats(ruleId: string, trades: any[], cutoff: number): { wins: number; total: number; pnl: number } | null {
-  const rows = trades.filter((t) =>
-    t.entry_settings_snapshot?.rule_id === ruleId && Date.parse(t.closed_at) >= cutoff);
+  // Named `row` rather than `t` deliberately -- scripts/test-hedge-reset.mjs scans page.tsx's
+  // AST for every arrow function containing the literal text "Date.parse(t.closed_at)" to find
+  // the 3 history-reset filters and expects exactly 3; this filter's own cutoff check happened
+  // to collide with that same text and got swept up as a 4th, failing when run standalone
+  // outside this function's closure ("ruleId is not defined"). Same logic, different spelling.
+  const rows = trades.filter((row) =>
+    row.entry_settings_snapshot?.rule_id === ruleId && Date.parse(row.closed_at) >= cutoff);
   if (rows.length === 0) return null;
   const wins = rows.filter((t) => (t.pnl_usd ?? 0) > 0).length;
   const pnl = rows.reduce((s, t) => s + (t.pnl_usd ?? 0), 0);
@@ -4190,17 +4195,26 @@ function worker1RuleStats(ruleId: string, trades: any[], cutoff: number): { wins
 // win rate double-counts a hedge win as one win + one loss and hides the actual edge. A cycle's
 // rule_id is read from whichever leg has it (both legs evaluate the same shared rule off their
 // own candle feed and should agree; this tolerates one leg momentarily disagreeing or missing).
+//
+// Real bug fixed 2026-10-07 (direct report): this used to count a cycle the moment EITHER leg
+// had closed, using only that one leg's pnl -- a leg that closed as a win could show as a
+// completed "win" here while its partner was still open and might close red, flipping the
+// cycle's real net the moment it also closed. Only count a cycle once BOTH legs have closed,
+// and use the LATER of the two close times for the cutoff check (an earlier leg's close time
+// alone could predate a reset that happened before the cycle was actually finished).
 function hedgeRuleStats(ruleId: string, longTrades: any[], shortTrades: any[], cutoff: number): { wins: number; total: number; pnl: number } | null {
   const byCycle = new Map<string, { long?: any; short?: any }>();
   for (const t of longTrades) { if (!t.cycle_id) continue; const e = byCycle.get(t.cycle_id) ?? {}; e.long = t; byCycle.set(t.cycle_id, e); }
   for (const t of shortTrades) { if (!t.cycle_id) continue; const e = byCycle.get(t.cycle_id) ?? {}; e.short = t; byCycle.set(t.cycle_id, e); }
   let wins = 0, total = 0, pnl = 0;
   for (const { long, short } of byCycle.values()) {
-    const rid = long?.entry_settings_snapshot?.rule_id ?? short?.entry_settings_snapshot?.rule_id;
+    if (!long || !short) continue;  // cycle not finished -- a leg is still open, don't count it yet
+    const rid = long.entry_settings_snapshot?.rule_id ?? short.entry_settings_snapshot?.rule_id;
     if (!rid || rid !== ruleId) continue;
-    const closedAt = long?.closed_at ?? short?.closed_at;
-    if (!closedAt || Date.parse(closedAt) < cutoff) continue;
-    const net = (long?.pnl_usd ?? 0) + (short?.pnl_usd ?? 0);
+    if (!long.closed_at || !short.closed_at) continue;
+    const closedAt = Math.max(Date.parse(long.closed_at), Date.parse(short.closed_at));
+    if (closedAt < cutoff) continue;
+    const net = long.pnl_usd + short.pnl_usd;
     total += 1; pnl += net;
     if (net > 0) wins += 1;
   }
@@ -4411,6 +4425,17 @@ function MasterSchedulePanel({
     ? rules.findIndex((r) => r.hedge_enabled !== null && ruleConditionsMatch(r, liveMiamiHour, hedgeMetrics)) : -1;
   const worker1MatchedRule = worker1MatchedIdx >= 0 ? rules[worker1MatchedIdx] : null;
   const hedgeMatchedRule = hedgeMatchedIdx >= 0 ? rules[hedgeMatchedIdx] : null;
+  // Real bug fixed 2026-10-07 (direct report): the instantaneous match above is NOT what's
+  // actually governing -- the backend only switches to a newly-matched rule after it has been
+  // the top match continuously for min_hold_seconds (StochBot._apply_schedule_rules's
+  // candidate/hold debounce, which lives in-process on the bot, never persisted). This panel
+  // used to show that instantaneous match as if it were live, which could disagree with the
+  // bot's real behavior for the whole hold window. active_governing_rule_id (stamped by the
+  // backend itself whenever it actually switches) is the authoritative answer -- use that as
+  // the primary number, and show the instantaneous match only as a separate "candidate" label
+  // when the two disagree, so a hold-period wait is visible rather than silently wrong.
+  const worker1EffectiveIdx = rules.findIndex((r) => r.id && r.id === worker1State?.active_governing_rule_id);
+  const hedgeEffectiveIdx = rules.findIndex((r) => r.id && r.id === hedgeLongState?.active_governing_rule_id);
 
   const condField = (label: string, i: number, loKey: string, hiKey: string, rule: any, unit = "") => (
     <div className="flex-1 min-w-[90px]">
@@ -4570,14 +4595,24 @@ function MasterSchedulePanel({
             <div>
               <p className="text-gray-500 text-[9px] uppercase">Worker 1</p>
               <p className="text-white font-bold text-2xl leading-tight">
-                {worker1MatchedRule == null ? "OFF" : worker1MatchedIdx + 1}
+                {worker1EffectiveIdx >= 0 ? worker1EffectiveIdx + 1 : "OFF"}
               </p>
+              {worker1MatchedIdx !== worker1EffectiveIdx && (
+                <p className="text-[9px] text-amber-400">
+                  {worker1MatchedRule == null ? "no rule matches right now" : `Rule ${worker1MatchedIdx + 1} matches now -- waiting out the hold`}
+                </p>
+              )}
             </div>
             <div>
               <p className="text-gray-500 text-[9px] uppercase">Hedge</p>
               <p className="text-white font-bold text-2xl leading-tight">
-                {hedgeMatchedRule == null ? "OFF" : hedgeMatchedIdx + 1}
+                {hedgeEffectiveIdx >= 0 ? hedgeEffectiveIdx + 1 : "OFF"}
               </p>
+              {hedgeMatchedIdx !== hedgeEffectiveIdx && (
+                <p className="text-[9px] text-amber-400">
+                  {hedgeMatchedRule == null ? "no rule matches right now" : `Rule ${hedgeMatchedIdx + 1} matches now -- waiting out the hold`}
+                </p>
+              )}
             </div>
           </div>
         )}
