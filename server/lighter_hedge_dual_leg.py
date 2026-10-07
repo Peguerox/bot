@@ -172,7 +172,7 @@ below for what each does.
 import asyncio
 import faulthandler
 import os
-from stoch_bot_core import BotConfig, StochBot
+from stoch_bot_core import AccountReadHub, BotConfig, StochBot
 
 LONG_CONFIG = BotConfig(
     name="HEDGE LONG LEG (worker 2 account)",
@@ -378,6 +378,10 @@ async def main():
     shared_cycle_hub = StochBot.new_cycle_hub([LONG_CONFIG.worker_id, SHORT_CONFIG.worker_id])
     long_bot.cycle_hub = shared_cycle_hub
     short_bot.cycle_hub = shared_cycle_hub
+    # 2026-10-07: one Lighter position read for both legs instead of one each (WAF rate limits).
+    shared_account_hub = AccountReadHub(member_count=2)
+    long_bot.account_hub = shared_account_hub
+    short_bot.account_hub = shared_account_hub
     await asyncio.gather(
         long_bot.run(),  # default credentials: this service's own LIGHTER_* env vars
         short_bot.run(

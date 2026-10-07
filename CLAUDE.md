@@ -286,6 +286,11 @@ dead instance would hold the lock for over five minutes.
   stop-loss protection at all on that position.
 - Lighter's WAF (`x-amzn-waf-ac`, HTTP 405 HTML) rate-limits our IP under heavy request volume;
   reads back off automatically. Don't add request-heavy loops.
+- **The hedge legs share one position read** (`AccountReadHub`, wired in
+  `lighter_hedge_dual_leg.py`): `account(by="l1_address")` returns every sub-account in one
+  uncached request. It turns on once both legs report the same parent address from their own
+  first read. A read confirming an order only joins a request that started after it; a
+  missing account raises, never reads as flat. Worker 1 (separate service) is unchanged.
 - Full incident write-up: `BUG_REPORT_2026-10-07.md`.
 
 ### Dead code

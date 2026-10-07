@@ -1581,6 +1581,78 @@ class LiveState:
         return time.time() - self.ob_updated_at < max_age
 
 
+def account_market_position(a, market_index):
+    """Signed position size for one market from a Lighter DetailedAccount (0.0 if none)."""
+    pos = 0.0
+    for p in a.positions:
+        if p.market_id == market_index:
+            sign = 1 if str(getattr(p, "sign", 1)) in ("1", "True", "true") else -1
+            pos = sign * float(p.position)
+    return pos
+
+
+class AccountReadHub:
+    """One Lighter position read for every account in this process (the hedge's two legs).
+
+    `account(by="l1_address")` returns the parent account and every sub-account, positions
+    included, in one uncached request -- verified live 2026-10-07. Before this each leg read
+    its own account every POSITION_TTL, doubling the hedge's request load on an endpoint
+    Lighter's WAF rate-limits.
+
+    Freshness contract, the reason this is not a plain shared cache:
+    - read(not_before=t) only joins an in-flight request that STARTED at or after t, so a
+      read confirming an order can never be answered by a request sent before that order.
+    - cached(max_age) is for read_position's existing POSITION_TTL tolerance only.
+
+    Inactive until every member has reported the same l1_address from its own by-index read,
+    so no new env var is needed and a misconfigured pair just keeps the old per-leg reads.
+    """
+
+    def __init__(self, member_count):
+        self.member_count = member_count
+        self._l1_by_index = {}
+        self.active = False
+        self.l1_address = None
+        self._inflight = None
+        self._inflight_started = 0.0
+        self._last = None
+        self._last_started = 0.0
+
+    def register(self, account_index, l1_address):
+        if not l1_address:
+            return
+        self._l1_by_index[int(account_index)] = str(l1_address).lower()
+        addrs = set(self._l1_by_index.values())
+        self.active = len(self._l1_by_index) >= self.member_count and len(addrs) == 1
+        self.l1_address = next(iter(addrs)) if self.active else None
+
+    def cached(self, account_index, max_age):
+        if self._last is None or time.time() - self._last_started >= max_age:
+            return None
+        a = self._last.get(int(account_index))
+        return (a, self._last_started) if a is not None else None
+
+    async def read(self, bot, not_before):
+        f = self._inflight
+        if f is None or f.done() or self._inflight_started < not_before:
+            started = time.time()
+            f = asyncio.ensure_future(self._fetch(bot, started))
+            f.add_done_callback(lambda fut: fut.cancelled() or fut.exception())
+            self._inflight, self._inflight_started = f, started
+        return await asyncio.shield(f)
+
+    async def _fetch(self, bot, started):
+        resp = await asyncio.wait_for(
+            bot._account_api().account(by="l1_address", value=self.l1_address,
+                                       _request_timeout=REST_TIMEOUT),
+            timeout=REST_TIMEOUT + 2.0,
+        )
+        accounts = {int(a.index): a for a in resp.accounts}
+        if started >= self._last_started:
+            self._last, self._last_started = accounts, started
+        return accounts
+
+
 class StochBot:
     def __init__(self, cfg: BotConfig):
         self.cfg = cfg
@@ -1755,6 +1827,7 @@ class StochBot:
         # lighter_hedge_dual_leg.py's main(). None (default): pressure bias, if enabled, uses
         # this bot's own compute_stoch_signal() reading in isolation, same as any standalone bot.
         self.pressure_signal_hub = None
+        self.account_hub = None  # AccountReadHub, wired by the dual-leg hedge only
         self.hedge_entry_hub = None
         self._hedge_entry_reading = {"allowed": False}
         self.environment_hub = None
@@ -3984,6 +4057,9 @@ class StochBot:
         self._auth_token_expiry_at = now + AUTH_TOKEN_LIFETIME_S
         return self._auth_token
 
+    def _account_api(self):
+        return lighter.AccountApi(self.client.api_client)
+
     async def get_position_rest(self):
         # Backs off across ALL callers (read_position, confirm_fill, close_all,
         # emergency_flatten, try_enter -- every one of them calls this directly, not just
@@ -4000,18 +4076,29 @@ class StochBot:
             raise RuntimeError(
                 f"get_position_rest: backing off until {self._pos_read_next_attempt_at - now:.1f}s "
                 f"from now ({self._pos_read_consecutive_failures} consecutive failures)")
-        account_api = lighter.AccountApi(self.client.api_client)
-        headers = {}
-        token = self._get_auth_token()
-        if token:
-            headers["authorization"] = token
+        hub = self.account_hub
         try:
-            acct = await asyncio.wait_for(
-                account_api.account(by="index", value=str(self.account_index),
-                                    _headers=headers or None,
-                                    _request_timeout=REST_TIMEOUT),
-                timeout=REST_TIMEOUT + 2.0,
-            )
+            if hub is not None and hub.active:
+                # One request for every leg in this process -- see AccountReadHub.
+                accounts = await hub.read(self, not_before=now)
+                a = accounts.get(int(self.account_index))
+                if a is None:
+                    # Never read a missing account as flat.
+                    raise RuntimeError(f"account {self.account_index} missing from l1_address read")
+            else:
+                headers = {}
+                token = self._get_auth_token()
+                if token:
+                    headers["authorization"] = token
+                acct = await asyncio.wait_for(
+                    self._account_api().account(by="index", value=str(self.account_index),
+                                                _headers=headers or None,
+                                                _request_timeout=REST_TIMEOUT),
+                    timeout=REST_TIMEOUT + 2.0,
+                )
+                a = acct.accounts[0]
+                if hub is not None:
+                    hub.register(self.account_index, getattr(a, "l1_address", None))
         except Exception:
             self._pos_read_consecutive_failures += 1
             self._pos_read_next_attempt_at = time.time() + tick_error_backoff_seconds(
@@ -4022,15 +4109,9 @@ class StochBot:
         # The exchange is visible again, so a previously-unknown entry outcome is resolved: the
         # reconcile/adopt path in tick() now deals with whatever is actually there.
         self._entry_outcome_unknown = False
-        a = acct.accounts[0]
-        pos = 0.0
-        for p in a.positions:
-            if p.market_id == self.cfg.market_index:
-                sign = 1 if str(getattr(p, "sign", 1)) in ("1", "True", "true") else -1
-                pos = sign * float(p.position)
         # Every authoritative read refreshes the cache, so a confirm_fill right after an
         # order also leaves read_position() returning the post-fill truth immediately.
-        self._pos_cache = (pos, float(a.collateral))
+        self._pos_cache = (account_market_position(a, self.cfg.market_index), float(a.collateral))
         self._pos_cache_at = time.time()
         return self._pos_cache
 
@@ -4051,6 +4132,17 @@ class StochBot:
         only thing moved here, and it does not change second to second.
         """
         now = time.time()
+        hub = self.account_hub
+        if hub is not None and not self._entry_outcome_unknown:
+            # A partner leg's read under POSITION_TTL old is as good as our own. Skipped while
+            # this leg's own entry outcome is unknown: that must clear on a read of our own.
+            shared = hub.cached(self.account_index, POSITION_TTL)
+            if shared is not None:
+                a, at = shared
+                if self._pos_cache is None or at > self._pos_cache_at:
+                    self._pos_cache = (account_market_position(a, self.cfg.market_index),
+                                       float(a.collateral))
+                    self._pos_cache_at = at
         if self._pos_cache is not None and now - self._pos_cache_at < POSITION_TTL:
             return self._pos_cache
         try:

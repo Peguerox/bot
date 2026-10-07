@@ -4774,6 +4774,133 @@ async def t_schedule_never_reenables_a_tripped_breaker():
     check("control: an untripped bot is turned ON as usual", ok.state_row["enabled"] is True)
 
 
+class _FakeAcct:
+    def __init__(self, index, pos, coll=10.0, l1="0xABC"):
+        self.index = index; self.collateral = str(coll); self.l1_address = l1
+        sign = 1 if pos >= 0 else 0
+        self.positions = [type("P", (), {"market_id": 1, "sign": sign, "position": str(abs(pos))})()]
+
+
+class _FakeAccountApi:
+    """Lighter account endpoint. `book` maps account index -> signed BTC position."""
+    def __init__(self, book, l1="0xABC"):
+        self.book = book; self.l1 = l1; self.calls = []; self.gate = None
+    async def account(self, by, value, **kw):
+        self.calls.append((by, value))
+        snap = dict(self.book)  # the exchange answers with state as of when the request was sent
+        if self.gate is not None:
+            await self.gate.wait()
+        if by == "index":
+            return type("R", (), {"accounts": [_FakeAcct(int(value), snap.get(int(value), 0.0), l1=self.l1)]})()
+        return type("R", (), {"accounts": [_FakeAcct(i, q, l1=self.l1) for i, q in snap.items()]})()
+
+
+def _hub_pair(book, l1_a="0xABC", l1_b="0xABC"):
+    hub = core.AccountReadHub(member_count=2)
+    legs = []
+    apis = {}
+    for idx, l1 in ((101, l1_a), (202, l1_b)):
+        bot = make_bot(FakeExchange())
+        del bot.get_position_rest          # use the real method, not make_bot's fake
+        bot.account_index = idx
+        api = apis.setdefault(l1, _FakeAccountApi(book, l1=l1))  # one endpoint per parent
+        bot._account_api = lambda api=api: api
+        bot._get_auth_token = lambda: None
+        bot.account_hub = hub
+        legs.append((bot, api))
+    return hub, legs
+
+
+async def t_account_hub_activates_and_serves_both_legs_in_one_request():
+    print("\n[account hub: after both legs report one l1 address, ONE request serves both]")
+    book = {101: 0.00012, 202: -0.00012}
+    hub, ((a, api_a), (b, api_b)) = _hub_pair(book)
+    await a.get_position_rest(); await b.get_position_rest()
+    check("first reads are by-index (address learned, no new env var)",
+          [c[0] for c in api_a.calls] == ["index", "index"], api_a.calls)
+    check("hub active once both report the same address", hub.active is True)
+    api_a.calls.clear(); api_b.calls.clear()
+    pa = await a.get_position_rest()
+    a._pos_cache_at = 0.0; b._pos_cache_at = 0.0
+    pb = await b.read_position()
+    check("one l1_address request covered both legs", len(api_a.calls) == 1, api_a.calls)
+    check("long leg sees its own position", abs(pa[0] - 0.00012) < 1e-9, pa)
+    check("short leg sees its own (negative) position", abs(pb[0] + 0.00012) < 1e-9, pb)
+
+
+async def t_account_hub_never_answers_a_fresh_read_with_an_older_request():
+    print("\n[account hub: a read confirming an order never joins a request sent BEFORE it]")
+    book = {101: 0.0, 202: 0.0}
+    hub, ((a, api), (b, _)) = _hub_pair(book)
+    await a.get_position_rest(); await b.get_position_rest()
+    api.calls.clear()
+    api.gate = asyncio.Event()
+    t1 = asyncio.ensure_future(a.get_position_rest())     # in flight, started now
+    await asyncio.sleep(0.01)
+    book[202] = -0.00012                                   # b's order fills AFTER t1 was sent
+    t2 = asyncio.ensure_future(b.get_position_rest())      # must NOT ride t1
+    await asyncio.sleep(0.01)
+    api.gate.set()
+    await t1; pb = await t2
+    check("a second request was sent", len(api.calls) == 2, api.calls)
+    check("b sees its post-order fill", abs(pb[0] + 0.00012) < 1e-9, pb)
+
+
+async def t_account_hub_joins_a_request_started_after_the_caller():
+    print("\n[account hub: two legs asking at the same moment share one request]")
+    book = {101: 0.0, 202: 0.0}
+    hub, ((a, api), (b, _)) = _hub_pair(book)
+    await a.get_position_rest(); await b.get_position_rest()
+    api.calls.clear()
+    api.gate = asyncio.Event()
+    not_before = time.time() - 1.0
+    t1 = asyncio.ensure_future(hub.read(a, not_before=not_before))
+    await asyncio.sleep(0.01)
+    t2 = asyncio.ensure_future(hub.read(b, not_before=not_before))
+    await asyncio.sleep(0.01)
+    api.gate.set()
+    await t1; await t2
+    check("joined: one request", len(api.calls) == 1, api.calls)
+
+
+async def t_account_hub_missing_account_is_an_error_not_flat():
+    print("\n[account hub: an account missing from the response raises -- never read as flat]")
+    book = {101: 0.00012, 202: -0.00012}
+    hub, ((a, api), (b, _)) = _hub_pair(book)
+    await a.get_position_rest(); await b.get_position_rest()
+    del book[202]
+    try:
+        await b.get_position_rest()
+        raised = False
+    except RuntimeError:
+        raised = True
+    check("raised instead of returning 0.0", raised)
+    check("counts as a failed read (backoff armed)", b._pos_read_consecutive_failures == 1)
+
+
+async def t_account_hub_stays_off_on_mismatched_addresses():
+    print("\n[account hub: legs under different parent accounts keep their own reads]")
+    hub, ((a, api_a), (b, api_b)) = _hub_pair({101: 0.0, 202: 0.0}, l1_a="0xAAA", l1_b="0xBBB")
+    await a.get_position_rest(); await b.get_position_rest()
+    check("hub inactive", hub.active is False)
+    await a.get_position_rest()
+    check("still reading by index", api_a.calls[-1][0] == "index", api_a.calls)
+
+
+async def t_account_hub_unknown_outcome_forces_own_read():
+    print("\n[account hub: a leg with an unknown entry outcome does its own fresh read]")
+    book = {101: 0.0, 202: 0.0}
+    hub, ((a, api), (b, _)) = _hub_pair(book)
+    await a.get_position_rest(); await b.get_position_rest()
+    await a.get_position_rest()                 # fresh shared result sits in the hub
+    api.calls.clear()
+    b._entry_outcome_unknown = True
+    b._pos_cache_at = 0.0
+    await b.read_position()
+    check("b sent its own request", len(api.calls) == 1, api.calls)
+    check("unknown outcome cleared by that read", b._entry_outcome_unknown is False)
+
+
 def _hedge_leg(**kw):
     base = dict(candles_kind="mid", fixed_direction="long", fixed_leg_usd=10.0, sl_pct=0.06,
                 tp_pct=0.10, disable_literal_tp=True, require_fresh_signal=False,
@@ -7561,7 +7688,13 @@ async def t_sl_dwell_does_not_apply_to_escalated_tier3_hard_cap():
 
 
 async def main():
-    for t in (t_no_stop_sl_never_sends_a_native_stop, t_late_visible_fill_without_settle_doubles, t_late_visible_fill_is_adopted_not_doubled,
+    for t in (t_account_hub_activates_and_serves_both_legs_in_one_request,
+              t_account_hub_never_answers_a_fresh_read_with_an_older_request,
+              t_account_hub_joins_a_request_started_after_the_caller,
+              t_account_hub_missing_account_is_an_error_not_flat,
+              t_account_hub_stays_off_on_mismatched_addresses,
+              t_account_hub_unknown_outcome_forces_own_read,
+              t_no_stop_sl_never_sends_a_native_stop, t_late_visible_fill_without_settle_doubles, t_late_visible_fill_is_adopted_not_doubled,
               t_settle_window_expires_and_allows_a_real_retry,
               t_tripped_breaker_never_releases_a_naked_partner,
               t_schedule_never_reenables_a_tripped_breaker,
