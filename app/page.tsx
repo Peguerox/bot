@@ -4540,7 +4540,7 @@ function MasterSchedulePanel({
 
       <div className="bg-gray-800/60 rounded-lg p-2">
         <p className="text-gray-500 text-[10px] uppercase mb-1.5">Live readings (Worker 1's feed)</p>
-        <div className="grid grid-cols-8 gap-1">
+        <div className="grid grid-cols-6 gap-1">
           <div className="bg-gray-900/50 rounded-lg p-1.5">
             <p className="text-gray-500 text-[8px] uppercase leading-tight">ER 2h</p>
             <p className={`font-bold text-xs tabular-nums ${liveEr == null ? "text-gray-500" : liveEr >= 0.15 ? "text-amber-400" : "text-gray-300"}`}>
@@ -4559,23 +4559,9 @@ function MasterSchedulePanel({
             <p className="text-gray-500 text-[8px] leading-tight mt-0.5">How many dollars price swings within each candle, averaged over the last 5. A simple volatility reading.</p>
           </div>
           <div className="bg-gray-900/50 rounded-lg p-1.5">
-            <p className="text-gray-500 text-[8px] uppercase leading-tight">Wiggle/Vol</p>
-            <p className={`font-bold text-xs tabular-nums ${liveVolWiggleRatio == null ? "text-gray-500" : liveVolWiggleRatio <= 3.33 ? "text-amber-400" : "text-gray-300"}`}>
-              {liveVolWiggleRatio != null ? liveVolWiggleRatio.toFixed(3) : "—"}
-            </p>
-            <p className="text-gray-500 text-[8px] leading-tight mt-0.5">How much price is actually moving for the volume behind it. Low = lots of trading, barely any real movement.</p>
-          </div>
-          <div className="bg-gray-900/50 rounded-lg p-1.5">
             <p className="text-gray-500 text-[8px] uppercase leading-tight">Vol×Wiggle</p>
             <p className="font-bold text-xs tabular-nums text-gray-300">{liveVolWiggleProduct != null ? liveVolWiggleProduct.toFixed(1) : "—"}</p>
             <p className="text-gray-500 text-[8px] leading-tight mt-0.5">Volume and wiggle multiplied together -- one combined number for total market activity.</p>
-          </div>
-          <div className="bg-gray-900/50 rounded-lg p-1.5">
-            <p className="text-gray-500 text-[8px] uppercase leading-tight">Vol rate</p>
-            <p className={`font-bold text-xs tabular-nums ${liveRate == null ? "text-gray-500" : liveRate > 0.05 ? "text-green-400" : liveRate < -0.05 ? "text-red-400" : "text-gray-300"}`}>
-              {liveRate != null ? liveRate.toFixed(2) : "—"}
-            </p>
-            <p className="text-gray-500 text-[8px] leading-tight mt-0.5">Whether trading volume right now is picking up or dying down vs its own recent pace.</p>
           </div>
           <div className="bg-gray-900/50 rounded-lg p-1.5">
             <p className="text-gray-500 text-[8px] uppercase leading-tight">Product Rate</p>
@@ -4585,16 +4571,11 @@ function MasterSchedulePanel({
             <p className="text-gray-500 text-[8px] leading-tight mt-0.5">How fast Vol×Wiggle itself is changing vs the prior candle. Backtested better than Vol rate at separating winners from losers -- large swings here (either direction) preceded worse trades.</p>
           </div>
           <div className="bg-gray-900/50 rounded-lg p-1.5">
-            <p className="text-gray-500 text-[8px] uppercase leading-tight">Zebra</p>
-            <p className="font-bold text-xs tabular-nums text-gray-300">{liveZebra != null ? liveZebra.toFixed(1) : "—"}</p>
-            <p className="text-gray-500 text-[8px] leading-tight mt-0.5">Not 0-100 -- flips ÷ avg candle size, so tiny candles inflate it. Low = grinding one way. High = lots of alternation, often on tiny noisy candles.</p>
-          </div>
-          <div className="bg-gray-900/50 rounded-lg p-1.5">
-            <p className="text-gray-500 text-[8px] uppercase leading-tight">Color bal</p>
-            <p className={`font-bold text-xs tabular-nums ${liveColorBalance == null ? "text-gray-500" : liveColorBalance < 50 ? "text-amber-400" : "text-gray-300"}`}>
-              {liveColorBalance != null ? liveColorBalance.toFixed(0) : "—"}
+            <p className="text-gray-500 text-[8px] uppercase leading-tight">Vol rate</p>
+            <p className={`font-bold text-xs tabular-nums ${liveRate == null ? "text-gray-500" : liveRate > 0.05 ? "text-green-400" : liveRate < -0.05 ? "text-red-400" : "text-gray-300"}`}>
+              {liveRate != null ? liveRate.toFixed(2) : "—"}
             </p>
-            <p className="text-gray-500 text-[8px] leading-tight mt-0.5">Whether the last 5 candles' ups and downs cancel out (high = balanced) or lean one way (low = trending).</p>
+            <p className="text-gray-500 text-[8px] leading-tight mt-0.5">Whether trading volume right now is picking up or dying down vs its own recent pace.</p>
           </div>
         </div>
       </div>
