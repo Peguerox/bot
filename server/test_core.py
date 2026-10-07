@@ -6557,6 +6557,62 @@ async def t_schedule_rules_enabled_flag_defaults_true_when_absent():
     check("defaults to enabled when the flag is simply absent", bot.state_row["enabled"] is True)
 
 
+async def t_schedule_rules_enabled_null_leaves_it_untouched_when_currently_on():
+    print("\n[schedule rules: {bot}_enabled explicitly null -- \"Don't change\", leaves enabled alone]")
+    print("  direct request: \"we need to put another option Dont change when matched -- so")
+    print("  whatever is happening in 1 rule does not touch the other rules\"")
+    ex = FakeExchange()
+    bot = make_bot(ex, candles=_schedule_candles(), schedule_rules_enabled=True,
+                    schedule_rules_bot_key="worker1")
+    bot.state_row["enabled"] = True
+    rule = {"hour_start": 0, "hour_end": 24, "worker1_enabled": None}  # explicit null, not absent
+    bot.sb = _schedule_sb([rule])
+    await bot._apply_schedule_rules(bot.state_row)
+    check("still enabled, untouched", bot.state_row["enabled"] is True)
+
+
+async def t_schedule_rules_enabled_null_leaves_it_untouched_when_currently_off():
+    print("\n[schedule rules: {bot}_enabled=null does NOT turn a currently-off bot back on]")
+    ex = FakeExchange()
+    bot = make_bot(ex, candles=_schedule_candles(), schedule_rules_enabled=True,
+                    schedule_rules_bot_key="worker1")
+    bot.state_row["enabled"] = False
+    rule = {"hour_start": 0, "hour_end": 24, "worker1_enabled": None,
+            "worker1": {"sl_pct": 0.15}}  # settings present, but enabled is still "don't touch"
+    bot.sb = _schedule_sb([rule])
+    await bot._apply_schedule_rules(bot.state_row)
+    check("stays OFF -- null means no opinion, settings existing on the rule doesn't force it on",
+          bot.state_row["enabled"] is False)
+    check("settings still pre-staged though -- only the on/off decision is skipped",
+          bot.state_row.get("override_sl_pct") == 0.15)
+
+
+async def t_schedule_rules_enabled_null_lets_one_bots_rule_ignore_the_other_bot():
+    print("\n[schedule rules: a hedge-only rule with worker1_enabled=null never touches Worker 1]")
+    # The exact real-money scenario this was built for: a hedge rule placed first in the list
+    # must be able to match without forcing Worker 1 on OR off -- true no-op for the other bot.
+    rule = {"hour_start": 0, "hour_end": 24,
+            "worker1_enabled": None, "hedge_enabled": True,
+            "hedge": {"sl_pct": 0.04}}
+
+    ex1 = FakeExchange()
+    bot1 = make_bot(ex1, candles=_schedule_candles(), schedule_rules_enabled=True,
+                     schedule_rules_bot_key="worker1")
+    bot1.state_row["enabled"] = True
+    bot1.sb = _schedule_sb([rule])
+    await bot1._apply_schedule_rules(bot1.state_row)
+    check("Worker 1 untouched -- stays enabled, this rule has no opinion on it",
+          bot1.state_row["enabled"] is True and "override_sl_pct" not in bot1.state_row)
+
+    ex2 = FakeExchange()
+    bot2 = make_bot(ex2, candles=_schedule_candles(), schedule_rules_enabled=True,
+                     schedule_rules_bot_key="hedge")
+    bot2.sb = _schedule_sb([rule])
+    await bot2._apply_schedule_rules(bot2.state_row)
+    check("hedge turns ON with its own settings as normal",
+          bot2.state_row["enabled"] is True and bot2.state_row.get("override_sl_pct") == 0.04)
+
+
 async def t_schedule_rules_settings_still_applied_while_bot_held_off():
     print("\n[schedule rules: settings pre-stage even while {bot}_enabled holds the bot OFF]")
     ex = FakeExchange()
@@ -7400,6 +7456,9 @@ async def main():
               t_schedule_rules_match_turns_bot_on,
               t_schedule_rules_per_bot_enabled_flag_independent_of_settings,
               t_schedule_rules_enabled_flag_defaults_true_when_absent,
+              t_schedule_rules_enabled_null_leaves_it_untouched_when_currently_on,
+              t_schedule_rules_enabled_null_leaves_it_untouched_when_currently_off,
+              t_schedule_rules_enabled_null_lets_one_bots_rule_ignore_the_other_bot,
               t_schedule_rules_settings_still_applied_while_bot_held_off,
               t_schedule_rules_enabled_sync_overrides_manual_change_every_cycle,
               t_schedule_rules_first_match_wins,

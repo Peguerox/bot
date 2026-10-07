@@ -3464,9 +3464,23 @@ class StochBot:
             self._schedule_effective_rule = matched
         settings = effective.get(cfg.schedule_rules_bot_key) if effective else None
         patch = {}
-        desired_enabled = bool(effective) and bool(effective.get(f"{cfg.schedule_rules_bot_key}_enabled", True))
-        if bool(state.get("enabled", True)) != desired_enabled:
-            patch["enabled"] = desired_enabled
+        # Tri-state (2026-10-06, direct request: "we need to put 3 options on off or leave
+        # alone") -- a rule whose {bot_key}_enabled is explicitly null has no opinion on
+        # on/off at all and must not touch `enabled` either way, so a rule built purely for
+        # the OTHER bot (e.g. a hedge-only Rule 4 placed first) can be a true no-op for this
+        # one -- not even forcing it back on. Absent key (an older saved rule, pre-tri-state)
+        # still defaults True, the exact pre-revision behavior. No match at all still turns
+        # the bot off, unchanged -- that's a decision ("nothing qualifies right now"), not
+        # an absence of opinion.
+        if effective is not None:
+            enabled_key = f"{cfg.schedule_rules_bot_key}_enabled"
+            bot_enabled_opt = effective[enabled_key] if enabled_key in effective else True
+            if bot_enabled_opt is not None:
+                desired_enabled = bool(bot_enabled_opt)
+                if bool(state.get("enabled", True)) != desired_enabled:
+                    patch["enabled"] = desired_enabled
+        elif state.get("enabled", True):
+            patch["enabled"] = False
         new_key = None
         if settings:
             new_key = jsonlib.dumps(settings, sort_keys=True)

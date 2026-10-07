@@ -4052,8 +4052,11 @@ const BOT_NUMERIC_FIELDS = [
 function normalizeRuleForSave(rule: any): any {
   const out: any = {};
   for (const key of RULE_NUMERIC_FIELDS) out[key] = numOrNull(rule[key]);
-  out.worker1_enabled = rule.worker1_enabled !== false;
-  out.hedge_enabled = rule.hedge_enabled !== false;
+  // Tri-state (2026-10-06, direct request: "we need to put another option Dont change when
+  // matched") -- true/false/null all pass through as-is; only a genuinely absent key (an older
+  // saved rule, pre-tri-state) defaults to true, matching the backend's own back-compat default.
+  out.worker1_enabled = rule.worker1_enabled === undefined ? true : rule.worker1_enabled;
+  out.hedge_enabled = rule.hedge_enabled === undefined ? true : rule.hedge_enabled;
   for (const bot of ["worker1", "hedge"] as const) {
     const botOut: any = {};
     for (const key of BOT_NUMERIC_FIELDS) {
@@ -4560,14 +4563,31 @@ function MasterSchedulePanel({
                   </div>
                 </div>
                 <div>
-                  <div className="flex items-center justify-between mb-1">
+                  <div className="flex items-center justify-between mb-1 flex-wrap gap-1">
                     <p className="text-gray-500 text-[9px] uppercase">Worker 1 settings (blank = leave alone)</p>
-                    <button
-                      onClick={() => patchRule(i, { worker1_enabled: !(rule.worker1_enabled !== false) })}
-                      className={`text-[9px] font-bold px-1.5 py-0.5 rounded ${
-                        rule.worker1_enabled !== false ? "bg-green-500/20 text-green-400" : "bg-red-500/20 text-red-400"}`}>
-                      {rule.worker1_enabled !== false ? "ON when matched" : "OFF when matched"}
-                    </button>
+                    <div className="flex gap-1">
+                      {/* Tri-state (2026-10-06, direct request: "we need to put another option
+                          Dont change when matched -- so whatever is happening in 1 rule does not
+                          touch the other rules") -- null = this rule has no opinion on Worker 1's
+                          on/off at all, so a rule built for the OTHER bot (e.g. a hedge-only rule
+                          placed first) can be a true no-op here, not even forcing it back on.
+                          Undefined (an older saved rule, pre-tri-state) displays as ON, matching
+                          the back-compat default in StochBot._apply_schedule_rules. */}
+                      {([[true, "ON when matched", "bg-green-500/20 text-green-400"],
+                         [false, "OFF when matched", "bg-red-500/20 text-red-400"],
+                         [null, "Don't change", "bg-gray-700/50 text-gray-400"]] as const).map(([val, label, activeCls]) => {
+                        const current = rule.worker1_enabled === undefined ? true : rule.worker1_enabled;
+                        return (
+                          <button key={String(val)}
+                            onClick={() => patchRule(i, { worker1_enabled: val })}
+                            className={`text-[9px] font-bold px-1.5 py-0.5 rounded ${
+                              current === val ? activeCls : "bg-gray-800/60 text-gray-600 hover:bg-gray-700"
+                            }`}>
+                            {label}
+                          </button>
+                        );
+                      })}
+                    </div>
                   </div>
                   <div className="flex gap-1.5 flex-wrap">
                     {settingsField("SL", i, "worker1", "sl_pct", rule)}
@@ -4601,14 +4621,24 @@ function MasterSchedulePanel({
                   </div>
                 </div>
                 <div>
-                  <div className="flex items-center justify-between mb-1">
+                  <div className="flex items-center justify-between mb-1 flex-wrap gap-1">
                     <p className="text-gray-500 text-[9px] uppercase">Hedge settings (blank = leave alone)</p>
-                    <button
-                      onClick={() => patchRule(i, { hedge_enabled: !(rule.hedge_enabled !== false) })}
-                      className={`text-[9px] font-bold px-1.5 py-0.5 rounded ${
-                        rule.hedge_enabled !== false ? "bg-green-500/20 text-green-400" : "bg-red-500/20 text-red-400"}`}>
-                      {rule.hedge_enabled !== false ? "ON when matched" : "OFF when matched"}
-                    </button>
+                    <div className="flex gap-1">
+                      {([[true, "ON when matched", "bg-green-500/20 text-green-400"],
+                         [false, "OFF when matched", "bg-red-500/20 text-red-400"],
+                         [null, "Don't change", "bg-gray-700/50 text-gray-400"]] as const).map(([val, label, activeCls]) => {
+                        const current = rule.hedge_enabled === undefined ? true : rule.hedge_enabled;
+                        return (
+                          <button key={String(val)}
+                            onClick={() => patchRule(i, { hedge_enabled: val })}
+                            className={`text-[9px] font-bold px-1.5 py-0.5 rounded ${
+                              current === val ? activeCls : "bg-gray-800/60 text-gray-600 hover:bg-gray-700"
+                            }`}>
+                            {label}
+                          </button>
+                        );
+                      })}
+                    </div>
                   </div>
                   <div className="flex gap-1.5 flex-wrap">
                     {settingsField("SL", i, "hedge", "sl_pct", rule)}
