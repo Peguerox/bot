@@ -4669,6 +4669,111 @@ async def t_live_configs_match_their_stated_rules():
            hedge.SHORT_CONFIG.pressure_signal_owner].count(True) == 1)
 
 
+def _hide_fills(bot, ex, hidden_reads):
+    """Exchange shows the position as flat for the next `hidden_reads` REST reads after each
+    order -- reproduces Lighter's late-visible fills (3-4s on 2026-10-07)."""
+    hidden = {"n": 0}
+    real_create = ex.create_market_order
+    async def create(*a, **k):
+        r = await real_create(*a, **k)
+        hidden["n"] = hidden_reads
+        return r
+    ex.create_market_order = create
+    async def get_position_rest():
+        bot._entry_outcome_unknown = False
+        pos = ex.position
+        if hidden["n"] > 0:
+            hidden["n"] -= 1
+            pos = 0.0
+        bot._pos_cache = (pos, ex.collateral)
+        bot._pos_cache_at = time.time()
+        return bot._pos_cache
+    bot.get_position_rest = get_position_rest
+
+
+async def t_late_visible_fill_without_settle_doubles():
+    print("\n[late-visible fill, settle OFF: reproduces the 2026-10-07 02:56:55 2x short]")
+    bot = _hedge_leg(fixed_direction="short")
+    ex = bot.client
+    _hide_fills(bot, ex, hidden_reads=6)
+    await bot.tick()
+    check("first entry reads as no-fill", any(a == "enter_no_fill" for a, _ in bot.runs))
+    await bot.tick()
+    check("old behaviour: a second real order went out", len(ex.orders) == 2, len(ex.orders))
+
+
+async def t_late_visible_fill_is_adopted_not_doubled():
+    print("\n[late-visible fill, settle ON: adopted once, counter cleared, never a 2nd order]")
+    bot = _hedge_leg(fixed_direction="short", entry_settle_seconds=10.0)
+    ex = bot.client
+    _hide_fills(bot, ex, hidden_reads=6)
+    await bot.tick()
+    check("first entry reads as no-fill", bot.state_row["consecutive_entry_failures"] == 1,
+          bot.state_row["consecutive_entry_failures"])
+    check("settle window armed", bot._entry_settle_until > time.time())
+    await bot.tick()
+    check("no second order during the settle window", len(ex.orders) == 1, len(ex.orders))
+    bot._pos_cache_at = 0.0  # cache expires; the next read sees the real fill
+    await bot.tick()
+    check("late fill adopted", bot.state_row["side"] == "short", bot.state_row["side"])
+    check("failure counter cleared by the adoption",
+          bot.state_row["consecutive_entry_failures"] == 0,
+          bot.state_row["consecutive_entry_failures"])
+    check("still exactly one real order", len(ex.orders) == 1, len(ex.orders))
+
+
+async def t_settle_window_expires_and_allows_a_real_retry():
+    print("\n[settle window: a GENUINE no-fill may retry once the window has passed]")
+    bot = _hedge_leg(entry_settle_seconds=10.0)
+    ex = bot.client
+    ex.order_error = "boom"
+    await bot.tick()
+    check("no fill counted", bot.state_row["consecutive_entry_failures"] == 1)
+    await bot.tick()
+    check("blocked inside the window", len(ex.orders) == 1, len(ex.orders))
+    bot._entry_settle_until = time.time() - 1
+    ex.order_error = None
+    await bot.tick()
+    check("retried after the window and entered", bot.state_row["side"] == "long",
+          bot.state_row["side"])
+
+
+async def t_tripped_breaker_never_releases_a_naked_partner():
+    print("\n[barrier + breaker: a tripped leg must not let its partner enter alone (02:51-02:58)]")
+    hub = core.StochBot.new_cycle_hub(["worker2", "worker3"])
+    long_bot = _hedge_leg(worker_id="worker2", cycle_partner_table="partner_state")
+    short_bot = _hedge_leg(worker_id="worker3", fixed_direction="short",
+                           cycle_partner_table="partner_state")
+    long_bot.cycle_hub = hub; short_bot.cycle_hub = hub
+    long_bot.state_row["consecutive_entry_failures"] = 3
+    for _ in range(3):
+        await long_bot.tick()
+        await short_bot.tick()
+    check("tripped long disabled itself", long_bot.state_row["enabled"] is False)
+    check("long never declared readiness", "worker2" not in hub["ready"], hub["ready"])
+    check("short did NOT enter unhedged", short_bot.state_row["side"] is None,
+          short_bot.state_row["side"])
+    check("no short order at all", len(short_bot.client.orders) == 0, len(short_bot.client.orders))
+
+
+async def t_schedule_never_reenables_a_tripped_breaker():
+    print("\n[schedule: a matching ON rule must not re-enable a breaker-tripped bot (fight loop)]")
+    rule = {"hour_start": 0, "hour_end": 24, "hedge_enabled": True, "worker1_enabled": None}
+    bot = make_bot(FakeExchange(), candles=_schedule_candles(), schedule_rules_enabled=True,
+                   schedule_rules_bot_key="hedge")
+    bot.sb = _schedule_sb([rule])
+    bot.state_row["enabled"] = False
+    bot.state_row["consecutive_entry_failures"] = 3
+    await bot._apply_schedule_rules(bot.state_row)
+    check("stays OFF while the breaker is tripped", bot.state_row["enabled"] is False)
+    ok = make_bot(FakeExchange(), candles=_schedule_candles(), schedule_rules_enabled=True,
+                  schedule_rules_bot_key="hedge")
+    ok.sb = _schedule_sb([rule])
+    ok.state_row["enabled"] = False
+    await ok._apply_schedule_rules(ok.state_row)
+    check("control: an untripped bot is turned ON as usual", ok.state_row["enabled"] is True)
+
+
 def _hedge_leg(**kw):
     base = dict(candles_kind="mid", fixed_direction="long", fixed_leg_usd=10.0, sl_pct=0.06,
                 tp_pct=0.10, disable_literal_tp=True, require_fresh_signal=False,
@@ -7307,6 +7412,30 @@ def _native_sl_state(entry, usd=10.0, side="long"):
     }
 
 
+async def t_no_stop_sl_never_sends_a_native_stop():
+    print("\n[SL 100% = 'no stop': no native SL is sent (579 rejected orders on 2026-10-06)]")
+    entry = 86169.0
+    ex = FakeExchange(position=round(10.0 / entry, 5), collateral=10.0)
+    state = _native_sl_state(entry)
+    state["override_sl_pct"] = 100.0
+    bot = make_bot(ex, state=state, candles_kind="mid", native_stop_loss_enabled=True,
+                   schema_has_exit_overrides=True)
+    bot.live.order_book = {"bids": [{"price": str(entry)}], "asks": [{"price": str(entry + 1)}]}
+    await bot.tick()
+    await bot.tick()
+    check("no native SL attempted at a $0 trigger", getattr(ex, "sl_order_attempts", 0) == 0,
+          getattr(ex, "sl_order_attempts", 0))
+    check("position left open (no stop to hit)", bot.state_row["side"] == "long", bot.state_row["side"])
+    normal = FakeExchange(position=round(10.0 / entry, 5), collateral=10.0)
+    st2 = _native_sl_state(entry); st2["override_sl_pct"] = 0.05
+    b2 = make_bot(normal, state=st2, candles_kind="mid", native_stop_loss_enabled=True,
+                  schema_has_exit_overrides=True)
+    b2.live.order_book = {"bids": [{"price": str(entry)}], "asks": [{"price": str(entry + 1)}]}
+    await b2.tick()
+    check("control: a normal 0.05% SL still gets its native stop", len(getattr(normal, "sl_orders", [])) == 1,
+          getattr(normal, "sl_orders", None))
+
+
 async def t_native_sync_backoff_does_not_retry_within_the_window():
     print("\n[native order backoff: a failure does NOT retry on the very next tick]")
     print("  direct report: 6,603 'OrderPrice should not be less than 1' failures since Oct 1,")
@@ -7432,7 +7561,11 @@ async def t_sl_dwell_does_not_apply_to_escalated_tier3_hard_cap():
 
 
 async def main():
-    for t in (t_hedge_volatility_filters, t_hedge_entry_filters, t_environment_two_binary_switches,
+    for t in (t_no_stop_sl_never_sends_a_native_stop, t_late_visible_fill_without_settle_doubles, t_late_visible_fill_is_adopted_not_doubled,
+              t_settle_window_expires_and_allows_a_real_retry,
+              t_tripped_breaker_never_releases_a_naked_partner,
+              t_schedule_never_reenables_a_tripped_breaker,
+              t_hedge_volatility_filters, t_hedge_entry_filters, t_environment_two_binary_switches,
               t_environment_er_hysteresis_and_freshness,
               t_environment_shared_clearance_and_scope,
               t_environment_paused_exits_still_run,

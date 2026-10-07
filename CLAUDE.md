@@ -255,6 +255,39 @@ the just-killed instance's heartbeat as still "fresh" and refused to start. Note
 **own** refresh timer and deliberately does not ride `HEARTBEAT_EVERY` (300s) — at that cadence a
 dead instance would hold the lock for over five minutes.
 
+### Master Schedule (automation panel)
+
+`bot_schedule_rules` (one row, id=1): master `enabled`, `min_hold_seconds`, and an ordered
+`rules` JSONB array. `StochBot._apply_schedule_rules` runs every tick on every bot with
+`schedule_rules_enabled=True` (Worker 1 `bot_key="worker1"`, both hedge legs `"hedge"`).
+
+- Each rule has `{bot}_enabled` per bot: `true` = ON when matched, `false` = OFF when matched,
+  `null` = **don't touch** (rule is invisible to that bot — it can't even win the match).
+- Per bot: first rule (list order) with a non-null opinion whose conditions match wins. No
+  matching rule for that bot = OFF. A rule's own "not matched" side is the opposite; never
+  build a second rule just to turn something off.
+- The schedule **never re-enables a bot whose entry circuit breaker tripped**
+  (`consecutive_entry_failures >= 3`). Only the panel's Reset clears that counter.
+- `live_schedule_*` metric columns publish every 5s even with the master switch off.
+- The dashboard's "Currently governing" must use the same null-skip as the server.
+
+### Entry safety rules (2026-10-07, after real-money incidents)
+
+- **Lighter shows fills late** (3-4s under load). A "no fill" from `confirm_fill` means "not
+  visible yet". `entry_settle_seconds=10` (on for all live configs) blocks re-entry after one so
+  the late fill gets adopted, not doubled. Adoption resets `consecutive_entry_failures`.
+- **`confirm_fill` stays at `tries=6`.** Cutting it to 3 to save requests caused a 2x position
+  (hedge short, 02:56:55) the same day; reverted.
+- **Circuit breaker / equity checks run before the hedge cycle barrier.** A tripped leg must
+  never declare readiness — when it did, its partner was released and entered alone (three
+  UNHEDGED shorts, 02:51-02:58).
+- **SL >= 50% (`NO_STOP_SL_PCT`) = "no stop"**: no native SL order is sent (a 100% SL priced at
+  $0 was rejected 579 times in 2h on 2026-10-06, adding to WAF rate-limiting). There is then NO
+  stop-loss protection at all on that position.
+- Lighter's WAF (`x-amzn-waf-ac`, HTTP 405 HTML) rate-limits our IP under heavy request volume;
+  reads back off automatically. Don't add request-heavy loops.
+- Full incident write-up: `BUG_REPORT_2026-10-07.md`.
+
 ### Dead code
 
 `server/sol-*.ts` (`sol-dca-bitfinex.ts`, `sol-hypertrade-paper.ts`) and the Surfer trigger.dev
@@ -321,7 +354,11 @@ Owner-only background history bootstraps with at most three extra 500-bar reques
 1502 bars, and merges normal minute refreshes. Legacy indicator inputs remain 60 bars.
 Calculations are cached per closed candle/config; stale/invalid data still fails closed.
 Tests cover true-range gaps, prior-only percentiles, history bootstrap, combined permission,
-legacy JSON defaults and exits while new filters are blocked. Deployment status: pending.
+legacy JSON defaults and exits while new filters are blocked. Deployed commit 7b3b6a5 to Render and the original Vercel bot project. All accounts were
+paused and exchange-flat before push. New locks, 1501 closed history bars, preserved
+stochastic 10/90 ON and Z OFF, and new ATR/BandWidth OFF defaults verified. Prior ON
+states restored for all three rows. 890 worker checks, 49 API/control tests, TypeScript,
+production build and independent NumPy/recorded-bar calculation checks passed.
 
 No `exec_sql` RPC exists in this project — DDL (new tables, ALTER TABLE) can't be applied via a
 script. Write the migration as a `.sql` file in `supabase/migrations/`, send it to the user, and

@@ -4085,6 +4085,13 @@ function getMiamiHour(): number {
   return hour === 24 ? 0 : hour; // some locales render midnight as "24"
 }
 
+// An unsaved draft holds a cleared input as "" -- that means "no bound", same as null.
+function boundOrNull(v: any): number | null {
+  if (v === null || v === undefined || v === "") return null;
+  const n = Number(v);
+  return Number.isFinite(n) ? n : null;
+}
+
 function ruleConditionsMatch(rule: any, hour: number, metrics: Record<string, number | null>): boolean {
   const hs = rule.hour_start, he = rule.hour_end;
   if (hs != null && he != null) {
@@ -4100,7 +4107,7 @@ function ruleConditionsMatch(rule: any, hour: number, metrics: Record<string, nu
     [metrics.colorBalance, "color_balance_min", "color_balance_max"],
   ];
   for (const [value, loKey, hiKey] of pairs) {
-    const lo = rule[loKey], hi = rule[hiKey];
+    const lo = boundOrNull(rule[loKey]), hi = boundOrNull(rule[hiKey]);
     if (lo == null && hi == null) continue;
     if (value == null) return false;
     if (lo != null && value < lo) return false;
@@ -4144,7 +4151,7 @@ function formatConditionsLine(rule: any): string {
     parts.push(`Hour ${rule.hour_start}-${rule.hour_end} (Miami)`);
   }
   for (const [label, loKey, hiKey] of CONDITION_LABELS) {
-    const lo = rule[loKey], hi = rule[hiKey];
+    const lo = boundOrNull(rule[loKey]), hi = boundOrNull(rule[hiKey]);
     if (lo == null && hi == null) continue;
     if (lo != null && hi != null) parts.push(`${label} ${lo}-${hi}`);
     else if (lo != null) parts.push(`${label} ≥${lo}`);
@@ -4323,10 +4330,13 @@ function MasterSchedulePanel({
   };
   // Each bot evaluates the same saved rules against its OWN candle feed server-side, so they
   // can genuinely land on different rules -- shown separately below, never collapsed into one.
+  // A rule whose {bot}_enabled is explicitly null ("Don't touch") is invisible to that bot, same
+  // as the server's per-bot filter in _apply_schedule_rules. Without this the panel said "Hedge:
+  // Rule 3" while Rule 4 was the one actually governing the hedge (2026-10-07).
   const worker1MatchedIdx = scheduleEnabled
-    ? rules.findIndex((r) => ruleConditionsMatch(r, liveMiamiHour, worker1Metrics)) : -1;
+    ? rules.findIndex((r) => r.worker1_enabled !== null && ruleConditionsMatch(r, liveMiamiHour, worker1Metrics)) : -1;
   const hedgeMatchedIdx = scheduleEnabled
-    ? rules.findIndex((r) => ruleConditionsMatch(r, liveMiamiHour, hedgeMetrics)) : -1;
+    ? rules.findIndex((r) => r.hedge_enabled !== null && ruleConditionsMatch(r, liveMiamiHour, hedgeMetrics)) : -1;
   const worker1MatchedRule = worker1MatchedIdx >= 0 ? rules[worker1MatchedIdx] : null;
   const hedgeMatchedRule = hedgeMatchedIdx >= 0 ? rules[hedgeMatchedIdx] : null;
 

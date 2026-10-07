@@ -52,12 +52,10 @@ import aiohttp
 import lighter
 
 # ── Network safety budget ───────────────────────────────────────────────────────────────────
-# Worst-case pathological tick is bounded by these: reconcile confirm (~17s) + close (~30s)
-# + re-entry (~30s) ~= 77s, comfortably under TICK_WATCHDOG (see confirm_fill()'s docstring
-# for how tries/delay were chosen -- there's a real tradeoff here between speed and this
-# margin, not just a free win; confirm_fill's own tries default is the authoritative number --
-# t_timeout_constants in test_core.py recomputes this from it directly, so it never goes
-# stale here the way this comment's own numbers can). A normal tick is ~0.5s.
+# Worst-case pathological tick is bounded by these: reconcile confirm (~17s) + close (~61s)
+# + re-entry (~61s) ~= 139s, comfortably under TICK_WATCHDOG (see confirm_fill()'s docstring
+# for how tries/delay were chosen; t_timeout_constants in test_core.py recomputes this from
+# the real defaults). A normal tick is ~0.5s.
 REST_TIMEOUT = 8.0        # per Lighter REST read (SDK default would be 300s)
 ORDER_TIMEOUT = 12.0      # per order placement / cancel-all
 SB_TIMEOUT = 10.0         # per Supabase call
@@ -121,6 +119,7 @@ OVERSIZE_FACTOR = 1.5     # real position this much bigger than intended => emer
 # purpose: a tight band here could let the stop trigger and then fail to fill in exactly the
 # fast move it exists to protect against, which is worse than not having it at all.
 NATIVE_STOP_BAND_PCT = 0.3
+NO_STOP_SL_PCT = 50.0     # SL at/above this is treated as "no stop" -- no native SL order is sent
 
 SUPABASE_URL = os.environ["NEXT_PUBLIC_SUPABASE_URL"]
 SUPABASE_KEY = os.environ["SUPABASE_SERVICE_ROLE_KEY"]
@@ -763,6 +762,12 @@ class BotConfig:
     # _acquire_instance_lock. Requires the lock_owner/lock_heartbeat column migration. False
     # (default) leaves every bot that hasn't had that migration run behaving exactly as before.
     single_instance_lock: bool = False
+    # After an entry whose fill was not visible during confirm_fill, block new entries this many
+    # seconds so a late-visible fill gets adopted instead of doubled (2026-10-07 02:56:55: hedge
+    # short re-entered 2s after a "no fill" that had actually filled -> 2x, emergency flatten).
+    # Must comfortably exceed POSITION_TTL so at least one fresh REST read lands in the window.
+    # 0 (default) keeps the old immediate-retry behaviour.
+    entry_settle_seconds: float = 0.0
     # Manual exit levers (2026-09-30). When set, override_sl_pct / override_profit_lock_trigger /
     # override_profit_lock_trail on the state row replace the compiled-in sl_pct /
     # profit_lock_trigger_pct / profit_lock_trail_pct, so the exits can be retuned from the
@@ -1711,6 +1716,7 @@ class StochBot:
         # Emergency-flatten bookkeeping -- see emergency_flatten / EMERGENCY_COOLDOWN.
         self._emergency_flattens = []
         self._entry_cooldown_until = 0.0
+        self._entry_settle_until = 0.0
         # min_cycle_gap_seconds bookkeeping. _was_in_position lets tick() detect the exact tick
         # this leg transitions to flat (side: not-None -> None) without needing a separate
         # "closed just now" signal -- side is already read fresh every tick regardless.
@@ -3491,6 +3497,12 @@ class StochBot:
         if effective is not None:
             bot_enabled_opt = effective[enabled_key] if enabled_key in effective else True
             desired_enabled = bool(bot_enabled_opt)
+            # Never re-enable a bot its own entry circuit breaker shut off. On 2026-10-07 the
+            # schedule flipped the tripped hedge long back ON every ~30s and the breaker shut it
+            # off again each time (4 trips in 7 min). Only a manual Reset clears the counter.
+            breaker_tripped = (state.get("consecutive_entry_failures", 0) or 0) >= 3
+            if desired_enabled and breaker_tripped:
+                desired_enabled = bool(state.get("enabled", True))
             if bool(state.get("enabled", True)) != desired_enabled:
                 patch["enabled"] = desired_enabled
         elif state.get("enabled", True):
@@ -4063,7 +4075,7 @@ class StochBot:
                 return self._pos_cache
             raise
 
-    async def confirm_fill(self, want_nonzero, expect_qty=None, tries=3, delay=0.25,
+    async def confirm_fill(self, want_nonzero, expect_qty=None, tries=6, delay=0.25,
                            require_consecutive=1):
         """Authoritative REST answer to 'what is the real position right now'.
 
@@ -4084,18 +4096,11 @@ class StochBot:
         essentially all the measured speedup (nothing here ever needed more than 2 tries)
         while keeping a real safety margin (~40s) under the watchdog.
 
-        tries=6 -> 3 (2026-10-07, direct request after a real WAF-rate-limit incident):
-        the hedge's two legs cycling every 20-90s during extreme volatility turned this
-        loop into the dominant source of request volume against Lighter's account-read
-        endpoint, which started intermittently 405/WAF-blocking it. The 2026-09-22
-        measurement above already showed nothing here ever needed more than 2 tries in
-        practice -- tries 3-6 were pure headroom for a genuinely slow exchange, not
-        normal-path need. Dropping to 3 keeps that headroom (one full try beyond the
-        measured worst case) while roughly halving both the worst-case request burst per
-        fill and the worst-case tick duration (see the REST_TIMEOUT comment block's
-        close/re-entry budget, ~61s -> ~30s each) -- more watchdog margin, not less.
-        t_timeout_constants in test_core.py reads this default dynamically, so it
-        re-validates the new margin automatically rather than needing its own update.
+        Do NOT lower tries below 6. It was cut to 3 on 2026-10-07 to reduce request volume
+        and reverted the same day: under load Lighter showed real fills 3-4s after the
+        order, 3 tries gave up first, and the hedge short placed a second real order on top
+        of a late-visible first one (oversize_detected 02:56:55, 2x size, emergency flatten).
+        A "no fill" here only means "not visible yet" -- see entry_settle_seconds.
         """
         pos, coll = 0.0, None
         # Distinguishes "read fine, nothing there" from "could not read at all" -- see
@@ -4460,6 +4465,8 @@ class StochBot:
                 # read can reveal it (observed live 2026-10-02). Retain durable identity
                 # for adoption; the next actual entry attempt overwrites it atomically.
                 self._pending_cycle_id = None
+            if cfg.entry_settle_seconds > 0:
+                self._entry_settle_until = time.time() + cfg.entry_settle_seconds
             await self.log_run("enter_no_fill", {"signal": signal, "via": via,
                                                  "error": str(err)[:200] if err else None,
                                                  "fail_count": fail_count + 1})
@@ -6229,6 +6236,12 @@ class StochBot:
                                 "side": side, "unrealized_pct": round(unrealized_pct, 5) if unrealized_pct is not None else None,
                             })
                 no_sl_skip = self._no_sl_partner_closed
+            # An SL this wide is the dashboard's "no stop" setting (cap raised to 100% on
+            # 2026-10-04 for a reversal-only test). Its trigger prices at <= $0, which Lighter
+            # rejects -- 579 rejected native orders in ~2h on 2026-10-06, feeding the same WAF
+            # rate-limit. Don't send it.
+            if pos_sl >= NO_STOP_SL_PCT:
+                no_sl_skip = True
             if cfg.native_stop_loss_enabled or cfg.native_take_profit_enabled:
                 qty_now = total_qty(legs)
                 if qty_now > 0:
@@ -6563,6 +6576,9 @@ class StochBot:
                 eq = self._pressure_biased_leg_usd(eq)
                 if not fresh.get("enabled"):
                     return
+                if time.time() < self._entry_settle_until:
+                    await self.update_state({"last_processed_candle_ts": candle_ts})
+                    return
                 if not holds_lock:
                     # Another live instance owns this row. The close leg of the reversal already
                     # ran above (exits are never gated on the lock); only the REOPEN is blocked.
@@ -6615,11 +6631,16 @@ class StochBot:
             if abs(real_pos) > QTY_EPS:
                 adopted = "long" if real_pos > 0 else "short"
                 price = best_ask if adopted == "long" else best_bid
+                # A real position exists, so any "no fill" that led here was a late-visible fill,
+                # not a failure: clear the counter, or three slow confirmations trip the circuit
+                # breaker on entries that all actually worked (2026-10-07 02:51:25, hedge long).
                 await self.update_state({
                     "side": adopted, "legs": [{"price": price, "usd_size": price * abs(real_pos)}],
                     "first_entry_price": price, "first_entry_time": self._recovered_entry_time(state, adopted),
                     "dca_level": 0, "collateral_before_entry": collateral,
+                    "consecutive_entry_failures": 0,
                     "last_processed_candle_ts": candle_ts})
+                self._entry_settle_until = 0.0
                 await self.log_run("adopted_orphan_position", {"side": adopted, "qty": abs(real_pos)})
             else:
                 if self._was_in_position:
@@ -6650,7 +6671,33 @@ class StochBot:
                             # Never send a second entry while a previous one's fate is unknown.
                             and not self._entry_outcome_unknown
                             # ...nor during the cooldown after an emergency flatten.
-                            and time.time() >= self._entry_cooldown_until)
+                            and time.time() >= self._entry_cooldown_until
+                            # ...nor while a recent "no fill" may still turn out to have filled.
+                            and time.time() >= self._entry_settle_until)
+                # Circuit breaker and equity are checked BEFORE the cycle barrier. Checked after
+                # it (as before 2026-10-07), a tripped leg declared ready, the barrier released
+                # both legs, this leg then bailed and its partner entered alone -- three UNHEDGED
+                # short cycles between 02:51 and 02:58 that day.
+                if wants_in:
+                    fail_count = state.get("consecutive_entry_failures", 0) or 0
+                    if fail_count >= 3:
+                        # Hard stop rather than another retry -- unbounded retries are what
+                        # stacked 19 real orders into one position on 2026-09-21.
+                        self._cycle_gate_withdraw()
+                        await self.log_run("entry_circuit_breaker",
+                                           {"signal": effective_signal, "fail_count": fail_count})
+                        await self.update_state({"enabled": False,
+                                                 "last_processed_candle_ts": candle_ts})
+                        return
+                    eq = (cfg.fixed_leg_usd if cfg.fixed_leg_usd is not None
+                          else state["seed_usd"] + state["realized_pnl_usd"])
+                    eq = self._pressure_biased_leg_usd(eq)
+                    if eq <= 0:
+                        self._cycle_gate_withdraw()
+                        await self.log_run("equity_non_positive", {"eq": eq})
+                        await self.update_state({"enabled": False,
+                                                 "last_processed_candle_ts": candle_ts})
+                        return
                 partner_flat = True
                 if wants_in and cfg.cycle_partner_table is not None:
                     # In-process barrier when one is wired (the hedge); it supersedes the DB poll
@@ -6670,23 +6717,6 @@ class StochBot:
                 if wants_in and partner_flat:
                     # one_cycle_per_candle: this candle is spent the moment an entry is attempted.
                     self._last_cycle_candle_t = self._current_candle_t()
-                    fail_count = state.get("consecutive_entry_failures", 0) or 0
-                    if fail_count >= 3:
-                        # Hard stop rather than another retry -- unbounded retries are what
-                        # stacked 19 real orders into one position on 2026-09-21.
-                        await self.log_run("entry_circuit_breaker",
-                                           {"signal": effective_signal, "fail_count": fail_count})
-                        await self.update_state({"enabled": False,
-                                                 "last_processed_candle_ts": candle_ts})
-                        return
-                    eq = (cfg.fixed_leg_usd if cfg.fixed_leg_usd is not None
-                          else state["seed_usd"] + state["realized_pnl_usd"])
-                    eq = self._pressure_biased_leg_usd(eq)
-                    if eq <= 0:
-                        await self.log_run("equity_non_positive", {"eq": eq})
-                        await self.update_state({"enabled": False,
-                                                 "last_processed_candle_ts": candle_ts})
-                        return
                     via = "entry" if entry_signal is not None else "mirror_paper"
                     price = best_ask if effective_signal == "long" else best_bid
                     if cfg.debug_verbose_tick:
