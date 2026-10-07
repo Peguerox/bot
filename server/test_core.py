@@ -6493,18 +6493,34 @@ async def t_schedule_rules_applies_hedge_fields_only():
           "override_stoch_band_lo" not in bot.state_row)
 
 
-async def t_schedule_rules_no_match_turns_bot_off():
-    print("\n[schedule rules: no rule matches -- turns the bot OFF, writes no settings]")
+async def t_schedule_rules_no_match_turns_bot_on():
+    print("\n[schedule rules: no rule matches -- turns the bot ON, writes no settings]")
     ex = FakeExchange()
     bot = make_bot(ex, candles=_schedule_candles(), schedule_rules_enabled=True,
                     schedule_rules_bot_key="worker1")
+    bot.state_row["enabled"] = False
     rule = {"hour_start": 0, "hour_end": 24, "er_min": 2.0,  # impossible -- ER never reaches 2.0
             "worker1": {"sl_pct": 0.5}}
     bot.sb = _schedule_sb([rule])
     await bot._apply_schedule_rules(bot.state_row)
     check("no settings written", "override_sl_pct" not in bot.state_row)
-    check("bot turned OFF -- no match, direct request: \"once the rules finish turn it off\"",
-          bot.state_row["enabled"] is False)
+    check("bot turned ON -- no match, direct request: \"both ons\" (real rule set has a gap "
+          "where nothing matches, and the bot must keep trading through it, not shut down)",
+          bot.state_row["enabled"] is True)
+
+
+async def t_schedule_rules_no_match_leaves_an_already_on_bot_on():
+    print("\n[schedule rules: no rule matches and bot is already ON -- no redundant write]")
+    ex = FakeExchange()
+    bot = make_bot(ex, candles=_schedule_candles(), schedule_rules_enabled=True,
+                    schedule_rules_bot_key="worker1")
+    bot.state_row["enabled"] = True
+    rule = {"hour_start": 0, "hour_end": 24, "er_min": 2.0,
+            "worker1": {"sl_pct": 0.5}}
+    bot.sb = _schedule_sb([rule])
+    await bot._apply_schedule_rules(bot.state_row)
+    check("no settings written", "override_sl_pct" not in bot.state_row)
+    check("stays ON, no spurious patch", bot.state_row["enabled"] is True)
 
 
 async def t_schedule_rules_match_turns_bot_on():
@@ -6775,7 +6791,7 @@ async def t_schedule_rules_malformed_data_fails_closed():
     bot.sb = _schedule_sb(None)  # rules is None, not a list
     await bot._apply_schedule_rules(bot.state_row)  # must not raise
     check("no settings written with rules=None", "override_sl_pct" not in bot.state_row)
-    check("treated as no match -- bot turned off, same as any other no-match", bot.state_row["enabled"] is False)
+    check("treated as no match -- bot turned on, same as any other no-match", bot.state_row["enabled"] is True)
 
 
 async def t_schedule_rules_mutates_local_state_dict_immediately():
@@ -7452,7 +7468,8 @@ async def main():
               t_schedule_rules_escalated_sl_false_is_explicitly_written,
               t_schedule_rules_escalated_sl_absent_leaves_it_alone,
               t_schedule_rules_applies_hedge_fields_only,
-              t_schedule_rules_no_match_turns_bot_off,
+              t_schedule_rules_no_match_turns_bot_on,
+              t_schedule_rules_no_match_leaves_an_already_on_bot_on,
               t_schedule_rules_match_turns_bot_on,
               t_schedule_rules_per_bot_enabled_flag_independent_of_settings,
               t_schedule_rules_enabled_flag_defaults_true_when_absent,

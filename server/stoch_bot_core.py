@@ -3469,9 +3469,11 @@ class StochBot:
         # on/off at all and must not touch `enabled` either way, so a rule built purely for
         # the OTHER bot (e.g. a hedge-only Rule 4 placed first) can be a true no-op for this
         # one -- not even forcing it back on. Absent key (an older saved rule, pre-tri-state)
-        # still defaults True, the exact pre-revision behavior. No match at all still turns
-        # the bot off, unchanged -- that's a decision ("nothing qualifies right now"), not
-        # an absence of opinion.
+        # still defaults True, the exact pre-revision behavior.
+        # No match at all now turns the bot ON (2026-10-06, direct request "both ons") --
+        # previously OFF. Flipped because the real 4-rule set has a gap (wiggle>50 with ER<0.05,
+        # or wiggle>50 with vol_wiggle_product outside rule 4's band) where nothing matches, and
+        # the user wants both bots left trading through that gap rather than shut down.
         if effective is not None:
             enabled_key = f"{cfg.schedule_rules_bot_key}_enabled"
             bot_enabled_opt = effective[enabled_key] if enabled_key in effective else True
@@ -3479,8 +3481,8 @@ class StochBot:
                 desired_enabled = bool(bot_enabled_opt)
                 if bool(state.get("enabled", True)) != desired_enabled:
                     patch["enabled"] = desired_enabled
-        elif state.get("enabled", True):
-            patch["enabled"] = False
+        elif not state.get("enabled", True):
+            patch["enabled"] = True
         new_key = None
         if settings:
             new_key = jsonlib.dumps(settings, sort_keys=True)

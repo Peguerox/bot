@@ -5023,8 +5023,8 @@ export default function Dashboard() {
           onToggled={load}
         />
 
-        {/* ── Lighter BTC Stochastic5: 3-worker comparison, real money, $100 each */}
-        <div className="grid grid-cols-1 sm:grid-cols-3 gap-3">
+        {/* ── Lighter BTC Stochastic5: Worker 1 + hedge (Worker 2, real money) */}
+        <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
           <CompactStochBtcPanel
             title="Worker 1 · Stochastic + Color-Balance Index"
             subtitle="2026-10-01 v4: enters ONLY on a fresh 25/75 stochastic signal (window 5) while the color-weighted balance index is 65-75 (each of the last 5 closed 1-min candles casts a size-weighted color vote; 100 = perfectly balanced, 0 = one color dominates) -- back to a band after a brief floor-only (70+) run showed both real losses landing above 80. Exits: SL 0.06% / TP 0.10% / profit lock at +0.06% (exits on first tick down). SL tightened from 0.10% same day after a sweep against real data: 0.06 beat 0.10 on both the full 644-trade history (+$2.41 vs +$1.80) and the live 20-trade window since the trigger change (+$0.38 vs +$0.11). A 3-stage ratchet SL (0.10->0.05->0 as the trade goes positive) was tested and rejected -- looked good on a small window, lost badly on the full history. One trade per signal; after a REVERSAL close specifically, a 2-minute cooldown before any new entry (fresh or another reversal) -- the close itself is never delayed. A GREEN position closes immediately (INDEX_EXIT) if the index leaves 65-75; a RED position is never touched by this. Self-lock, hour ban, dispersion and saving lock all OFF."
@@ -5054,20 +5054,6 @@ export default function Dashboard() {
             currentPrice={hedgeCoinPrice}
             loading={loading}
             onToggled={load}
-          />
-          <CompactStochBtcPanel
-            title="Worker 3 · Joint Adaptive"
-            subtitle="Window, K thresholds, TP, SL, and reversal blanking all move continuously with volatility (R = vol_pct/0.0712) -- unchanged formula / real SL locks real orders, 2 consecutive paper wins unlock (at least 1 must be a literal TP), OR 3 wins of any kind unlocks regardless / book-opposition early exit added (10s age, losing >=0.05%, near-touch opposing depth >60% within 0.05% of price)"
-            table="lighter_stoch_dca_btc_state"
-            state={dcaBtcState}
-            trades={dcaBtcTrades.filter((t: any) => Date.parse(t.closed_at) >= Date.parse(dcaBtcState?.history_reset_at ?? WORKER3_RESET_AT))}
-            currentPrice={ocoBtcPrice}
-            loading={loading}
-            onToggled={load}
-            runs={dcaBtcRuns}
-            showSelfLock
-            combineEquityWinRate
-            dormant
           />
         </div>
 
