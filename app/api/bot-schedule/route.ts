@@ -85,6 +85,7 @@ const CONDITION_PAIRS = [
   ["wiggle_min", "wiggle_max"], ["rate_min", "rate_max"],
   ["vol_wiggle_ratio_min", "vol_wiggle_ratio_max"],
   ["vol_wiggle_product_min", "vol_wiggle_product_max"],
+  ["product_rate_min", "product_rate_max"],
   ["zebra_min", "zebra_max"], ["color_balance_min", "color_balance_max"],
 ] as const;
 

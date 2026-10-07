@@ -4007,6 +4007,7 @@ const EMPTY_RULE = {
   wiggle_min: null, wiggle_max: null, rate_min: null, rate_max: null,
   vol_wiggle_ratio_min: null, vol_wiggle_ratio_max: null,
   vol_wiggle_product_min: null, vol_wiggle_product_max: null,
+  product_rate_min: null, product_rate_max: null,
   zebra_min: null, zebra_max: null,
   color_balance_min: null, color_balance_max: null,
   // Per-bot ON/OFF switch, independent of that bot having a settings object on the same rule --
@@ -4042,6 +4043,7 @@ const RULE_NUMERIC_FIELDS = [
   "wiggle_min", "wiggle_max", "rate_min", "rate_max",
   "vol_wiggle_ratio_min", "vol_wiggle_ratio_max",
   "vol_wiggle_product_min", "vol_wiggle_product_max",
+  "product_rate_min", "product_rate_max",
   "zebra_min", "zebra_max", "color_balance_min", "color_balance_max",
 ] as const;
 const BOT_NUMERIC_FIELDS = [
@@ -4114,6 +4116,7 @@ function ruleConditionsMatch(rule: any, hour: number, metrics: Record<string, nu
     [metrics.wiggle, "wiggle_min", "wiggle_max"], [metrics.rate, "rate_min", "rate_max"],
     [metrics.volWiggleRatio, "vol_wiggle_ratio_min", "vol_wiggle_ratio_max"],
     [metrics.volWiggleProduct, "vol_wiggle_product_min", "vol_wiggle_product_max"],
+    [metrics.productRate, "product_rate_min", "product_rate_max"],
     [metrics.zebra, "zebra_min", "zebra_max"],
     [metrics.colorBalance, "color_balance_min", "color_balance_max"],
   ];
@@ -4152,6 +4155,7 @@ const CONDITION_LABELS: [string, string, string][] = [
   ["Wiggle", "wiggle_min", "wiggle_max"], ["Rate", "rate_min", "rate_max"],
   ["Wiggle/Vol", "vol_wiggle_ratio_min", "vol_wiggle_ratio_max"],
   ["Vol×Wiggle", "vol_wiggle_product_min", "vol_wiggle_product_max"],
+  ["Product Rate", "product_rate_min", "product_rate_max"],
   ["Zebra", "zebra_min", "zebra_max"],
   ["Color bal", "color_balance_min", "color_balance_max"],
 ];
@@ -4390,6 +4394,7 @@ function MasterSchedulePanel({
   const liveZebra = worker1State?.live_schedule_zebra ?? null;
   const liveVolWiggleRatio = worker1State?.live_schedule_vol_wiggle_ratio ?? null;
   const liveVolWiggleProduct = worker1State?.live_schedule_vol_wiggle_product ?? null;
+  const liveProductRate = worker1State?.live_schedule_product_rate ?? null;
   // Color-weighted BALANCE index (net balance, 0-100) -- 2026-10-05, now published unconditionally
   // by every bot as live_schedule_color_balance (same metric Worker 1's own 65-75 entry gate
   // reads), replacing the older live_zebra_index column which only Worker 1 ever wrote (gated
@@ -4402,7 +4407,7 @@ function MasterSchedulePanel({
   const worker1Metrics = {
     er: liveEr, volume: liveVolume, wiggle: liveWiggle, rate: liveRate,
     volWiggleRatio: liveVolWiggleRatio, volWiggleProduct: liveVolWiggleProduct,
-    zebra: liveZebra, colorBalance: liveColorBalance,
+    zebra: liveZebra, colorBalance: liveColorBalance, productRate: liveProductRate,
   };
   const hedgeMetrics = {
     er: hedgeLongState?.live_schedule_er ?? null,
@@ -4413,6 +4418,7 @@ function MasterSchedulePanel({
     volWiggleProduct: hedgeLongState?.live_schedule_vol_wiggle_product ?? null,
     zebra: hedgeLongState?.live_schedule_zebra ?? null,
     colorBalance: hedgeLongState?.live_schedule_color_balance ?? null,
+    productRate: hedgeLongState?.live_schedule_product_rate ?? null,
   };
   // Each bot evaluates the same saved rules against its OWN candle feed server-side, so they
   // can genuinely land on different rules -- shown separately below, never collapsed into one.
@@ -4572,6 +4578,13 @@ function MasterSchedulePanel({
             <p className="text-gray-500 text-[8px] leading-tight mt-0.5">Whether trading volume right now is picking up or dying down vs its own recent pace.</p>
           </div>
           <div className="bg-gray-900/50 rounded-lg p-1.5">
+            <p className="text-gray-500 text-[8px] uppercase leading-tight">Product Rate</p>
+            <p className={`font-bold text-xs tabular-nums ${liveProductRate == null ? "text-gray-500" : Math.abs(liveProductRate) > 50 ? "text-amber-400" : "text-gray-300"}`}>
+              {liveProductRate != null ? liveProductRate.toFixed(1) : "—"}
+            </p>
+            <p className="text-gray-500 text-[8px] leading-tight mt-0.5">How fast Vol×Wiggle itself is changing vs the prior candle. Backtested better than Vol rate at separating winners from losers -- large swings here (either direction) preceded worse trades.</p>
+          </div>
+          <div className="bg-gray-900/50 rounded-lg p-1.5">
             <p className="text-gray-500 text-[8px] uppercase leading-tight">Zebra</p>
             <p className="font-bold text-xs tabular-nums text-gray-300">{liveZebra != null ? liveZebra.toFixed(1) : "—"}</p>
             <p className="text-gray-500 text-[8px] leading-tight mt-0.5">Not 0-100 -- flips ÷ avg candle size, so tiny candles inflate it. Low = grinding one way. High = lots of alternation, often on tiny noisy candles.</p>
@@ -4695,6 +4708,7 @@ function MasterSchedulePanel({
                     {condField("Vol Rate", i, "rate_min", "rate_max", rule)}
                     {condField("Wiggle/Vol", i, "vol_wiggle_ratio_min", "vol_wiggle_ratio_max", rule)}
                     {condField("Vol×Wiggle", i, "vol_wiggle_product_min", "vol_wiggle_product_max", rule)}
+                    {condField("Product Rate", i, "product_rate_min", "product_rate_max", rule)}
                     {condField("Zebra", i, "zebra_min", "zebra_max", rule)}
                     {condField("Color bal", i, "color_balance_min", "color_balance_max", rule)}
                   </div>

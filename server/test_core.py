@@ -6766,6 +6766,70 @@ async def t_apply_schedule_rules_computes_vol_wiggle_product_as_volume_times_wig
           "override_sl_pct" not in bot2.state_row)
 
 
+async def t_compute_product_rate_hand_computed():
+    print("\n[compute_product_rate: hand-computed example]")
+    candles = [
+        {"h": 10, "l": 0, "v": 1},   # c0
+        {"h": 10, "l": 0, "v": 2},   # c1 -- mid 5
+        {"h": 20, "l": 0, "v": 3},   # c2 -- mid 10
+        {"h": 30, "l": 0, "v": 4},   # c3 -- mid 15
+        {"h": 30, "l": 0, "v": 999}, # c4 -- forming, excluded
+    ]
+    # now: closed=[c0,c1,c2,c3], window=2 -> vol=(3+4)/2=3.5, wiggle=stdev(mid10,mid15)=2.5 -> 8.75
+    # prior (shifted one candle back): closed=[c0,c1,c2], window=2 -> vol=(2+3)/2=2.5, wiggle=stdev(mid5,mid10)=2.5 -> 6.25
+    rate = core.compute_product_rate(candles, vol_window=2, wiggle_window=2)
+    check("product rate matches hand calculation", rate is not None and abs(rate - 2.5) < 1e-9, rate)
+
+
+async def t_compute_product_rate_insufficient_history():
+    print("\n[compute_product_rate: None until BOTH this candle and the prior one have a full window]")
+    candles = [
+        {"h": 10, "l": 0, "v": 1},   # c0
+        {"h": 10, "l": 0, "v": 2},   # c1
+        {"h": 20, "l": 0, "v": 999}, # forming
+    ]
+    # "now" (window=2) has exactly [c0,c1] to work with -- fine. "prior" needs the 2 CLOSED
+    # candles before THAT (i.e. candles[:-2]), which is just [c0] here -- one short.
+    rate = core.compute_product_rate(candles, vol_window=2, wiggle_window=2)
+    check("not enough history for the prior window -> None", rate is None, rate)
+
+
+async def t_rule_matches_product_rate_condition():
+    print("\n[_rule_matches: product_rate min/max -- direct request, 2026-10-07: \"product rate... puts 3 variables instead of 2\"]")
+    ex = FakeExchange()
+    bot = make_bot(ex)
+    rule = {"product_rate_min": -5.0, "product_rate_max": 5.0}
+    check("inside bounds", bot._rule_matches(rule, 0, None, None, None, None, None, None, None, None, 2.0))
+    check("at the max (inclusive)", bot._rule_matches(rule, 0, None, None, None, None, None, None, None, None, 5.0))
+    check("above the max", not bot._rule_matches(rule, 0, None, None, None, None, None, None, None, None, 7.0))
+    check("no reading available -- fails closed",
+          not bot._rule_matches(rule, 0, None, None, None, None, None, None, None, None, None))
+
+
+async def t_apply_schedule_rules_computes_product_rate_from_real_candles():
+    print("\n[_apply_schedule_rules: product_rate is volume*wiggle's own change vs the prior candle]")
+    ex = FakeExchange()
+    bot = make_bot(ex, candles=_schedule_candles(volume=2.5), schedule_rules_enabled=True,
+                    schedule_rules_bot_key="worker1")
+    expected = core.compute_product_rate(bot.candles)
+    matching_rule = {"product_rate_min": expected - 0.01, "product_rate_max": expected + 0.01,
+                      "worker1": {"sl_pct": 0.11}}
+    bot.sb = _schedule_sb([matching_rule])
+    await bot._apply_schedule_rules(bot.state_row)
+    check("rule matched on the real computed product_rate -- settings applied",
+          bot.state_row.get("override_sl_pct") == 0.11)
+
+    ex2 = FakeExchange()
+    bot2 = make_bot(ex2, candles=_schedule_candles(volume=2.5), schedule_rules_enabled=True,
+                     schedule_rules_bot_key="worker1")
+    non_matching_rule = {"product_rate_min": (expected or 0) + 50.0,  # well above the real reading
+                          "worker1": {"sl_pct": 0.11}}
+    bot2.sb = _schedule_sb([non_matching_rule])
+    await bot2._apply_schedule_rules(bot2.state_row)
+    check("rule did NOT match -- the real product_rate is below this bound",
+          "override_sl_pct" not in bot2.state_row)
+
+
 async def t_schedule_current_hour_is_miami_not_utc():
     print("\n[_schedule_current_hour: Miami local time (America/New_York), not UTC -- direct request]")
     ex = FakeExchange()
@@ -7289,6 +7353,7 @@ async def t_schedule_rules_publishes_live_metrics_with_schema_flag():
     check("vol_wiggle_product published", abs(bot.state_row.get("live_schedule_vol_wiggle_product") - 3.53553) < 1e-3)
     check("er published (not None)", bot.state_row.get("live_schedule_er") is not None)
     check("rate published (not None)", bot.state_row.get("live_schedule_rate") is not None)
+    check("product_rate published (not None)", bot.state_row.get("live_schedule_product_rate") is not None)
 
 
 async def t_schedule_rules_publishes_zebra_alternation_index():
@@ -8003,6 +8068,10 @@ async def main():
               t_rule_matches_vol_wiggle_ratio_condition,
               t_rule_matches_vol_wiggle_product_condition,
               t_apply_schedule_rules_computes_vol_wiggle_product_as_volume_times_wiggle,
+              t_compute_product_rate_hand_computed,
+              t_compute_product_rate_insufficient_history,
+              t_rule_matches_product_rate_condition,
+              t_apply_schedule_rules_computes_product_rate_from_real_candles,
               t_schedule_current_hour_is_miami_not_utc,
               t_schedule_rules_off_by_default_schema_flag,
               t_schedule_rules_off_without_bot_key,

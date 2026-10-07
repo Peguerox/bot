@@ -1320,6 +1320,27 @@ def compute_candle_volume_rate(candles, window=10):
     return now - prior
 
 
+def compute_product_rate(candles, vol_window=10, wiggle_window=5):
+    """Change in (compute_candle_volume_avg * compute_intrabar_dispersion) between this closed
+    candle and the one before it -- same idea as compute_candle_volume_rate, but on the
+    volume*wiggle PRODUCT instead of plain volume. Direct request, 2026-10-07: backtested
+    against real Worker 1 trades (369 trades, full history) after the plain volume rate didn't
+    separate winners from losers well -- entries where this product was moving FAST (top 30% by
+    |product_rate|) lost more than entries where it was calmer, at a materially wider margin
+    than the same split on plain volume_rate (matched-n comparison: 71.0% win / +$0.285 net
+    here vs 67.6% win / -$0.413 net on volume_rate). None if either product is unavailable (too
+    few candles)."""
+    vol_now = compute_candle_volume_avg(candles, vol_window)
+    wig_now = compute_intrabar_dispersion(candles, wiggle_window)
+    if vol_now is None or wig_now is None:
+        return None
+    vol_prior = compute_candle_volume_avg(candles[:-1], vol_window)
+    wig_prior = compute_intrabar_dispersion(candles[:-1], wiggle_window)
+    if vol_prior is None or wig_prior is None:
+        return None
+    return (vol_now * wig_now) - (vol_prior * wig_prior)
+
+
 def compute_volume_wiggle_ratio(candles, vol_window=10, wiggle_window=5):
     """compute_intrabar_dispersion / compute_candle_volume_avg -- how much price is actually
     dispersing relative to traded BTC. 2026-10-04, direct request during a real live
@@ -3396,7 +3417,7 @@ class StochBot:
         return datetime.now(SCHEDULE_TZ).hour
 
     def _rule_matches(self, rule, hour, er, volume, wiggle, rate, vol_wiggle_ratio, vol_wiggle_product,
-                       zebra=None, color_balance=None):
+                       zebra=None, color_balance=None, product_rate=None):
         """True if `rule`'s conditions all hold right now. Every field is independently optional
         -- a rule can be pure-hour, pure-condition, or both. `hour` is Miami local time (see
         _schedule_current_hour); hour_start/hour_end wrap past midnight when start > end (e.g.
@@ -3417,7 +3438,8 @@ class StochBot:
                                        (vol_wiggle_ratio, "vol_wiggle_ratio_min", "vol_wiggle_ratio_max"),
                                        (vol_wiggle_product, "vol_wiggle_product_min", "vol_wiggle_product_max"),
                                        (zebra, "zebra_min", "zebra_max"),
-                                       (color_balance, "color_balance_min", "color_balance_max")):
+                                       (color_balance, "color_balance_min", "color_balance_max"),
+                                       (product_rate, "product_rate_min", "product_rate_max")):
             lo, hi = rule.get(lo_key), rule.get(hi_key)
             if lo is None and hi is None:
                 continue
@@ -3506,6 +3528,12 @@ class StochBot:
         # wrote one). Universal readout + rule condition, same pattern as every other
         # live_schedule_* field.
         color_balance = compute_color_weighted_balance_index(self.candles, 5)
+        # Volume*wiggle product RATE (2026-10-07, direct request: "product rate... puts 3
+        # variables instead of 2" -- replaces the plain volume_rate as the preferred condition
+        # per the backtest cited in compute_product_rate's own docstring). Unlike
+        # vol_wiggle_product above (a plain inline multiply), this needs its OWN prior-candle
+        # product too, so it gets a dedicated compute_* function, same as compute_candle_volume_rate.
+        product_rate = compute_product_rate(self.candles)
         if cfg.schema_has_schedule_metrics and now - self._schedule_metrics_last_persist_ts >= 5.0:
             self._schedule_metrics_last_persist_ts = now
             # Isolated best-effort write, same reasoning as live_candle_volume elsewhere: a
@@ -3520,6 +3548,7 @@ class StochBot:
                     "live_schedule_vol_wiggle_product": vol_wiggle_product,
                     "live_schedule_zebra": zebra,
                     "live_schedule_color_balance": color_balance,
+                    "live_schedule_product_rate": product_rate,
                 })
             except Exception:
                 pass
@@ -3556,7 +3585,7 @@ class StochBot:
             if bot_enabled_opt is None:
                 continue
             if self._rule_matches(rule, hour, er, volume, wiggle, rate, vol_wiggle_ratio, vol_wiggle_product,
-                                   zebra, color_balance):
+                                   zebra, color_balance, product_rate):
                 matched = rule
                 break
         # Minimum-hold debounce: `matched` is just "whichever rule the live numbers satisfy THIS
