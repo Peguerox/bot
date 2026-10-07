@@ -281,6 +281,7 @@ LONG_CONFIG = BotConfig(
     # "Currently governing" box fell back to Worker 1's readings -- wrong whenever Worker 1 is
     # off. Requires bot_schedule_live_metrics.sql.
     schema_has_schedule_metrics=True,
+    schema_has_schedule_rule_tracking=True,  # 2026-10-07: per-rule win-rate/earnings on the dashboard
 )
 
 SHORT_CONFIG = BotConfig(
@@ -350,6 +351,7 @@ SHORT_CONFIG = BotConfig(
     schedule_rules_enabled=True,
     schedule_rules_bot_key="hedge",
     schema_has_schedule_metrics=True,
+    schema_has_schedule_rule_tracking=True,  # 2026-10-07: per-rule win-rate/earnings on the dashboard
 )
 
 

@@ -7203,6 +7203,66 @@ async def t_schedule_rules_metrics_publish_throttled():
           bot._schedule_metrics_last_persist_ts == first_ts)
 
 
+async def t_schedule_rules_stamps_governing_rule_id_when_tracking_on():
+    print("\n[schedule rules: active_governing_rule_id stamped when the matched rule changes]")
+    ex = FakeExchange()
+    bot = make_bot(ex, candles=_schedule_candles(), schedule_rules_enabled=True,
+                    schedule_rules_bot_key="worker1", schema_has_schedule_rule_tracking=True)
+    rule = {"hour_start": 0, "hour_end": 24, "id": "r-abc", "worker1": {"sl_pct": 0.11}}
+    bot.sb = _schedule_sb([rule])
+    await bot._apply_schedule_rules(bot.state_row)
+    check("governing rule id written", bot.state_row.get("active_governing_rule_id") == "r-abc",
+          bot.state_row.get("active_governing_rule_id"))
+    await bot._apply_schedule_rules(bot.state_row)
+    check("unchanged match -> no redundant write (same tracker, no log noise)",
+          bot.state_row.get("active_governing_rule_id") == "r-abc")
+
+
+async def t_schedule_rules_rule_id_clears_on_no_match():
+    print("\n[schedule rules: active_governing_rule_id clears to null when no rule matches]")
+    ex = FakeExchange()
+    bot = make_bot(ex, candles=_schedule_candles(), schedule_rules_enabled=True,
+                    schedule_rules_bot_key="worker1", schema_has_schedule_rule_tracking=True)
+    bot.state_row["active_governing_rule_id"] = "r-old"
+    rule = {"hour_start": 0, "hour_end": 24, "id": "r-new", "er_min": 2.0,  # impossible
+            "worker1": {"sl_pct": 0.11}}
+    bot.sb = _schedule_sb([rule])
+    await bot._apply_schedule_rules(bot.state_row)
+    check("cleared to None, not stuck on the old id",
+          bot.state_row.get("active_governing_rule_id") is None,
+          bot.state_row.get("active_governing_rule_id"))
+
+
+async def t_schedule_rules_rule_id_untouched_when_tracking_off():
+    print("\n[schedule rules: tracking off by default -- never reads or writes the column]")
+    ex = FakeExchange()
+    bot = make_bot(ex, candles=_schedule_candles(), schedule_rules_enabled=True,
+                    schedule_rules_bot_key="worker1")  # schema_has_schedule_rule_tracking defaults False
+    rule = {"hour_start": 0, "hour_end": 24, "id": "r-abc", "worker1": {"sl_pct": 0.11}}
+    bot.sb = _schedule_sb([rule])
+    await bot._apply_schedule_rules(bot.state_row)
+    check("column never written", "active_governing_rule_id" not in bot.state_row)
+
+
+async def t_entry_snapshot_carries_the_governing_rule_id():
+    print("\n[entry snapshot: rule_id copied from state onto the trade at entry time]")
+    ex = FakeExchange()
+    bot = make_bot(ex, candles_kind="long", schema_has_entry_features=True)
+    bot.state_row["active_governing_rule_id"] = "r-xyz"
+    await bot.tick()
+    snap = bot.state_row.get("entry_settings_snapshot") or {}
+    check("rule_id present on the entry snapshot", snap.get("rule_id") == "r-xyz", snap.get("rule_id"))
+
+
+async def t_entry_snapshot_rule_id_is_none_without_a_governing_rule():
+    print("\n[entry snapshot: rule_id is None for a manually-controlled entry (no schedule)]")
+    ex = FakeExchange()
+    bot = make_bot(ex, candles_kind="long", schema_has_entry_features=True)
+    await bot.tick()
+    snap = bot.state_row.get("entry_settings_snapshot") or {}
+    check("rule_id is None, not missing or stale", snap.get("rule_id") is None, snap.get("rule_id"))
+
+
 async def t_volume_switch_uses_flip_above_threshold():
     print("\n[volume regime switch: at/above threshold, flip signal wins and gates are bypassed]")
     side = await _volume_switch_case(candle_volume=5.0, threshold=2.0)
@@ -7791,6 +7851,11 @@ async def main():
               t_schedule_rules_zebra_and_color_balance_conditions_match,
               t_schedule_rules_metrics_publish_is_isolated_from_settings_patch,
               t_schedule_rules_metrics_publish_throttled,
+              t_schedule_rules_stamps_governing_rule_id_when_tracking_on,
+              t_schedule_rules_rule_id_clears_on_no_match,
+              t_schedule_rules_rule_id_untouched_when_tracking_off,
+              t_entry_snapshot_carries_the_governing_rule_id,
+              t_entry_snapshot_rule_id_is_none_without_a_governing_rule,
               t_volume_switch_uses_flip_above_threshold,
               t_volume_switch_keeps_normal_path_below_threshold,
               t_volume_switch_off_by_default,

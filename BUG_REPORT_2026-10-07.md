@@ -15,10 +15,12 @@ source. Times are UTC. Status reflects the audit's fix commit.
 | 6 | SL=100% ("no stop") sent a $0 native stop, rejected 579× in 2h | Request spam → WAF | **Fixed** |
 | 7 | Dashboard "Currently governing" ignored "Don't touch" | Showed Rule 3 for hedge | **Fixed** |
 | 8 | Draft rule showed dangling "Wiggle ≤" | Display only | **Fixed** |
-| — | Lighter WAF rate-limiting (405 HTML, `x-amzn-waf-ac`) | Slow/failed reads | External; mitigated |
+| 9 | Each hedge leg polled its own Lighter account separately — 2x the request volume of 1 | Feeds WAF rate-limiting | **Fixed** |
+| — | Lighter WAF rate-limiting (405 HTML, `x-amzn-waf-ac`) | Slow/failed reads | External; mitigated by #6 and #9 |
 | — | `close_incomplete` with `remaining_qty: 0.0` | None — PnL matches to the cent | Not a bug |
 | — | Duplicate identical `closed` logs | None — deploy overlap logs twice | Not a bug |
 | — | `tick_watchdog_timeout` on all 3 bots at 07:25 Oct 6 | Watchdog recovered | External stall |
+| — | "Currently governing: Hedge 2" shown after Rule 4 deployed | Browser tab open since before the 03:46 deploy, serving the old JS bundle | Not a bug — refresh after every deploy |
 
 ## The sequence that broke the hedge (02:47–02:58)
 
@@ -49,11 +51,29 @@ source. Times are UTC. Status reflects the audit's fix commit.
 6. **`NO_STOP_SL_PCT = 50`**: an SL at/above this sends no native stop order.
 7. **`app/page.tsx`**: "Currently governing" skips rules whose `{bot}_enabled` is null; rule
    condition text treats a blank draft input as "no bound".
+8. **`AccountReadHub`** (`server/stoch_bot_core.py`, wired in `lighter_hedge_dual_leg.py`):
+   both hedge legs share one `account(by="l1_address")` Lighter request instead of each
+   polling its own account — confirmed live that this single uncached call returns every
+   sub-account including positions. Activates only once both legs report the same parent
+   address from their own first by-index read. A read confirming an order never joins a
+   request that started before it (tested by deliberately breaking that rule — the test
+   fails without it). A missing account in the response raises, never reads as flat.
 
 New regression tests replay each incident and fail against the pre-fix code
-(verified): late-visible fill doubling, adoption + counter reset, settle expiry, tripped breaker
-releasing a naked partner, schedule re-enabling a tripped bot, SL=100% native spam.
-1092/1092 worker checks pass; TypeScript clean.
+(verified, including by deliberately reverting one fix at a time and re-running): late-visible
+fill doubling, adoption + counter reset, settle expiry, tripped breaker releasing a naked
+partner, schedule re-enabling a tripped bot, SL=100% native spam, account-hub freshness and
+sharing. 1106/1106 worker checks pass; TypeScript clean.
+
+## Deploy history
+
+- `0935778` — confirm_fill tries 6→3 (the mistake that caused the incident; reverted in the next commit)
+- `9cdc651` — fixes #1–#7
+- `0a4d5e1` — fix #8 (AccountReadHub)
+- Both pushed and live as of 03:46 UTC 2026-10-07; both services restarted and took fresh
+  locks by 03:48. **Live-verified**: first hedge cycle after deploy (03:54–03:59) ran clean —
+  both legs entered within 0.02s of each other, both native stops placed, no errors, net
+  +$0.0068 on the cycle.
 
 ## Known risks still open (decisions for the user, not bugs)
 

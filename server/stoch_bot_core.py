@@ -383,6 +383,12 @@ class BotConfig:
     # whenever Worker 1 is off and only the hedge is live). Requires the migration adding the
     # live_schedule_* columns; needs schedule_rules_enabled too.
     schema_has_schedule_metrics: bool = False
+    # Per-rule win-rate/earnings tracking (2026-10-07, direct request: "know which rule
+    # failed... winning rate and the earnings for each session"). Requires the migration
+    # adding active_governing_rule_id to this bot's state table and rule_stats_reset_at to
+    # bot_schedule_rules; needs schedule_rules_enabled too. See _apply_schedule_rules and
+    # _entry_settings_snapshot's "rule_id" key.
+    schema_has_schedule_rule_tracking: bool = False
     # Low-volatility entry gate (2026-09-29, direct request): the OPPOSITE direction from the
     # pair above -- blocks new entries (and a reversal's reopen leg, never TP/SL/exits) when
     # the market is TOO QUIET rather than too spiky. Built to test a real finding from 844 real
@@ -3559,6 +3565,17 @@ class StochBot:
             self._schedule_effective_rule = matched
         settings = effective.get(cfg.schedule_rules_bot_key) if effective else None
         patch = {}
+        # Per-rule win-rate/earnings on the dashboard (2026-10-07, direct request: "know which
+        # rule failed... winning rate and the earnings for each session"). Each rule carries a
+        # stable `id` in its saved JSON (survives reordering/editing, unlike an array index).
+        # Stamped onto this bot's state row so _entry_settings_snapshot can copy it onto the
+        # trade row at entry time -- the dashboard then groups trades by that id. Gated behind
+        # schema_has_schedule_rule_tracking so a bot without the migration never writes (or
+        # reads) this column.
+        if cfg.schema_has_schedule_rule_tracking:
+            governing_rule_id = effective.get("id") if effective else None
+            if governing_rule_id != state.get("active_governing_rule_id"):
+                patch["active_governing_rule_id"] = governing_rule_id
         # Tri-state (2026-10-06/07, direct request: "turn on when matched / turn off when
         # matched / do not touch" -- each rule is symmetric on its own: matched -> its value,
         # not matched -> the opposite, never a second rule needed for the "off" side). Because
@@ -3832,6 +3849,9 @@ class StochBot:
             "jump_ratio_threshold": jump_ratio_threshold, "jump_pause_seconds": jump_pause_seconds,
             "jump_release_mode": jump_release_mode, "jump_ratio_now": self._last_volume_jump_ratio,
             "volume_now": volume_now, "er_2h": er_2h, "er_2h_direction": er_2h_direction,
+            # Which schedule rule was governing at entry -- see schema_has_schedule_rule_tracking.
+            # None when the feature/migration is off, or no rule was governing (manual control).
+            "rule_id": state.get("active_governing_rule_id"),
             **({"entry_filters": dict(self.hedge_entry_hub if self.hedge_entry_hub is not None else self._hedge_entry_reading)}
                if cfg.hedge_entry_filters else {}),
         }

@@ -4049,8 +4049,19 @@ const BOT_NUMERIC_FIELDS = [
   "band_lo", "band_hi", "reversal_lo", "reversal_hi", "window",
 ] as const;
 
+// Stable per-rule id (2026-10-07, direct request: "know which rule failed... winning rate and
+// the earnings for each session") -- survives reordering/editing, unlike an array index, so
+// trades stay attributed to the rule that actually governed them. Generated once per rule, not
+// per save, so editing a rule's conditions keeps its trade history attached to it.
+function genRuleId(): string {
+  return `r-${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 8)}`;
+}
+
 function normalizeRuleForSave(rule: any): any {
   const out: any = {};
+  // A rule saved before this feature existed has no id yet -- give it one now rather than
+  // leaving it un-trackable forever.
+  out.id = typeof rule.id === "string" && rule.id ? rule.id : genRuleId();
   for (const key of RULE_NUMERIC_FIELDS) out[key] = numOrNull(rule[key]);
   // Tri-state (2026-10-06, direct request: "we need to put another option Dont change when
   // matched") -- true/false/null all pass through as-is; only a genuinely absent key (an older
@@ -4160,10 +4171,63 @@ function formatConditionsLine(rule: any): string {
   return parts.join(" · ");
 }
 
+// Per-rule win-rate/earnings (2026-10-07, direct request: "know which rule failed... winning
+// rate and the earnings for each session"). Reads entry_settings_snapshot.rule_id, stamped by
+// the server at entry time (see schema_has_schedule_rule_tracking) -- null/undefined for any
+// trade from before this feature or while the schedule was off (manual control), which these
+// deliberately never attribute to a rule. `cutoff` is the Reset button's timestamp (0 = all
+// time). Only CLOSED trades count -- an open position has no final pnl yet.
+function worker1RuleStats(ruleId: string, trades: any[], cutoff: number): { wins: number; total: number; pnl: number } | null {
+  const rows = trades.filter((t) =>
+    t.entry_settings_snapshot?.rule_id === ruleId && Date.parse(t.closed_at) >= cutoff);
+  if (rows.length === 0) return null;
+  const wins = rows.filter((t) => (t.pnl_usd ?? 0) > 0).length;
+  const pnl = rows.reduce((s, t) => s + (t.pnl_usd ?? 0), 0);
+  return { wins, total: rows.length, pnl };
+}
+
+// Hedge stats are paired cycles (net of both legs), not individual leg trades -- a leg-level
+// win rate double-counts a hedge win as one win + one loss and hides the actual edge. A cycle's
+// rule_id is read from whichever leg has it (both legs evaluate the same shared rule off their
+// own candle feed and should agree; this tolerates one leg momentarily disagreeing or missing).
+function hedgeRuleStats(ruleId: string, longTrades: any[], shortTrades: any[], cutoff: number): { wins: number; total: number; pnl: number } | null {
+  const byCycle = new Map<string, { long?: any; short?: any }>();
+  for (const t of longTrades) { if (!t.cycle_id) continue; const e = byCycle.get(t.cycle_id) ?? {}; e.long = t; byCycle.set(t.cycle_id, e); }
+  for (const t of shortTrades) { if (!t.cycle_id) continue; const e = byCycle.get(t.cycle_id) ?? {}; e.short = t; byCycle.set(t.cycle_id, e); }
+  let wins = 0, total = 0, pnl = 0;
+  for (const { long, short } of byCycle.values()) {
+    const rid = long?.entry_settings_snapshot?.rule_id ?? short?.entry_settings_snapshot?.rule_id;
+    if (!rid || rid !== ruleId) continue;
+    const closedAt = long?.closed_at ?? short?.closed_at;
+    if (!closedAt || Date.parse(closedAt) < cutoff) continue;
+    const net = (long?.pnl_usd ?? 0) + (short?.pnl_usd ?? 0);
+    total += 1; pnl += net;
+    if (net > 0) wins += 1;
+  }
+  return total === 0 ? null : { wins, total, pnl };
+}
+
+function RuleStatsBadge({ label, stats }: { label: string; stats: { wins: number; total: number; pnl: number } | null }) {
+  if (!stats) return null;
+  const winPct = Math.round((stats.wins / stats.total) * 100);
+  const positive = stats.pnl >= 0;
+  return (
+    <span className="text-[9px] text-gray-500">
+      {label} {stats.wins}W/{stats.total - stats.wins}L ({winPct}%){" "}
+      <span className={positive ? "text-green-400" : "text-red-400"}>
+        {positive ? "+" : ""}{stats.pnl.toFixed(4)}
+      </span>
+    </span>
+  );
+}
+
 function MasterSchedulePanel({
-  scheduleState, worker1State, hedgeLongState, loading, onToggled,
+  scheduleState, worker1State, hedgeLongState, worker1Trades, hedgeLongTrades, hedgeShortTrades,
+  loading, onToggled,
 }: {
-  scheduleState: any; worker1State: any; hedgeLongState: any; loading: boolean; onToggled: () => void;
+  scheduleState: any; worker1State: any; hedgeLongState: any;
+  worker1Trades: any[]; hedgeLongTrades: any[]; hedgeShortTrades: any[];
+  loading: boolean; onToggled: () => void;
 }) {
   const [rules, setRules] = useState<any[]>([]);
   const [expanded, setExpanded] = useState<number | null>(null);
@@ -4199,6 +4263,14 @@ function MasterSchedulePanel({
       return false;
     }
     return true;
+  }
+
+  async function handleResetRuleStats() {
+    if (!confirm("Reset each rule's win rate/earnings back to zero? Trade history itself is not touched -- only the stats shown on each rule card.")) return;
+    setSaving(true);
+    await postSchedule({ reset_rule_stats: true });
+    await onToggled();
+    setSaving(false);
   }
 
   async function handleToggleSchedule() {
@@ -4259,7 +4331,7 @@ function MasterSchedulePanel({
   }
 
   function addRule() {
-    setRules((r) => [...r, JSON.parse(JSON.stringify(EMPTY_RULE))]);
+    setRules((r) => [...r, { ...JSON.parse(JSON.stringify(EMPTY_RULE)), id: genRuleId() }]);
     setExpanded(rules.length);
   }
   function removeRule(i: number) {
@@ -4388,6 +4460,10 @@ function MasterSchedulePanel({
             className="text-xs font-bold px-2.5 py-1 rounded-full bg-red-500/20 text-red-400 hover:bg-red-500/30 disabled:opacity-40">
             {togglingBoth ? "…" : "Both OFF"}
           </button>
+          <button onClick={handleResetRuleStats} disabled={saving || loading}
+            className="text-xs font-bold px-2.5 py-1 rounded-full bg-gray-700/50 text-gray-400 hover:bg-gray-700 disabled:opacity-40">
+            {saving ? "…" : "Reset Rule Stats"}
+          </button>
         </div>
       </div>
       <p className="text-gray-600 text-[10px] leading-snug">
@@ -4508,7 +4584,13 @@ function MasterSchedulePanel({
       </div>
 
       <div className="space-y-1.5">
-        {rules.map((rule, i) => (
+        {(() => { const ruleStatsCutoff = scheduleState?.rule_stats_reset_at ? Date.parse(scheduleState.rule_stats_reset_at) : 0;
+        return rules.map((rule, i) => {
+          const w1Stats = rule.id && rule.worker1_enabled !== null
+            ? worker1RuleStats(rule.id, worker1Trades, ruleStatsCutoff) : null;
+          const hedgeStats = rule.id && rule.hedge_enabled !== null
+            ? hedgeRuleStats(rule.id, hedgeLongTrades, hedgeShortTrades, ruleStatsCutoff) : null;
+          return (
           <div key={i} className="bg-gray-800/60 rounded-lg p-2">
             <div className="flex items-center justify-between cursor-pointer" onClick={() => setExpanded(expanded === i ? null : i)}>
               <p className="text-xs font-bold text-white">
@@ -4549,6 +4631,12 @@ function MasterSchedulePanel({
                 <span className="text-gray-600">Hedge:</span>{" "}
                 {formatSettingsLine(rule.hedge, HEDGE_SETTINGS_LABELS) || <span className="text-gray-600">no settings set</span>}
               </p>
+            )}
+            {(w1Stats || hedgeStats) && (
+              <div className="flex justify-end gap-3 mt-1 pt-1 border-t border-gray-700/50">
+                <RuleStatsBadge label="W1" stats={w1Stats} />
+                <RuleStatsBadge label="Hedge" stats={hedgeStats} />
+              </div>
             )}
             {expanded === i && (
               <div className="mt-2 space-y-2">
@@ -4665,7 +4753,9 @@ function MasterSchedulePanel({
               </div>
             )}
           </div>
-        ))}
+          );
+        });
+        })()}
         {rules.length === 0 && <p className="text-gray-600 text-[11px]">No rules yet.</p>}
       </div>
 
@@ -5033,6 +5123,9 @@ export default function Dashboard() {
           scheduleState={scheduleState}
           worker1State={initialBtcState}
           hedgeLongState={optimalBtcState}
+          worker1Trades={initialBtcTrades}
+          hedgeLongTrades={optimalBtcTrades}
+          hedgeShortTrades={dcaBtcTrades}
           loading={loading}
           onToggled={load}
         />

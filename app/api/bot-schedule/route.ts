@@ -158,6 +158,13 @@ export async function POST(req: NextRequest) {
     out.min_hold_seconds = v;
   }
 
+  // Per-rule win-rate/earnings reset (2026-10-07, direct request). Non-destructive, same
+  // pattern as every other reset in this project: trade history is untouched, this only moves
+  // the cutoff the dashboard sums rule stats from forward to now.
+  if (body.reset_rule_stats === true) {
+    out.rule_stats_reset_at = new Date().toISOString();
+  }
+
   if (Object.keys(out).length === 0) {
     return NextResponse.json({ error: "Nothing to change." }, { status: 400 });
   }

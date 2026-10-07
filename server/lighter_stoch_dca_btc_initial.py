@@ -456,6 +456,7 @@ CONFIG = BotConfig(
     # hedge -- publishes the exact numbers _apply_schedule_rules matches against so the panel
     # is never guessing. Requires bot_schedule_live_metrics.sql.
     schema_has_schedule_metrics=True,
+    schema_has_schedule_rule_tracking=True,  # 2026-10-07: per-rule win-rate/earnings on the dashboard
     # 2026-10-03, direct request ("make sure we are collecting all that data... what settings
     # won for what conditions"): Worker 1 never had entry_k/balance_index/vol_pct/dispersion
     # snapshotting at all -- the hedge legs have had this since 2026-10-01. Purely descriptive,
