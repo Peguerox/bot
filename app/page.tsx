@@ -4434,15 +4434,20 @@ function hedgeRuleStats(ruleId: string, longTrades: any[], shortTrades: any[], c
   return total === 0 ? null : { wins, total, pnl };
 }
 
-function RuleStatsBadge({ label, stats }: { label: string; stats: { wins: number; total: number; pnl: number } | null }) {
+function RuleStatsBadge({ label, stats, notional }: { label: string; stats: { wins: number; total: number; pnl: number } | null; notional: number }) {
   if (!stats) return null;
   const winPct = Math.round((stats.wins / stats.total) * 100);
   const positive = stats.pnl >= 0;
+  // 2026-10-08, direct request: "put the percentage instead of the actual earnings... so we
+  // can compare 1 rule to the other" -- a raw dollar figure isn't comparable across rules (or
+  // between W1 and the hedge, different notional) the way a % of capital at risk is. Worker 1's
+  // notional is its live seed_usd; the hedge's is the fixed $10/leg x 2 legs, not equity-scaled.
+  const pct = notional > 0 ? (stats.pnl / notional) * 100 : null;
   return (
     <span className="text-[9px] text-gray-500">
       {label} {stats.wins}W/{stats.total - stats.wins}L ({winPct}%){" "}
       <span className={positive ? "text-green-400" : "text-red-400"}>
-        {positive ? "+" : ""}{stats.pnl.toFixed(4)}
+        {pct != null ? `${positive ? "+" : ""}${pct.toFixed(3)}%` : `${positive ? "+" : ""}${stats.pnl.toFixed(4)}`}
       </span>
     </span>
   );
@@ -4907,8 +4912,8 @@ function MasterSchedulePanel({
             )}
             {(w1Stats || hedgeStats) && (
               <div className="flex justify-end gap-3 mt-1 pt-1 border-t border-gray-700/50">
-                <RuleStatsBadge label="W1" stats={w1Stats} />
-                <RuleStatsBadge label="Hedge" stats={hedgeStats} />
+                <RuleStatsBadge label="W1" stats={w1Stats} notional={worker1State?.seed_usd ?? 98} />
+                <RuleStatsBadge label="Hedge" stats={hedgeStats} notional={20} />
               </div>
             )}
             {expanded === i && (
