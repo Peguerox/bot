@@ -28,6 +28,15 @@ const LIMITS = {
   // 2026-10-08, direct request after backtesting it against real trades: "if 20% we dont take
   // the trade and wait for the next signal." Percentage, not a ratio.
   rateGuard: { min: 1, max: 200, label: "volume-rate guard threshold" },
+  // 2026-10-08, direct request after a real-tick test: "we use the dwelling... give time for
+  // the trend to develop" -- same mechanism and bounds as Worker 1's own SL dwell
+  // (StochBot.sl_dwell_seconds / _sl_dwell_ready), newly wired up for the hedge.
+  slDwell: { min: 0, max: 300, label: "SL dwell 1st leg (seconds)" },
+  // Split same day, direct follow-up: "dwelling for first leg and dwelling for second leg
+  // split... maybe I want to put dwelling for the one leg and then not dwelling for the other
+  // one" -- independent from slDwell above. Applies only to a leg's own SL AFTER its partner
+  // has already closed for the cycle (StochBot.survivor_sl_dwell_seconds / _partner_is_flat).
+  survivorSlDwell: { min: 0, max: 300, label: "SL dwell 2nd leg (seconds)" },
 };
 
 export async function POST(req: NextRequest) {
@@ -59,6 +68,8 @@ export async function POST(req: NextRequest) {
     ["jumpPause", "override_volume_jump_pause_seconds"],
     ["wiggleLock", "override_volume_wiggle_lock_threshold"],
     ["rateGuard", "override_volume_rate_guard_threshold"],
+    ["slDwell", "override_sl_dwell_seconds"],
+    ["survivorSlDwell", "override_survivor_sl_dwell_seconds"],
   ] as const) {
     const raw = body[key];
     if (raw === undefined || raw === null || raw === "") continue;

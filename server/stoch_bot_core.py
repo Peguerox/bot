@@ -801,6 +801,20 @@ class BotConfig:
     # this existed -- live-tunable via override_sl_dwell_seconds, not meant to be a fixed
     # compiled default yet. See _exit_params / _sl_dwell_ready.
     sl_dwell_seconds: float = 0.0
+    # Survivor SL dwell (2026-10-08, direct request: "we need to have dwelling for first leg and
+    # dwelling for second leg split... maybe I want to put dwelling for the one leg and then not
+    # dwelling for the other one"). sl_dwell_seconds above applies BEFORE either leg of a hedge
+    # cycle has been cut -- the normal case, same meaning it already had for Worker 1 (which has
+    # no partner leg at all, so for Worker 1 this new field is simply inert). This field is the
+    # INDEPENDENT dwell applied to a leg's own SL check ONLY AFTER its partner has already
+    # closed for this cycle (detected via _partner_is_flat(), the same cheap, unconditional,
+    # throttled check exit_mode="no_sl" already uses -- NOT the breakeven floor's
+    # _read_partner_cycle_pnl, which needs a baseline that's only set when
+    # breakeven_floor_enabled/exit_mode="floor" is active and would silently never fire
+    # otherwise). 0 (default) is instant, same as sl_dwell_seconds' own default -- inert until
+    # explicitly set, live-tunable via override_survivor_sl_dwell_seconds. Only meaningful for a
+    # bot with cfg.cycle_partner_table set (the hedge); a no-op for any bot without one.
+    survivor_sl_dwell_seconds: float = 0.0
     # 2026-09-30, direct request: a fixed pause after THIS leg goes flat, before it will declare
     # itself ready for the next cycle -- "once you finish a trade, wait N seconds, then another
     # trade." Built to test hypertrading with require_pressure_to_enter off: with nothing else
@@ -1812,6 +1826,10 @@ class StochBot:
         # checks ever runs for a given open position. See BotConfig.dwell_seconds / _dwell_ready.
         self._dwell_touch_at = None
         self._sl_dwell_touch_at = None  # see BotConfig.sl_dwell_seconds / _sl_dwell_ready
+        # Separate tracker, not shared with _sl_dwell_touch_at -- the two dwell seconds apply in
+        # mutually exclusive phases (before vs. after the partner closes) but keeping them
+        # independent means a phase transition mid-touch can never inherit the wrong clock.
+        self._survivor_sl_dwell_touch_at = None  # see BotConfig.survivor_sl_dwell_seconds
         self._last_reversal_close_at = None  # see BotConfig.post_reversal_cooldown_seconds
         # Breakeven floor (see BotConfig.breakeven_floor_enabled). Same arrangement as the
         # profit-lock trail: in-process state is authoritative, the DB column only exists so a
@@ -1840,6 +1858,11 @@ class StochBot:
         # re-open mid-cycle); reset at every position-close point alongside the breakeven state.
         self._no_sl_partner_closed = False
         self._no_sl_partner_checked_at = 0.0
+        # See BotConfig.survivor_sl_dwell_seconds. Independent tracker from the no_sl pair above
+        # (different feature, same cheap partner-flat-check pattern) -- sticky once True for the
+        # life of the current position, reset at every position-close point.
+        self._survivor_partner_closed = False
+        self._survivor_partner_checked_at = 0.0
         # Single-instance lock. The id is per-LEG, not per-process: the hedge bot runs two legs in
         # one process and they lock two DIFFERENT rows, so sharing one id would make "who holds
         # this?" ambiguous in the logs for no benefit.
@@ -2614,8 +2637,8 @@ class StochBot:
         return window
 
     def _exit_params(self, state):
-        """(sl_pct, profit_lock_trigger, profit_lock_trail, tp_pct, exit_mode, dwell_seconds)
-        for this tick.
+        """(sl_pct, profit_lock_trigger, profit_lock_trail, tp_pct, exit_mode, dwell_seconds,
+        sl_dwell_seconds, survivor_sl_dwell_seconds) for this tick.
 
         A non-NULL override on the state row wins over the compiled-in value; NULL means "use the
         config". Read live every tick rather than frozen at entry, so a change takes effect at
@@ -2685,12 +2708,24 @@ class StochBot:
         5-60s tested notably better (30s best at +$0.62), using REAL tick prices at confirmation
         (not an idealized exact-threshold fill) -- still a live experiment on one night's data,
         not a proven edge, which is why this is a live-tunable override, not a new compiled
-        default."""
+        default.
+
+        survivor_sl_dwell_seconds (2026-10-08, direct request: "dwelling for first leg and
+        dwelling for second leg split... maybe I want to put dwelling for the one leg and then
+        not dwelling for the other one") -- a SECOND, fully independent dwell duration for the
+        plain SL, in effect only after THIS leg's own partner has already closed for the cycle
+        (checked via _partner_is_flat, same cheap throttled pattern as no_sl's
+        self._no_sl_partner_closed, but its own separate tracker -- see
+        self._survivor_partner_closed's comment in __init__). Before the partner closes,
+        sl_dwell_seconds above is still the one that applies -- nothing about that phase
+        changes. 0 (default) is instant, same as sl_dwell_seconds' own default. Only
+        meaningful for a bot with cfg.cycle_partner_table set (the hedge); inert for Worker 1."""
         cfg = self.cfg
         sl, trig, trail, tp = cfg.sl_pct, cfg.profit_lock_trigger_pct, cfg.profit_lock_trail_pct, cfg.tp_pct
         exit_mode = "trail"
         dwell = cfg.dwell_seconds
         sl_dwell = cfg.sl_dwell_seconds
+        survivor_sl_dwell = cfg.survivor_sl_dwell_seconds
         if cfg.schema_has_exit_overrides:
             o = state.get("override_sl_pct")
             if o is not None: sl = float(o)
@@ -2706,7 +2741,9 @@ class StochBot:
             if o is not None: dwell = float(o)
             o = state.get("override_sl_dwell_seconds")
             if o is not None: sl_dwell = float(o)
-        return sl, trig, trail, tp, exit_mode, dwell, sl_dwell
+            o = state.get("override_survivor_sl_dwell_seconds")
+            if o is not None: survivor_sl_dwell = float(o)
+        return sl, trig, trail, tp, exit_mode, dwell, sl_dwell, survivor_sl_dwell
 
     def _dwell_ready(self, touched, dwell_seconds):
         """Requires `touched` to stay True for dwell_seconds of continuous wall-clock time
@@ -2742,6 +2779,23 @@ class StochBot:
             self._sl_dwell_touch_at = now_s
             return False
         return now_s - self._sl_dwell_touch_at >= dwell_seconds
+
+    def _survivor_sl_dwell_ready(self, touched, dwell_seconds):
+        """Same continuous-touch contract as _sl_dwell_ready, for the post-partner-close phase
+        specifically -- see BotConfig.survivor_sl_dwell_seconds. Separate tracker
+        (self._survivor_sl_dwell_touch_at) so a phase transition mid-touch (partner closes
+        while the plain sl_dwell_seconds clock is already running) never inherits the wrong
+        clock -- the two phases never check the same tracker."""
+        if not touched:
+            self._survivor_sl_dwell_touch_at = None
+            return False
+        if dwell_seconds <= 0:
+            return True
+        now_s = time.time()
+        if self._survivor_sl_dwell_touch_at is None:
+            self._survivor_sl_dwell_touch_at = now_s
+            return False
+        return now_s - self._survivor_sl_dwell_touch_at >= dwell_seconds
 
     def _measure_vol_pct(self, lookback):
         """Mean 1-min (high-low)/close%, trailing `lookback` CLOSED candles -- the same
@@ -3175,11 +3229,15 @@ class StochBot:
         # has nothing to do with the breakeven floor and must stay covered either way).
         self._dwell_touch_at = None
         self._sl_dwell_touch_at = None
+        self._survivor_sl_dwell_touch_at = None
         # Same "every position-close point" reasoning for exit_mode="no_sl" -- see its own
         # comment in __init__. Independent of the breakeven floor, but this is the established
         # shared reset point for per-cycle state.
         self._no_sl_partner_closed = False
         self._no_sl_partner_checked_at = 0.0
+        # See BotConfig.survivor_sl_dwell_seconds. Same reset point, independent tracker.
+        self._survivor_partner_closed = False
+        self._survivor_partner_checked_at = 0.0
 
     @staticmethod
     def breakeven_floor_pct(partner_cycle_pnl, own_notional_usd, fixed_floor_pct=None):
@@ -3957,7 +4015,7 @@ class StochBot:
         volume-jump guard's settings and live ratio, and now volume+ER, not a repeat of what
         entry_vol_pct/entry_dispersion already cover."""
         cfg = self.cfg
-        sl, trig, trail, tp, exit_mode, dwell, sl_dwell = self._exit_params(state)
+        sl, trig, trail, tp, exit_mode, dwell, sl_dwell, survivor_sl_dwell = self._exit_params(state)
         jump_ratio_threshold = cfg.volume_jump_ratio
         jump_pause_seconds = cfg.volume_jump_pause_seconds
         jump_release_mode = cfg.volume_jump_release_mode
@@ -3978,6 +4036,7 @@ class StochBot:
         return {
             "exit_mode": exit_mode, "sl_pct": sl, "tp_pct": tp,
             "trigger_pct": trig, "trail_pct": trail, "dwell_seconds": dwell, "sl_dwell_seconds": sl_dwell,
+            "survivor_sl_dwell_seconds": survivor_sl_dwell,
             "jump_ratio_threshold": jump_ratio_threshold, "jump_pause_seconds": jump_pause_seconds,
             "jump_release_mode": jump_release_mode, "jump_ratio_now": self._last_volume_jump_ratio,
             "volume_rate_guard_threshold": volume_rate_guard_threshold,
@@ -6511,7 +6570,8 @@ class StochBot:
             pos_tp = state.get("position_tp_pct") if bands else None
             pos_sl = state.get("position_sl_pct") if bands else None
             # Manual exit levers win over both the recorded band and the compiled-in default.
-            ov_sl, ov_trig, ov_trail, ov_tp, exit_mode, dwell_seconds, sl_dwell_seconds = self._exit_params(state)
+            (ov_sl, ov_trig, ov_trail, ov_tp, exit_mode, dwell_seconds, sl_dwell_seconds,
+             survivor_sl_dwell_seconds) = self._exit_params(state)
             # exit_mode (2026-10-03, direct request: "a panel where i can change between trail
             # and TP so i can test multiple strategies") -- "trail" (default) is unchanged
             # behavior: disable_literal_tp / profit_lock_enabled exactly as compiled. "tp" flips
@@ -6590,11 +6650,29 @@ class StochBot:
             # edge (0.004-0.016 points, see LONG_CONFIG's docstring) for dwell actually
             # working, and it means a hung/crashed process has NO stop-loss protection at all
             # on this position -- known and accepted, not an oversight.
+            # survivor_sl_dwell_seconds: see BotConfig's docstring. Only meaningful for a bot
+            # with a cycle partner (the hedge) -- cfg.cycle_partner_table is None for Worker 1,
+            # so survivor_active is always False there and this whole block is a no-op.
+            # Independent of no_sl_skip/_no_sl_partner_closed above (different feature, same
+            # cheap partner-flat-check pattern, own 1/s throttle) -- this only picks WHICH SL
+            # dwell duration and tracker apply below, never whether the SL itself is skipped.
+            # Computed BEFORE suppress_native_sl so the native-stop suppression (next block)
+            # reflects whichever dwell duration is actually in effect this tick.
+            survivor_active = False
+            if cfg.cycle_partner_table is not None:
+                if not self._survivor_partner_closed:
+                    now_s = time.time()
+                    if now_s - self._survivor_partner_checked_at >= 1.0:
+                        self._survivor_partner_checked_at = now_s
+                        if await self._partner_is_flat():
+                            self._survivor_partner_closed = True
+                survivor_active = self._survivor_partner_closed
+            effective_sl_dwell_seconds = survivor_sl_dwell_seconds if survivor_active else sl_dwell_seconds
             # Native-only suppression -- deliberately NOT folded into no_sl_skip, which also
             # gates the in-process check below (`not no_sl_skip and sl_touched...`). Dwell
             # needs the OPPOSITE of what no_sl_skip means everywhere else: keep the in-process,
             # dwell-gated check fully live, suppress only the native order racing ahead of it.
-            suppress_native_sl = no_sl_skip or sl_dwell_seconds > 0
+            suppress_native_sl = no_sl_skip or effective_sl_dwell_seconds > 0
             if cfg.native_stop_loss_enabled or cfg.native_take_profit_enabled:
                 qty_now = total_qty(legs)
                 if qty_now > 0:
@@ -6624,14 +6702,16 @@ class StochBot:
             # never applies to TP.
             if gap_hit is None and side == "long":
                 sl_touched = check_price <= sl
-                dwell_ok = self._sl_dwell_ready(sl_touched, sl_dwell_seconds)
+                dwell_ok = (self._survivor_sl_dwell_ready(sl_touched, survivor_sl_dwell_seconds)
+                            if survivor_active else self._sl_dwell_ready(sl_touched, sl_dwell_seconds))
                 if not no_sl_skip and sl_touched and (escalated_active or dwell_ok):
                     gap_hit = "ESCALATED_SL_TIER3" if escalated_active else "SL"
                 elif tp_enabled and check_price >= tp:
                     gap_hit = "TP"
             elif gap_hit is None:
                 sl_touched = check_price >= sl
-                dwell_ok = self._sl_dwell_ready(sl_touched, sl_dwell_seconds)
+                dwell_ok = (self._survivor_sl_dwell_ready(sl_touched, survivor_sl_dwell_seconds)
+                            if survivor_active else self._sl_dwell_ready(sl_touched, sl_dwell_seconds))
                 if not no_sl_skip and sl_touched and (escalated_active or dwell_ok):
                     gap_hit = "ESCALATED_SL_TIER3" if escalated_active else "SL"
                 elif tp_enabled and check_price <= tp:

@@ -3189,6 +3189,16 @@ function HedgeDualLegPanel({
   // Dwell -- see Worker 1's panel for the full reasoning.
   const curDwell: number = longState?.override_dwell_seconds ?? 0;
   const [dwellIn, setDwellIn] = useState("");
+  // SL dwell -- newly wired up 2026-10-08, same mechanism as Worker 1's own panel. Split into
+  // two independent settings same day (direct request: "dwelling for first leg and dwelling
+  // for second leg split... maybe I want to put dwelling for the one leg and then not
+  // dwelling for the other one"). 1st leg = applies before either leg of the cycle has been
+  // cut. 2nd leg (survivor) = applies only to this leg's own SL AFTER its partner has already
+  // closed -- independently tunable, can be on while the 1st-leg one is off or vice versa.
+  const curSlDwell: number = longState?.override_sl_dwell_seconds ?? 0;
+  const [slDwellIn, setSlDwellIn] = useState("");
+  const curSurvivorSlDwell: number = longState?.override_survivor_sl_dwell_seconds ?? 0;
+  const [survivorSlDwellIn, setSurvivorSlDwellIn] = useState("");
 
   async function handleSetExitMode(mode: "trail" | "tp" | "floor" | "no_sl") {
     if (mode === curExitMode) return;
@@ -3221,6 +3231,8 @@ function HedgeDualLegPanel({
     if (trailIn.trim()) payload.trail = trailIn.trim();
     if (tpIn.trim()) payload.tp = tpIn.trim();
     if (dwellIn.trim()) payload.dwell = dwellIn.trim();
+    if (slDwellIn.trim()) payload.slDwell = slDwellIn.trim();
+    if (survivorSlDwellIn.trim()) payload.survivorSlDwell = survivorSlDwellIn.trim();
     if (Object.keys(payload).length === 0) return;
     // The route writes BOTH legs together -- unequal exits would break the breakeven floor.
     if (!confirm(
@@ -3229,7 +3241,9 @@ function HedgeDualLegPanel({
       + `Trigger ${payload.trigger ?? "(unchanged)"}%\n`
       + `Trail   ${payload.trail ?? "(unchanged)"}%\n`
       + `TP      ${payload.tp ?? "(unchanged)"}%\n`
-      + `Dwell   ${payload.dwell ?? "(unchanged)"}s\n\n`
+      + `Dwell   ${payload.dwell ?? "(unchanged)"}s\n`
+      + `SL Dwell 1st Leg ${payload.slDwell ?? "(unchanged)"}s\n`
+      + `SL Dwell 2nd Leg ${payload.survivorSlDwell ?? "(unchanged)"}s\n\n`
       + `Takes effect immediately, including on an open position.`
     )) return;
     setSavingSettings(true);
@@ -3240,7 +3254,10 @@ function HedgeDualLegPanel({
     if (!res.ok) {
       const b = await res.json().catch(() => ({}));
       alert(b.error || "Could not apply settings.");
-    } else { setSlIn(""); setTrigIn(""); setTrailIn(""); setTpIn(""); setDwellIn(""); }
+    } else {
+      setSlIn(""); setTrigIn(""); setTrailIn(""); setTpIn(""); setDwellIn("");
+      setSlDwellIn(""); setSurvivorSlDwellIn("");
+    }
     await onToggled();
     setSavingSettings(false);
   }
@@ -3934,12 +3951,14 @@ function HedgeDualLegPanel({
                 Higher risk by design -- there is no longer a hard cap on that leg's loss.
               </p>
             </div>
-            <div className="grid grid-cols-5 gap-1.5">
+            <div className="grid grid-cols-3 gap-1.5">
               {([["SL", slIn, setSlIn, curSl, "%"],
                  ["Trigger", trigIn, setTrigIn, curTrig, "%"],
                  ["Trail", trailIn, setTrailIn, curTrail, "%"],
                  ["TP", tpIn, setTpIn, curTp, "%"],
-                 ["Dwell", dwellIn, setDwellIn, curDwell, "s"]] as const).map(([label, val, set, cur, unit]) => (
+                 ["Dwell", dwellIn, setDwellIn, curDwell, "s"],
+                 ["SL Dwell 1st Leg", slDwellIn, setSlDwellIn, curSlDwell, "s"],
+                 ["SL Dwell 2nd Leg", survivorSlDwellIn, setSurvivorSlDwellIn, curSurvivorSlDwell, "s"]] as const).map(([label, val, set, cur, unit]) => (
                 <div key={label}>
                   <p className="text-gray-500 text-[9px] uppercase">{label}</p>
                   <p className="text-gray-600 text-[9px]">now {cur != null ? cur + unit : "—"}</p>
@@ -3953,9 +3972,17 @@ function HedgeDualLegPanel({
                 </div>
               ))}
             </div>
+            <p className="text-gray-600 text-[9px] leading-snug">
+              SL Dwell 1st Leg: applies BEFORE either leg of a cycle has been cut -- the SL above
+              must stay continuously past its level for this many seconds before closing. SL
+              Dwell 2nd Leg: a SEPARATE dwell that takes over for a leg's own SL only AFTER its
+              partner has already closed -- set one without the other, both, or neither. Backed
+              by a real-tick check on 61 real hedge SL closes: 44% would not have closed yet at
+              10s. Never wired up before 2026-10-08.
+            </p>
             <button
               onClick={handleApplySettings}
-              disabled={savingSettings || loading || (!slIn.trim() && !trigIn.trim() && !trailIn.trim() && !tpIn.trim() && !dwellIn.trim())}
+              disabled={savingSettings || loading || (!slIn.trim() && !trigIn.trim() && !trailIn.trim() && !tpIn.trim() && !dwellIn.trim() && !slDwellIn.trim() && !survivorSlDwellIn.trim())}
               className="w-full text-xs font-bold px-2.5 py-1 rounded bg-blue-500/20 text-blue-400 hover:bg-blue-500/30 disabled:opacity-30"
             >
               {savingSettings ? "Applying…" : "Apply to both legs"}

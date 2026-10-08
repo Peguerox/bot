@@ -2026,6 +2026,7 @@ async def _tick_at(bot, price):
     # otherwise only ever get one reading.
     bot._breakeven_partner_read_at = 0.0
     bot._no_sl_partner_checked_at = 0.0
+    bot._survivor_partner_checked_at = 0.0
     await bot.tick()
 
 
@@ -2761,6 +2762,81 @@ async def t_exit_mode_no_sl_reversal_check_waits_for_partner_to_close():
     await _tick_at(bot, entry)
     check("still open -- partner hasn't closed yet, so no_sl's reversal check hasn't armed",
           bot.state_row["side"] == "long", bot.state_row["side"])
+
+
+async def t_survivor_sl_dwell_pre_partner_close_uses_the_plain_dwell():
+    print("\n[survivor SL dwell: BEFORE the partner closes, plain sl_dwell_seconds still governs]")
+    print("  direct request, 2026-10-08: split SL dwell into an independent 1st-leg/2nd-leg pair.")
+    entry = 86000.0
+    ex = FakeExchange(position=round(10.0 / entry, 5), collateral=10.0)
+    partner = {"side": "short", "realized_pnl_usd": 0.0}  # partner STILL open
+    state = _breakeven_state(entry, 10.0)
+    bot = _breakeven_bot(ex, state, partner, breakeven_floor_enabled=False,
+                          sl_pct=0.03, sl_dwell_seconds=5.0, survivor_sl_dwell_seconds=0.0,
+                          schema_has_exit_overrides=True)
+    await _tick_at(bot, entry * (1 - 0.03 / 100) - 1.0)  # past the 0.03% SL
+    check("still open -- first touch, sl_dwell_seconds=5s hasn't elapsed (survivor's 0s is NOT used yet)",
+          bot.state_row["side"] == "long", bot.state_row["side"])
+
+
+async def t_survivor_sl_dwell_switches_after_partner_closes():
+    print("\n[survivor SL dwell: AFTER the partner closes, survivor_sl_dwell_seconds takes over]")
+    entry = 86000.0
+    ex = FakeExchange(position=round(10.0 / entry, 5), collateral=10.0)
+    partner = {"side": None, "realized_pnl_usd": -0.003}  # partner already closed
+    state = _breakeven_state(entry, 10.0)
+    bot = _breakeven_bot(ex, state, partner, breakeven_floor_enabled=False,
+                          sl_pct=0.03, sl_dwell_seconds=5.0, survivor_sl_dwell_seconds=0.0,
+                          schema_has_exit_overrides=True)
+    await _tick_at(bot, entry * (1 - 0.03 / 100) - 1.0)  # past the 0.03% SL
+    check("closed instantly -- survivor_sl_dwell_seconds=0 governs now, NOT the 1st leg's 5s",
+          bot.state_row["side"] is None, bot.state_row["side"])
+    check("reason is SL", any(a == "closed" and d.get("reason") == "SL" for a, d in bot.runs),
+          [(a, d.get("reason")) for a, d in bot.runs if a == "closed"])
+
+
+async def t_survivor_sl_dwell_actually_delays_when_configured():
+    print("\n[survivor SL dwell: a configured survivor dwell genuinely delays the close post-partner]")
+    entry = 86000.0
+    ex = FakeExchange(position=round(10.0 / entry, 5), collateral=10.0)
+    partner = {"side": None, "realized_pnl_usd": -0.003}  # partner already closed
+    state = _breakeven_state(entry, 10.0)
+    bot = _breakeven_bot(ex, state, partner, breakeven_floor_enabled=False,
+                          sl_pct=0.03, sl_dwell_seconds=0.0, survivor_sl_dwell_seconds=5.0,
+                          schema_has_exit_overrides=True)
+    await _tick_at(bot, entry * (1 - 0.03 / 100) - 1.0)  # past the 0.03% SL, first touch
+    check("still open -- survivor_sl_dwell_seconds=5s hasn't elapsed (1st leg's 0s is NOT used)",
+          bot.state_row["side"] == "long", bot.state_row["side"])
+
+
+async def t_survivor_sl_dwell_live_override_wins():
+    print("\n[survivor SL dwell: override_survivor_sl_dwell_seconds wins over the compiled value]")
+    entry = 86000.0
+    ex = FakeExchange(position=round(10.0 / entry, 5), collateral=10.0)
+    partner = {"side": None, "realized_pnl_usd": -0.003}  # partner already closed
+    state = _breakeven_state(entry, 10.0)
+    state["override_survivor_sl_dwell_seconds"] = 5.0
+    bot = _breakeven_bot(ex, state, partner, breakeven_floor_enabled=False,
+                          sl_pct=0.03, sl_dwell_seconds=0.0, survivor_sl_dwell_seconds=0.0,
+                          schema_has_exit_overrides=True)
+    await _tick_at(bot, entry * (1 - 0.03 / 100) - 1.0)  # past the 0.03% SL, first touch
+    check("still open -- the live override's 5s wins over both compiled 0s values",
+          bot.state_row["side"] == "long", bot.state_row["side"])
+
+
+async def t_survivor_sl_dwell_inert_without_a_cycle_partner_table():
+    print("\n[survivor SL dwell: a no-op for a bot with no cycle_partner_table (Worker 1)]")
+    ex = FakeExchange()
+    bot = make_bot(ex, candles_kind="long", sl_pct=0.03, sl_dwell_seconds=0.0,
+                   survivor_sl_dwell_seconds=5.0)
+    await bot.tick()  # enter
+    ex.sl_orders = []
+    await bot.tick()
+    bot.live.order_book = {"bids": [{"price": str(bot.state_row["first_entry_price"] * (1 - 0.03 / 100) - 1.0)}],
+                            "asks": [{"price": str(bot.state_row["first_entry_price"])}]}
+    await bot.tick()
+    check("closed instantly -- survivor dwell never activates with no partner table to check",
+          bot.state_row["side"] is None, bot.state_row["side"])
 
 
 async def t_trail_dwell_blocks_a_single_touch():
@@ -8434,6 +8510,11 @@ async def main():
               t_exit_mode_no_sl_native_stop_cancelled_after_partner_closes,
               t_exit_mode_no_sl_real_reversal_closes_the_survivor,
               t_exit_mode_no_sl_reversal_check_waits_for_partner_to_close,
+              t_survivor_sl_dwell_pre_partner_close_uses_the_plain_dwell,
+              t_survivor_sl_dwell_switches_after_partner_closes,
+              t_survivor_sl_dwell_actually_delays_when_configured,
+              t_survivor_sl_dwell_live_override_wins,
+              t_survivor_sl_dwell_inert_without_a_cycle_partner_table,
               t_escalated_sl_tier1_fires_fast_and_thin,
               t_escalated_sl_tier1_does_not_fire_past_2_minutes,
               t_escalated_sl_tier1_does_not_fire_when_volume_is_normal,
