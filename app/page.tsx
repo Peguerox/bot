@@ -2396,24 +2396,6 @@ function CompactStochBtcPanel({
         );
       })()}
       {showLevers && !loading && (
-        <div className="bg-gray-800/60 rounded-lg p-2">
-          {/* Must match zebra_index_min/max in lighter_stoch_dca_btc_initial.py. */}
-          <p className="text-gray-500 text-[10px] uppercase">Color-balance index (5 candles, enters at 65–75)</p>
-          <p className="font-bold text-sm tabular-nums">
-            <span className={liveZebra == null ? "text-gray-500"
-              : liveZebra >= 65 && liveZebra <= 75 ? "text-green-400" : "text-amber-400"}>
-              {liveZebra != null ? liveZebra.toFixed(0) : "—"}
-            </span>
-            <span className="text-[10px] font-normal text-gray-500 ml-1.5">
-              {liveZebra == null ? "no reading yet"
-                : liveZebra >= 65 && liveZebra <= 75 ? "IN BAND — a fresh signal can enter"
-                : liveZebra < 65 ? "too trendy — no entry"
-                : "too balanced/choppy — no entry"}
-            </span>
-          </p>
-        </div>
-      )}
-      {showLevers && !loading && (
         <div className="bg-gray-800/60 rounded-lg p-2 space-y-2">
           {/* 2026-10-02, direct request: a visible readout of the exact traded-volume figure
               the entry switch itself acts on, and which signal currently governs entries --
@@ -2814,29 +2796,6 @@ function CompactStochBtcPanel({
           </div>
         );
       })()}
-      {showLevers && !loading && (
-        <div className="bg-gray-800/60 rounded-lg p-2">
-          {/* 2026-10-04, direct request: "publish the ER 2 hours... so I can see it" -- a
-              slower-moving regime indicator (chop vs trend) than ER15. Readout only, gates
-              nothing. The reading alone isn't the signal -- watch whether the direction holds
-              the same across several checks over a couple hours; it flipping often means chop. */}
-          <p className="text-gray-500 text-[10px] uppercase">Efficiency ratio (2h, chop vs trend)</p>
-          <p className="font-bold text-sm tabular-nums">
-            <span className={liveEr2h == null ? "text-gray-500"
-              : liveEr2h >= 0.15 ? "text-amber-400" : "text-gray-300"}>
-              {liveEr2h != null ? liveEr2h.toFixed(3) : "—"}
-            </span>
-            <span className="text-[10px] font-normal text-gray-500 ml-1.5">
-              {liveEr2h == null ? "no reading yet"
-                : `${liveEr2hDir === "long" ? "up" : liveEr2hDir === "short" ? "down" : "flat"} -- near 0 = chop, near 1 = trend`}
-            </span>
-          </p>
-          <p className="text-gray-600 text-[9px] leading-snug mt-1">
-            Watch whether the direction holds steady across several checks over a couple hours --
-            that's the real signal, not any single reading.
-          </p>
-        </div>
-      )}
       {showLevers && !loading && (
         <div className="bg-gray-800/60 rounded-lg p-2 space-y-2">
           <div className="flex items-baseline justify-between">
