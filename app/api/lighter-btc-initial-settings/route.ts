@@ -34,6 +34,10 @@ const LIMITS = {
   // StochBot/BotConfig.sl_dwell_seconds's docstring. Never applies to the escalated SL tiers.
   slDwell: { min: 0, max: 300, label: "SL dwell (seconds)" },
   wiggleLock: { min: 0.01, max: 50, label: "volume/wiggle lock threshold" },
+  // 2026-10-08, direct request after backtesting it against real trades: "if 20% we dont take
+  // the trade and wait for the next signal." Percentage, not a ratio -- see
+  // StochBot.compute_volume_rate_pct_max / BotConfig.volume_rate_guard_threshold.
+  rateGuard: { min: 1, max: 200, label: "volume-rate guard threshold" },
   // 2026-10-04, direct request: "change the window of stochastic for worker 1". Integer candle
   // count; governs both the entry and reversal bands (see StochBot._stoch_window_control).
   stochWindow: { min: 2, max: 50, label: "stochastic window" },
@@ -58,6 +62,7 @@ export async function POST(req: NextRequest) {
     ["dwell", "override_dwell_seconds"],
     ["slDwell", "override_sl_dwell_seconds"],
     ["wiggleLock", "override_volume_wiggle_lock_threshold"],
+    ["rateGuard", "override_volume_rate_guard_threshold"],
     ["stochWindow", "override_stoch_window"],
   ] as const) {
     const raw = body[key];
@@ -86,6 +91,7 @@ export async function POST(req: NextRequest) {
     ["zebra", "override_zebra_enabled"],
     ["flip", "override_flip_enabled"],
     ["wiggleLockEnabled", "override_volume_wiggle_lock_enabled"],
+    ["rateGuardEnabled", "override_volume_rate_guard_enabled"],
     ["jumpGuardEnabled", "override_volume_jump_enabled"],
   ] as const) {
     const raw = body[key];

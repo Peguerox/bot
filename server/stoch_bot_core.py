@@ -368,6 +368,17 @@ class BotConfig:
     # so it reacts (both locking AND releasing) as fast as a fresh candle allows. None (default)
     # is off. See compute_volume_wiggle_ratio / _volume_wiggle_allows_cycle.
     volume_wiggle_lock_threshold: Optional[float] = None
+    # Volume-rate guard (2026-10-08, direct request: "if 20% we dont take the trade and wait
+    # for the next signal" -- backtested against real Worker 1 trades: blocking entries where
+    # |volume_rate_pct| (volume's own % change vs the prior candle, max over the trailing
+    # volume_rate_guard_lookback closed candles so the bot genuinely has this in hand before
+    # entering, not a same-candle lookahead) exceeds 20% lifted win rate 66%->70% and net PnL
+    # roughly doubled on the surviving trades. Same "instant, no pause timer" contract as the
+    # wiggle/volume lock above -- re-evaluated every tick, skips just the one signal, never
+    # blocks an exit. None (default) is off. See compute_volume_rate_pct_max /
+    # _volume_rate_guard_allows_cycle.
+    volume_rate_guard_threshold: Optional[float] = None
+    volume_rate_guard_lookback: int = 5
     # Schedule rules (2026-10-04, direct request: a master panel controlling Worker 1 and the
     # hedge together, by hour and/or live ER/volume/wiggle/rate conditions). Compiled opt-in,
     # same convention as every other feature this session -- False means zero behavior change.
@@ -1320,6 +1331,40 @@ def compute_candle_volume_rate(candles, window=10):
     return now - prior
 
 
+def compute_volume_rate_pct_max(candles, window=10, lookback=5):
+    """Backtested 2026-10-08 against real Worker 1 trades: |compute_candle_volume_rate| as a
+    PERCENTAGE of the volume level it's changing FROM (not the raw signed BTC/min number),
+    taken as the MAX over the trailing `lookback` closed candles -- not just the single most
+    recent one. A single-candle reading would use the exact candle that's simultaneously
+    triggering entry, which isn't realistically actionable (no lead time to react to a spike
+    in the very candle causing the decision); checking the last `lookback` already-closed
+    candles instead means the bot genuinely has this number in hand before deciding to enter.
+    Blocking entries where this exceeds 20% lifted win rate from 66.1%->69.7% and roughly
+    doubled net PnL on the surviving trades (full-window backtest) -- see
+    BotConfig.volume_rate_guard_threshold. None if there isn't enough history for at least one
+    valid reading in the lookback window."""
+    closed = candles[:-1]
+    best = None
+    for back in range(lookback):
+        # back=0 is the most recent closed candle's own reading, back=1 the one before it, etc.
+        # -- each a full window-over-window shift by exactly one candle, same recurrence as
+        # compute_candle_volume_rate's own now-vs-prior (verified: back=1's "now" window is
+        # identical to back=0's "prior" window).
+        end = len(closed) - back
+        now_bars = closed[end - window:end]
+        prior_bars = closed[end - window - 1:end - 1]
+        if len(now_bars) < window or len(prior_bars) < window:
+            continue
+        now_vol = sum(c.get("v", 0) for c in now_bars) / window
+        prior_vol = sum(c.get("v", 0) for c in prior_bars) / window
+        if prior_vol == 0:
+            continue
+        pct = abs(now_vol - prior_vol) / prior_vol * 100
+        if best is None or pct > best:
+            best = pct
+    return best
+
+
 def compute_product_rate(candles, vol_window=10, wiggle_window=5):
     """Change in (compute_candle_volume_avg * compute_intrabar_dispersion) between this closed
     candle and the one before it -- same idea as compute_candle_volume_rate, but on the
@@ -1902,6 +1947,8 @@ class StochBot:
         self._last_volume_jump_ratio = None  # see _update_volume_jump_guard, _entry_settings_snapshot
         self._last_volume_wiggle_ratio = None  # see _update_volume_wiggle_lock
         self._volume_wiggle_locked = False
+        self._last_volume_rate_pct = None  # see _update_volume_rate_guard
+        self._volume_rate_guard_active = False
         # Schedule rules (2026-10-04, direct request: a master panel that applies different
         # Worker 1 / hedge settings automatically by hour and/or live ER/volume/wiggle/rate
         # conditions). See _apply_schedule_rules. Cache is a throttled copy of the shared
@@ -3411,6 +3458,44 @@ class StochBot:
         is set earlier in the SAME tick."""
         return not self._volume_wiggle_locked
 
+    def _update_volume_rate_guard(self, state):
+        """Volume-rate guard (2026-10-08, direct request: "if 20% we dont take the trade and
+        wait for the next signal"). Same shape as _update_volume_wiggle_lock -- no peak-tracking,
+        no pause timer, re-evaluated every tick so it skips just the signal that tripped it and
+        clears again the instant the reading drops, rather than locking the bot out for a
+        stretch like the jump guard's pause does. The one difference from the wiggle lock: HIGH
+        readings are what block here (a violently changing volume level), not low ones, and the
+        reading itself is compute_volume_rate_pct_max's max-over-the-last-N-closed-candles (see
+        that function's docstring for why a single-candle reading isn't realistically
+        actionable). Always caches self._last_volume_rate_pct for the dashboard/entry snapshot,
+        even when the threshold itself is unconfigured, same "watch before choosing" reasoning
+        as every other readout here. Never touches an exit, only ever blocks a fresh entry."""
+        cfg = self.cfg
+        threshold = cfg.volume_rate_guard_threshold
+        lookback = cfg.volume_rate_guard_lookback
+        enabled = True
+        if cfg.schema_has_regime_overrides:
+            o = state.get("override_volume_rate_guard_threshold")
+            if o is not None:
+                threshold = float(o)
+            o = state.get("override_volume_rate_guard_enabled")
+            if o is not None:
+                enabled = bool(o)
+            o = state.get("override_volume_rate_guard_lookback")
+            if o is not None:
+                lookback = int(o)
+        pct = compute_volume_rate_pct_max(self.candles, lookback=lookback)
+        self._last_volume_rate_pct = pct
+        active = enabled and threshold is not None and pct is not None and pct > threshold
+        self._volume_rate_guard_active = active
+        return active
+
+    def _volume_rate_guard_allows_cycle(self):
+        """See _update_volume_rate_guard's docstring -- same 'fixed_direction bots never
+        consult entry_signal' reasoning as _volume_jump_allows_cycle/_volume_wiggle_allows_cycle.
+        self._volume_rate_guard_active is set earlier in the SAME tick."""
+        return not self._volume_rate_guard_active
+
     def _schedule_current_hour(self):
         """The current hour in Miami local time (0-23), DST-aware. A seam (own method, not
         inlined) so tests can pin a deterministic hour instead of depending on when they run."""
@@ -3698,7 +3783,8 @@ class StochBot:
         """Every condition for DECLARING readiness for a new cycle (or, standalone, entering)."""
         return (self._hedge_entry_allows_cycle() and self._environment_allows_cycle() and self._has_entry_pressure() and self._cycle_gap_elapsed()
                 and self._has_entry_dispersion() and self._candle_unused()
-                and self._volume_jump_allows_cycle() and self._volume_wiggle_allows_cycle())
+                and self._volume_jump_allows_cycle() and self._volume_wiggle_allows_cycle()
+                and self._volume_rate_guard_allows_cycle())
 
     def _reversal_cooldown_active(self):
         """See BotConfig.post_reversal_cooldown_seconds."""
@@ -3882,6 +3968,11 @@ class StochBot:
             if o is not None: jump_pause_seconds = float(o)
             o = state.get("override_volume_jump_release_mode")
             if o is not None: jump_release_mode = o or None
+        volume_rate_guard_threshold = cfg.volume_rate_guard_threshold
+        if cfg.schema_has_regime_overrides:
+            o = state.get("override_volume_rate_guard_threshold")
+            if o is not None:
+                volume_rate_guard_threshold = float(o)
         volume_now = compute_candle_volume_avg(self.candles, 10)
         er_2h, er_2h_direction = compute_er_and_direction(self.candles, 120)
         return {
@@ -3889,6 +3980,8 @@ class StochBot:
             "trigger_pct": trig, "trail_pct": trail, "dwell_seconds": dwell, "sl_dwell_seconds": sl_dwell,
             "jump_ratio_threshold": jump_ratio_threshold, "jump_pause_seconds": jump_pause_seconds,
             "jump_release_mode": jump_release_mode, "jump_ratio_now": self._last_volume_jump_ratio,
+            "volume_rate_guard_threshold": volume_rate_guard_threshold,
+            "volume_rate_pct_now": self._last_volume_rate_pct,
             "volume_now": volume_now, "er_2h": er_2h, "er_2h_direction": er_2h_direction,
             # Which schedule rule was governing at entry -- see schema_has_schedule_rule_tracking.
             # None when the feature/migration is off, or no rule was governing (manual control).
@@ -5966,6 +6059,16 @@ class StochBot:
                                 {"live_volume_wiggle_ratio": self._last_volume_wiggle_ratio})
                         except Exception:
                             pass
+                # Volume-rate guard readout (2026-10-08) -- same "watch before choosing" intent
+                # as live_volume_jump_ratio/live_volume_wiggle_ratio above, but its own
+                # independent block since volume_rate_guard_threshold isn't tied to
+                # volume_jump_ratio being configured. Requires
+                # lighter_btc_initial_volume_rate_guard.sql (or the hedge-leg equivalent).
+                if self._last_volume_rate_pct is not None:
+                    try:
+                        await self.update_state({"live_volume_rate_pct": self._last_volume_rate_pct})
+                    except Exception:
+                        pass
                 if cfg.color_balance_index_min is not None or cfg.color_balance_index_max is not None:
                     # Isolated best-effort write (2026-10-01) so the dashboard can show the live
                     # color-weighted balance index the entry gate is reading. Written into the
@@ -6175,6 +6278,13 @@ class StochBot:
         # touches an exit. volume_wiggle_locked is reused below at _wants_new_cycle (hedge).
         volume_wiggle_locked = self._update_volume_wiggle_lock(state)
         if volume_wiggle_locked:
+            entry_signal = None
+
+        # See BotConfig.volume_rate_guard_threshold -- same contract as every gate here, never
+        # touches an exit. volume_rate_guard_active is reused below at the reversal-reopen gate
+        # and at _wants_new_cycle (hedge).
+        volume_rate_guard_active = self._update_volume_rate_guard(state)
+        if volume_rate_guard_active:
             entry_signal = None
 
         if cfg.trading_hours_utc is not None:
@@ -6854,7 +6964,7 @@ class StochBot:
                 reopen_overconfirmed = self._entry_overconfirmed(reversal_signal)
                 if (self.entry_vol_paused or intrabar_dispersion_blocked or zebra_blocked
                         or balance_blocked or self._reversal_cooldown_active() or volume_jump_active
-                        or volume_wiggle_locked
+                        or volume_wiggle_locked or volume_rate_guard_active
                         or (cfg.self_lock_enabled and self.real_trading_locked)
                         or (cfg.trading_hours_utc is not None
                             and self._apply_trading_hours_gate(reversal_signal) is None)

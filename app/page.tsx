@@ -1865,6 +1865,50 @@ function CompactStochBtcPanel({
     setSavingSignal(null);
   }
 
+  // Volume-rate guard (2026-10-08, direct request after backtesting it against real trades:
+  // "if 20% we dont take the trade and wait for the next signal"). Same instant/no-pause-timer
+  // contract as the wiggle lock above, but blocks on HIGH readings, not low -- see
+  // StochBot._update_volume_rate_guard.
+  const liveVolumeRatePct: number | null = state?.live_volume_rate_pct ?? null;
+  const curRateGuardThreshold: number | null = state?.override_volume_rate_guard_threshold ?? null;
+  const curRateGuardEnabled: boolean = state?.override_volume_rate_guard_enabled ?? true;
+  const rateGuardActive = curRateGuardEnabled && curRateGuardThreshold != null
+    && liveVolumeRatePct != null && liveVolumeRatePct > curRateGuardThreshold;
+  const [rateGuardThresholdIn, setRateGuardThresholdIn] = useState("");
+
+  async function handleSetRateGuardThreshold() {
+    if (!rateGuardThresholdIn.trim()) return;
+    if (!confirm(`Set the volume-rate guard threshold to ${rateGuardThresholdIn.trim()}% for ${title}? Takes effect immediately.`)) return;
+    setSavingSignal("rateGuard");
+    const res = await fetch("/api/lighter-btc-initial-settings", {
+      method: "POST", headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ rateGuard: rateGuardThresholdIn.trim() }),
+    });
+    if (!res.ok) {
+      const b = await res.json().catch(() => ({}));
+      alert(b.error || "Could not apply the change.");
+    } else {
+      setRateGuardThresholdIn("");
+    }
+    await onToggled();
+    setSavingSignal(null);
+  }
+
+  async function handleToggleRateGuard(next: boolean) {
+    if (!confirm(`Turn the volume-rate guard ${next ? "ON" : "OFF"} for ${title}? Takes effect immediately.`)) return;
+    setSavingSignal("rateGuardEnabled");
+    const res = await fetch("/api/lighter-btc-initial-settings", {
+      method: "POST", headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ rateGuardEnabled: next }),
+    });
+    if (!res.ok) {
+      const b = await res.json().catch(() => ({}));
+      alert(b.error || "Could not apply the change.");
+    }
+    await onToggled();
+    setSavingSignal(null);
+  }
+
   async function handleToggleSignal(key: "stochastic" | "zebra" | "flip", label: string, next: boolean) {
     if (!confirm(`Turn ${label} ${next ? "ON" : "OFF"} for ${title}? Takes effect immediately.`)) return;
     setSavingSignal(key);
@@ -2685,6 +2729,67 @@ function CompactStochBtcPanel({
           </p>
         </div>
       )}
+      {showLevers && !loading && (
+        <div className="bg-gray-800/60 rounded-lg p-2">
+          {/* 2026-10-08, direct request after backtesting it against real trades: "if 20% we
+              dont take the trade and wait for the next signal." Max |volume_rate_pct| over the
+              last 5 closed candles before entry -- skips just the one signal, no pause timer,
+              clears the instant the reading drops back down. */}
+          <div className="flex items-baseline justify-between">
+            <p className="text-gray-500 text-[10px] uppercase">Volume-rate guard</p>
+            <button
+              onClick={() => handleToggleRateGuard(!curRateGuardEnabled)}
+              disabled={savingSignal !== null || loading}
+              className={`text-[10px] font-bold px-1.5 py-0.5 rounded disabled:opacity-30 ${
+                curRateGuardEnabled ? "bg-blue-500/20 text-blue-300" : "bg-gray-700/50 text-gray-500"
+              }`}
+            >
+              {savingSignal === "rateGuardEnabled" ? "…" : curRateGuardEnabled ? "ON" : "OFF"}
+            </button>
+          </div>
+          <p className="font-bold text-sm tabular-nums">
+            <span className={!curRateGuardEnabled ? "text-gray-500" : rateGuardActive ? "text-red-400" : "text-green-400"}>
+              {!curRateGuardEnabled ? "OFF" : rateGuardActive ? "BLOCKING" : "not blocking"}
+            </span>
+            <span className="text-[10px] font-normal text-gray-500 ml-1.5">
+              {curRateGuardEnabled ? (rateGuardActive ? "this signal skipped" : "entries allowed") : "switch is off -- never blocks"}
+            </span>
+          </p>
+          <p className="text-[11px] text-gray-500 mt-0.5 tabular-nums">
+            latest reading (max/5 candles):{" "}
+            <span className={liveVolumeRatePct == null ? "text-gray-500"
+              : curRateGuardThreshold != null && liveVolumeRatePct > curRateGuardThreshold ? "text-red-400" : "text-gray-400"}>
+              {liveVolumeRatePct != null ? `${liveVolumeRatePct.toFixed(1)}%` : "—"}
+            </span>
+          </p>
+          <div className="flex items-end gap-1.5 mt-1.5">
+            <div className="flex-1">
+              <p className="text-gray-500 text-[9px] uppercase">
+                Threshold % <span className="text-gray-600">now {curRateGuardThreshold ?? "off"}</span>
+              </p>
+              <input
+                value={rateGuardThresholdIn}
+                onChange={(e) => setRateGuardThresholdIn(e.target.value)}
+                placeholder={curRateGuardThreshold != null ? String(curRateGuardThreshold) : "e.g. 20"}
+                inputMode="decimal"
+                className="w-full bg-gray-900 border border-gray-700 rounded px-1.5 py-1 text-xs text-white tabular-nums focus:outline-none focus:border-blue-500"
+              />
+            </div>
+            <button
+              onClick={handleSetRateGuardThreshold}
+              disabled={savingSignal !== null || loading || !rateGuardThresholdIn.trim()}
+              className="text-xs font-bold px-2.5 py-1 rounded bg-blue-500/20 text-blue-400 hover:bg-blue-500/30 disabled:opacity-30 whitespace-nowrap"
+            >
+              {savingSignal === "rateGuard" ? "…" : "Set"}
+            </button>
+          </div>
+          <p className="text-gray-600 text-[9px] leading-snug mt-1">
+            How much volume's own 10-candle average changed vs the prior candle, as a %, worst
+            reading over the last 5 closed candles. Skips just this one entry signal when above
+            the threshold -- never blocks an exit, never pauses the bot.
+          </p>
+        </div>
+      )}
       {showLevers && liveCandleVolume != null && liveCandleVolume >= curVolThreshold && !loading && (() => {
         const dots = liveStreakLen != null ? "●".repeat(Math.min(liveStreakLen, 5)) + (liveStreakLen > 5 ? "+" : "") : "—";
         const dirLabel = liveStreakDir === "long" ? "GREEN" : liveStreakDir === "short" ? "RED" : "—";
@@ -3064,6 +3169,51 @@ function HedgeDualLegPanel({
     }
     await onToggled();
     setSavingWiggleLock(null);
+  }
+
+  // Volume-rate guard -- see Worker 1's panel for the full reasoning. Blocks on HIGH readings
+  // (max |volume_rate_pct| over the last 5 closed candles), not low. LONG leg is the
+  // live-readout owner, same convention as the jump guard/wiggle lock above; overrides are
+  // written identically to both legs.
+  const liveVolumeRatePct: number | null = longState?.live_volume_rate_pct ?? null;
+  const curRateGuardThreshold: number | null = longState?.override_volume_rate_guard_threshold ?? null;
+  const curRateGuardEnabled: boolean = longState?.override_volume_rate_guard_enabled ?? true;
+  const rateGuardActive = curRateGuardEnabled && curRateGuardThreshold != null
+    && liveVolumeRatePct != null && liveVolumeRatePct > curRateGuardThreshold;
+  const [rateGuardThresholdIn, setRateGuardThresholdIn] = useState("");
+  const [savingRateGuard, setSavingRateGuard] = useState<string | null>(null);
+
+  async function handleSetRateGuardThreshold() {
+    if (!rateGuardThresholdIn.trim()) return;
+    if (!confirm(`Set the volume-rate guard threshold to ${rateGuardThresholdIn.trim()}% for both hedge legs? Takes effect immediately.`)) return;
+    setSavingRateGuard("rateGuard");
+    const res = await fetch("/api/lighter-hedge-settings", {
+      method: "POST", headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ rateGuard: rateGuardThresholdIn.trim() }),
+    });
+    if (!res.ok) {
+      const b = await res.json().catch(() => ({}));
+      alert(b.error || "Could not apply the change.");
+    } else {
+      setRateGuardThresholdIn("");
+    }
+    await onToggled();
+    setSavingRateGuard(null);
+  }
+
+  async function handleToggleRateGuard(next: boolean) {
+    if (!confirm(`Turn the volume-rate guard ${next ? "ON" : "OFF"} for both hedge legs? Takes effect immediately.`)) return;
+    setSavingRateGuard("rateGuardEnabled");
+    const res = await fetch("/api/lighter-hedge-settings", {
+      method: "POST", headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ rateGuardEnabled: next }),
+    });
+    if (!res.ok) {
+      const b = await res.json().catch(() => ({}));
+      alert(b.error || "Could not apply the change.");
+    }
+    await onToggled();
+    setSavingRateGuard(null);
   }
 
   const curSl = longState?.override_sl_pct ?? null;
@@ -3729,6 +3879,65 @@ function HedgeDualLegPanel({
               <p className="text-gray-600 text-[9px] leading-snug mt-1">
                 Wiggle ÷ volume. Instant reading, no pause timer -- blocks new paired cycles only
                 while below the threshold, releases the moment it rises back up.
+              </p>
+            </div>
+            <div className="bg-gray-800/60 rounded-lg p-2 col-span-2">
+              {/* 2026-10-08, direct request after backtesting it against real trades: "if 20% we
+                  dont take the trade and wait for the next signal." Max |volume_rate_pct| over
+                  the last 5 closed candles before entry -- skips just the one signal, no pause
+                  timer, clears the instant the reading drops back down. */}
+              <div className="flex items-baseline justify-between">
+                <p className="text-gray-500 text-[10px] uppercase">Volume-rate guard (both legs)</p>
+                <button
+                  onClick={() => handleToggleRateGuard(!curRateGuardEnabled)}
+                  disabled={savingRateGuard !== null || loading}
+                  className={`text-[10px] font-bold px-1.5 py-0.5 rounded disabled:opacity-30 ${
+                    curRateGuardEnabled ? "bg-blue-500/20 text-blue-300" : "bg-gray-700/50 text-gray-500"
+                  }`}
+                >
+                  {savingRateGuard === "rateGuardEnabled" ? "…" : curRateGuardEnabled ? "ON" : "OFF"}
+                </button>
+              </div>
+              <p className="font-bold text-sm tabular-nums">
+                <span className={!curRateGuardEnabled ? "text-gray-500" : rateGuardActive ? "text-red-400" : "text-green-400"}>
+                  {!curRateGuardEnabled ? "OFF" : rateGuardActive ? "BLOCKING" : "not blocking"}
+                </span>
+                <span className="text-[10px] font-normal text-gray-500 ml-1.5">
+                  {curRateGuardEnabled ? (rateGuardActive ? "this signal skipped" : "new cycles allowed") : "switch is off -- never blocks"}
+                </span>
+              </p>
+              <p className="text-[11px] text-gray-500 mt-0.5 tabular-nums">
+                latest reading (max/5 candles):{" "}
+                <span className={liveVolumeRatePct == null ? "text-gray-500"
+                  : curRateGuardThreshold != null && liveVolumeRatePct > curRateGuardThreshold ? "text-red-400" : "text-gray-400"}>
+                  {liveVolumeRatePct != null ? `${liveVolumeRatePct.toFixed(1)}%` : "—"}
+                </span>
+              </p>
+              <div className="flex items-end gap-1.5 mt-1.5">
+                <div className="flex-1">
+                  <p className="text-gray-500 text-[9px] uppercase">
+                    Threshold % <span className="text-gray-600">now {curRateGuardThreshold ?? "off"}</span>
+                  </p>
+                  <input
+                    value={rateGuardThresholdIn}
+                    onChange={(e) => setRateGuardThresholdIn(e.target.value)}
+                    placeholder={curRateGuardThreshold != null ? String(curRateGuardThreshold) : "e.g. 20"}
+                    inputMode="decimal"
+                    className="w-full bg-gray-900 border border-gray-700 rounded px-1.5 py-1 text-xs text-white tabular-nums focus:outline-none focus:border-blue-500"
+                  />
+                </div>
+                <button
+                  onClick={handleSetRateGuardThreshold}
+                  disabled={savingRateGuard !== null || loading || !rateGuardThresholdIn.trim()}
+                  className="text-xs font-bold px-2.5 py-1 rounded bg-blue-500/20 text-blue-400 hover:bg-blue-500/30 disabled:opacity-30 whitespace-nowrap"
+                >
+                  {savingRateGuard === "rateGuard" ? "…" : "Set"}
+                </button>
+              </div>
+              <p className="text-gray-600 text-[9px] leading-snug mt-1">
+                How much volume's own 10-candle average changed vs the prior candle, as a %,
+                worst reading over the last 5 closed candles. Skips just this one paired entry
+                when above the threshold -- never blocks an exit, never pauses the hedge.
               </p>
             </div>
           </div>

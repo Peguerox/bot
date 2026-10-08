@@ -6063,6 +6063,114 @@ async def t_volume_wiggle_lock_blocks_a_hedge_style_cycle():
     check("fixed_direction leg does not want a new cycle while locked", bot._wants_new_cycle() is False)
 
 
+def _rate_candles(volumes, base=86000.0):
+    """One closed candle per entry in `volumes` (flat price, only v varies -- this function
+    never looks at price), plus one trailing live candle. Same shape as _jump_candles."""
+    t0 = 1700000000000
+    c = [{"t": t0 + i * 60000, "o": base, "h": base + 1, "l": base - 1, "c": base, "v": v}
+         for i, v in enumerate(volumes)]
+    c.append({"t": t0 + len(volumes) * 60000, "o": base, "h": base, "l": base, "c": base,
+              "v": volumes[-1] if volumes else 1.0})
+    return c
+
+
+async def t_volume_rate_pct_max_hand_computed():
+    print("\n[compute_volume_rate_pct_max: hand-computed example]")
+    # window=2, lookback=2. closed volumes [1,2,3,4,5,6,7].
+    # back=0: now=avg(6,7)=6.5, prior=avg(5,6)=5.5 -> pct=|6.5-5.5|/5.5*100 ~= 18.182%
+    # back=1: now=avg(5,6)=5.5, prior=avg(4,5)=4.5 -> pct=|5.5-4.5|/4.5*100 ~= 22.222%
+    candles = _rate_candles([1, 2, 3, 4, 5, 6, 7])
+    pct = core.compute_volume_rate_pct_max(candles, window=2, lookback=2)
+    check("max of the two readings matches hand calculation",
+          pct is not None and abs(pct - 22.22222222) < 1e-4, pct)
+
+
+async def t_volume_rate_pct_max_insufficient_history():
+    print("\n[compute_volume_rate_pct_max: None when not even one lookback point has a full window]")
+    candles = _rate_candles([1, 2])  # window=2 needs 2 closed for "now" alone AND 2 more before that
+    pct = core.compute_volume_rate_pct_max(candles, window=2, lookback=2)
+    check("not enough history for even back=0 -> None", pct is None, pct)
+
+
+# Shared fixture for the guard tests below: 14 flat candles (volume 10) then one spike (volume
+# 100) as the LAST closed candle -- only back=0's window reaches the spike (its own 10-candle
+# "now" window includes it, "prior" doesn't); back=1-4 see nothing but flat 10s on both sides.
+# back=0: now=avg(9x10 + 1x100)/10=19.0, prior=avg(10x10)/10=10.0 -> pct=90%. back>=1: pct=0%.
+# max=90%, unambiguously above any reasonable threshold like 20.
+_RATE_SPIKE_VOLUMES = [10.0] * 14 + [100.0]
+_RATE_FLAT_VOLUMES = [10.0] * 15
+
+
+async def t_volume_rate_guard_blocks_above_threshold():
+    print("\n[volume-rate guard: blocks a fresh entry when the max reading is ABOVE the threshold]")
+    bot = make_bot(FakeExchange(), candles_kind="mid", volume_rate_guard_threshold=20.0,
+                    schema_has_regime_overrides=True)
+    bot.candles = _rate_candles(_RATE_SPIKE_VOLUMES)
+    active = bot._update_volume_rate_guard(bot.state_row)
+    check("guard active", active is True, active)
+    check("_volume_rate_guard_allows_cycle reflects the block", bot._volume_rate_guard_allows_cycle() is False)
+
+
+async def t_volume_rate_guard_allows_at_or_below_threshold():
+    print("\n[volume-rate guard: stays inactive while the max reading is at/below the threshold]")
+    bot = make_bot(FakeExchange(), candles_kind="mid", volume_rate_guard_threshold=20.0,
+                    schema_has_regime_overrides=True)
+    bot.candles = _rate_candles(_RATE_FLAT_VOLUMES)
+    active = bot._update_volume_rate_guard(bot.state_row)
+    check("not active", active is False, active)
+    check("_volume_rate_guard_allows_cycle reflects the allow", bot._volume_rate_guard_allows_cycle() is True)
+
+
+async def t_volume_rate_guard_off_by_default():
+    print("\n[volume-rate guard: off by default -- unconfigured never blocks regardless of the reading]")
+    bot = make_bot(FakeExchange(), candles_kind="mid")  # volume_rate_guard_threshold defaults None
+    bot.candles = _rate_candles(_RATE_SPIKE_VOLUMES)
+    active = bot._update_volume_rate_guard(bot.state_row)
+    check("never blocks when unconfigured", active is False, active)
+
+
+async def t_volume_rate_guard_live_override():
+    print("\n[volume-rate guard: override_volume_rate_guard_threshold picks the threshold live]")
+    bot = make_bot(FakeExchange(), candles_kind="mid", schema_has_regime_overrides=True)  # compiled off
+    bot.candles = _rate_candles(_RATE_SPIKE_VOLUMES)
+    bot.state_row["override_volume_rate_guard_threshold"] = 20.0
+    active = bot._update_volume_rate_guard(bot.state_row)
+    check("blocks via the live override", active is True, active)
+
+
+async def t_volume_rate_guard_override_ignored_without_schema_flag():
+    print("\n[volume-rate guard: schema_has_regime_overrides=False ignores the override]")
+    bot = make_bot(FakeExchange(), candles_kind="mid", schema_has_regime_overrides=False)
+    bot.candles = _rate_candles(_RATE_SPIKE_VOLUMES)
+    bot.state_row["override_volume_rate_guard_threshold"] = 20.0
+    active = bot._update_volume_rate_guard(bot.state_row)
+    check("still inactive -- override present but the schema flag is off", active is False, active)
+
+
+async def t_volume_rate_guard_enabled_switch_overrides_without_losing_threshold():
+    print("\n[volume-rate guard: override_volume_rate_guard_enabled=False disables it, threshold untouched]")
+    bot = make_bot(FakeExchange(), candles_kind="mid", volume_rate_guard_threshold=20.0,
+                    schema_has_regime_overrides=True)
+    bot.candles = _rate_candles(_RATE_SPIKE_VOLUMES)
+    bot.state_row["override_volume_rate_guard_enabled"] = False
+    active = bot._update_volume_rate_guard(bot.state_row)
+    check("not active -- switched off even though the reading is above threshold", active is False, active)
+    check("the threshold itself is unchanged", bot.cfg.volume_rate_guard_threshold == 20.0,
+          bot.cfg.volume_rate_guard_threshold)
+    bot.state_row["override_volume_rate_guard_enabled"] = True
+    active_again = bot._update_volume_rate_guard(bot.state_row)
+    check("blocks again once switched back on, same threshold", active_again is True, active_again)
+
+
+async def t_volume_rate_guard_blocks_a_hedge_style_cycle():
+    print("\n[volume-rate guard: blocks a fixed_direction leg's _wants_new_cycle, not just entry_signal]")
+    bot = _hedge_leg(volume_rate_guard_threshold=20.0)
+    bot.candles = _rate_candles(_RATE_SPIKE_VOLUMES)
+    active = bot._update_volume_rate_guard(bot.state_row)
+    check("active", active is True, active)
+    check("fixed_direction leg does not want a new cycle while blocked", bot._wants_new_cycle() is False)
+
+
 async def t_volume_jump_ratio_basic():
     print("\n[compute_volume_jump_ratio: hand-computed example]")
     candles = _jump_candles([1.0] * 10 + [5.0])
@@ -8126,6 +8234,15 @@ async def main():
               t_volume_wiggle_lock_override_ignored_without_schema_flag,
               t_volume_wiggle_lock_enabled_switch_overrides_without_losing_threshold,
               t_volume_wiggle_lock_blocks_a_hedge_style_cycle,
+              t_volume_rate_pct_max_hand_computed,
+              t_volume_rate_pct_max_insufficient_history,
+              t_volume_rate_guard_blocks_above_threshold,
+              t_volume_rate_guard_allows_at_or_below_threshold,
+              t_volume_rate_guard_off_by_default,
+              t_volume_rate_guard_live_override,
+              t_volume_rate_guard_override_ignored_without_schema_flag,
+              t_volume_rate_guard_enabled_switch_overrides_without_losing_threshold,
+              t_volume_rate_guard_blocks_a_hedge_style_cycle,
               t_volume_jump_ratio_basic,
               t_volume_jump_ratio_needs_full_lookback,
               t_volume_jump_ratio_zero_baseline,

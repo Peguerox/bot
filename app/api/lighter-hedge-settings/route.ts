@@ -25,6 +25,9 @@ const LIMITS = {
   jumpRatio: { min: 1.1, max: 20, label: "volume-jump ratio" },
   jumpPause: { min: 0, max: 1800, label: "volume-jump pause (seconds)" },
   wiggleLock: { min: 0.01, max: 50, label: "volume/wiggle lock threshold" },
+  // 2026-10-08, direct request after backtesting it against real trades: "if 20% we dont take
+  // the trade and wait for the next signal." Percentage, not a ratio.
+  rateGuard: { min: 1, max: 200, label: "volume-rate guard threshold" },
 };
 
 export async function POST(req: NextRequest) {
@@ -55,6 +58,7 @@ export async function POST(req: NextRequest) {
     ["jumpRatio", "override_volume_jump_ratio"],
     ["jumpPause", "override_volume_jump_pause_seconds"],
     ["wiggleLock", "override_volume_wiggle_lock_threshold"],
+    ["rateGuard", "override_volume_rate_guard_threshold"],
   ] as const) {
     const raw = body[key];
     if (raw === undefined || raw === null || raw === "") continue;
@@ -80,6 +84,15 @@ export async function POST(req: NextRequest) {
       return NextResponse.json({ error: "wiggleLockEnabled must be true or false." }, { status: 400 });
     }
     out["override_volume_wiggle_lock_enabled"] = body.wiggleLockEnabled;
+  }
+
+  // Volume-rate guard on/off switch -- same contract as the wiggle lock's switch above, both
+  // legs always carry the same value.
+  if (body.rateGuardEnabled !== undefined) {
+    if (typeof body.rateGuardEnabled !== "boolean") {
+      return NextResponse.json({ error: "rateGuardEnabled must be true or false." }, { status: 400 });
+    }
+    out["override_volume_rate_guard_enabled"] = body.rateGuardEnabled;
   }
 
   // Volume-jump guard on/off switch (2026-10-04, direct request: "put a switch on an off for
