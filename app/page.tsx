@@ -1907,6 +1907,29 @@ function CompactStochBtcPanel({
     setSavingSignal(null);
   }
 
+  // Higher-timeframe stochastic alignment block (2026-10-09, direct request after a real-data
+  // study on 449 real trades: aligned entries ran 56-60% win/net LOSS, not-aligned ran 70-81%
+  // win/net WIN, strongest at 5-minute). Blocks a fresh/reopen entry only, never an exit.
+  const curHtfTimeframe: string = state?.override_htf_alignment_block_timeframe ?? "off";
+  const liveHtfK: number | null = state?.live_htf_k ?? null;
+  const [savingHtf, setSavingHtf] = useState(false);
+
+  async function handleSetHtfTimeframe(tf: "off" | "5m" | "10m" | "1h") {
+    if (tf === curHtfTimeframe) return;
+    if (!confirm(`Set the higher-timeframe alignment block to "${tf}" for ${title}? Blocks a fresh entry whenever that timeframe's stochastic agrees with the 1-min signal. Takes effect immediately.`)) return;
+    setSavingHtf(true);
+    const res = await fetch("/api/lighter-btc-initial-settings", {
+      method: "POST", headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ htfBlockTimeframe: tf }),
+    });
+    if (!res.ok) {
+      const b = await res.json().catch(() => ({}));
+      alert(b.error || "Could not apply the change.");
+    }
+    await onToggled();
+    setSavingHtf(false);
+  }
+
   // Volume-rate guard (2026-10-08, direct request after backtesting it against real trades:
   // "if 20% we dont take the trade and wait for the next signal"). Same instant/no-pause-timer
   // contract as the wiggle lock above, but blocks on HIGH readings, not low -- see
@@ -2814,6 +2837,39 @@ function CompactStochBtcPanel({
       )}
       {showLevers && !loading && (
         <div className="bg-gray-800/60 rounded-lg p-2">
+          {/* 2026-10-09, direct request after a real-data study: "a little panel that can
+              block an entry when they are aligned... switch from 5 minutes to 10 minutes to
+              1 hour." Blocks a fresh/reopen entry only, never an exit. */}
+          <p className="text-gray-500 text-[10px] uppercase">Higher-timeframe alignment block</p>
+          <p className="text-[11px] text-gray-500 mt-0.5 tabular-nums">
+            latest {curHtfTimeframe !== "off" ? curHtfTimeframe : ""} K:{" "}
+            <span className="text-gray-400">{liveHtfK != null ? liveHtfK.toFixed(1) : "—"}</span>
+          </p>
+          <div className="grid grid-cols-4 gap-1 mt-1.5">
+            {(["off", "5m", "10m", "1h"] as const).map((tf) => (
+              <button
+                key={tf}
+                onClick={() => handleSetHtfTimeframe(tf)}
+                disabled={savingHtf || loading}
+                className={`text-[11px] font-bold px-1.5 py-1.5 rounded capitalize disabled:opacity-30 ${
+                  curHtfTimeframe === tf ? "bg-blue-500/30 text-blue-300" : "bg-gray-700/50 text-gray-500 hover:bg-gray-700"
+                }`}
+              >
+                {tf}
+              </button>
+            ))}
+          </div>
+          <p className="text-gray-600 text-[9px] leading-snug mt-1">
+            Blocks a fresh entry when the chosen timeframe's own stochastic AGREES with the
+            1-min signal direction. Backed by a real study on 449 real trades: aligned entries
+            ran 56-60% win / net LOSS; not-aligned ran 70-81% win / net WIN -- strongest at
+            5-minute. Backwards from intuition: agreement usually means a real trend is running,
+            which this mean-reversion bot loses against. "off" (default) never blocks.
+          </p>
+        </div>
+      )}
+      {showLevers && !loading && (
+        <div className="bg-gray-800/60 rounded-lg p-2">
           {/* 2026-10-08, direct request after backtesting it against real trades: "if 20% we
               dont take the trade and wait for the next signal." Max |volume_rate_pct| over the
               last 5 closed candles before entry -- skips just the one signal, no pause timer,
@@ -3014,6 +3070,7 @@ function CompactStochBtcPanel({
             ["Flip regime", flipOn ? "ON" : "off"],
             ["Trail Dwell", curDwell > 0 ? `ON (${curDwell}s)` : "off"],
             ["SL Dwell", curSlDwell > 0 ? `ON (${curSlDwell}s)` : "off"],
+            ["HTF alignment block", curHtfTimeframe !== "off" ? `ON (${curHtfTimeframe})` : "off"],
             ["Self-lock / hour ban", "off (compiled, not live-controllable)"],
           ].map(([label, val]) => (
             <div key={label} className="flex items-center justify-between text-[10px]">

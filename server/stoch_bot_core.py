@@ -393,6 +393,23 @@ class BotConfig:
     # _volume_rate_guard_allows_cycle.
     volume_rate_guard_threshold: Optional[float] = None
     volume_rate_guard_lookback: int = 5
+    # Higher-timeframe stochastic alignment block (2026-10-09, direct request after a real-data
+    # study on 449 real Worker 1 trades): compares the 1-minute stochastic signal that's about
+    # to fire against the SAME stochastic computed on a longer timeframe (5m/10m/1h, see
+    # aggregate_candles/compute_stoch_k). Found backwards from the intuitive expectation --
+    # when the longer timeframe AGREES with the 1-min direction, trades ran 56-60% win / net
+    # LOSS; when it disagreed, 70-81% win / net WIN, strongest at 5-minute. A longer-timeframe
+    # confirmation usually means a real trend is running, which this mean-reversion bot loses
+    # against; disagreement means the 1-min blip is more likely noise about to revert, which is
+    # its actual edge. htf_alignment_block_available is a compiled opt-in (extends the candle
+    # history fetch so there's enough data for a 1-hour window; False elsewhere means zero
+    # extra API load and this whole feature is inert). htf_alignment_block_timeframe selects
+    # which comparison to run -- None (default) is off, live-tunable via
+    # override_htf_alignment_block_timeframe. Blocks ONLY a fresh/reopen entry, never an exit,
+    # same contract as every gate in this file. Missing data fails CLOSED (blocks), same
+    # convention as the color-balance gate.
+    htf_alignment_block_available: bool = False
+    htf_alignment_block_timeframe: Optional[str] = None
     # Schedule rules (2026-10-04, direct request: a master panel controlling Worker 1 and the
     # hedge together, by hour and/or live ER/volume/wiggle/rate conditions). Compiled opt-in,
     # same convention as every other feature this session -- False means zero behavior change.
@@ -1432,6 +1449,48 @@ def compute_volume_wiggle_ratio(candles, vol_window=10, wiggle_window=5):
     return wig / vol
 
 
+def aggregate_candles(candles, minutes):
+    """Groups 1-min candles into calendar-aligned `minutes`-sized bars (bin index =
+    t // (minutes*60000), same alignment a real exchange's own 5m/1h candles use), same OHLCV
+    aggregation convention as the exchange itself (open=first 1-min bar's open, close=last
+    bar's close, high=max high, low=min low, volume=sum). Returned in chronological order; the
+    LAST element may be a still-forming bin (not all its 1-min bars have arrived yet) -- same
+    'closed = candles[:-1]' convention every compute_* function in this file already uses, so
+    no caller needs special-casing. [] if given no input."""
+    bins = {}
+    order = []
+    for c in candles:
+        b = c["t"] // (minutes * 60000)
+        if b not in bins:
+            bins[b] = {"t": b * minutes * 60000, "o": c["o"], "h": c["h"], "l": c["l"],
+                       "c": c["c"], "v": c.get("v", 0)}
+            order.append(b)
+        else:
+            bar = bins[b]
+            bar["h"] = max(bar["h"], c["h"])
+            bar["l"] = min(bar["l"], c["l"])
+            bar["c"] = c["c"]
+            bar["v"] = bar["v"] + c.get("v", 0)
+    return [bins[b] for b in order]
+
+
+def compute_stoch_k(candles, window=5):
+    """Plain stochastic %K over the trailing `window` CLOSED candles -- same formula as
+    StochBot.compute_stoch_signal's own K calc, factored out as a standalone function (not tied
+    to self.candles) so it can be run against a DIFFERENT candle series, e.g. an aggregated
+    higher timeframe (see aggregate_candles). None if there isn't enough history or the window
+    is perfectly flat (nothing to divide by)."""
+    closed = candles[:-1]
+    if len(closed) < window:
+        return None
+    bars = closed[-window:]
+    hh = max(b["h"] for b in bars)
+    ll = min(b["l"] for b in bars)
+    if hh == ll:
+        return None
+    return 100 * (closed[-1]["c"] - ll) / (hh - ll)
+
+
 def compute_live_flip_streak(candles, lookback=20):
     """Live readout (2026-10-02, direct request: "a candle counter so i can see we are doing
     it correctly... 1 2 3 waiting for flip") -- how many consecutive same-color CLOSED candles
@@ -1972,6 +2031,7 @@ class StochBot:
         self._entry_wiggle_vol_ratio = None
         self._last_volume_rate_pct = None  # see _update_volume_rate_guard
         self._volume_rate_guard_active = False
+        self._last_htf_k = None  # see BotConfig.htf_alignment_block_timeframe, dashboard readout
         # Schedule rules (2026-10-04, direct request: a master panel that applies different
         # Worker 1 / hedge settings automatically by hour and/or live ER/volume/wiggle/rate
         # conditions). See _apply_schedule_rules. Cache is a throttled copy of the shared
@@ -2221,7 +2281,13 @@ class StochBot:
     async def run_candle_refresh_forever(self):
         while True:
             try:
-                self.candles = await self.fetch_candles()
+                # See BotConfig.htf_alignment_block_available -- a 1-hour window needs 5 closed
+                # hourly bars (300 one-min bars) plus margin; 400 covers every configured
+                # timeframe (5m/10m/1h) at once, so no re-fetch is needed when the live
+                # override picks a different one. Compiled opt-in -- False elsewhere means the
+                # default 60-bar fetch is unchanged, zero extra API load.
+                count = 400 if self.cfg.htf_alignment_block_available else 60
+                self.candles = await self.fetch_candles(count)
                 self.candles_updated_at = time.time()
                 if self.cfg.hedge_entry_filters and self.cfg.hedge_entry_filter_owner:
                     try:
@@ -3547,6 +3613,34 @@ class StochBot:
         consult entry_signal' reasoning as _volume_jump_allows_cycle/_volume_wiggle_allows_cycle.
         self._volume_rate_guard_active is set earlier in the SAME tick."""
         return not self._volume_rate_guard_active
+
+    def _htf_alignment_blocks_entry(self, state, signal):
+        """See BotConfig.htf_alignment_block_timeframe's docstring. `signal` is the fresh
+        entry/reversal direction ('long'/'short') about to be acted on -- returns True if the
+        longer-timeframe stochastic AGREES with it (blocks), False if it disagrees or the
+        feature is off. Always caches self._last_htf_k for the dashboard, even when the feature
+        itself is off, same "watch before choosing" convention as every other readout here.
+        Missing data (not enough aggregated history yet) fails CLOSED -- never guesses an entry
+        is safe, same as the color-balance gate."""
+        cfg = self.cfg
+        if not cfg.htf_alignment_block_available:
+            return False
+        timeframe = cfg.htf_alignment_block_timeframe
+        if cfg.schema_has_regime_overrides:
+            o = state.get("override_htf_alignment_block_timeframe")
+            if o is not None:
+                timeframe = o or None
+        minutes = {"5m": 5, "10m": 10, "1h": 60}.get(timeframe)
+        if minutes is None:
+            self._last_htf_k = None
+            return False
+        k = compute_stoch_k(aggregate_candles(self.candles, minutes), 5)
+        self._last_htf_k = k
+        if signal is None:
+            return False
+        if k is None:
+            return True
+        return (signal == "long" and k < 50) or (signal == "short" and k > 50)
 
     def _schedule_current_hour(self):
         """The current hour in Miami local time (0-23), DST-aware. A seam (own method, not
@@ -6132,6 +6226,16 @@ class StochBot:
                         await self.update_state({"live_volume_rate_pct": self._last_volume_rate_pct})
                     except Exception:
                         pass
+                # HTF alignment block readout (2026-10-09) -- same "watch before choosing"
+                # intent as every readout above, shown whenever the feature is compiled
+                # available, even if no timeframe is currently selected (self._last_htf_k is
+                # None in that case, same as the others). Requires
+                # lighter_btc_initial_htf_alignment_block.sql.
+                if cfg.htf_alignment_block_available:
+                    try:
+                        await self.update_state({"live_htf_k": self._last_htf_k})
+                    except Exception:
+                        pass
                 if cfg.color_balance_index_min is not None or cfg.color_balance_index_max is not None:
                     # Isolated best-effort write (2026-10-01) so the dashboard can show the live
                     # color-weighted balance index the entry gate is reading. Written into the
@@ -6348,6 +6452,13 @@ class StochBot:
         # and at _wants_new_cycle (hedge).
         volume_rate_guard_active = self._update_volume_rate_guard(state)
         if volume_rate_guard_active:
+            entry_signal = None
+
+        # See BotConfig.htf_alignment_block_timeframe. Called unconditionally (same "watch
+        # before choosing" pattern as every gate above) so the dashboard readout stays fresh
+        # even on a tick with no signal; the method itself returns False when signal is None.
+        # Reused below at the reversal-reopen gate with reversal_signal instead.
+        if self._htf_alignment_blocks_entry(state, entry_signal):
             entry_signal = None
 
         if cfg.trading_hours_utc is not None:
@@ -7038,6 +7149,7 @@ class StochBot:
                     self._clear_burn()
                     reopen_burned = False
                 reopen_overconfirmed = self._entry_overconfirmed(reversal_signal)
+                reopen_htf_blocked = self._htf_alignment_blocks_entry(state, reversal_signal)
                 if (self.entry_vol_paused or intrabar_dispersion_blocked or zebra_blocked
                         or balance_blocked or self._reversal_cooldown_active() or volume_jump_active
                         or volume_wiggle_locked or volume_rate_guard_active
@@ -7045,7 +7157,7 @@ class StochBot:
                         or (cfg.trading_hours_utc is not None
                             and self._apply_trading_hours_gate(reversal_signal) is None)
                         or reopen_flow_blocked or reopen_stale or low_vol_blocked or reopen_burned
-                        or reopen_overconfirmed):
+                        or reopen_overconfirmed or reopen_htf_blocked):
                     # Close leg of a reversal always runs (already happened above); only the
                     # reopen leg respects the gate -- left flat until it clears instead of
                     # immediately flipping into the opposite side.

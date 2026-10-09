@@ -445,6 +445,12 @@ CONFIG = BotConfig(
     # lighter_btc_initial_regime_overrides.sql. See BotConfig.schema_has_regime_overrides /
     # StochBot._regime_controls.
     schema_has_regime_overrides=True,
+    # 2026-10-09, direct request after a real-data study (449 real trades): block a fresh entry
+    # when the longer-timeframe stochastic AGREES with the 1-minute signal -- found backwards
+    # from intuition (alignment meant WORSE outcomes, 56-60% win/net loss vs 70-81% win/net win
+    # when they disagreed). Off by default (no timeframe selected); extends the candle history
+    # fetch to 400 bars so a 1-hour window has enough data. See BotConfig.htf_alignment_block_*.
+    htf_alignment_block_available=True,
     # 2026-10-04, direct request: the master schedule panel that drives both this bot and the
     # hedge from one place, by hour and/or live ER/volume/wiggle/rate conditions. "worker1" says
     # which half of each shared rule applies to this bot. Requires bot_schedule_rules.sql. See

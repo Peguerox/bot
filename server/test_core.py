@@ -8124,6 +8124,162 @@ async def t_wiggle_vol_rise_exit_baseline_captured_at_real_entry_and_reset_on_cl
           bot._entry_wiggle_vol_ratio is None, bot._entry_wiggle_vol_ratio)
 
 
+def _htf_candles(n_bins, minutes=5, trend="down", base=86000.0, step=20.0):
+    """n_bins calendar-aligned `minutes`-sized bins worth of 1-min candles (n_bins*minutes + 1
+    one-min bars, the extra one left as the currently-forming last bin), timestamps anchored to
+    a real bin boundary (t0 is itself a multiple of minutes*60000) so aggregate_candles's own
+    calendar binning lines up exactly with bin index 0..n_bins. "down": each bin's close is
+    LOWER than the one before (K near 0 on the last closed bin -- aligned with a LONG signal).
+    "up": the reverse (K near 100 -- aligned with a SHORT signal)."""
+    bin_ms = minutes * 60000
+    t0 = (1700000000000 // bin_ms) * bin_ms
+    out = []
+    price = base
+    for bin_i in range(n_bins + 1):  # +1 for the forming bin
+        bin_start_price = price
+        for m in range(minutes):
+            o = price
+            price = price - step if trend == "down" else price + step
+            out.append({"t": t0 + (bin_i * minutes + m) * 60000, "o": o,
+                       "h": max(o, price) + 2, "l": min(o, price) - 2, "c": price, "v": 1.0})
+    return out
+
+
+async def t_aggregate_candles_calendar_aligned_bins():
+    print("\n[aggregate_candles: calendar-aligned 5-min bins combine OHLCV correctly]")
+    candles = _htf_candles(2, minutes=5, trend="down")  # 2 complete bins + 1 forming = 15 bars
+    bars = core.aggregate_candles(candles, 5)
+    check("3 bins produced (2 complete + 1 forming)", len(bars) == 3, len(bars))
+    check("bin 0 open equals the real first 1-min candle's open",
+          bars[0]["o"] == candles[0]["o"], (bars[0]["o"], candles[0]["o"]))
+    check("bin 0 close equals the real 5th 1-min candle's close",
+          bars[0]["c"] == candles[4]["c"], (bars[0]["c"], candles[4]["c"]))
+    check("bin 0 high is the real max across its 5 bars",
+          bars[0]["h"] == max(c["h"] for c in candles[0:5]), bars[0]["h"])
+    check("bin 0 low is the real min across its 5 bars",
+          bars[0]["l"] == min(c["l"] for c in candles[0:5]), bars[0]["l"])
+    check("bin 0 volume is the real sum across its 5 bars",
+          bars[0]["v"] == sum(c["v"] for c in candles[0:5]), bars[0]["v"])
+
+
+async def t_compute_stoch_k_matches_hand_calc():
+    print("\n[compute_stoch_k: matches a hand-computed example on an explicit candle array]")
+    bars = [
+        {"t": 0, "o": 100, "h": 110, "l": 90, "c": 100},
+        {"t": 1, "o": 100, "h": 105, "l": 95, "c": 100},
+        {"t": 2, "o": 100, "h": 108, "l": 92, "c": 100},
+        {"t": 3, "o": 100, "h": 106, "l": 94, "c": 100},
+        {"t": 4, "o": 100, "h": 103, "l": 97, "c": 95},  # last CLOSED bar, close=95
+        {"t": 5, "o": 95, "h": 96, "l": 94, "c": 95},    # forming/current, excluded
+    ]
+    # window=5 over the 5 closed bars (index 0-4): hh=110 (bar0), ll=90 (bar0), last close=95.
+    k = core.compute_stoch_k(bars, 5)
+    expected = 100 * (95 - 90) / (110 - 90)
+    check("matches hand calc", k is not None and abs(k - expected) < 1e-9, (k, expected))
+
+
+async def t_compute_stoch_k_none_without_enough_history():
+    print("\n[compute_stoch_k: None when there aren't enough closed candles for the window]")
+    bars = [{"t": i, "o": 100, "h": 101, "l": 99, "c": 100} for i in range(4)]  # 3 closed, need 5
+    k = core.compute_stoch_k(bars, 5)
+    check("None -- not enough history", k is None, k)
+
+
+async def t_htf_alignment_blocks_a_fresh_entry_when_aligned():
+    print("\n[HTF alignment block: a LONG signal blocked when the 5m stochastic agrees (K<50)]")
+    candles = _htf_candles(5, minutes=5, trend="down")  # trending down -> K near 0 on 5m
+    bot = make_bot(FakeExchange(), candles=candles, htf_alignment_block_available=True,
+                    htf_alignment_block_timeframe="5m", schema_has_regime_overrides=True)
+    blocked = bot._htf_alignment_blocks_entry(bot.state_row, "long")
+    k = core.compute_stoch_k(core.aggregate_candles(candles, 5), 5)
+    check("5m K is indeed below 50 (sanity check on the fixture)", k is not None and k < 50, k)
+    check("blocked -- long signal agrees with a low (oversold-leaning) 5m K", blocked is True)
+    check("live K cached for the dashboard", bot._last_htf_k == k, (bot._last_htf_k, k))
+
+
+async def t_htf_alignment_allows_entry_when_not_aligned():
+    print("\n[HTF alignment block: a LONG signal NOT blocked when the 5m stochastic disagrees (K>=50)]")
+    candles = _htf_candles(5, minutes=5, trend="up")  # trending up -> K near 100 on 5m
+    bot = make_bot(FakeExchange(), candles=candles, htf_alignment_block_available=True,
+                    htf_alignment_block_timeframe="5m", schema_has_regime_overrides=True)
+    blocked = bot._htf_alignment_blocks_entry(bot.state_row, "long")
+    k = core.compute_stoch_k(core.aggregate_candles(candles, 5), 5)
+    check("5m K is indeed above 50 (sanity check on the fixture)", k is not None and k >= 50, k)
+    check("not blocked -- long signal disagrees with a high 5m K", blocked is False)
+
+
+async def t_htf_alignment_short_signal_mirrors_long():
+    print("\n[HTF alignment block: a SHORT signal blocked when the 5m stochastic agrees (K>50)]")
+    candles = _htf_candles(5, minutes=5, trend="up")
+    bot = make_bot(FakeExchange(), candles=candles, htf_alignment_block_available=True,
+                    htf_alignment_block_timeframe="5m", schema_has_regime_overrides=True)
+    blocked = bot._htf_alignment_blocks_entry(bot.state_row, "short")
+    check("blocked -- short signal agrees with a high 5m K", blocked is True)
+
+
+async def t_htf_alignment_off_by_default():
+    print("\n[HTF alignment block: off by default (compiled False) -- never blocks regardless of candles]")
+    candles = _htf_candles(5, minutes=5, trend="down")
+    bot = make_bot(FakeExchange(), candles=candles, htf_alignment_block_timeframe="5m",
+                    schema_has_regime_overrides=True)  # htf_alignment_block_available defaults False
+    blocked = bot._htf_alignment_blocks_entry(bot.state_row, "long")
+    check("never blocked -- feature not compiled available", blocked is False)
+
+
+async def t_htf_alignment_inert_without_a_timeframe_selected():
+    print("\n[HTF alignment block: available=True but no timeframe chosen -- never blocks]")
+    candles = _htf_candles(5, minutes=5, trend="down")
+    bot = make_bot(FakeExchange(), candles=candles, htf_alignment_block_available=True,
+                    schema_has_regime_overrides=True)  # htf_alignment_block_timeframe defaults None
+    blocked = bot._htf_alignment_blocks_entry(bot.state_row, "long")
+    check("not blocked -- no timeframe configured", blocked is False)
+    check("live K is None -- nothing was even computed", bot._last_htf_k is None, bot._last_htf_k)
+
+
+async def t_htf_alignment_live_override_selects_timeframe():
+    print("\n[HTF alignment block: override_htf_alignment_block_timeframe picks the timeframe live]")
+    candles = _htf_candles(5, minutes=5, trend="down")
+    state = dict(_native_sl_state(86000.0))
+    state["override_htf_alignment_block_timeframe"] = "5m"
+    bot = make_bot(FakeExchange(), candles=candles, htf_alignment_block_available=True,
+                    schema_has_regime_overrides=True)  # compiled timeframe stays None
+    blocked = bot._htf_alignment_blocks_entry(state, "long")
+    check("blocked -- the live override turned it on", blocked is True)
+
+
+async def t_htf_alignment_fails_closed_on_missing_history():
+    print("\n[HTF alignment block: not enough aggregated history yet -- fails CLOSED (blocks)]")
+    candles = _htf_candles(1, minutes=5, trend="down")  # only 1 complete 5m bin, need 5 for K
+    bot = make_bot(FakeExchange(), candles=candles, htf_alignment_block_available=True,
+                    htf_alignment_block_timeframe="1h", schema_has_regime_overrides=True)
+    blocked = bot._htf_alignment_blocks_entry(bot.state_row, "long")
+    check("blocked -- missing data never guesses an entry is safe", blocked is True)
+    check("live K is None -- genuinely unavailable", bot._last_htf_k is None, bot._last_htf_k)
+
+
+async def t_htf_alignment_caches_live_k_even_without_a_signal():
+    print("\n[HTF alignment block: caches the live K for the dashboard even when signal is None]")
+    candles = _htf_candles(5, minutes=5, trend="down")
+    bot = make_bot(FakeExchange(), candles=candles, htf_alignment_block_available=True,
+                    htf_alignment_block_timeframe="5m", schema_has_regime_overrides=True)
+    blocked = bot._htf_alignment_blocks_entry(bot.state_row, None)
+    check("never blocks when there's no signal to evaluate", blocked is False)
+    check("live K still cached", bot._last_htf_k is not None, bot._last_htf_k)
+
+
+async def t_htf_alignment_wired_into_fresh_entry_gate():
+    print("\n[HTF alignment block: actually wired into the fresh-entry path, not just the method]")
+    # Stub the gate to force-block, on real entry-triggering candles -- isolates "is tick()
+    # wired to respect it" from "is the gate's own alignment math correct" (covered above).
+    ex = FakeExchange()
+    bot = make_bot(ex, candles_kind="long", htf_alignment_block_available=True,
+                    htf_alignment_block_timeframe="5m", schema_has_regime_overrides=True)
+    bot._htf_alignment_blocks_entry = lambda state, signal: True
+    await bot.tick()
+    check("no entry -- the gate said block and tick() respected it",
+          bot.state_row["side"] is None, bot.state_row["side"])
+
+
 def _native_sl_state(entry, usd=10.0, side="long"):
     return {
         "id": 1, "side": side, "legs": [{"price": entry, "usd_size": usd}],
@@ -8629,6 +8785,18 @@ async def main():
               t_wiggle_vol_rise_exit_inert_without_a_captured_baseline,
               t_wiggle_vol_rise_exit_inert_when_baseline_is_exactly_zero,
               t_wiggle_vol_rise_exit_baseline_captured_at_real_entry_and_reset_on_close,
+              t_aggregate_candles_calendar_aligned_bins,
+              t_compute_stoch_k_matches_hand_calc,
+              t_compute_stoch_k_none_without_enough_history,
+              t_htf_alignment_blocks_a_fresh_entry_when_aligned,
+              t_htf_alignment_allows_entry_when_not_aligned,
+              t_htf_alignment_short_signal_mirrors_long,
+              t_htf_alignment_off_by_default,
+              t_htf_alignment_inert_without_a_timeframe_selected,
+              t_htf_alignment_live_override_selects_timeframe,
+              t_htf_alignment_fails_closed_on_missing_history,
+              t_htf_alignment_caches_live_k_even_without_a_signal,
+              t_htf_alignment_wired_into_fresh_entry_gate,
               t_native_sync_backoff_does_not_retry_within_the_window,
               t_native_sync_backoff_retries_once_the_window_elapses,
               t_native_sync_backoff_clears_on_success,

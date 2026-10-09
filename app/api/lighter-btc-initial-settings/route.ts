@@ -152,6 +152,17 @@ export async function POST(req: NextRequest) {
     out["override_escalated_sl_enabled"] = body.escalatedSlEnabled;
   }
 
+  // Higher-timeframe stochastic alignment block (2026-10-09, direct request after a real-data
+  // study on 449 real trades) -- "off" writes null, same convention as releaseMode above. See
+  // BotConfig.htf_alignment_block_timeframe's docstring.
+  if (body.htfBlockTimeframe !== undefined) {
+    const tf = body.htfBlockTimeframe;
+    if (tf !== "off" && tf !== "5m" && tf !== "10m" && tf !== "1h") {
+      return NextResponse.json({ error: `htfBlockTimeframe must be off/5m/10m/1h (got "${tf}").` }, { status: 400 });
+    }
+    out["override_htf_alignment_block_timeframe"] = tf === "off" ? null : tf;
+  }
+
   if (Object.keys(out).length === 0) {
     return NextResponse.json({ error: "Nothing to change." }, { status: 400 });
   }
