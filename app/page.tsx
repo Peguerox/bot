@@ -3012,6 +3012,8 @@ function CompactStochBtcPanel({
             ["Stochastic signal", stochasticOn ? "ON" : "off"],
             ["Zebra gate", zebraOn ? "ON" : "off"],
             ["Flip regime", flipOn ? "ON" : "off"],
+            ["Trail Dwell", curDwell > 0 ? `ON (${curDwell}s)` : "off"],
+            ["SL Dwell", curSlDwell > 0 ? `ON (${curSlDwell}s)` : "off"],
             ["Self-lock / hour ban", "off (compiled, not live-controllable)"],
           ].map(([label, val]) => (
             <div key={label} className="flex items-center justify-between text-[10px]">
@@ -4133,8 +4135,8 @@ function HedgeDualLegPanel({
               ["Volume jump guard", curJumpGuardEnabled ? `ON (release: ${curReleaseMode})` : "off"],
               ["Volume/wiggle lock", curWiggleLockEnabled ? `ON (< ${curWiggleLockThreshold ?? "—"})` : "off"],
               ["Volume-rate guard", curRateGuardEnabled ? `ON (> ${curRateGuardThreshold ?? "—"}%)` : "off"],
-              ["Trail Dwell", `${curDwell}s`],
-              ["SL Dwell", `${curSlDwell}s`],
+              ["Trail Dwell", curDwell > 0 ? `ON (${curDwell}s)` : "off"],
+              ["SL Dwell", curSlDwell > 0 ? `ON (${curSlDwell}s)` : "off"],
               ["Entry filter: ATR", longState?.override_hedge_entry_filters?.atrEnabled ? "ON" : "off"],
               ["Entry filter: BandWidth", longState?.override_hedge_entry_filters?.bandwidthEnabled ? "ON" : "off"],
               ["Entry filter: Stochastic", longState?.override_hedge_entry_filters?.stochasticEnabled ? "ON" : "off"],
