@@ -21,7 +21,11 @@ const LIMITS = {
   trigger: { min: 0.01, max: 1.0, label: "profit-lock trigger" },
   trail: { min: 0.005, max: 0.5, label: "profit-lock trail" },
   tp: { min: 0.01, max: 1.0, label: "take-profit" },
-  dwell: { min: 0, max: 300, label: "dwell (seconds)" },
+  // Trail dwell -- gates ONLY the profit-lock trail's pullback, never the SL. Renamed from the
+  // plain "dwell" (2026-10-09, direct correction after real confusion with the SL dwell below:
+  // "I was setting up the second leg dwell as the trailing dwell... that is a setup for losing
+  // a lot of money") -- the label now says what it actually does.
+  dwell: { min: 0, max: 300, label: "trail dwell (seconds)" },
   jumpRatio: { min: 1.1, max: 20, label: "volume-jump ratio" },
   jumpPause: { min: 0, max: 1800, label: "volume-jump pause (seconds)" },
   wiggleLock: { min: 0.01, max: 50, label: "volume/wiggle lock threshold" },
@@ -30,13 +34,12 @@ const LIMITS = {
   rateGuard: { min: 1, max: 200, label: "volume-rate guard threshold" },
   // 2026-10-08, direct request after a real-tick test: "we use the dwelling... give time for
   // the trend to develop" -- same mechanism and bounds as Worker 1's own SL dwell
-  // (StochBot.sl_dwell_seconds / _sl_dwell_ready), newly wired up for the hedge.
-  slDwell: { min: 0, max: 300, label: "SL dwell 1st leg (seconds)" },
-  // Split same day, direct follow-up: "dwelling for first leg and dwelling for second leg
-  // split... maybe I want to put dwelling for the one leg and then not dwelling for the other
-  // one" -- independent from slDwell above. Applies only to a leg's own SL AFTER its partner
-  // has already closed for the cycle (StochBot.survivor_sl_dwell_seconds / _partner_is_flat).
-  survivorSlDwell: { min: 0, max: 300, label: "SL dwell 2nd leg (seconds)" },
+  // (StochBot.sl_dwell_seconds / _sl_dwell_ready). A split "survivor" (2nd-leg) SL dwell was
+  // built and removed the same day (2026-10-09, direct correction): by the time a survivor's
+  // price has round-tripped from a favorable move back through breakeven to its own SL,
+  // waiting only risks giving back more -- there's no real move it could be protecting. This
+  // is the only SL dwell now, for every phase.
+  slDwell: { min: 0, max: 300, label: "SL dwell (seconds)" },
 };
 
 export async function POST(req: NextRequest) {
@@ -69,7 +72,6 @@ export async function POST(req: NextRequest) {
     ["wiggleLock", "override_volume_wiggle_lock_threshold"],
     ["rateGuard", "override_volume_rate_guard_threshold"],
     ["slDwell", "override_sl_dwell_seconds"],
-    ["survivorSlDwell", "override_survivor_sl_dwell_seconds"],
   ] as const) {
     const raw = body[key];
     if (raw === undefined || raw === null || raw === "") continue;

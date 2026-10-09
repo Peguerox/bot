@@ -1995,12 +1995,12 @@ function CompactStochBtcPanel({
     if (Object.keys(payload).length === 0) return;
     if (!confirm(
       `Apply to ${title}?\n\n`
-      + `SL      ${payload.sl ?? "(unchanged)"}%\n`
-      + `Trigger ${payload.trigger ?? "(unchanged)"}%\n`
-      + `Trail   ${payload.trail ?? "(unchanged)"}%\n`
-      + `TP      ${payload.tp ?? "(unchanged)"}%\n`
-      + `Dwell   ${payload.dwell ?? "(unchanged)"}s\n`
-      + `SL Dwell ${payload.slDwell ?? "(unchanged)"}s\n\n`
+      + `SL          ${payload.sl ?? "(unchanged)"}%\n`
+      + `Trigger     ${payload.trigger ?? "(unchanged)"}%\n`
+      + `Trail       ${payload.trail ?? "(unchanged)"}%\n`
+      + `TP          ${payload.tp ?? "(unchanged)"}%\n`
+      + `Trail Dwell ${payload.dwell ?? "(unchanged)"}s\n`
+      + `SL Dwell    ${payload.slDwell ?? "(unchanged)"}s\n\n`
       + `Takes effect immediately, including on an open position.`
     )) return;
     setSavingSettings(true);
@@ -2958,7 +2958,7 @@ function CompactStochBtcPanel({
                ["Trigger", trigIn, setTrigIn, curTrig, "%"],
                ["Trail", trailIn, setTrailIn, curTrail, "%"],
                ["TP", tpIn, setTpIn, curTp, "%"],
-               ["Dwell", dwellIn, setDwellIn, curDwell, "s"],
+               ["Trail Dwell", dwellIn, setDwellIn, curDwell, "s"],
                ["SL Dwell", slDwellIn, setSlDwellIn, curSlDwell, "s"]] as const).map(([label, val, set, cur, unit]) => (
               <div key={label}>
                 <p className="text-gray-500 text-[9px] uppercase">{label}</p>
@@ -3315,18 +3315,18 @@ function HedgeDualLegPanel({
   const curTp = longState?.override_tp_pct ?? null;
   const curExitMode: string = longState?.override_exit_mode ?? "trail";
   // Dwell -- see Worker 1's panel for the full reasoning.
+  // Trail dwell -- gates ONLY the profit-lock trail's pullback, never the SL. Renamed from the
+  // plain "Dwell" (2026-10-09, direct correction after real confusion with the SL dwell below:
+  // "I was setting up the second leg dwell as the trailing dwell... that is a setup for losing
+  // a lot of money" -- dwelling on an already-reversing SURVIVOR's own SL has no protective
+  // upside, unlike dwelling on a real winner's pullback here).
   const curDwell: number = longState?.override_dwell_seconds ?? 0;
   const [dwellIn, setDwellIn] = useState("");
-  // SL dwell -- newly wired up 2026-10-08, same mechanism as Worker 1's own panel. Split into
-  // two independent settings same day (direct request: "dwelling for first leg and dwelling
-  // for second leg split... maybe I want to put dwelling for the one leg and then not
-  // dwelling for the other one"). 1st leg = applies before either leg of the cycle has been
-  // cut. 2nd leg (survivor) = applies only to this leg's own SL AFTER its partner has already
-  // closed -- independently tunable, can be on while the 1st-leg one is off or vice versa.
+  // SL dwell -- same mechanism as Worker 1's own panel. A split "survivor" (2nd-leg) SL dwell
+  // was built and removed the same day (2026-10-09) for the reason above -- this is the only
+  // SL dwell now, for every phase of the cycle.
   const curSlDwell: number = longState?.override_sl_dwell_seconds ?? 0;
   const [slDwellIn, setSlDwellIn] = useState("");
-  const curSurvivorSlDwell: number = longState?.override_survivor_sl_dwell_seconds ?? 0;
-  const [survivorSlDwellIn, setSurvivorSlDwellIn] = useState("");
 
   async function handleSetExitMode(mode: "trail" | "tp" | "floor" | "no_sl") {
     if (mode === curExitMode) return;
@@ -3360,18 +3360,16 @@ function HedgeDualLegPanel({
     if (tpIn.trim()) payload.tp = tpIn.trim();
     if (dwellIn.trim()) payload.dwell = dwellIn.trim();
     if (slDwellIn.trim()) payload.slDwell = slDwellIn.trim();
-    if (survivorSlDwellIn.trim()) payload.survivorSlDwell = survivorSlDwellIn.trim();
     if (Object.keys(payload).length === 0) return;
     // The route writes BOTH legs together -- unequal exits would break the breakeven floor.
     if (!confirm(
       `Apply to BOTH legs?\n\n`
-      + `SL      ${payload.sl ?? "(unchanged)"}%\n`
-      + `Trigger ${payload.trigger ?? "(unchanged)"}%\n`
-      + `Trail   ${payload.trail ?? "(unchanged)"}%\n`
-      + `TP      ${payload.tp ?? "(unchanged)"}%\n`
-      + `Dwell   ${payload.dwell ?? "(unchanged)"}s\n`
-      + `SL Dwell 1st Leg ${payload.slDwell ?? "(unchanged)"}s\n`
-      + `SL Dwell 2nd Leg ${payload.survivorSlDwell ?? "(unchanged)"}s\n\n`
+      + `SL          ${payload.sl ?? "(unchanged)"}%\n`
+      + `Trigger     ${payload.trigger ?? "(unchanged)"}%\n`
+      + `Trail       ${payload.trail ?? "(unchanged)"}%\n`
+      + `TP          ${payload.tp ?? "(unchanged)"}%\n`
+      + `Trail Dwell ${payload.dwell ?? "(unchanged)"}s\n`
+      + `SL Dwell    ${payload.slDwell ?? "(unchanged)"}s\n\n`
       + `Takes effect immediately, including on an open position.`
     )) return;
     setSavingSettings(true);
@@ -3384,7 +3382,7 @@ function HedgeDualLegPanel({
       alert(b.error || "Could not apply settings.");
     } else {
       setSlIn(""); setTrigIn(""); setTrailIn(""); setTpIn(""); setDwellIn("");
-      setSlDwellIn(""); setSurvivorSlDwellIn("");
+      setSlDwellIn("");
     }
     await onToggled();
     setSavingSettings(false);
@@ -4084,9 +4082,8 @@ function HedgeDualLegPanel({
                  ["Trigger", trigIn, setTrigIn, curTrig, "%"],
                  ["Trail", trailIn, setTrailIn, curTrail, "%"],
                  ["TP", tpIn, setTpIn, curTp, "%"],
-                 ["Dwell", dwellIn, setDwellIn, curDwell, "s"],
-                 ["SL Dwell 1st Leg", slDwellIn, setSlDwellIn, curSlDwell, "s"],
-                 ["SL Dwell 2nd Leg", survivorSlDwellIn, setSurvivorSlDwellIn, curSurvivorSlDwell, "s"]] as const).map(([label, val, set, cur, unit]) => (
+                 ["Trail Dwell", dwellIn, setDwellIn, curDwell, "s"],
+                 ["SL Dwell", slDwellIn, setSlDwellIn, curSlDwell, "s"]] as const).map(([label, val, set, cur, unit]) => (
                 <div key={label}>
                   <p className="text-gray-500 text-[9px] uppercase">{label}</p>
                   <p className="text-gray-600 text-[9px]">now {cur != null ? cur + unit : "—"}</p>
@@ -4101,16 +4098,17 @@ function HedgeDualLegPanel({
               ))}
             </div>
             <p className="text-gray-600 text-[9px] leading-snug">
-              SL Dwell 1st Leg: applies BEFORE either leg of a cycle has been cut -- the SL above
-              must stay continuously past its level for this many seconds before closing. SL
-              Dwell 2nd Leg: a SEPARATE dwell that takes over for a leg's own SL only AFTER its
-              partner has already closed -- set one without the other, both, or neither. Backed
-              by a real-tick check on 61 real hedge SL closes: 44% would not have closed yet at
-              10s. Never wired up before 2026-10-08.
+              Trail Dwell protects a WINNER -- the trail's pullback must hold this many seconds
+              before closing, so a brief wiggle doesn't cut a real move short. SL Dwell protects
+              against closing a LOSER too early on noise -- same contract, but for the plain SL,
+              every phase of the cycle (a separate "2nd leg" survivor-only SL dwell was tried and
+              removed 2026-10-09: by the time a survivor round-trips from a favorable move back
+              through breakeven to its own SL, waiting only risks losing more, there's no real
+              move left to protect).
             </p>
             <button
               onClick={handleApplySettings}
-              disabled={savingSettings || loading || (!slIn.trim() && !trigIn.trim() && !trailIn.trim() && !tpIn.trim() && !dwellIn.trim() && !slDwellIn.trim() && !survivorSlDwellIn.trim())}
+              disabled={savingSettings || loading || (!slIn.trim() && !trigIn.trim() && !trailIn.trim() && !tpIn.trim() && !dwellIn.trim() && !slDwellIn.trim())}
               className="w-full text-xs font-bold px-2.5 py-1 rounded bg-blue-500/20 text-blue-400 hover:bg-blue-500/30 disabled:opacity-30"
             >
               {savingSettings ? "Applying…" : "Apply to both legs"}
@@ -4135,7 +4133,8 @@ function HedgeDualLegPanel({
               ["Volume jump guard", curJumpGuardEnabled ? `ON (release: ${curReleaseMode})` : "off"],
               ["Volume/wiggle lock", curWiggleLockEnabled ? `ON (< ${curWiggleLockThreshold ?? "—"})` : "off"],
               ["Volume-rate guard", curRateGuardEnabled ? `ON (> ${curRateGuardThreshold ?? "—"}%)` : "off"],
-              ["SL Dwell 1st/2nd leg", `${curSlDwell}s / ${curSurvivorSlDwell}s`],
+              ["Trail Dwell", `${curDwell}s`],
+              ["SL Dwell", `${curSlDwell}s`],
               ["Entry filter: ATR", longState?.override_hedge_entry_filters?.atrEnabled ? "ON" : "off"],
               ["Entry filter: BandWidth", longState?.override_hedge_entry_filters?.bandwidthEnabled ? "ON" : "off"],
               ["Entry filter: Stochastic", longState?.override_hedge_entry_filters?.stochasticEnabled ? "ON" : "off"],
@@ -4368,7 +4367,8 @@ const EMPTY_RULE = {
              // too") -- null = leave whatever's currently live alone, true/false = set it. Not
              // in BOT_NUMERIC_FIELDS since it's a boolean, not a percentage/count.
              escalated_sl_enabled: null },
-  hedge: { sl_pct: null, trigger_pct: null, trail_pct: null, tp_pct: null, dwell_seconds: null },
+  hedge: { sl_pct: null, trigger_pct: null, trail_pct: null, tp_pct: null, dwell_seconds: null,
+           sl_dwell_seconds: null },
 };
 
 function numOrNull(v: string | number | null | undefined): number | null {
@@ -4420,7 +4420,7 @@ function normalizeRuleForSave(rule: any): any {
   for (const bot of ["worker1", "hedge"] as const) {
     const botOut: any = {};
     for (const key of BOT_NUMERIC_FIELDS) {
-      if (bot === "hedge" && !["sl_pct", "trigger_pct", "trail_pct", "tp_pct", "dwell_seconds"].includes(key)) continue;
+      if (bot === "hedge" && !["sl_pct", "trigger_pct", "trail_pct", "tp_pct", "dwell_seconds", "sl_dwell_seconds"].includes(key)) continue;
       botOut[key] = numOrNull(rule[bot]?.[key]);
     }
     if (bot === "worker1") {
@@ -4479,12 +4479,13 @@ function ruleConditionsMatch(rule: any, hour: number, metrics: Record<string, nu
 
 const WORKER1_SETTINGS_LABELS: [string, string][] = [
   ["SL", "sl_pct"], ["Trig", "trigger_pct"], ["Trail", "trail_pct"], ["TP", "tp_pct"],
-  ["Dwell", "dwell_seconds"], ["SLDwell", "sl_dwell_seconds"], ["BandLo", "band_lo"], ["BandHi", "band_hi"],
+  ["TrailDwell", "dwell_seconds"], ["SLDwell", "sl_dwell_seconds"], ["BandLo", "band_lo"], ["BandHi", "band_hi"],
   ["RevLo", "reversal_lo"], ["RevHi", "reversal_hi"], ["Window", "window"],
   ["EscSL", "escalated_sl_enabled"],
 ];
 const HEDGE_SETTINGS_LABELS: [string, string][] = [
-  ["SL", "sl_pct"], ["Trig", "trigger_pct"], ["Trail", "trail_pct"], ["TP", "tp_pct"], ["Dwell", "dwell_seconds"],
+  ["SL", "sl_pct"], ["Trig", "trigger_pct"], ["Trail", "trail_pct"], ["TP", "tp_pct"],
+  ["TrailDwell", "dwell_seconds"], ["SLDwell", "sl_dwell_seconds"],
 ];
 
 function formatSettingsLine(settings: any, labels: [string, string][]): string {
@@ -5113,7 +5114,7 @@ function MasterSchedulePanel({
                     {settingsField("Trig", i, "worker1", "trigger_pct", rule)}
                     {settingsField("Trail", i, "worker1", "trail_pct", rule)}
                     {settingsField("TP", i, "worker1", "tp_pct", rule)}
-                    {settingsField("Dwell", i, "worker1", "dwell_seconds", rule)}
+                    {settingsField("Trail Dwell", i, "worker1", "dwell_seconds", rule)}
                     {settingsField("SL Dwell", i, "worker1", "sl_dwell_seconds", rule)}
                   </div>
                   <div className="flex gap-1.5 flex-wrap mt-1.5">
@@ -5164,7 +5165,8 @@ function MasterSchedulePanel({
                     {settingsField("Trig", i, "hedge", "trigger_pct", rule)}
                     {settingsField("Trail", i, "hedge", "trail_pct", rule)}
                     {settingsField("TP", i, "hedge", "tp_pct", rule)}
-                    {settingsField("Dwell", i, "hedge", "dwell_seconds", rule)}
+                    {settingsField("Trail Dwell", i, "hedge", "dwell_seconds", rule)}
+                    {settingsField("SL Dwell", i, "hedge", "sl_dwell_seconds", rule)}
                   </div>
                 </div>
               </div>
