@@ -3003,6 +3003,7 @@ function CompactStochBtcPanel({
           <p className="text-gray-400 text-[10px] uppercase font-bold">Status overview -- everything on/off</p>
           {[
             ["Exit mode", curExitMode],
+            ["Require fresh signal", "ON (compiled, not live-controllable)"],
             ["Escalated SL", escalatedSlOn ? "ON" : "off"],
             ["Volume jump guard", curJumpGuardEnabled ? `ON (release: ${curReleaseMode})` : "off"],
             ["Volume/wiggle lock", curWiggleLockEnabled ? `ON (< ${curWiggleLockThreshold ?? "—"})` : "off"],
@@ -4130,6 +4131,7 @@ function HedgeDualLegPanel({
             <p className="text-gray-400 text-[10px] uppercase font-bold">Status overview -- everything on/off</p>
             {[
               ["Exit mode", curExitMode],
+              ["Require fresh signal", "off (compiled, not live-controllable)"],
               ["Volume jump guard", curJumpGuardEnabled ? `ON (release: ${curReleaseMode})` : "off"],
               ["Volume/wiggle lock", curWiggleLockEnabled ? `ON (< ${curWiggleLockThreshold ?? "—"})` : "off"],
               ["Volume-rate guard", curRateGuardEnabled ? `ON (> ${curRateGuardThreshold ?? "—"}%)` : "off"],
