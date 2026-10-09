@@ -34,6 +34,11 @@ const LIMITS = {
   // StochBot/BotConfig.sl_dwell_seconds's docstring. Never applies to the escalated SL tiers.
   slDwell: { min: 0, max: 300, label: "SL dwell (seconds)" },
   wiggleLock: { min: 0.01, max: 50, label: "volume/wiggle lock threshold" },
+  // 2026-10-09, direct request after a real-trade audit: "the moment your wiggle volume goes
+  // up by 10%" -- a SEPARATE mechanism from wiggleLock above (that gates ENTRY on the ratio's
+  // absolute level; this gates EXIT on the ratio's own RISE relative to the position's own
+  // entry reading). See BotConfig.wiggle_vol_rise_exit_pct.
+  wiggleVolRiseExit: { min: 0.1, max: 200, label: "wiggle/vol rise exit (%)" },
   // 2026-10-08, direct request after backtesting it against real trades: "if 20% we dont take
   // the trade and wait for the next signal." Percentage, not a ratio -- see
   // StochBot.compute_volume_rate_pct_max / BotConfig.volume_rate_guard_threshold.
@@ -62,6 +67,7 @@ export async function POST(req: NextRequest) {
     ["dwell", "override_dwell_seconds"],
     ["slDwell", "override_sl_dwell_seconds"],
     ["wiggleLock", "override_volume_wiggle_lock_threshold"],
+    ["wiggleVolRiseExit", "override_wiggle_vol_rise_exit_pct"],
     ["rateGuard", "override_volume_rate_guard_threshold"],
     ["stochWindow", "override_stoch_window"],
   ] as const) {
@@ -91,6 +97,7 @@ export async function POST(req: NextRequest) {
     ["zebra", "override_zebra_enabled"],
     ["flip", "override_flip_enabled"],
     ["wiggleLockEnabled", "override_volume_wiggle_lock_enabled"],
+    ["wiggleVolRiseExitEnabled", "override_wiggle_vol_rise_exit_enabled"],
     ["rateGuardEnabled", "override_volume_rate_guard_enabled"],
     ["jumpGuardEnabled", "override_volume_jump_enabled"],
   ] as const) {

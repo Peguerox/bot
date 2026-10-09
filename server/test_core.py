@@ -8022,6 +8022,184 @@ async def t_escalated_sl_native_stop_reflects_tier3_not_old_sl_pct():
           abs(actual_trigger - expected_trigger) < 10.0, (actual_trigger, expected_trigger))
 
 
+def _wiggle_vol_candles(vol, shift=20.0, n=15, base=86000.0):
+    """n candles, volume `vol` constant, closes alternating base/base+shift for real non-zero
+    midpoint dispersion -- _vol_candles' symmetric h/l around a fixed base always has ZERO
+    midpoint variance regardless of range width, so it can't produce a non-zero wiggle/vol
+    reading. Enough candles (n>=11) for both the 10-window volume average and 5-window wiggle."""
+    t0 = 1700000000000
+    out = []
+    for i in range(n):
+        c = base if i % 2 == 0 else base + shift
+        out.append({"t": t0 + i * 60000, "o": c, "h": c + 1, "l": c - 1, "c": c, "v": vol})
+    return out
+
+
+async def t_wiggle_vol_rise_exit_fires_on_a_real_rise():
+    print("\n[wiggle/vol rise exit: a real rise past the threshold closes the position]")
+    print("  direct request after a real-trade audit: all 5 real SL losses in a 16-trade")
+    print("  window showed wig/vol rising from entry to close; 9/11 wins showed it falling.")
+    entry = 86000.0
+    before = _wiggle_vol_candles(vol=5.0, shift=5.0)
+    after = _wiggle_vol_candles(vol=5.0, shift=40.0)
+    ratio_before = core.compute_volume_wiggle_ratio(before)
+    ratio_after = core.compute_volume_wiggle_ratio(after)
+    actual_rise_pct = (ratio_after - ratio_before) / ratio_before * 100
+    ex = FakeExchange(position=round(10.0 / entry, 5), collateral=10.0)
+    state = _escalated_state(entry, age_s=60)
+    bot = make_bot(ex, state=state, candles=after, sl_pct=0.5, tp_pct=0.5,
+                    entry_lo=-1000, entry_hi=1000, reversal_lo=-1000, reversal_hi=1000,
+                    wiggle_vol_rise_exit_pct=actual_rise_pct - 5, schema_has_exit_overrides=True,
+                    schema_has_regime_overrides=True)
+    bot._entry_wiggle_vol_ratio = ratio_before
+    bot.live.order_book = {"bids": [{"price": str(entry)}], "asks": [{"price": str(entry + 1)}]}
+    await bot.tick()
+    check("closed via WIGGLE_VOL_RISE", bot.state_row["side"] is None, bot.state_row["side"])
+    check("reason is WIGGLE_VOL_RISE",
+          any(a == "closed" and d.get("reason") == "WIGGLE_VOL_RISE" for a, d in bot.runs),
+          [(a, d.get("reason")) for a, d in bot.runs if a == "closed"])
+
+
+async def t_wiggle_vol_rise_exit_stays_open_below_threshold():
+    print("\n[wiggle/vol rise exit: a rise SMALLER than the threshold does not close]")
+    entry = 86000.0
+    before = _wiggle_vol_candles(vol=5.0, shift=5.0)
+    after = _wiggle_vol_candles(vol=5.0, shift=40.0)
+    ratio_before = core.compute_volume_wiggle_ratio(before)
+    ratio_after = core.compute_volume_wiggle_ratio(after)
+    actual_rise_pct = (ratio_after - ratio_before) / ratio_before * 100
+    ex = FakeExchange(position=round(10.0 / entry, 5), collateral=10.0)
+    state = _escalated_state(entry, age_s=60)
+    bot = make_bot(ex, state=state, candles=after, sl_pct=0.5, tp_pct=0.5,
+                    entry_lo=-1000, entry_hi=1000, reversal_lo=-1000, reversal_hi=1000,
+                    wiggle_vol_rise_exit_pct=actual_rise_pct + 5, schema_has_exit_overrides=True,
+                    schema_has_regime_overrides=True)
+    bot._entry_wiggle_vol_ratio = ratio_before
+    bot.live.order_book = {"bids": [{"price": str(entry)}], "asks": [{"price": str(entry + 1)}]}
+    await bot.tick()
+    check("still open -- the real rise is below the configured threshold",
+          bot.state_row["side"] == "long", bot.state_row["side"])
+
+
+async def t_wiggle_vol_rise_exit_off_by_default():
+    print("\n[wiggle/vol rise exit: off (None, default) -- even a huge rise never closes via this]")
+    entry = 86000.0
+    before = _wiggle_vol_candles(vol=5.0, shift=5.0)
+    after = _wiggle_vol_candles(vol=5.0, shift=40.0)
+    ratio_before = core.compute_volume_wiggle_ratio(before)
+    ex = FakeExchange(position=round(10.0 / entry, 5), collateral=10.0)
+    state = _escalated_state(entry, age_s=60)
+    bot = make_bot(ex, state=state, candles=after, sl_pct=0.5, tp_pct=0.5,
+                    entry_lo=-1000, entry_hi=1000, reversal_lo=-1000, reversal_hi=1000,
+                    schema_has_exit_overrides=True, schema_has_regime_overrides=True)
+    bot._entry_wiggle_vol_ratio = ratio_before
+    bot.live.order_book = {"bids": [{"price": str(entry)}], "asks": [{"price": str(entry + 1)}]}
+    await bot.tick()
+    check("still open -- feature not configured", bot.state_row["side"] == "long", bot.state_row["side"])
+
+
+async def t_wiggle_vol_rise_exit_live_override_enables_it():
+    print("\n[wiggle/vol rise exit: override_wiggle_vol_rise_exit_pct turns it on live]")
+    entry = 86000.0
+    before = _wiggle_vol_candles(vol=5.0, shift=5.0)
+    after = _wiggle_vol_candles(vol=5.0, shift=40.0)
+    ratio_before = core.compute_volume_wiggle_ratio(before)
+    ratio_after = core.compute_volume_wiggle_ratio(after)
+    actual_rise_pct = (ratio_after - ratio_before) / ratio_before * 100
+    ex = FakeExchange(position=round(10.0 / entry, 5), collateral=10.0)
+    state = _escalated_state(entry, age_s=60)
+    state["override_wiggle_vol_rise_exit_pct"] = actual_rise_pct - 5
+    bot = make_bot(ex, state=state, candles=after, sl_pct=0.5, tp_pct=0.5,
+                    entry_lo=-1000, entry_hi=1000, reversal_lo=-1000, reversal_hi=1000,
+                    schema_has_exit_overrides=True, schema_has_regime_overrides=True)
+    bot._entry_wiggle_vol_ratio = ratio_before
+    bot.live.order_book = {"bids": [{"price": str(entry)}], "asks": [{"price": str(entry + 1)}]}
+    await bot.tick()
+    check("closed via WIGGLE_VOL_RISE -- compiled off, live override turned it on",
+          bot.state_row["side"] is None, bot.state_row["side"])
+
+
+async def t_wiggle_vol_rise_exit_enabled_switch_turns_it_off():
+    print("\n[wiggle/vol rise exit: override_wiggle_vol_rise_exit_enabled=False wins even with a % configured]")
+    entry = 86000.0
+    before = _wiggle_vol_candles(vol=5.0, shift=5.0)
+    after = _wiggle_vol_candles(vol=5.0, shift=40.0)
+    ratio_before = core.compute_volume_wiggle_ratio(before)
+    ratio_after = core.compute_volume_wiggle_ratio(after)
+    actual_rise_pct = (ratio_after - ratio_before) / ratio_before * 100
+    ex = FakeExchange(position=round(10.0 / entry, 5), collateral=10.0)
+    state = _escalated_state(entry, age_s=60)
+    state["override_wiggle_vol_rise_exit_enabled"] = False
+    bot = make_bot(ex, state=state, candles=after, sl_pct=0.5, tp_pct=0.5,
+                    entry_lo=-1000, entry_hi=1000, reversal_lo=-1000, reversal_hi=1000,
+                    wiggle_vol_rise_exit_pct=actual_rise_pct - 5, schema_has_exit_overrides=True,
+                    schema_has_regime_overrides=True)
+    bot._entry_wiggle_vol_ratio = ratio_before
+    bot.live.order_book = {"bids": [{"price": str(entry)}], "asks": [{"price": str(entry + 1)}]}
+    await bot.tick()
+    check("still open -- the enabled switch wins, percentage stays configured but inert",
+          bot.state_row["side"] == "long", bot.state_row["side"])
+
+
+async def t_wiggle_vol_rise_exit_inert_without_a_captured_baseline():
+    print("\n[wiggle/vol rise exit: no baseline captured at entry -> never fires, no guessing]")
+    entry = 86000.0
+    after = _wiggle_vol_candles(vol=5.0, shift=40.0)
+    ex = FakeExchange(position=round(10.0 / entry, 5), collateral=10.0)
+    state = _escalated_state(entry, age_s=60)
+    bot = make_bot(ex, state=state, candles=after, sl_pct=0.5, tp_pct=0.5,
+                    entry_lo=-1000, entry_hi=1000, reversal_lo=-1000, reversal_hi=1000,
+                    wiggle_vol_rise_exit_pct=1.0, schema_has_exit_overrides=True,
+                    schema_has_regime_overrides=True)
+    check("baseline starts None (never captured -- this test skips entry)",
+          bot._entry_wiggle_vol_ratio is None)
+    bot.live.order_book = {"bids": [{"price": str(entry)}], "asks": [{"price": str(entry + 1)}]}
+    await bot.tick()
+    check("still open -- no baseline to compare against", bot.state_row["side"] == "long", bot.state_row["side"])
+
+
+async def t_wiggle_vol_rise_exit_inert_when_baseline_is_exactly_zero():
+    print("\n[wiggle/vol rise exit: a zero baseline is inert, not treated as an infinite rise]")
+    entry = 86000.0
+    after = _wiggle_vol_candles(vol=5.0, shift=40.0)
+    ex = FakeExchange(position=round(10.0 / entry, 5), collateral=10.0)
+    state = _escalated_state(entry, age_s=60)
+    bot = make_bot(ex, state=state, candles=after, sl_pct=0.5, tp_pct=0.5,
+                    entry_lo=-1000, entry_hi=1000, reversal_lo=-1000, reversal_hi=1000,
+                    wiggle_vol_rise_exit_pct=1.0, schema_has_exit_overrides=True,
+                    schema_has_regime_overrides=True)
+    bot._entry_wiggle_vol_ratio = 0.0
+    bot.live.order_book = {"bids": [{"price": str(entry)}], "asks": [{"price": str(entry + 1)}]}
+    await bot.tick()
+    check("still open -- zero baseline guarded against, not treated as any-positive-reading-is-a-rise",
+          bot.state_row["side"] == "long", bot.state_row["side"])
+
+
+async def t_wiggle_vol_rise_exit_baseline_captured_at_real_entry_and_reset_on_close():
+    print("\n[wiggle/vol rise exit: a REAL entry captures the baseline, a close resets it]")
+    candles = make_candles("long")
+    for bar in candles:
+        bar["v"] = 5.0
+    ex = FakeExchange()
+    bot = make_bot(ex, candles=candles, wiggle_vol_rise_exit_pct=10.0,
+                    schema_has_exit_overrides=True, schema_has_regime_overrides=True,
+                    sl_pct=0.11, tp_pct=0.10)
+    bot.live.order_book = {"bids": [{"price": "86000.0"}], "asks": [{"price": "86001.0"}]}
+    await bot.tick()
+    check("entered", bot.state_row["side"] == "long", bot.state_row["side"])
+    expected = core.compute_volume_wiggle_ratio(candles)
+    check("baseline captured from the real function, same candles",
+          bot._entry_wiggle_vol_ratio == expected, (bot._entry_wiggle_vol_ratio, expected))
+    # Force a plain internal SL close (not an external/manual one) to go flat again -- a single
+    # tick both closes AND resets the tracker; checked immediately, before the still-valid
+    # "long" signal on these unchanged candles can re-enter and recapture a new baseline.
+    bot.live.order_book = {"bids": [{"price": "85000.0"}], "asks": [{"price": "85001.0"}]}
+    await bot.tick()
+    check("closed via SL", bot.state_row["side"] is None, bot.state_row["side"])
+    check("baseline reset to None after close",
+          bot._entry_wiggle_vol_ratio is None, bot._entry_wiggle_vol_ratio)
+
+
 def _native_sl_state(entry, usd=10.0, side="long"):
     return {
         "id": 1, "side": side, "legs": [{"price": entry, "usd_size": usd}],
@@ -8524,6 +8702,14 @@ async def main():
               t_escalated_sl_replaces_the_plain_sl_entirely,
               t_escalated_sl_off_by_default_keeps_plain_sl_behavior,
               t_escalated_sl_native_stop_reflects_tier3_not_old_sl_pct,
+              t_wiggle_vol_rise_exit_fires_on_a_real_rise,
+              t_wiggle_vol_rise_exit_stays_open_below_threshold,
+              t_wiggle_vol_rise_exit_off_by_default,
+              t_wiggle_vol_rise_exit_live_override_enables_it,
+              t_wiggle_vol_rise_exit_enabled_switch_turns_it_off,
+              t_wiggle_vol_rise_exit_inert_without_a_captured_baseline,
+              t_wiggle_vol_rise_exit_inert_when_baseline_is_exactly_zero,
+              t_wiggle_vol_rise_exit_baseline_captured_at_real_entry_and_reset_on_close,
               t_native_sync_backoff_does_not_retry_within_the_window,
               t_native_sync_backoff_retries_once_the_window_elapses,
               t_native_sync_backoff_clears_on_success,

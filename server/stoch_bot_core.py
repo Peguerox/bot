@@ -368,6 +368,20 @@ class BotConfig:
     # so it reacts (both locking AND releasing) as fast as a fresh candle allows. None (default)
     # is off. See compute_volume_wiggle_ratio / _volume_wiggle_allows_cycle.
     volume_wiggle_lock_threshold: Optional[float] = None
+    # Wiggle/vol RISE exit (2026-10-09, direct request after a real-trade audit: "first you dont
+    # go in if your wiggle/volume is 3 then you come out the moment your wiggle volume goes up
+    # by 10%"). A SEPARATE mechanism from volume_wiggle_lock_threshold above -- that gates
+    # ENTRY on the ratio's absolute LEVEL; this gates EXIT on the ratio's own RISE relative to
+    # THIS position's own entry reading (self._entry_wiggle_vol_ratio, captured once at entry,
+    # reset at every position-close point same as every other per-cycle tracker). Checked on a
+    # 16-trade real window: all 5 real SL losses showed wig/vol rising from entry to close (17%
+    # to 369%); 9 of 11 real wins showed it falling. Mechanism: a rising wig/vol mid-position
+    # means price is swinging MORE per unit of volume than when this mean-reversion entry was
+    # taken -- a real directional move developing against it. None (default) is off. Instant,
+    # no dwell -- the % threshold itself is the filter, same "no pause timer" contract as the
+    # lock above. Inert if the entry-time reading was None (not enough candle history yet) or
+    # exactly 0 (a 0 baseline would make ANY positive reading look like an infinite rise).
+    wiggle_vol_rise_exit_pct: Optional[float] = None
     # Volume-rate guard (2026-10-08, direct request: "if 20% we dont take the trade and wait
     # for the next signal" -- backtested against real Worker 1 trades: blocking entries where
     # |volume_rate_pct| (volume's own % change vs the prior candle, max over the trailing
@@ -1970,6 +1984,9 @@ class StochBot:
         self._last_volume_jump_ratio = None  # see _update_volume_jump_guard, _entry_settings_snapshot
         self._last_volume_wiggle_ratio = None  # see _update_volume_wiggle_lock
         self._volume_wiggle_locked = False
+        # See BotConfig.wiggle_vol_rise_exit_pct. Captured once per position at entry, reset at
+        # every position-close point alongside every other per-cycle tracker.
+        self._entry_wiggle_vol_ratio = None
         self._last_volume_rate_pct = None  # see _update_volume_rate_guard
         self._volume_rate_guard_active = False
         # Schedule rules (2026-10-04, direct request: a master panel that applies different
@@ -3238,6 +3255,8 @@ class StochBot:
         # See BotConfig.survivor_sl_dwell_seconds. Same reset point, independent tracker.
         self._survivor_partner_closed = False
         self._survivor_partner_checked_at = 0.0
+        # See BotConfig.wiggle_vol_rise_exit_pct. Same reset point.
+        self._entry_wiggle_vol_ratio = None
 
     @staticmethod
     def breakeven_floor_pct(partner_cycle_pnl, own_notional_usd, fixed_floor_pct=None):
@@ -3515,6 +3534,26 @@ class StochBot:
         consult entry_signal' reasoning as _volume_jump_allows_cycle. self._volume_wiggle_locked
         is set earlier in the SAME tick."""
         return not self._volume_wiggle_locked
+
+    def _wiggle_vol_rise_exit_pct(self, state):
+        """See BotConfig.wiggle_vol_rise_exit_pct. A non-NULL override wins over the compiled
+        value, same contract as every override in this file; gated behind the same
+        schema_has_regime_overrides flag the paired entry lock already uses.
+        override_wiggle_vol_rise_exit_enabled is a SEPARATE boolean, same reason as the paired
+        entry lock's own enabled switch (override_volume_wiggle_lock_enabled) -- flipping it
+        off doesn't lose whatever percentage was dialed in. Defaults True whenever a percentage
+        is configured, matching every other paired threshold/enabled control in this file."""
+        cfg = self.cfg
+        pct = cfg.wiggle_vol_rise_exit_pct
+        enabled = True
+        if cfg.schema_has_regime_overrides:
+            o = state.get("override_wiggle_vol_rise_exit_pct")
+            if o is not None:
+                pct = float(o)
+            o = state.get("override_wiggle_vol_rise_exit_enabled")
+            if o is not None:
+                enabled = bool(o)
+        return pct if enabled else None
 
     def _update_volume_rate_guard(self, state):
         """Volume-rate guard (2026-10-08, direct request: "if 20% we dont take the trade and
@@ -4042,6 +4081,8 @@ class StochBot:
             "volume_rate_guard_threshold": volume_rate_guard_threshold,
             "volume_rate_pct_now": self._last_volume_rate_pct,
             "volume_now": volume_now, "er_2h": er_2h, "er_2h_direction": er_2h_direction,
+            "wiggle_vol_rise_exit_pct": self._wiggle_vol_rise_exit_pct(state),
+            "entry_wiggle_vol_ratio": self._entry_wiggle_vol_ratio,
             # Which schedule rule was governing at entry -- see schema_has_schedule_rule_tracking.
             # None when the feature/migration is off, or no rule was governing (manual control).
             "rule_id": state.get("active_governing_rule_id"),
@@ -4869,6 +4910,10 @@ class StochBot:
             except Exception:
                 pass  # best-effort only -- read back from state at close time regardless
         self._pending_cycle_id = None
+        # See BotConfig.wiggle_vol_rise_exit_pct. In-process only (no DB write needed -- same
+        # accepted convention as the dwell-timer trackers), computed unconditionally since it's
+        # cheap and this bot may not have schema_has_entry_features at all.
+        self._entry_wiggle_vol_ratio = compute_volume_wiggle_ratio(self.candles)
         if cfg.schema_has_entry_features:
             # Isolated write -- see BotConfig.schema_has_entry_features. Computed fresh here
             # (not read from self.live_k, which only the pressure-bias OWNER leg keeps current)
@@ -6741,6 +6786,18 @@ class StochBot:
                         or (cfg.color_balance_index_max is not None and cwi > cfg.color_balance_index_max))
                     if out_of_band:
                         gap_hit = "INDEX_EXIT"
+
+            if gap_hit is None:
+                # Wiggle/vol RISE exit -- see BotConfig.wiggle_vol_rise_exit_pct. Instant, no
+                # dwell; inert if never configured, no baseline was captured at entry (not
+                # enough candle history), or the baseline was exactly 0 (would make any
+                # positive reading look like an infinite rise).
+                rise_pct = self._wiggle_vol_rise_exit_pct(state)
+                baseline = self._entry_wiggle_vol_ratio
+                if rise_pct is not None and baseline is not None and baseline > 0:
+                    current_ratio = compute_volume_wiggle_ratio(self.candles)
+                    if current_ratio is not None and current_ratio >= baseline * (1 + rise_pct / 100):
+                        gap_hit = "WIGGLE_VOL_RISE"
 
             if gap_hit is None and trail_enabled and ae:
                 # Restore from the DB once per boot if a prior run persisted a peak (only

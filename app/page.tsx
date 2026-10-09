@@ -1865,6 +1865,48 @@ function CompactStochBtcPanel({
     setSavingSignal(null);
   }
 
+  // Wiggle/vol RISE exit (2026-10-09, direct request after a real-trade audit: "the moment
+  // your wiggle volume goes up by 10%"). A SEPARATE mechanism from the entry lock above --
+  // this watches the ratio's own RISE relative to the position's own entry reading, not an
+  // absolute level, and only ever closes, never blocks an entry. See
+  // BotConfig.wiggle_vol_rise_exit_pct.
+  const curWiggleVolRisePct: number | null = state?.override_wiggle_vol_rise_exit_pct ?? null;
+  const curWiggleVolRiseEnabled: boolean = state?.override_wiggle_vol_rise_exit_enabled ?? true;
+  const [wiggleVolRisePctIn, setWiggleVolRisePctIn] = useState("");
+
+  async function handleSetWiggleVolRisePct() {
+    if (!wiggleVolRisePctIn.trim()) return;
+    if (!confirm(`Set the wiggle/vol RISE exit to ${wiggleVolRisePctIn.trim()}% for ${title}? Closes a position the moment its own wig/vol ratio rises this much from entry. Takes effect immediately, including on an open position.`)) return;
+    setSavingSignal("wiggleVolRiseExit");
+    const res = await fetch("/api/lighter-btc-initial-settings", {
+      method: "POST", headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ wiggleVolRiseExit: wiggleVolRisePctIn.trim() }),
+    });
+    if (!res.ok) {
+      const b = await res.json().catch(() => ({}));
+      alert(b.error || "Could not apply the change.");
+    } else {
+      setWiggleVolRisePctIn("");
+    }
+    await onToggled();
+    setSavingSignal(null);
+  }
+
+  async function handleToggleWiggleVolRise(next: boolean) {
+    if (!confirm(`Turn the wiggle/vol RISE exit ${next ? "ON" : "OFF"} for ${title}? Takes effect immediately.`)) return;
+    setSavingSignal("wiggleVolRiseExitEnabled");
+    const res = await fetch("/api/lighter-btc-initial-settings", {
+      method: "POST", headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ wiggleVolRiseExitEnabled: next }),
+    });
+    if (!res.ok) {
+      const b = await res.json().catch(() => ({}));
+      alert(b.error || "Could not apply the change.");
+    }
+    await onToggled();
+    setSavingSignal(null);
+  }
+
   // Volume-rate guard (2026-10-08, direct request after backtesting it against real trades:
   // "if 20% we dont take the trade and wait for the next signal"). Same instant/no-pause-timer
   // contract as the wiggle lock above, but blocks on HIGH readings, not low -- see
@@ -2713,6 +2755,65 @@ function CompactStochBtcPanel({
       )}
       {showLevers && !loading && (
         <div className="bg-gray-800/60 rounded-lg p-2">
+          {/* 2026-10-09, direct request after a real-trade audit: "first you dont go in if your
+              wiggle/volume is 3 then you come out the moment your wiggle volume goes up by 10%".
+              Separate panel from the entry lock above -- this watches the ratio's own RISE
+              relative to THIS position's entry reading, exit-only, never blocks an entry. */}
+          <div className="flex items-baseline justify-between">
+            <p className="text-gray-500 text-[10px] uppercase">Wiggle/Vol rise exit</p>
+            <button
+              onClick={() => handleToggleWiggleVolRise(!curWiggleVolRiseEnabled)}
+              disabled={savingSignal !== null || loading}
+              className={`text-[10px] font-bold px-1.5 py-0.5 rounded disabled:opacity-30 ${
+                curWiggleVolRiseEnabled ? "bg-blue-500/20 text-blue-300" : "bg-gray-700/50 text-gray-500"
+              }`}
+            >
+              {savingSignal === "wiggleVolRiseExitEnabled" ? "…" : curWiggleVolRiseEnabled ? "ON" : "OFF"}
+            </button>
+          </div>
+          <p className="font-bold text-sm tabular-nums">
+            <span className={!curWiggleVolRiseEnabled || curWiggleVolRisePct == null ? "text-gray-500" : "text-blue-300"}>
+              {curWiggleVolRisePct != null ? `+${curWiggleVolRisePct}%` : "off"}
+            </span>
+            <span className="text-[10px] font-normal text-gray-500 ml-1.5">
+              {!curWiggleVolRiseEnabled ? "switch is off -- never fires"
+                : curWiggleVolRisePct == null ? "no percentage configured"
+                : "rise from entry's own reading closes the position"}
+            </span>
+          </p>
+          <p className="text-[11px] text-gray-500 mt-0.5 tabular-nums">
+            latest reading: <span className="text-gray-400">{liveWiggleRatio != null ? liveWiggleRatio.toFixed(2) : "—"}</span>
+          </p>
+          <div className="flex items-end gap-1.5 mt-1.5">
+            <div className="flex-1">
+              <p className="text-gray-500 text-[9px] uppercase">
+                Rise % <span className="text-gray-600">now {curWiggleVolRisePct ?? "off"}</span>
+              </p>
+              <input
+                value={wiggleVolRisePctIn}
+                onChange={(e) => setWiggleVolRisePctIn(e.target.value)}
+                placeholder={curWiggleVolRisePct != null ? String(curWiggleVolRisePct) : "e.g. 10"}
+                inputMode="decimal"
+                className="w-full bg-gray-900 border border-gray-700 rounded px-1.5 py-1 text-xs text-white tabular-nums focus:outline-none focus:border-blue-500"
+              />
+            </div>
+            <button
+              onClick={handleSetWiggleVolRisePct}
+              disabled={savingSignal !== null || loading || !wiggleVolRisePctIn.trim()}
+              className="text-xs font-bold px-2.5 py-1 rounded bg-blue-500/20 text-blue-400 hover:bg-blue-500/30 disabled:opacity-30 whitespace-nowrap"
+            >
+              {savingSignal === "wiggleVolRiseExit" ? "…" : "Set"}
+            </button>
+          </div>
+          <p className="text-gray-600 text-[9px] leading-snug mt-1">
+            Checked on a 16-trade real window: all 5 real SL losses showed wig/vol rising from
+            entry to close (17%-369%); 9 of 11 real wins showed it falling. Closes instantly,
+            no dwell -- the % itself is the filter. Never blocks an entry, only an exit.
+          </p>
+        </div>
+      )}
+      {showLevers && !loading && (
+        <div className="bg-gray-800/60 rounded-lg p-2">
           {/* 2026-10-08, direct request after backtesting it against real trades: "if 20% we
               dont take the trade and wait for the next signal." Max |volume_rate_pct| over the
               last 5 closed candles before entry -- skips just the one signal, no pause timer,
@@ -2891,6 +2992,32 @@ function CompactStochBtcPanel({
             must hold for this many seconds before it actually closes -- 0 = instant, same as
             before. Never applies to TP (reaching it should close right away) or SL.
           </p>
+        </div>
+      )}
+      {showLevers && !loading && (
+        <div className="bg-gray-900/80 border border-gray-700 rounded-lg p-2 space-y-1">
+          {/* 2026-10-09, direct request: "we have a bunch of rules that we dont know we need
+              to enumerate them" -- read-only, every switch/filter on this bot in one place, so
+              nothing stays quietly on or off without anyone remembering. Every control here is
+              changed elsewhere on this panel; this box is purely a status checklist. */}
+          <p className="text-gray-400 text-[10px] uppercase font-bold">Status overview -- everything on/off</p>
+          {[
+            ["Exit mode", curExitMode],
+            ["Escalated SL", escalatedSlOn ? "ON" : "off"],
+            ["Volume jump guard", curJumpGuardEnabled ? `ON (release: ${curReleaseMode})` : "off"],
+            ["Volume/wiggle lock", curWiggleLockEnabled ? `ON (< ${curWiggleLockThreshold ?? "—"})` : "off"],
+            ["Wiggle/vol rise exit", curWiggleVolRiseEnabled && curWiggleVolRisePct != null ? `ON (+${curWiggleVolRisePct}%)` : "off"],
+            ["Volume-rate guard", curRateGuardEnabled ? `ON (> ${curRateGuardThreshold ?? "—"}%)` : "off"],
+            ["Stochastic signal", stochasticOn ? "ON" : "off"],
+            ["Zebra gate", zebraOn ? "ON" : "off"],
+            ["Flip regime", flipOn ? "ON" : "off"],
+            ["Self-lock / hour ban", "off (compiled, not live-controllable)"],
+          ].map(([label, val]) => (
+            <div key={label} className="flex items-center justify-between text-[10px]">
+              <span className="text-gray-500">{label}</span>
+              <span className={String(val).startsWith("ON") ? "text-blue-300 font-semibold" : "text-gray-600"}>{val}</span>
+            </div>
+          ))}
         </div>
       )}
       <div className="space-y-1">
@@ -3995,6 +4122,29 @@ function HedgeDualLegPanel({
               Never applies to TP (take it the instant it's reached) or SL. Research found it
               cuts whipsaw but hasn't beaten plain no-dwell yet -- see WORKER_2_HANDOFF.md follow-up.
             </p>
+          </div>
+          <div className="bg-gray-900/80 border border-gray-700 rounded-lg p-2 space-y-1">
+            {/* 2026-10-09, direct request: "we have a bunch of rules that we dont know we need
+                to enumerate them" -- read-only, every switch/filter on both legs in one place.
+                Every control here is changed elsewhere on this panel; this is a checklist only. */}
+            <p className="text-gray-400 text-[10px] uppercase font-bold">Status overview -- everything on/off</p>
+            {[
+              ["Exit mode", curExitMode],
+              ["Volume jump guard", curJumpGuardEnabled ? `ON (release: ${curReleaseMode})` : "off"],
+              ["Volume/wiggle lock", curWiggleLockEnabled ? `ON (< ${curWiggleLockThreshold ?? "—"})` : "off"],
+              ["Volume-rate guard", curRateGuardEnabled ? `ON (> ${curRateGuardThreshold ?? "—"}%)` : "off"],
+              ["SL Dwell 1st/2nd leg", `${curSlDwell}s / ${curSurvivorSlDwell}s`],
+              ["Entry filter: ATR", longState?.override_hedge_entry_filters?.atrEnabled ? "ON" : "off"],
+              ["Entry filter: BandWidth", longState?.override_hedge_entry_filters?.bandwidthEnabled ? "ON" : "off"],
+              ["Entry filter: Stochastic", longState?.override_hedge_entry_filters?.stochasticEnabled ? "ON" : "off"],
+              ["Entry filter: Z-score", longState?.override_hedge_entry_filters?.zscoreEnabled ? "ON" : "off"],
+              ["Environment (ER/Vol) gate", "off (compiled, readings only)"],
+            ].map(([label, val]) => (
+              <div key={label} className="flex items-center justify-between text-[10px]">
+                <span className="text-gray-500">{label}</span>
+                <span className={String(val).startsWith("ON") ? "text-blue-300 font-semibold" : "text-gray-600"}>{val}</span>
+              </div>
+            ))}
           </div>
           <div className="space-y-1">
             <p className="text-gray-500 text-[10px] uppercase">Recent cycles (net of both legs)</p>
