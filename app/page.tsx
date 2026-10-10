@@ -5456,7 +5456,6 @@ export default function Dashboard() {
   const [worker4State,  setWorker4State]  = useState<any>(null);
   const [worker4Trades, setWorker4Trades] = useState<any[]>([]);
   const [worker4Runs,   setWorker4Runs]   = useState<any[]>([]);
-  const [worker4Stats,  setWorker4Stats]  = useState({ total: 0, wins: 0 });
   const [optimalBtcState,  setOptimalBtcState]  = useState<any>(null);
   const [optimalBtcTrades, setOptimalBtcTrades] = useState<any[]>([]);
   const [optimalBtcRuns,   setOptimalBtcRuns]   = useState<any[]>([]);
@@ -5493,8 +5492,6 @@ export default function Dashboard() {
       { data: worker4St },
       { data: worker4Tr },
       { data: worker4Rs },
-      { count: worker4Total },
-      { count: worker4Wins },
       { data: optimalBtcSt },
       { data: optimalBtcTr },
       { data: optimalBtcRs },
@@ -5531,8 +5528,6 @@ export default function Dashboard() {
       getSupabase().from("lighter_btc_worker4_state").select("*").eq("id", 1).single(),
       getSupabase().from("lighter_btc_worker4_trades").select("*").order("closed_at", { ascending: false }).limit(200),
       getSupabase().from("lighter_btc_worker4_runs").select("*").order("ran_at", { ascending: false }).limit(30),
-      getSupabase().from("lighter_btc_worker4_trades").select("id", { count: "exact", head: true }),
-      getSupabase().from("lighter_btc_worker4_trades").select("id", { count: "exact", head: true }).gt("pnl_usd", 0),
       getSupabase().from("lighter_btc_optimal_state").select("*").eq("id", 1).single(),
       getSupabase().from("lighter_btc_optimal_trades").select("*").order("closed_at", { ascending: false }).limit(200),
       getSupabase().from("lighter_btc_optimal_runs").select("*").order("ran_at", { ascending: false }).limit(30),
@@ -5576,7 +5571,6 @@ export default function Dashboard() {
     setWorker4State(worker4St ?? null);
     setWorker4Trades(worker4Tr ?? []);
     setWorker4Runs(worker4Rs ?? []);
-    setWorker4Stats({ total: worker4Total ?? 0, wins: worker4Wins ?? 0 });
     setOptimalBtcState(optimalBtcSt ?? null);
     setOptimalBtcTrades(optimalBtcTr ?? []);
     setOptimalBtcRuns(optimalBtcRs ?? []);
@@ -5835,7 +5829,6 @@ export default function Dashboard() {
             currentPrice={ocoBtcPrice}
             loading={loading}
             onToggled={load}
-            stats={worker4Stats}
             combineEquityWinRate
           />
         </div>
