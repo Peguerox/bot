@@ -1464,6 +1464,12 @@ function CompactStochBtcPanel({
     );
   }
   const [toggling, setToggling] = useState(false);
+  // 2026-10-10, direct request: "put the explanations in a pill, same size so all the other
+  // panels match to each other" -- these subtitles vary wildly in length (Worker 1's is a long
+  // running changelog, Worker 4/hedge's are short), which made the cards different heights when
+  // placed side by side for comparison. Clamped to 2 lines by default; a "Details" toggle
+  // reveals the full text without changing any other panel's height.
+  const [showDetails, setShowDetails] = useState(false);
   const [nowTick, setNowTick] = useState(() => Date.now());
   useEffect(() => {
     const id = setInterval(() => setNowTick(Date.now()), 1000);
@@ -2097,7 +2103,13 @@ function CompactStochBtcPanel({
       <div className="space-y-2.5">
         <div>
           <h3 className="text-white font-bold text-sm">{title}</h3>
-          <p className="text-gray-500 text-[11px] leading-relaxed">{subtitle}</p>
+          <p className={`text-gray-500 text-[11px] leading-relaxed ${showDetails ? "" : "line-clamp-2"}`}>{subtitle}</p>
+          <button
+            onClick={() => setShowDetails((v) => !v)}
+            className="text-[10px] font-semibold text-blue-400/70 hover:text-blue-300 mt-0.5"
+          >
+            {showDetails ? "Hide details ▲" : "Details ▾"}
+          </button>
         </div>
         <div className="flex items-center gap-1.5 flex-wrap">
           {side != null && (
@@ -3131,6 +3143,8 @@ function HedgeDualLegPanel({
   const [toggling, setToggling] = useState(false);
   const [resetting, setResetting] = useState(false);
   const [closing, setClosing] = useState(false);
+  // Same clamp+toggle pattern as CompactStochBtcPanel's subtitle -- see its own comment.
+  const [showDetails, setShowDetails] = useState(false);
   // Own 1s ticker for the jump-guard countdown (2026-10-03) -- the `now` prop is healthTick,
   // shared dashboard-wide and only updated every 15s, which made the countdown look frozen.
   // Same pattern as Worker 1's panel (its own local nowTick at 1000ms).
@@ -3718,9 +3732,15 @@ function HedgeDualLegPanel({
       <div className="space-y-2.5">
         <div>
           <h3 className="text-white font-bold text-sm">Worker 2 · Hedge Strategy (2 legs)</h3>
-          <p className="text-gray-500 text-[11px] leading-relaxed">
+          <p className={`text-gray-500 text-[11px] leading-relaxed ${showDetails ? "" : "line-clamp-2"}`}>
             Both legs open together: Worker 2 LONG, Worker 3 SHORT, $10 per leg. Stochastic, Z-score, ATR and Bollinger BandWidth below gate new pairs only. All OFF removes those signal filters; existing volume safeguards still apply. Exit controls apply to both legs. ER15 and Vol10 remain readings only.
           </p>
+          <button
+            onClick={() => setShowDetails((v) => !v)}
+            className="text-[10px] font-semibold text-blue-400/70 hover:text-blue-300 mt-0.5"
+          >
+            {showDetails ? "Hide details ▲" : "Details ▾"}
+          </button>
         </div>
         <div className="flex items-center gap-1.5 flex-wrap">
           {/* ALWAYS rendered. It used to be hidden unless a leg's row showed a position, which
