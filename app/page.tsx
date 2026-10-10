@@ -2723,7 +2723,7 @@ function CompactStochBtcPanel({
               pause timer: blocks new entries only while the ratio stays below the threshold,
               releases the moment it rises back up. */}
           <div className="flex items-baseline justify-between">
-            <p className="text-gray-500 text-[10px] uppercase">Volume/wiggle lock</p>
+            <p className="text-gray-500 text-[10px] uppercase">Wiggle/volume lock</p>
             <button
               onClick={() => handleToggleWiggleLock(!curWiggleLockEnabled)}
               disabled={savingSignal !== null || loading}
@@ -3062,7 +3062,7 @@ function CompactStochBtcPanel({
             ["Require fresh signal", "ON (compiled, not live-controllable)"],
             ["Escalated SL", escalatedSlOn ? "ON" : "off"],
             ["Volume jump guard", curJumpGuardEnabled ? `ON (release: ${curReleaseMode})` : "off"],
-            ["Volume/wiggle lock", curWiggleLockEnabled ? `ON (< ${curWiggleLockThreshold ?? "—"})` : "off"],
+            ["Wiggle/volume lock", curWiggleLockEnabled ? `ON (< ${curWiggleLockThreshold ?? "—"})` : "off"],
             ["Wiggle/vol rise exit", curWiggleVolRiseEnabled && curWiggleVolRisePct != null ? `ON (+${curWiggleVolRisePct}%)` : "off"],
             ["Volume-rate guard", curRateGuardEnabled ? `ON (> ${curRateGuardThreshold ?? "—"}%)` : "off"],
             ["Stochastic signal", stochasticOn ? "ON" : "off"],
@@ -3990,7 +3990,7 @@ function HedgeDualLegPanel({
                   only while the ratio stays below the threshold, releases the moment it rises
                   back up. */}
               <div className="flex items-baseline justify-between">
-                <p className="text-gray-500 text-[10px] uppercase">Volume/wiggle lock (both legs)</p>
+                <p className="text-gray-500 text-[10px] uppercase">Wiggle/volume lock (both legs)</p>
                 <button
                   onClick={() => handleToggleWiggleLock(!curWiggleLockEnabled)}
                   disabled={savingWiggleLock !== null || loading}
@@ -4190,7 +4190,7 @@ function HedgeDualLegPanel({
               ["Exit mode", curExitMode],
               ["Require fresh signal", "off (compiled, not live-controllable)"],
               ["Volume jump guard", curJumpGuardEnabled ? `ON (release: ${curReleaseMode})` : "off"],
-              ["Volume/wiggle lock", curWiggleLockEnabled ? `ON (< ${curWiggleLockThreshold ?? "—"})` : "off"],
+              ["Wiggle/volume lock", curWiggleLockEnabled ? `ON (< ${curWiggleLockThreshold ?? "—"})` : "off"],
               ["Volume-rate guard", curRateGuardEnabled ? `ON (> ${curRateGuardThreshold ?? "—"}%)` : "off"],
               ["Trail Dwell", curDwell > 0 ? `ON (${curDwell}s)` : "off"],
               ["SL Dwell", curSlDwell > 0 ? `ON (${curSlDwell}s)` : "off"],
