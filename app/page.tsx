@@ -5771,8 +5771,11 @@ export default function Dashboard() {
           onToggled={load}
         />
 
-        {/* ── Lighter BTC Stochastic5: Worker 1, hedge (Worker 2), Worker 4 (real money) */}
-        <div className="grid grid-cols-1 lg:grid-cols-3 gap-3">
+        {/* ── Lighter BTC Stochastic5: Worker 1 + Worker 4 side by side (the A/B pair being
+            compared repeatedly), own 2-col row so grid stretch equalizes their height against
+            EACH OTHER only -- not padded out by the much taller hedge panel. Hedge gets its own
+            full-width row below. */}
+        <div className="grid grid-cols-1 lg:grid-cols-2 gap-3 items-stretch">
           <CompactStochBtcPanel
             title="Worker 1 · Stochastic + Color-Balance Index"
             subtitle="2026-10-01 v4: enters ONLY on a fresh 25/75 stochastic signal (window 5) while the color-weighted balance index is 65-75 (each of the last 5 closed 1-min candles casts a size-weighted color vote; 100 = perfectly balanced, 0 = one color dominates) -- back to a band after a brief floor-only (70+) run showed both real losses landing above 80. Exits: SL 0.06% / TP 0.10% / profit lock at +0.06% (exits on first tick down). SL tightened from 0.10% same day after a sweep against real data: 0.06 beat 0.10 on both the full 644-trade history (+$2.41 vs +$1.80) and the live 20-trade window since the trigger change (+$0.38 vs +$0.11). A 3-stage ratchet SL (0.10->0.05->0 as the trade goes positive) was tested and rejected -- looked good on a small window, lost badly on the full history. One trade per signal; after a REVERSAL close specifically, a 2-minute cooldown before any new entry (fresh or another reversal) -- the close itself is never delayed. A GREEN position closes immediately (INDEX_EXIT) if the index leaves 65-75; a RED position is never touched by this. Self-lock, hour ban, dispersion and saving lock all OFF."
@@ -5792,17 +5795,6 @@ export default function Dashboard() {
             // 2026-10-01: hour ban OFF (trading_hours_utc=None in the live config). Pass
             // tradingHoursUtc={WORKER1_TRADING_HOURS} again when the schedule is restored.
           />
-          <HedgeDualLegPanel
-            environmentRun={hedgeEnvironmentRun}
-            now={healthTick}
-            longState={optimalBtcState}
-            longTrades={optimalBtcTrades.filter((t: any) => Date.parse(t.closed_at) >= Date.parse(optimalBtcState?.history_reset_at ?? WORKER2_RESET_AT))}
-            shortState={dcaBtcState}
-            shortTrades={dcaBtcTrades.filter((t: any) => Date.parse(t.closed_at) >= Date.parse(dcaBtcState?.history_reset_at ?? WORKER2_RESET_AT))}
-            currentPrice={hedgeCoinPrice}
-            loading={loading}
-            onToggled={load}
-          />
           <CompactStochBtcPanel
             title="Worker 4 · A/B Test Bot (same code as Worker 1)"
             subtitle="2026-10-10: same underlying strategy code as Worker 1, own sub-account ($45 seed), own tables, independently tunable -- full exit-lever/signal-toggle controls below, separate from Worker 1's. Started as an exact-clone control; now used to test different settings live against Worker 1 side by side. Has its own Master Schedule rule slot (worker4), independent from Worker 1's."
@@ -5817,6 +5809,18 @@ export default function Dashboard() {
             combineEquityWinRate
           />
         </div>
+
+        <HedgeDualLegPanel
+          environmentRun={hedgeEnvironmentRun}
+          now={healthTick}
+          longState={optimalBtcState}
+          longTrades={optimalBtcTrades.filter((t: any) => Date.parse(t.closed_at) >= Date.parse(optimalBtcState?.history_reset_at ?? WORKER2_RESET_AT))}
+          shortState={dcaBtcState}
+          shortTrades={dcaBtcTrades.filter((t: any) => Date.parse(t.closed_at) >= Date.parse(dcaBtcState?.history_reset_at ?? WORKER2_RESET_AT))}
+          currentPrice={hedgeCoinPrice}
+          loading={loading}
+          onToggled={load}
+        />
 
       </div>
     </main>
