@@ -48,8 +48,14 @@ const LIMITS = {
   stochWindow: { min: 2, max: 50, label: "stochastic window" },
 };
 
+// Worker 4 (2026-10-10, exact clone of Worker 1, cloned table shape) shares this same route --
+// `table` picks which row gets the update, gated by this allowlist same as the toggle/close-
+// position/reset routes.
+const ALLOWED_TABLES = new Set(["lighter_btc_initial_state", "lighter_btc_worker4_state"]);
+
 export async function POST(req: NextRequest) {
   const body = await req.json();
+  const table = ALLOWED_TABLES.has(body.table) ? body.table : "lighter_btc_initial_state";
   const out: Record<string, number | boolean | string | null> = {};
 
   for (const [key, col] of [
@@ -177,7 +183,7 @@ export async function POST(req: NextRequest) {
   // request on a missing column; "*" just omits it from the result (reads as undefined,
   // same as null for every `??` below) until the migration runs.
   const { data: cur, error: readError } = await sb
-    .from("lighter_btc_initial_state")
+    .from(table)
     .select("*")
     .eq("id", 1)
     .single();
@@ -213,7 +219,7 @@ export async function POST(req: NextRequest) {
     );
   }
 
-  const { error } = await sb.from("lighter_btc_initial_state").update(out).eq("id", 1);
+  const { error } = await sb.from(table).update(out).eq("id", 1);
   if (error) {
     return NextResponse.json({ error: error.message }, { status: 500 });
   }

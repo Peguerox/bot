@@ -1530,8 +1530,10 @@ function CompactStochBtcPanel({
   const [closing, setClosing] = useState(false);
   const closeRequested = Boolean(state?.close_requested);
   const [resetting, setResetting] = useState(false);
-  // Worker 1 manual exit levers -- same as the Worker 2 hedge panel, one row instead of two.
-  const showLevers = table === "lighter_btc_initial_state";
+  // Manual exit levers -- same as the Worker 2 hedge panel, one row instead of two. Worker 4
+  // (2026-10-10, exact clone of Worker 1) shares the same settings API route and table shape,
+  // so it gets the identical set of controls, each independently writing its own table.
+  const showLevers = table === "lighter_btc_initial_state" || table === "lighter_btc_worker4_state";
   const [slIn, setSlIn] = useState("");
   const [trigIn, setTrigIn] = useState("");
   const [trailIn, setTrailIn] = useState("");
@@ -1592,7 +1594,7 @@ function CompactStochBtcPanel({
     setSavingExitMode(true);
     const res = await fetch("/api/lighter-btc-initial-settings", {
       method: "POST", headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ exitMode: mode }),
+      body: JSON.stringify({ table, exitMode: mode }),
     });
     if (!res.ok) {
       const b = await res.json().catch(() => ({}));
@@ -1620,7 +1622,7 @@ function CompactStochBtcPanel({
     setSavingEscalatedSl(true);
     const res = await fetch("/api/lighter-btc-initial-settings", {
       method: "POST", headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ escalatedSlEnabled: next }),
+      body: JSON.stringify({ table, escalatedSlEnabled: next }),
     });
     if (!res.ok) {
       const b = await res.json().catch(() => ({}));
@@ -1661,7 +1663,7 @@ function CompactStochBtcPanel({
     setSavingSignal("stochWindow");
     const res = await fetch("/api/lighter-btc-initial-settings", {
       method: "POST", headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ stochWindow: stochWindowIn.trim() }),
+      body: JSON.stringify({ table, stochWindow: stochWindowIn.trim() }),
     });
     if (!res.ok) {
       const b = await res.json().catch(() => ({}));
@@ -1687,7 +1689,7 @@ function CompactStochBtcPanel({
     if (hiIn.trim()) payload[hiKey] = hiIn.trim();
     const res = await fetch("/api/lighter-btc-initial-settings", {
       method: "POST", headers: { "Content-Type": "application/json" },
-      body: JSON.stringify(payload),
+      body: JSON.stringify({ table, ...payload }),
     });
     if (!res.ok) {
       const b = await res.json().catch(() => ({}));
@@ -1717,7 +1719,7 @@ function CompactStochBtcPanel({
     setSavingSignal("jumpGuardEnabled");
     const res = await fetch("/api/lighter-btc-initial-settings", {
       method: "POST", headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ jumpGuardEnabled: next }),
+      body: JSON.stringify({ table, jumpGuardEnabled: next }),
     });
     if (!res.ok) {
       const b = await res.json().catch(() => ({}));
@@ -1747,7 +1749,7 @@ function CompactStochBtcPanel({
     setSavingRelease(true);
     const res = await fetch("/api/lighter-btc-initial-settings", {
       method: "POST", headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ releaseMode: mode }),
+      body: JSON.stringify({ table, releaseMode: mode }),
     });
     if (!res.ok) {
       const b = await res.json().catch(() => ({}));
@@ -1786,7 +1788,7 @@ function CompactStochBtcPanel({
     if (jumpPauseIn.trim()) payload.jumpPause = jumpPauseIn.trim();
     const res = await fetch("/api/lighter-btc-initial-settings", {
       method: "POST", headers: { "Content-Type": "application/json" },
-      body: JSON.stringify(payload),
+      body: JSON.stringify({ table, ...payload }),
     });
     if (!res.ok) {
       const b = await res.json().catch(() => ({}));
@@ -1806,7 +1808,7 @@ function CompactStochBtcPanel({
     setSavingSignal("jumpClear");
     const res = await fetch("/api/lighter-btc-initial-settings", {
       method: "POST", headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ clearVolumeJump: true }),
+      body: JSON.stringify({ table, clearVolumeJump: true }),
     });
     if (!res.ok) {
       const b = await res.json().catch(() => ({}));
@@ -1838,7 +1840,7 @@ function CompactStochBtcPanel({
     setSavingSignal("wiggleLock");
     const res = await fetch("/api/lighter-btc-initial-settings", {
       method: "POST", headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ wiggleLock: wiggleLockThresholdIn.trim() }),
+      body: JSON.stringify({ table, wiggleLock: wiggleLockThresholdIn.trim() }),
     });
     if (!res.ok) {
       const b = await res.json().catch(() => ({}));
@@ -1855,7 +1857,7 @@ function CompactStochBtcPanel({
     setSavingSignal("wiggleLockEnabled");
     const res = await fetch("/api/lighter-btc-initial-settings", {
       method: "POST", headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ wiggleLockEnabled: next }),
+      body: JSON.stringify({ table, wiggleLockEnabled: next }),
     });
     if (!res.ok) {
       const b = await res.json().catch(() => ({}));
@@ -1880,7 +1882,7 @@ function CompactStochBtcPanel({
     setSavingSignal("wiggleVolRiseExit");
     const res = await fetch("/api/lighter-btc-initial-settings", {
       method: "POST", headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ wiggleVolRiseExit: wiggleVolRisePctIn.trim() }),
+      body: JSON.stringify({ table, wiggleVolRiseExit: wiggleVolRisePctIn.trim() }),
     });
     if (!res.ok) {
       const b = await res.json().catch(() => ({}));
@@ -1897,7 +1899,7 @@ function CompactStochBtcPanel({
     setSavingSignal("wiggleVolRiseExitEnabled");
     const res = await fetch("/api/lighter-btc-initial-settings", {
       method: "POST", headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ wiggleVolRiseExitEnabled: next }),
+      body: JSON.stringify({ table, wiggleVolRiseExitEnabled: next }),
     });
     if (!res.ok) {
       const b = await res.json().catch(() => ({}));
@@ -1920,7 +1922,7 @@ function CompactStochBtcPanel({
     setSavingHtf(true);
     const res = await fetch("/api/lighter-btc-initial-settings", {
       method: "POST", headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ htfBlockTimeframe: tf }),
+      body: JSON.stringify({ table, htfBlockTimeframe: tf }),
     });
     if (!res.ok) {
       const b = await res.json().catch(() => ({}));
@@ -1947,7 +1949,7 @@ function CompactStochBtcPanel({
     setSavingSignal("rateGuard");
     const res = await fetch("/api/lighter-btc-initial-settings", {
       method: "POST", headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ rateGuard: rateGuardThresholdIn.trim() }),
+      body: JSON.stringify({ table, rateGuard: rateGuardThresholdIn.trim() }),
     });
     if (!res.ok) {
       const b = await res.json().catch(() => ({}));
@@ -1964,7 +1966,7 @@ function CompactStochBtcPanel({
     setSavingSignal("rateGuardEnabled");
     const res = await fetch("/api/lighter-btc-initial-settings", {
       method: "POST", headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ rateGuardEnabled: next }),
+      body: JSON.stringify({ table, rateGuardEnabled: next }),
     });
     if (!res.ok) {
       const b = await res.json().catch(() => ({}));
@@ -1979,7 +1981,7 @@ function CompactStochBtcPanel({
     setSavingSignal(key);
     const res = await fetch("/api/lighter-btc-initial-settings", {
       method: "POST", headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ [key]: next }),
+      body: JSON.stringify({ table, [key]: next }),
     });
     if (!res.ok) {
       const b = await res.json().catch(() => ({}));
@@ -1995,7 +1997,7 @@ function CompactStochBtcPanel({
     setSavingSignal("volThreshold");
     const res = await fetch("/api/lighter-btc-initial-settings", {
       method: "POST", headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ volThreshold: volThresholdIn.trim() }),
+      body: JSON.stringify({ table, volThreshold: volThresholdIn.trim() }),
     });
     if (!res.ok) {
       const b = await res.json().catch(() => ({}));
@@ -2029,7 +2031,7 @@ function CompactStochBtcPanel({
     setSavingSettings(true);
     const res = await fetch("/api/lighter-btc-initial-settings", {
       method: "POST", headers: { "Content-Type": "application/json" },
-      body: JSON.stringify(payload),
+      body: JSON.stringify({ table, ...payload }),
     });
     if (!res.ok) {
       const b = await res.json().catch(() => ({}));
@@ -2042,7 +2044,10 @@ function CompactStochBtcPanel({
   async function handleReset() {
     if (!confirm(`Reset ${title}? Rolls PnL into equity and hides trades before now -- nothing is deleted, all trades stay in the database for research. Only works while flat.`)) return;
     setResetting(true);
-    const res = await fetch("/api/lighter-btc-initial-reset", { method: "POST" });
+    const res = await fetch("/api/lighter-btc-initial-reset", {
+      method: "POST", headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ table }),
+    });
     if (!res.ok) {
       const body = await res.json().catch(() => ({}));
       alert(body.error ?? "Reset failed.");
@@ -2105,7 +2110,7 @@ function CompactStochBtcPanel({
               {closing ? "…" : closeRequested ? "Closing…" : "Close"}
             </button>
           )}
-          {table === "lighter_btc_initial_state" && (
+          {(table === "lighter_btc_initial_state" || table === "lighter_btc_worker4_state") && (
             <button
               onClick={handleReset}
               disabled={resetting || side != null || loading}
@@ -4419,6 +4424,10 @@ const EMPTY_RULE = {
   // direct request: "maybe with this rule I want 1 on and the other off... I need a little
   // switch". Default true (both run) -- see normalizeRuleForSave / StochBot._apply_schedule_rules.
   worker1_enabled: true, hedge_enabled: true,
+  // worker4 (2026-10-10, same BotConfig shape as Worker 1, own rule slot per direct request:
+  // "wire the automation panel to worker 4... worker 1 on and off, worker 2 on and off, worker
+  // 4 on and off"). Default true, same as the other two.
+  worker4_enabled: true,
   worker1: { sl_pct: null, trigger_pct: null, trail_pct: null, tp_pct: null, dwell_seconds: null,
              sl_dwell_seconds: null,
              band_lo: null, band_hi: null, reversal_lo: null, reversal_hi: null, window: null,
@@ -4428,6 +4437,10 @@ const EMPTY_RULE = {
              escalated_sl_enabled: null },
   hedge: { sl_pct: null, trigger_pct: null, trail_pct: null, tp_pct: null, dwell_seconds: null,
            sl_dwell_seconds: null },
+  worker4: { sl_pct: null, trigger_pct: null, trail_pct: null, tp_pct: null, dwell_seconds: null,
+             sl_dwell_seconds: null,
+             band_lo: null, band_hi: null, reversal_lo: null, reversal_hi: null, window: null,
+             escalated_sl_enabled: null },
 };
 
 function numOrNull(v: string | number | null | undefined): number | null {
@@ -4483,16 +4496,17 @@ function normalizeRuleForSave(rule: any): any {
   // saved rule, pre-tri-state) defaults to true, matching the backend's own back-compat default.
   out.worker1_enabled = rule.worker1_enabled === undefined ? true : rule.worker1_enabled;
   out.hedge_enabled = rule.hedge_enabled === undefined ? true : rule.hedge_enabled;
-  for (const bot of ["worker1", "hedge"] as const) {
+  out.worker4_enabled = rule.worker4_enabled === undefined ? true : rule.worker4_enabled;
+  for (const bot of ["worker1", "hedge", "worker4"] as const) {
     const botOut: any = {};
     for (const key of BOT_NUMERIC_FIELDS) {
       if (bot === "hedge" && !["sl_pct", "trigger_pct", "trail_pct", "tp_pct", "dwell_seconds", "sl_dwell_seconds"].includes(key)) continue;
       botOut[key] = numOrNull(rule[bot]?.[key]);
     }
-    if (bot === "worker1") {
+    if (bot === "worker1" || bot === "worker4") {
       // Tri-state, not numeric -- true/false are valid "set it" values, only undefined/null
       // means "leave alone."
-      const v = rule.worker1?.escalated_sl_enabled;
+      const v = rule[bot]?.escalated_sl_enabled;
       botOut.escalated_sl_enabled = v === true || v === false ? v : null;
     }
     out[bot] = botOut;
@@ -4553,6 +4567,8 @@ const HEDGE_SETTINGS_LABELS: [string, string][] = [
   ["SL", "sl_pct"], ["Trig", "trigger_pct"], ["Trail", "trail_pct"], ["TP", "tp_pct"],
   ["TrailDwell", "dwell_seconds"], ["SLDwell", "sl_dwell_seconds"],
 ];
+// Worker 4 (2026-10-10): identical lever set to Worker 1 (same BotConfig shape).
+const WORKER4_SETTINGS_LABELS: [string, string][] = WORKER1_SETTINGS_LABELS;
 
 function formatSettingsLine(settings: any, labels: [string, string][]): string {
   return labels
@@ -4659,11 +4675,12 @@ function RuleStatsBadge({ label, stats, notional }: { label: string; stats: { wi
 }
 
 function MasterSchedulePanel({
-  scheduleState, worker1State, hedgeLongState, worker1Trades, hedgeLongTrades, hedgeShortTrades,
+  scheduleState, worker1State, hedgeLongState, worker4State,
+  worker1Trades, hedgeLongTrades, hedgeShortTrades, worker4Trades,
   loading, onToggled,
 }: {
-  scheduleState: any; worker1State: any; hedgeLongState: any;
-  worker1Trades: any[]; hedgeLongTrades: any[]; hedgeShortTrades: any[];
+  scheduleState: any; worker1State: any; hedgeLongState: any; worker4State: any;
+  worker1Trades: any[]; hedgeLongTrades: any[]; hedgeShortTrades: any[]; worker4Trades: any[];
   loading: boolean; onToggled: () => void;
 }) {
   const [rules, setRules] = useState<any[]>([]);
@@ -4807,7 +4824,7 @@ function MasterSchedulePanel({
   function patchRule(i: number, patch: Record<string, unknown>) {
     setRules((r) => r.map((rule, idx) => (idx === i ? { ...rule, ...patch } : rule)));
   }
-  function patchRuleBot(i: number, bot: "worker1" | "hedge", patch: Record<string, unknown>) {
+  function patchRuleBot(i: number, bot: "worker1" | "hedge" | "worker4", patch: Record<string, unknown>) {
     setRules((r) => r.map((rule, idx) => (idx === i ? { ...rule, [bot]: { ...rule[bot], ...patch } } : rule)));
   }
 
@@ -4858,6 +4875,19 @@ function MasterSchedulePanel({
     colorBalance: hedgeLongState?.live_schedule_color_balance ?? null,
     productRate: hedgeLongState?.live_schedule_product_rate ?? null,
   };
+  // Worker 4 (2026-10-10): own candle feed, own live_schedule_* readings, own matched rule --
+  // same reasoning as hedgeMetrics above (never collapsed into Worker 1's numbers).
+  const worker4Metrics = {
+    er: worker4State?.live_schedule_er ?? null,
+    volume: worker4State?.live_schedule_volume ?? null,
+    wiggle: worker4State?.live_schedule_wiggle ?? null,
+    rate: worker4State?.live_schedule_rate ?? null,
+    volWiggleRatio: worker4State?.live_schedule_vol_wiggle_ratio ?? null,
+    volWiggleProduct: worker4State?.live_schedule_vol_wiggle_product ?? null,
+    zebra: worker4State?.live_schedule_zebra ?? null,
+    colorBalance: worker4State?.live_schedule_color_balance ?? null,
+    productRate: worker4State?.live_schedule_product_rate ?? null,
+  };
   // Each bot evaluates the same saved rules against its OWN candle feed server-side, so they
   // can genuinely land on different rules -- shown separately below, never collapsed into one.
   // A rule whose {bot}_enabled is explicitly null ("Don't touch") is invisible to that bot, same
@@ -4867,8 +4897,11 @@ function MasterSchedulePanel({
     ? rules.findIndex((r) => r.worker1_enabled !== null && ruleConditionsMatch(r, liveMiamiHour, worker1Metrics)) : -1;
   const hedgeMatchedIdx = scheduleEnabled
     ? rules.findIndex((r) => r.hedge_enabled !== null && ruleConditionsMatch(r, liveMiamiHour, hedgeMetrics)) : -1;
+  const worker4MatchedIdx = scheduleEnabled
+    ? rules.findIndex((r) => r.worker4_enabled !== null && ruleConditionsMatch(r, liveMiamiHour, worker4Metrics)) : -1;
   const worker1MatchedRule = worker1MatchedIdx >= 0 ? rules[worker1MatchedIdx] : null;
   const hedgeMatchedRule = hedgeMatchedIdx >= 0 ? rules[hedgeMatchedIdx] : null;
+  const worker4MatchedRule = worker4MatchedIdx >= 0 ? rules[worker4MatchedIdx] : null;
   // Real bug fixed 2026-10-07 (direct report): the instantaneous match above is NOT what's
   // actually governing -- the backend only switches to a newly-matched rule after it has been
   // the top match continuously for min_hold_seconds (StochBot._apply_schedule_rules's
@@ -4880,6 +4913,7 @@ function MasterSchedulePanel({
   // when the two disagree, so a hold-period wait is visible rather than silently wrong.
   const worker1EffectiveIdx = rules.findIndex((r) => r.id && r.id === worker1State?.active_governing_rule_id);
   const hedgeEffectiveIdx = rules.findIndex((r) => r.id && r.id === hedgeLongState?.active_governing_rule_id);
+  const worker4EffectiveIdx = rules.findIndex((r) => r.id && r.id === worker4State?.active_governing_rule_id);
 
   const condField = (label: string, i: number, loKey: string, hiKey: string, rule: any, unit = "") => (
     <div className="flex-1 min-w-[90px]">
@@ -4903,7 +4937,7 @@ function MasterSchedulePanel({
     </div>
   );
 
-  const settingsField = (label: string, i: number, bot: "worker1" | "hedge", key: string, rule: any) => (
+  const settingsField = (label: string, i: number, bot: "worker1" | "hedge" | "worker4", key: string, rule: any) => (
     <div className="flex-1 min-w-[70px]">
       <p className="text-gray-500 text-[9px] uppercase">{label}</p>
       <input
@@ -4936,7 +4970,9 @@ function MasterSchedulePanel({
         </div>
       </div>
       <p className="text-gray-600 text-[10px] leading-snug">
-        Controls Worker 1 and the hedge together. When the schedule below is ON, the first rule
+        Controls Worker 1, the hedge, and Worker 4 together -- each with its own rule slot, so
+        Worker 4 can run different settings from Worker 1 even on the same rule. When the
+        schedule below is ON, the first rule
         whose hour range and/or ER/volume/wiggle/rate conditions match applies its settings AND
         turns that bot ON -- no match turns it OFF. This overrides the plain ON/OFF buttons and
         manual SL/Trigger/Trail/etc. boxes every ~30s for as long as the schedule is on, even if
@@ -5076,6 +5112,17 @@ function MasterSchedulePanel({
                 </p>
               )}
             </div>
+            <div>
+              <p className="text-gray-500 text-[9px] uppercase">Worker 4</p>
+              <p className="text-white font-bold text-2xl leading-tight">
+                {worker4EffectiveIdx >= 0 ? worker4EffectiveIdx + 1 : "OFF"}
+              </p>
+              {worker4MatchedIdx !== worker4EffectiveIdx && (
+                <p className="text-[9px] text-amber-400">
+                  {worker4MatchedRule == null ? "no rule matches right now" : `Rule ${worker4MatchedIdx + 1} matches now -- waiting out the hold`}
+                </p>
+              )}
+            </div>
           </div>
         )}
       </div>
@@ -5091,6 +5138,8 @@ function MasterSchedulePanel({
             ? worker1RuleStats(rule.id, worker1Trades, ruleStatsCutoff) : null;
           const hedgeStats = rule.id && rule.hedge_enabled !== null
             ? hedgeRuleStats(rule.id, hedgeLongTrades, hedgeShortTrades, ruleStatsCutoff) : null;
+          const w4Stats = rule.id && rule.worker4_enabled !== null
+            ? worker1RuleStats(rule.id, worker4Trades, ruleStatsCutoff) : null;
           return (
           <div key={i} className="bg-gray-800/60 rounded-lg p-2">
             <div className="flex items-center justify-between cursor-pointer" onClick={() => setExpanded(expanded === i ? null : i)}>
@@ -5105,6 +5154,11 @@ function MasterSchedulePanel({
                   rule.hedge_enabled === null ? "bg-gray-500/20 text-gray-400"
                     : rule.hedge_enabled !== false ? "bg-green-500/20 text-green-400" : "bg-red-500/20 text-red-400"}`}>
                   Hedge {rule.hedge_enabled === null ? "Don't touch" : rule.hedge_enabled !== false ? "ON" : "OFF"}
+                </span>
+                <span className={`ml-1 text-[9px] font-bold px-1 rounded ${
+                  rule.worker4_enabled === null ? "bg-gray-500/20 text-gray-400"
+                    : rule.worker4_enabled !== false ? "bg-green-500/20 text-green-400" : "bg-red-500/20 text-red-400"}`}>
+                  W4 {rule.worker4_enabled === null ? "Don't touch" : rule.worker4_enabled !== false ? "ON" : "OFF"}
                 </span>
               </p>
               <div className="flex items-center gap-1">
@@ -5137,10 +5191,17 @@ function MasterSchedulePanel({
                 {formatSettingsLine(rule.hedge, HEDGE_SETTINGS_LABELS) || <span className="text-gray-600">no settings set</span>}
               </p>
             )}
-            {(w1Stats || hedgeStats) && (
+            {rule.worker4_enabled !== false && (
+              <p className="text-[10px] text-gray-400 leading-snug">
+                <span className="text-gray-600">W4:</span>{" "}
+                {formatSettingsLine(rule.worker4, WORKER4_SETTINGS_LABELS) || <span className="text-gray-600">no settings set</span>}
+              </p>
+            )}
+            {(w1Stats || hedgeStats || w4Stats) && (
               <div className="flex justify-end gap-3 mt-1 pt-1 border-t border-gray-700/50">
                 <RuleStatsBadge label="W1" stats={w1Stats} notional={worker1State?.seed_usd ?? 98} />
                 <RuleStatsBadge label="Hedge" stats={hedgeStats} notional={20} />
+                <RuleStatsBadge label="W4" stats={w4Stats} notional={worker4State?.seed_usd ?? 45} />
               </div>
             )}
             {expanded === i && (
@@ -5255,6 +5316,57 @@ function MasterSchedulePanel({
                     {settingsField("TP", i, "hedge", "tp_pct", rule)}
                     {settingsField("Trail Dwell", i, "hedge", "dwell_seconds", rule)}
                     {settingsField("SL Dwell", i, "hedge", "sl_dwell_seconds", rule)}
+                  </div>
+                </div>
+                <div>
+                  <div className="flex items-center justify-between mb-1 flex-wrap gap-1">
+                    <p className="text-gray-500 text-[9px] uppercase">Worker 4 settings (blank = leave alone)</p>
+                    <div className="flex gap-1">
+                      {([[true, "ON when matched", "bg-green-500/20 text-green-400"],
+                         [false, "OFF when matched", "bg-red-500/20 text-red-400"],
+                         [null, "Don't change", "bg-gray-700/50 text-gray-400"]] as const).map(([val, label, activeCls]) => {
+                        const current = rule.worker4_enabled === undefined ? true : rule.worker4_enabled;
+                        return (
+                          <button key={String(val)}
+                            onClick={() => patchRule(i, { worker4_enabled: val })}
+                            className={`text-[9px] font-bold px-1.5 py-0.5 rounded ${
+                              current === val ? activeCls : "bg-gray-800/60 text-gray-600 hover:bg-gray-700"
+                            }`}>
+                            {label}
+                          </button>
+                        );
+                      })}
+                    </div>
+                  </div>
+                  <div className="flex gap-1.5 flex-wrap">
+                    {settingsField("SL", i, "worker4", "sl_pct", rule)}
+                    {settingsField("Trig", i, "worker4", "trigger_pct", rule)}
+                    {settingsField("Trail", i, "worker4", "trail_pct", rule)}
+                    {settingsField("TP", i, "worker4", "tp_pct", rule)}
+                    {settingsField("Trail Dwell", i, "worker4", "dwell_seconds", rule)}
+                    {settingsField("SL Dwell", i, "worker4", "sl_dwell_seconds", rule)}
+                  </div>
+                  <div className="flex gap-1.5 flex-wrap mt-1.5">
+                    {settingsField("Band lo", i, "worker4", "band_lo", rule)}
+                    {settingsField("Band hi", i, "worker4", "band_hi", rule)}
+                    {settingsField("Rev lo", i, "worker4", "reversal_lo", rule)}
+                    {settingsField("Rev hi", i, "worker4", "reversal_hi", rule)}
+                    {settingsField("Window", i, "worker4", "window", rule)}
+                  </div>
+                  <div className="mt-1.5">
+                    <p className="text-gray-500 text-[9px] uppercase">Escalated SL</p>
+                    <div className="flex gap-1 mt-0.5">
+                      {([[null, "Leave alone"], [true, "Turn ON"], [false, "Turn OFF"]] as const).map(([val, label]) => (
+                        <button key={String(val)}
+                          onClick={() => patchRuleBot(i, "worker4", { escalated_sl_enabled: val })}
+                          className={`text-[10px] font-bold px-2 py-1 rounded ${
+                            (rule.worker4?.escalated_sl_enabled ?? null) === val
+                              ? "bg-blue-500/30 text-blue-300" : "bg-gray-700/50 text-gray-500 hover:bg-gray-700"
+                          }`}>
+                          {label}
+                        </button>
+                      ))}
+                    </div>
                   </div>
                 </div>
               </div>
@@ -5650,9 +5762,11 @@ export default function Dashboard() {
           scheduleState={scheduleState}
           worker1State={initialBtcState}
           hedgeLongState={optimalBtcState}
+          worker4State={worker4State}
           worker1Trades={initialBtcTrades}
           hedgeLongTrades={optimalBtcTrades}
           hedgeShortTrades={dcaBtcTrades}
+          worker4Trades={worker4Trades}
           loading={loading}
           onToggled={load}
         />
@@ -5690,8 +5804,8 @@ export default function Dashboard() {
             onToggled={load}
           />
           <CompactStochBtcPanel
-            title="Worker 4 · Exact Clone of Worker 1 (A/B control)"
-            subtitle="2026-10-10: identical strategy/settings to Worker 1, own sub-account ($45 seed), own tables. A pure control test -- two instances of the same config trading live side by side, to see how much they diverge from real fill/timing noise alone before trusting any future deliberate difference as real signal. Governed by the same Master Schedule rules as Worker 1 (shares the worker1 rule slot). Manual exit-lever/signal-toggle controls live on Worker 1's panel only -- this bot follows whatever Worker 1 is set to via the schedule, not independently tunable here yet."
+            title="Worker 4 · A/B Test Bot (same code as Worker 1)"
+            subtitle="2026-10-10: same underlying strategy code as Worker 1, own sub-account ($45 seed), own tables, independently tunable -- full exit-lever/signal-toggle controls below, separate from Worker 1's. Started as an exact-clone control; now used to test different settings live against Worker 1 side by side. Has its own Master Schedule rule slot (worker4), independent from Worker 1's."
             table="lighter_btc_worker4_state"
             state={worker4State}
             trades={worker4Trades.filter((t: any) =>

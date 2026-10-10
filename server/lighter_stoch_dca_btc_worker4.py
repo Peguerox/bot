@@ -22,9 +22,11 @@ Worker 1's own standalone service -- this bot is the only process on its service
 need for the hedge's WORKER3_LIGHTER_*-prefixed pattern (that prefix exists only because the
 hedge's two legs share one process).
 
-schedule_rules_bot_key is "worker1" (not a new "worker4" key) so this clone is governed by the
-exact same Master Schedule rules as Worker 1 -- any schedule-driven override applies identically
-to both, which is required for a fair control comparison.
+2026-10-10, revised same day: started as an exact clone sharing Worker 1's Master Schedule rule
+slot, but the user wants it independently tunable to A/B test different live settings against
+Worker 1, not just mirror it -- schedule_rules_bot_key is now its own "worker4" slot (same field
+map as worker1's, see StochBot._apply_schedule_rules), and the dashboard panel has full exit-
+lever/signal-toggle controls, same as Worker 1's, each writing worker4's own table.
 """
 from stoch_bot_core import BotConfig, run_bot
 
@@ -99,7 +101,7 @@ CONFIG = BotConfig(
     schema_has_regime_overrides=True,
     htf_alignment_block_available=True,
     schedule_rules_enabled=True,
-    schedule_rules_bot_key="worker1",
+    schedule_rules_bot_key="worker4",
     schema_has_schedule_metrics=True,
     schema_has_schedule_rule_tracking=True,
     schema_has_entry_features=True,

@@ -1,9 +1,11 @@
-import { NextResponse } from "next/server";
+import { NextRequest, NextResponse } from "next/server";
 import { getSupabaseAdmin } from "@/lib/supabase-admin";
 
-// Worker 1 only (lighter_btc_initial_state) -- deliberately NOT a shared multi-table route, since
-// lighter_stoch_dca_btc_state/lighter_btc_optimal_state are owned by the hedge dual-leg process;
-// mixing them into one endpoint risks resetting the wrong bot.
+// Worker 1 + Worker 4 only (lighter_btc_initial_state / lighter_btc_worker4_state) -- explicitly
+// NOT the hedge's tables (lighter_stoch_dca_btc_state/lighter_btc_optimal_state are owned by the
+// hedge dual-leg process; mixing them into one endpoint risks resetting the wrong bot). Worker 4
+// added 2026-10-10 (exact clone of Worker 1, same table shape, same reset semantics) -- table is
+// now a request param instead of hardcoded, gated by the allowlist below.
 //
 // NON-DESTRUCTIVE, deliberately unlike the hedge reset: trade rows are NEVER deleted -- they are
 // the research data (e.g. the 575-trade timing/dispersion audits). Reset only stamps
@@ -13,11 +15,17 @@ import { getSupabaseAdmin } from "@/lib/supabase-admin";
 // 2026-10-01: the first version silently did nothing -- history_reset_at's migration
 // (lighter_btc_initial_reset_cutoff.sql) had never been run, PostgREST rejected the whole update,
 // and the route returned ok:true without checking the error. Every call is now checked.
-export async function POST() {
+const ALLOWED_TABLES = new Set(["lighter_btc_initial_state", "lighter_btc_worker4_state"]);
+
+export async function POST(req: NextRequest) {
+  const { table } = await req.json().catch(() => ({ table: "lighter_btc_initial_state" }));
+  if (!ALLOWED_TABLES.has(table)) {
+    return NextResponse.json({ error: "invalid table" }, { status: 400 });
+  }
   const sb = getSupabaseAdmin();
 
   const { data: state, error: readError } = await sb
-    .from("lighter_btc_initial_state")
+    .from(table)
     .select("side, seed_usd, realized_pnl_usd")
     .eq("id", 1)
     .single();
@@ -38,7 +46,7 @@ export async function POST() {
   const nowIso = new Date().toISOString();
 
   const { error: updateError } = await sb
-    .from("lighter_btc_initial_state")
+    .from(table)
     .update({
       seed_usd: newSeed,
       realized_pnl_usd: 0,

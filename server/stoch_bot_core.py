@@ -417,7 +417,7 @@ class BotConfig:
     # set explicitly per bot file, never inferred, so a config mistake fails loud, not by guessing.
     # See StochBot._apply_schedule_rules.
     schedule_rules_enabled: bool = False
-    schedule_rules_bot_key: Optional[str] = None  # "worker1" or "hedge"
+    schedule_rules_bot_key: Optional[str] = None  # "worker1", "worker4", or "hedge"
     # Publishes the exact live ER/volume/wiggle/rate/vol-wiggle numbers _apply_schedule_rules
     # just matched against, so the dashboard's "Currently governing" box can show each bot's
     # OWN real match instead of guessing from Worker 1's readings (2026-10-05 bug: the hedge
@@ -3873,7 +3873,9 @@ class StochBot:
         if settings:
             new_key = jsonlib.dumps(settings, sort_keys=True)
             if new_key != self._schedule_rules_last_applied_key:
-                if cfg.schedule_rules_bot_key == "worker1":
+                # worker4 (2026-10-10, same BotConfig shape as Worker 1) gets its own rule slot
+                # with the identical field map -- see the panel's WORKER4_SETTINGS_LABELS.
+                if cfg.schedule_rules_bot_key in ("worker1", "worker4"):
                     field_map = [("sl_pct", "override_sl_pct"), ("trigger_pct", "override_profit_lock_trigger"),
                                  ("trail_pct", "override_profit_lock_trail"), ("tp_pct", "override_tp_pct"),
                                  ("dwell_seconds", "override_dwell_seconds"), ("band_lo", "override_stoch_band_lo"),
