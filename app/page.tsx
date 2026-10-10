@@ -4467,9 +4467,16 @@ function genRuleId(): string {
 
 function normalizeRuleForSave(rule: any): any {
   const out: any = {};
-  // A rule saved before this feature existed has no id yet -- give it one now rather than
+  // A rule saved before this feature existed has no id yet -- give it now rather than
   // leaving it un-trackable forever.
   out.id = typeof rule.id === "string" && rule.id ? rule.id : genRuleId();
+  // Per-rule stats reset (2026-10-10, direct request: "can you reset rule 3 wins without
+  // resetting rule 1" -- the old reset_rule_stats was a single shared cutoff for every rule).
+  // null/absent means "no individual reset yet" -- the render site falls back to the old
+  // shared bot_schedule_rules.rule_stats_reset_at for continuity, so nothing changes for any
+  // rule until it's reset individually going forward. Passed through as-is, not generated
+  // here -- only handleResetOneRuleStats ever sets a real timestamp.
+  out.stats_reset_at = typeof rule.stats_reset_at === "string" ? rule.stats_reset_at : null;
   for (const key of RULE_NUMERIC_FIELDS) out[key] = numOrNull(rule[key]);
   // Tri-state (2026-10-06, direct request: "we need to put another option Dont change when
   // matched") -- true/false/null all pass through as-is; only a genuinely absent key (an older
@@ -4701,10 +4708,24 @@ function MasterSchedulePanel({
   }
 
   async function handleResetRuleStats() {
-    if (!confirm("Reset each rule's win rate/earnings back to zero? Trade history itself is not touched -- only the stats shown on each rule card.")) return;
+    if (!confirm("Reset EVERY rule's win rate/earnings back to zero? Trade history itself is not touched -- only the stats shown on each rule card. Use the Reset button on one rule's own card instead if you only want that one.")) return;
     setSaving(true);
     await postSchedule({ reset_rule_stats: true });
     await onToggled();
+    setSaving(false);
+  }
+
+  // Per-rule stats reset (2026-10-10, direct request: "can you reset rule 3 wins without
+  // resetting rule 1"). Mutates just this one rule's stats_reset_at locally, then saves the
+  // whole rules array through the same path handleSaveRules already uses -- no new endpoint.
+  async function handleResetOneRuleStats(ruleIndex: number) {
+    const label = `Rule ${ruleIndex + 1}`;
+    if (!confirm(`Reset ${label}'s win rate/earnings back to zero? Trade history itself is not touched, and no OTHER rule's stats are affected.`)) return;
+    setSaving(true);
+    const updated = rules.map((r, i) => i === ruleIndex ? { ...r, stats_reset_at: new Date().toISOString() } : r);
+    setRules(updated);
+    const ok = await postSchedule({ rules: updated.map(normalizeRuleForSave) });
+    if (ok) await onToggled();
     setSaving(false);
   }
 
@@ -5060,8 +5081,12 @@ function MasterSchedulePanel({
       </div>
 
       <div className="space-y-1.5">
-        {(() => { const ruleStatsCutoff = scheduleState?.rule_stats_reset_at ? Date.parse(scheduleState.rule_stats_reset_at) : 0;
+        {(() => { const sharedCutoff = scheduleState?.rule_stats_reset_at ? Date.parse(scheduleState.rule_stats_reset_at) : 0;
         return rules.map((rule, i) => {
+          // Per-rule cutoff wins when this rule has been reset individually; otherwise falls
+          // back to the old shared cutoff, so nothing changes for a rule until it's reset on
+          // its own. See handleResetOneRuleStats.
+          const ruleStatsCutoff = rule.stats_reset_at ? Date.parse(rule.stats_reset_at) : sharedCutoff;
           const w1Stats = rule.id && rule.worker1_enabled !== null
             ? worker1RuleStats(rule.id, worker1Trades, ruleStatsCutoff) : null;
           const hedgeStats = rule.id && rule.hedge_enabled !== null
@@ -5083,6 +5108,10 @@ function MasterSchedulePanel({
                 </span>
               </p>
               <div className="flex items-center gap-1">
+                <button onClick={(e) => { e.stopPropagation(); handleResetOneRuleStats(i); }}
+                  disabled={saving || loading}
+                  title={`Reset Rule ${i + 1}'s win rate/earnings only -- no other rule is affected`}
+                  className="text-gray-500 hover:text-blue-300 disabled:opacity-20 px-1 text-[10px] font-bold">↺</button>
                 <button onClick={(e) => { e.stopPropagation(); moveRule(i, -1); }} disabled={i === 0}
                   className="text-gray-500 hover:text-white disabled:opacity-20 px-1">↑</button>
                 <button onClick={(e) => { e.stopPropagation(); moveRule(i, 1); }} disabled={i === rules.length - 1}
