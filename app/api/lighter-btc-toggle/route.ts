@@ -5,6 +5,7 @@ const ALLOWED_TABLES = new Set([
   "lighter_stoch_dca_btc_state",
   "lighter_btc_initial_state",
   "lighter_btc_optimal_state",
+  "lighter_btc_worker4_state",
 ]);
 
 export async function POST(req: NextRequest) {

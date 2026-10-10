@@ -5320,6 +5320,11 @@ export default function Dashboard() {
   const [initialBtcState,  setInitialBtcState]  = useState<any>(null);
   const [initialBtcTrades, setInitialBtcTrades] = useState<any[]>([]);
   const [initialBtcRuns,   setInitialBtcRuns]   = useState<any[]>([]);
+  // Worker 4: exact clone of Worker 1, own sub-account, live A/B control test (2026-10-10).
+  const [worker4State,  setWorker4State]  = useState<any>(null);
+  const [worker4Trades, setWorker4Trades] = useState<any[]>([]);
+  const [worker4Runs,   setWorker4Runs]   = useState<any[]>([]);
+  const [worker4Stats,  setWorker4Stats]  = useState({ total: 0, wins: 0 });
   const [optimalBtcState,  setOptimalBtcState]  = useState<any>(null);
   const [optimalBtcTrades, setOptimalBtcTrades] = useState<any[]>([]);
   const [optimalBtcRuns,   setOptimalBtcRuns]   = useState<any[]>([]);
@@ -5353,6 +5358,11 @@ export default function Dashboard() {
       { data: initialBtcSt },
       { data: initialBtcTr },
       { data: initialBtcRs },
+      { data: worker4St },
+      { data: worker4Tr },
+      { data: worker4Rs },
+      { count: worker4Total },
+      { count: worker4Wins },
       { data: optimalBtcSt },
       { data: optimalBtcTr },
       { data: optimalBtcRs },
@@ -5386,6 +5396,11 @@ export default function Dashboard() {
       getSupabase().from("lighter_btc_initial_state").select("*").eq("id", 1).single(),
       getSupabase().from("lighter_btc_initial_trades").select("*").order("closed_at", { ascending: false }).limit(200),
       getSupabase().from("lighter_btc_initial_runs").select("*").order("ran_at", { ascending: false }).limit(30),
+      getSupabase().from("lighter_btc_worker4_state").select("*").eq("id", 1).single(),
+      getSupabase().from("lighter_btc_worker4_trades").select("*").order("closed_at", { ascending: false }).limit(200),
+      getSupabase().from("lighter_btc_worker4_runs").select("*").order("ran_at", { ascending: false }).limit(30),
+      getSupabase().from("lighter_btc_worker4_trades").select("id", { count: "exact", head: true }),
+      getSupabase().from("lighter_btc_worker4_trades").select("id", { count: "exact", head: true }).gt("pnl_usd", 0),
       getSupabase().from("lighter_btc_optimal_state").select("*").eq("id", 1).single(),
       getSupabase().from("lighter_btc_optimal_trades").select("*").order("closed_at", { ascending: false }).limit(200),
       getSupabase().from("lighter_btc_optimal_runs").select("*").order("ran_at", { ascending: false }).limit(30),
@@ -5426,6 +5441,10 @@ export default function Dashboard() {
     setInitialBtcState(initialBtcSt ?? null);
     setInitialBtcTrades(initialBtcTr ?? []);
     setInitialBtcRuns(initialBtcRs ?? []);
+    setWorker4State(worker4St ?? null);
+    setWorker4Trades(worker4Tr ?? []);
+    setWorker4Runs(worker4Rs ?? []);
+    setWorker4Stats({ total: worker4Total ?? 0, wins: worker4Wins ?? 0 });
     setOptimalBtcState(optimalBtcSt ?? null);
     setOptimalBtcTrades(optimalBtcTr ?? []);
     setOptimalBtcRuns(optimalBtcRs ?? []);
@@ -5598,6 +5617,7 @@ export default function Dashboard() {
     // on the next manual action or full-page reload.
     const ch5 = sb.channel("lighter-btc-runs")
       .on("postgres_changes", { event: "INSERT", schema: "public", table: "lighter_btc_initial_runs" }, debouncedLoad)
+      .on("postgres_changes", { event: "INSERT", schema: "public", table: "lighter_btc_worker4_runs" }, debouncedLoad)
       .on("postgres_changes", { event: "INSERT", schema: "public", table: "lighter_btc_optimal_runs" }, debouncedLoad)
       .on("postgres_changes", { event: "INSERT", schema: "public", table: "lighter_stoch_dca_btc_runs" }, debouncedLoad)
       .subscribe();
@@ -5657,6 +5677,19 @@ export default function Dashboard() {
             combineEquityWinRate
             // 2026-10-01: hour ban OFF (trading_hours_utc=None in the live config). Pass
             // tradingHoursUtc={WORKER1_TRADING_HOURS} again when the schedule is restored.
+          />
+          <CompactStochBtcPanel
+            title="Worker 4 · Exact Clone of Worker 1 (A/B control)"
+            subtitle="2026-10-10: identical strategy/settings to Worker 1, own sub-account ($45 seed), own tables. A pure control test -- two instances of the same config trading live side by side, to see how much they diverge from real fill/timing noise alone before trusting any future deliberate difference as real signal. Governed by the same Master Schedule rules as Worker 1 (shares the worker1 rule slot). Manual exit-lever/signal-toggle controls live on Worker 1's panel only -- this bot follows whatever Worker 1 is set to via the schedule, not independently tunable here yet."
+            table="lighter_btc_worker4_state"
+            state={worker4State}
+            trades={worker4Trades.filter((t: any) =>
+              t.closed_at >= (worker4State?.history_reset_at ?? "1970-01-01T00:00:00Z"))}
+            currentPrice={ocoBtcPrice}
+            loading={loading}
+            onToggled={load}
+            stats={worker4Stats}
+            combineEquityWinRate
           />
           <HedgeDualLegPanel
             environmentRun={hedgeEnvironmentRun}
