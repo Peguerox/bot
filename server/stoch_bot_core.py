@@ -3704,10 +3704,15 @@ class StochBot:
         rule also carries settings for this bot (further direct follow-up: "maybe with this rule
         I want 1 on and the other off... I need a little switch" -- a settings object existing,
         even full of blanks, used to force the bot on with no way to say otherwise). No match
-        turns the bot off. Checked every cycle, not just when the match changes -- a manual click
-        on the plain ON/OFF button gets overridden back within ~30s while the schedule is on, by
-        design. Same safe contract as every other enabled toggle in this file: flips `enabled`
-        only, NEVER closes a position already open.
+        turns the bot off -- UNLESS this bot has no opinionated rule anywhere in the list at all
+        (every rule says "Don't touch", or there are zero rules): revised 2026-10-10, direct
+        report ("when i turn on and i dont want the rule to touch another bot keeps turning it
+        off") -- a bot that is not part of the schedule at all must never have its `enabled`
+        written, so a human's manual toggle sticks. See `bot_in_schedule` below. Checked every
+        cycle, not just when the match changes -- a manual click on the plain ON/OFF button gets
+        overridden back within ~30s while the schedule is on AND a rule actually has an opinion
+        on this bot, by design. Same safe contract as every other enabled toggle in this file:
+        flips `enabled` only, NEVER closes a position already open.
 
         The settings themselves still land in this bot's own override_* columns -- the exact
         same columns the manual dashboard panels already write -- regardless of the enabled flag
@@ -3810,6 +3815,15 @@ class StochBot:
         # matched": Rule 1 isn't even a candidate once something else relevant is matched, and
         # only falls back to OFF (below) when NOTHING relevant to this bot matches at all.
         enabled_key = f"{cfg.schedule_rules_bot_key}_enabled"
+        # Direct report, 2026-10-10: "when i turn on and i dont want the rule to touch another
+        # bot keeps turning it off" -- "Don't touch" on every single rule (or zero rules at all)
+        # must mean this bot is not part of the schedule AT ALL, so its `enabled` is never
+        # written -- a human's own ON/OFF click sticks. Previously "Don't touch" only kept a
+        # rule from WINNING the match; the no-match fallback below still forced the bot off
+        # regardless, which silently fought a manual toggle whenever nothing happened to have an
+        # opinion. Only when at least one rule actually has an opinion (true/false, or the key
+        # absent -- back-compat default true) does "no match right now" mean OFF.
+        bot_in_schedule = any((enabled_key not in rule) or (rule[enabled_key] is not None) for rule in rules)
         matched = None
         for rule in rules:
             bot_enabled_opt = rule[enabled_key] if enabled_key in rule else True
@@ -3867,7 +3881,7 @@ class StochBot:
                 desired_enabled = bool(state.get("enabled", True))
             if bool(state.get("enabled", True)) != desired_enabled:
                 patch["enabled"] = desired_enabled
-        elif state.get("enabled", True):
+        elif bot_in_schedule and state.get("enabled", True):
             patch["enabled"] = False
         new_key = None
         if settings:

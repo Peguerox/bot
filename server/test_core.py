@@ -7147,11 +7147,12 @@ async def t_schedule_rules_enabled_flag_defaults_true_when_absent():
 
 async def t_schedule_rules_enabled_null_rule_is_fully_invisible_to_that_bot():
     print("\n[schedule rules: {bot}_enabled=null -- this rule is not a candidate for this bot at all]")
-    print("  Direct request, 2026-10-07, after a real live incident: \"do not touch\" means this")
-    print("  rule has ZERO opinion on this bot -- it can't even win the match on this bot's")
-    print("  behalf, so if it's the ONLY rule, this bot has no relevant rule at all and falls to")
-    print("  the same OFF default as a true no-match (settings are skipped too -- fully invisible,")
-    print("  not \"visible for settings, silent on enabled\").")
+    print("  Direct request, 2026-10-07: \"do not touch\" means this rule has ZERO opinion on this")
+    print("  bot -- it can't even win the match on this bot's behalf, so settings are skipped.")
+    print("  REVISED 2026-10-10, direct report (\"when i turn on and i dont want the rule to touch")
+    print("  another bot keeps turning it off\"): if this is the ONLY rule, this bot has no")
+    print("  opinionated rule anywhere -- it is not part of the schedule at all, so `enabled` is")
+    print("  left completely alone (was: forced OFF, which is exactly the reported bug).")
     ex = FakeExchange()
     bot = make_bot(ex, candles=_schedule_candles(), schedule_rules_enabled=True,
                     schedule_rules_bot_key="worker1")
@@ -7159,10 +7160,46 @@ async def t_schedule_rules_enabled_null_rule_is_fully_invisible_to_that_bot():
     rule = {"hour_start": 0, "hour_end": 24, "worker1_enabled": None, "worker1": {"sl_pct": 0.15}}
     bot.sb = _schedule_sb([rule])
     await bot._apply_schedule_rules(bot.state_row)
-    check("turned OFF -- no rule relevant to worker1 matched, symmetric no-match default",
-          bot.state_row["enabled"] is False)
+    check("enabled left untouched -- worker1 has no opinionated rule anywhere, not even a candidate",
+          bot.state_row["enabled"] is True)
     check("settings also skipped -- the rule is invisible to worker1, not partially visible",
           "override_sl_pct" not in bot.state_row)
+
+
+async def t_schedule_rules_not_in_schedule_never_touches_enabled_either_direction():
+    print("\n[schedule rules: a bot with zero opinionated rules never writes enabled, ON or OFF]")
+    print("  Direct report, 2026-10-10: \"when i turn on and i dont want the rule to touch another")
+    print("  bot keeps turning it off.\" Proves the fix holds in BOTH directions -- starting ON")
+    print("  stays ON, starting OFF stays OFF -- and with zero rules at all, not just all-null ones.")
+    hedge_only_rule = {"hour_start": 0, "hour_end": 24, "worker1_enabled": None,
+                        "hedge_enabled": True, "hedge": {"sl_pct": 0.04}}
+
+    ex1 = FakeExchange()
+    bot_on = make_bot(ex1, candles=_schedule_candles(), schedule_rules_enabled=True,
+                       schedule_rules_bot_key="worker1")
+    bot_on.state_row["enabled"] = True
+    bot_on.sb = _schedule_sb([hedge_only_rule])
+    await bot_on._apply_schedule_rules(bot_on.state_row)
+    check("a human's manual ON sticks -- never forced off", bot_on.state_row["enabled"] is True)
+    check("no enabled key even written to the patch", "enabled" not in bot_on.state_row or
+          bot_on.state_row["enabled"] is True)
+
+    ex2 = FakeExchange()
+    bot_off = make_bot(ex2, candles=_schedule_candles(), schedule_rules_enabled=True,
+                        schedule_rules_bot_key="worker1")
+    bot_off.state_row["enabled"] = False
+    bot_off.sb = _schedule_sb([hedge_only_rule])
+    await bot_off._apply_schedule_rules(bot_off.state_row)
+    check("a human's manual OFF sticks too -- not coincidentally left ON only",
+          bot_off.state_row["enabled"] is False)
+
+    ex3 = FakeExchange()
+    bot_zero = make_bot(ex3, candles=_schedule_candles(), schedule_rules_enabled=True,
+                         schedule_rules_bot_key="worker1")
+    bot_zero.state_row["enabled"] = True
+    bot_zero.sb = _schedule_sb([])  # zero rules at all, not just all-null ones
+    await bot_zero._apply_schedule_rules(bot_zero.state_row)
+    check("zero rules at all -- enabled still left alone", bot_zero.state_row["enabled"] is True)
 
 
 async def t_schedule_rules_null_rule_never_blocks_a_real_rule_for_this_bot():
@@ -7406,10 +7443,15 @@ async def t_schedule_rules_malformed_data_fails_closed():
     ex = FakeExchange()
     bot = make_bot(ex, candles=_schedule_candles(), schedule_rules_enabled=True,
                     schedule_rules_bot_key="worker1")
+    bot.state_row["enabled"] = True
     bot.sb = _schedule_sb(None)  # rules is None, not a list
     await bot._apply_schedule_rules(bot.state_row)  # must not raise
     check("no settings written with rules=None", "override_sl_pct" not in bot.state_row)
-    check("treated as no match -- bot turned off, same as any other no-match", bot.state_row["enabled"] is False)
+    # REVISED 2026-10-10 (see t_schedule_rules_not_in_schedule_never_touches_enabled_either_
+    # direction): malformed/empty rules means zero opinionated rules for this bot, same as an
+    # all-"Don't touch" list -- not in the schedule at all, enabled is left alone, not forced off.
+    check("enabled left untouched -- zero usable rules means not in the schedule at all",
+          bot.state_row["enabled"] is True)
 
 
 async def t_schedule_rules_mutates_local_state_dict_immediately():
@@ -8528,6 +8570,7 @@ async def main():
               t_schedule_rules_per_bot_enabled_flag_independent_of_settings,
               t_schedule_rules_enabled_flag_defaults_true_when_absent,
               t_schedule_rules_enabled_null_rule_is_fully_invisible_to_that_bot,
+              t_schedule_rules_not_in_schedule_never_touches_enabled_either_direction,
               t_schedule_rules_null_rule_never_blocks_a_real_rule_for_this_bot,
               t_schedule_rules_unmatched_rule_does_not_fight_a_matched_one_for_same_bot,
               t_schedule_rules_hedge_governed_purely_by_its_own_rule_regardless_of_worker1_match,
