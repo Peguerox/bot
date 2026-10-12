@@ -184,6 +184,14 @@ flip these three fields and fixed_leg_usd back (market_index=1, price_decimals=1
 size_decimals=5, fixed_leg_usd=10.0), point hedgeCoinPrice back at market_id=1, redeploy -- no
 new tag needed since hedge-v2-btc-before-sol already pins the exact pre-SOL byte-for-byte state
 if a hard revert is ever needed instead of a hand edit.
+
+2026-10-12, same day, ~45 min later: reverted ("this sol business was a bad idea, let's put it
+back to btc"). Both legs confirmed flat on the real exchange (MANUAL_BUTTON close, 21:09:27 UTC)
+before this edit -- redeploying with a different market_index while a position is still open on
+the OLD market would have made the new code blind to it (it only ever checks its own configured
+market_index), orphaning a real position with no monitoring or stop. Reverted exactly per the
+plan above: market_index/price_decimals/size_decimals back to 1/1/5, fixed_leg_usd back to 10.0,
+hedgeCoinPrice back to market_id=1.
 """
 import asyncio
 import faulthandler
@@ -191,15 +199,14 @@ import os
 from stoch_bot_core import AccountReadHub, BotConfig, StochBot
 
 LONG_CONFIG = BotConfig(
-    name="HEDGE LONG LEG (worker 2 account) -- SOL (temp, 2026-10-12)",
+    name="HEDGE LONG LEG (worker 2 account)",
     worker_id="worker2",
     table_state="lighter_btc_optimal_state",
     table_trades="lighter_btc_optimal_trades",
     table_runs="lighter_btc_optimal_runs",
-    # 2026-10-12, direct request, explicitly temporary (~30 min): see the module docstring's
-    # "2026-10-12" entry. market_index=2/price_decimals=3/size_decimals=3 is SOL, confirmed live
-    # off Lighter's own /orderBookDetails. Revert: market_index=1/price_decimals=1/size_decimals=5.
-    market_index=2, price_decimals=3, size_decimals=3,
+    # 2026-10-12: back to BTC, see the module docstring's second "2026-10-12" entry -- the
+    # ~30-min SOL test (market_index=2/price_decimals=3/size_decimals=3) was reverted.
+    market_index=1, price_decimals=1, size_decimals=5,
     # Unused while fixed_direction is set -- no stochastic signal computed at all -- left at
     # harmless reference values, required fields with no default.
     stoch_window=5, entry_lo=25, entry_hi=75, reversal_lo=25, reversal_hi=75,
@@ -237,10 +244,7 @@ LONG_CONFIG = BotConfig(
     #   - schema_has_cycle_id / schema_has_entry_features: dashboard pairing and hover-only
     #     documentation, no effect on any trading decision.
     tp_pct=0.10, sl_pct=0.03,
-    # 2026-10-12, temp SOL test: bumped 10.0 -> 12.0, same reasoning as the 2026-10-01 SOL
-    # switch -- SOL's min_quote_amount is $10 too, so $10 sits exactly on the floor with zero
-    # margin against one unfavourable tick at entry. Revert to 10.0 with the BTC revert.
-    fixed_leg_usd=12.0,
+    fixed_leg_usd=10.0,  # direct request: same $ per leg, not the account's full balance; back from 12.0 (temp SOL test) now that the hedge is back on BTC
     pressure_bias_enabled=False,
     require_pressure_to_enter=False,  # REVERTED: no entry gate, always try to be in when flat
     pressure_signal_owner=True,  # harmless readout only now -- K no longer gates anything
@@ -308,7 +312,7 @@ LONG_CONFIG = BotConfig(
 )
 
 SHORT_CONFIG = BotConfig(
-    name="HEDGE SHORT LEG (worker 3 account) -- SOL (temp, 2026-10-12)",
+    name="HEDGE SHORT LEG (worker 3 account)",
     worker_id="worker3",
     table_state="lighter_stoch_dca_btc_state",
     table_trades="lighter_stoch_dca_btc_trades",
@@ -316,8 +320,8 @@ SHORT_CONFIG = BotConfig(
     # See LONG_CONFIG's docstring/comment above -- must match exactly, both legs always carry
     # identical market/precision/sizing or the breakeven floor's math breaks (pinned by
     # t_live_configs_match_their_stated_rules's "SAME market_index/price_decimals/size_decimals"
-    # checks).
-    market_index=2, price_decimals=3, size_decimals=3,
+    # checks). Back to BTC as of 2026-10-12 -- the SOL test was reverted.
+    market_index=1, price_decimals=1, size_decimals=5,
     stoch_window=5, entry_lo=25, entry_hi=75, reversal_lo=25, reversal_hi=75,
     fixed_direction="short",
     environment_entry_gate_enabled=False,  # User request: no environment filters; retain research readings.
@@ -331,10 +335,7 @@ SHORT_CONFIG = BotConfig(
     # See LONG_CONFIG's docstring -- full revert to the 2026-09-29 original, infra/correctness
     # fixes kept.
     tp_pct=0.10, sl_pct=0.03,
-    # 2026-10-12, temp SOL test: bumped 10.0 -> 12.0, same reasoning as the 2026-10-01 SOL
-    # switch -- SOL's min_quote_amount is $10 too, so $10 sits exactly on the floor with zero
-    # margin against one unfavourable tick at entry. Revert to 10.0 with the BTC revert.
-    fixed_leg_usd=12.0,
+    fixed_leg_usd=10.0,  # direct request: same $ per leg, not the account's full balance; back from 12.0 (temp SOL test) now that the hedge is back on BTC
     pressure_bias_enabled=False,
     require_pressure_to_enter=False,  # REVERTED: no entry gate, always try to be in when flat
     debug_verbose_tick=False,
