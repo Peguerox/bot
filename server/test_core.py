@@ -6090,6 +6090,154 @@ async def t_trade_flow_ratio_missing_or_empty_is_none():
           core.compute_trade_flow_ratio([{"size": "oops", "is_maker_ask": True}, {"size": "1", "is_maker_ask": True}]) == 1.0)
 
 
+def _make_trade_flow_paper_bot(ex, **cfg_overrides):
+    """make_bot doesn't stub self.sb (the real one would try a live HTTP call) -- this wraps it
+    with a capturing fake so trade_flow_paper tests can assert on what got logged."""
+    bot = make_bot(ex, schema_has_trade_flow_paper_test=True, trade_flow_paper_enabled=True,
+                   **cfg_overrides)
+    bot.sb_calls = []
+    async def sb(method, path, body=None):
+        bot.sb_calls.append((method, path, body))
+        return []
+    bot.sb = sb
+    return bot
+
+
+async def t_trade_flow_paper_opens_long_on_high_ratio():
+    print("\n[trade-flow paper: ratio >= long_threshold while flat -> opens long at the ask]")
+    ex = FakeExchange()
+    bot = _make_trade_flow_paper_bot(ex)
+    state = dict(bot.state_row)
+    state["live_trade_flow_ratio"] = 0.85
+    await bot._update_trade_flow_paper_shadow(state, 86000.0, 86001.0, 1700000000000)
+    check("opened long", bot.trade_flow_paper_side == "long", bot.trade_flow_paper_side)
+    check("entered at the ASK (buying long)", bot.trade_flow_paper_entry == 86001.0, bot.trade_flow_paper_entry)
+    check("entry ratio recorded", bot.trade_flow_paper_entry_ratio == 0.85)
+
+
+async def t_trade_flow_paper_opens_short_on_low_ratio():
+    print("\n[trade-flow paper: ratio <= short_threshold while flat -> opens short at the bid]")
+    ex = FakeExchange()
+    bot = _make_trade_flow_paper_bot(ex)
+    state = dict(bot.state_row)
+    state["live_trade_flow_ratio"] = 0.15
+    await bot._update_trade_flow_paper_shadow(state, 86000.0, 86001.0, 1700000000000)
+    check("opened short", bot.trade_flow_paper_side == "short", bot.trade_flow_paper_side)
+    check("entered at the BID (selling short)", bot.trade_flow_paper_entry == 86000.0, bot.trade_flow_paper_entry)
+
+
+async def t_trade_flow_paper_stays_flat_in_neutral_zone():
+    print("\n[trade-flow paper: ratio between the thresholds -> stays flat, no entry]")
+    ex = FakeExchange()
+    bot = _make_trade_flow_paper_bot(ex)
+    state = dict(bot.state_row)
+    state["live_trade_flow_ratio"] = 0.5
+    await bot._update_trade_flow_paper_shadow(state, 86000.0, 86001.0, 1700000000000)
+    check("still flat", bot.trade_flow_paper_side is None)
+    check("no trade logged", len(bot.sb_calls) == 0, bot.sb_calls)
+
+
+async def t_trade_flow_paper_closes_at_tp():
+    print("\n[trade-flow paper: closes at the TP threshold, logs the trade]")
+    ex = FakeExchange()
+    bot = _make_trade_flow_paper_bot(ex)
+    bot.trade_flow_paper_side = "long"
+    bot.trade_flow_paper_entry = 86000.0
+    bot.trade_flow_paper_entry_ms = 1700000000000
+    bot.trade_flow_paper_peak_pct = None
+    bot.trade_flow_paper_entry_ratio = 0.9
+    bot._trade_flow_paper_loaded = True
+    state = dict(bot.state_row)
+    tp_price = 86000.0 * 1.0011  # past the default 0.10% TP
+    await bot._update_trade_flow_paper_shadow(state, tp_price, tp_price + 1, 1700000060000)
+    check("closed (flat again)", bot.trade_flow_paper_side is None, bot.trade_flow_paper_side)
+    check("one trade logged", len(bot.sb_calls) == 1, bot.sb_calls)
+    method, path, body = bot.sb_calls[0]
+    check("logged to the paper trades table", path == "lighter_btc_trade_flow_paper_trades", path)
+    check("reason is TP", body["reason"] == "TP", body)
+    check("entry ratio carried through from entry, not re-read at close", body["entry_ratio"] == 0.9, body)
+
+
+async def t_trade_flow_paper_trigger_trail_exit():
+    print("\n[trade-flow paper: arms at the trigger, exits once price gives back the trail from the peak]")
+    ex = FakeExchange()
+    bot = _make_trade_flow_paper_bot(ex)
+    bot.trade_flow_paper_side = "long"
+    bot.trade_flow_paper_entry = 86000.0
+    bot.trade_flow_paper_entry_ms = 1700000000000
+    bot.trade_flow_paper_peak_pct = None
+    bot._trade_flow_paper_loaded = True
+    state = dict(bot.state_row)
+    # Arm at +0.03% (above the default 0.02% trigger), well under the 0.10% TP.
+    arm_price = 86000.0 * 1.0003
+    await bot._update_trade_flow_paper_shadow(state, arm_price, arm_price + 1, 1700000060000)
+    check("armed -- peak recorded, still open", bot.trade_flow_paper_side == "long")
+    check("peak ~0.03%", bot.trade_flow_paper_peak_pct is not None and abs(bot.trade_flow_paper_peak_pct - 0.03) < 0.001,
+          bot.trade_flow_paper_peak_pct)
+    check("no trade logged yet", len(bot.sb_calls) == 0)
+    # Pull back 0.01% (the default trail) from that peak -> should close now.
+    pullback_price = 86000.0 * 1.0002
+    await bot._update_trade_flow_paper_shadow(state, pullback_price, pullback_price + 1, 1700000070000)
+    check("closed on the trail", bot.trade_flow_paper_side is None, bot.trade_flow_paper_side)
+    check("one trade logged, reason TRIGGER_TRAIL", len(bot.sb_calls) == 1 and bot.sb_calls[0][2]["reason"] == "TRIGGER_TRAIL",
+          bot.sb_calls)
+
+
+async def t_trade_flow_paper_no_stop_loss():
+    print("\n[trade-flow paper: NO stop-loss, by direct instruction -- stays open on an adverse move]")
+    ex = FakeExchange()
+    bot = _make_trade_flow_paper_bot(ex)
+    bot.trade_flow_paper_side = "long"
+    bot.trade_flow_paper_entry = 86000.0
+    bot.trade_flow_paper_entry_ms = 1700000000000
+    bot.trade_flow_paper_peak_pct = None
+    bot._trade_flow_paper_loaded = True
+    state = dict(bot.state_row)
+    bad_price = 86000.0 * 0.95  # -5%, never arms the trigger, no SL to catch it
+    await bot._update_trade_flow_paper_shadow(state, bad_price, bad_price + 1, 1700000060000)
+    check("still open -- no stop-loss closes it, by design", bot.trade_flow_paper_side == "long",
+          bot.trade_flow_paper_side)
+    check("no trade logged", len(bot.sb_calls) == 0, bot.sb_calls)
+
+
+async def t_trade_flow_paper_enabled_gates_new_entry_only():
+    print("\n[trade-flow paper: disabling only blocks NEW entries -- an open paper position still gets managed]")
+    ex = FakeExchange()
+    bot = _make_trade_flow_paper_bot(ex)
+    state = dict(bot.state_row)
+    state["override_trade_flow_paper_enabled"] = False
+    state["live_trade_flow_ratio"] = 0.9  # would open long if enabled
+    await bot._update_trade_flow_paper_shadow(state, 86000.0, 86001.0, 1700000000000)
+    check("disabled -- no new entry", bot.trade_flow_paper_side is None, bot.trade_flow_paper_side)
+    # Now simulate an already-open position (opened before the disable) -- it must still close normally.
+    bot.trade_flow_paper_side = "long"
+    bot.trade_flow_paper_entry = 86000.0
+    bot.trade_flow_paper_entry_ms = 1700000000000
+    bot.trade_flow_paper_peak_pct = None
+    tp_price = 86000.0 * 1.0011
+    await bot._update_trade_flow_paper_shadow(state, tp_price, tp_price + 1, 1700000060000)
+    check("still closes on TP even while disabled -- disabling never blocks an exit",
+          bot.trade_flow_paper_side is None, bot.trade_flow_paper_side)
+
+
+async def t_trade_flow_paper_controls_override_contract():
+    print("\n[_trade_flow_paper_controls: NULL overrides fall back to compiled defaults, independently]")
+    ex = FakeExchange()
+    bot = _make_trade_flow_paper_bot(ex, trade_flow_paper_long_threshold=0.8,
+                                     trade_flow_paper_short_threshold=0.2,
+                                     trade_flow_paper_tp_pct=0.10, trade_flow_paper_trigger_pct=0.02,
+                                     trade_flow_paper_trail_pct=0.01)
+    enabled, lo, hi, tp, trig, trail = bot._trade_flow_paper_controls({})
+    check("all compiled defaults with no overrides set",
+          (enabled, lo, hi, tp, trig, trail) == (True, 0.8, 0.2, 0.10, 0.02, 0.01),
+          (enabled, lo, hi, tp, trig, trail))
+    state = {"override_trade_flow_paper_tp_pct": 0.25}
+    enabled, lo, hi, tp, trig, trail = bot._trade_flow_paper_controls(state)
+    check("only tp overridden, everything else still default",
+          tp == 0.25 and lo == 0.8 and hi == 0.2 and trig == 0.02 and trail == 0.01,
+          (lo, hi, tp, trig, trail))
+
+
 # Shared fixture for the lock tests below: midpoints [86000,86100,85900,86050,85950] give a
 # dispersion (wiggle) of exactly sqrt(5000) ~= 70.7107 (raw dollars). Paired with volume=100,
 # wig/vol ~= 0.70711 (small -- lots of volume, little price movement -- the chop signal under
@@ -8719,6 +8867,14 @@ async def main():
               t_trade_flow_ratio_all_one_side,
               t_trade_flow_ratio_weighted_by_size_not_count,
               t_trade_flow_ratio_missing_or_empty_is_none,
+              t_trade_flow_paper_opens_long_on_high_ratio,
+              t_trade_flow_paper_opens_short_on_low_ratio,
+              t_trade_flow_paper_stays_flat_in_neutral_zone,
+              t_trade_flow_paper_closes_at_tp,
+              t_trade_flow_paper_trigger_trail_exit,
+              t_trade_flow_paper_no_stop_loss,
+              t_trade_flow_paper_enabled_gates_new_entry_only,
+              t_trade_flow_paper_controls_override_contract,
               t_volume_wiggle_lock_blocks_below_threshold,
               t_volume_wiggle_lock_allows_at_or_above_threshold,
               t_volume_wiggle_lock_off_by_default,

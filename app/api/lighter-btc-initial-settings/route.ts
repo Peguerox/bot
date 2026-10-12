@@ -46,6 +46,13 @@ const LIMITS = {
   // 2026-10-04, direct request: "change the window of stochastic for worker 1". Integer candle
   // count; governs both the entry and reversal bands (see StochBot._stoch_window_control).
   stochWindow: { min: 2, max: 50, label: "stochastic window" },
+  // 2026-10-12, direct request: paper-only trade-flow-ratio shadow, "put some options to change
+  // the settings". Thresholds are a 0-1 ratio (buy_volume share), not a percentage.
+  tradeFlowPaperLongThreshold: { min: 0.5, max: 1.0, label: "trade-flow paper long threshold" },
+  tradeFlowPaperShortThreshold: { min: 0.0, max: 0.5, label: "trade-flow paper short threshold" },
+  tradeFlowPaperTp: { min: 0.01, max: 2.0, label: "trade-flow paper TP" },
+  tradeFlowPaperTrigger: { min: 0.01, max: 1.0, label: "trade-flow paper trigger" },
+  tradeFlowPaperTrail: { min: 0, max: 0.5, label: "trade-flow paper trail" },
 };
 
 // Worker 4 (2026-10-10, exact clone of Worker 1, cloned table shape) shares this same route --
@@ -76,6 +83,11 @@ export async function POST(req: NextRequest) {
     ["wiggleVolRiseExit", "override_wiggle_vol_rise_exit_pct"],
     ["rateGuard", "override_volume_rate_guard_threshold"],
     ["stochWindow", "override_stoch_window"],
+    ["tradeFlowPaperLongThreshold", "override_trade_flow_paper_long_threshold"],
+    ["tradeFlowPaperShortThreshold", "override_trade_flow_paper_short_threshold"],
+    ["tradeFlowPaperTp", "override_trade_flow_paper_tp_pct"],
+    ["tradeFlowPaperTrigger", "override_trade_flow_paper_trigger_pct"],
+    ["tradeFlowPaperTrail", "override_trade_flow_paper_trail_pct"],
   ] as const) {
     const raw = body[key];
     if (raw === undefined || raw === null || raw === "") continue;
@@ -106,6 +118,7 @@ export async function POST(req: NextRequest) {
     ["wiggleVolRiseExitEnabled", "override_wiggle_vol_rise_exit_enabled"],
     ["rateGuardEnabled", "override_volume_rate_guard_enabled"],
     ["jumpGuardEnabled", "override_volume_jump_enabled"],
+    ["tradeFlowPaperEnabled", "override_trade_flow_paper_enabled"],
   ] as const) {
     const raw = body[key];
     if (raw === undefined || raw === null) continue;
@@ -215,6 +228,22 @@ export async function POST(req: NextRequest) {
   if (reversalLo != null && reversalHi != null && reversalLo >= reversalHi) {
     return NextResponse.json(
       { error: `Reversal band low (${reversalLo}) must be less than reversal band high (${reversalHi}).` },
+      { status: 400 }
+    );
+  }
+  const paperTrig = (out["override_trade_flow_paper_trigger_pct"] as number | undefined) ?? cur?.override_trade_flow_paper_trigger_pct;
+  const paperTrail = (out["override_trade_flow_paper_trail_pct"] as number | undefined) ?? cur?.override_trade_flow_paper_trail_pct;
+  if (paperTrig != null && paperTrail != null && paperTrail > paperTrig) {
+    return NextResponse.json(
+      { error: `Trade-flow paper trail (${paperTrail}%) must not be larger than its trigger (${paperTrig}%).` },
+      { status: 400 }
+    );
+  }
+  const paperLong = (out["override_trade_flow_paper_long_threshold"] as number | undefined) ?? cur?.override_trade_flow_paper_long_threshold;
+  const paperShort = (out["override_trade_flow_paper_short_threshold"] as number | undefined) ?? cur?.override_trade_flow_paper_short_threshold;
+  if (paperLong != null && paperShort != null && paperLong <= paperShort) {
+    return NextResponse.json(
+      { error: `Trade-flow paper long threshold (${paperLong}) must be greater than the short threshold (${paperShort}).` },
       { status: 400 }
     );
   }

@@ -1421,7 +1421,7 @@ function currentSessionStart(nowUtc: Date): Date {
 function CompactStochBtcPanel({
   title, subtitle, table, state, trades, currentPrice, loading, onToggled, runs, cooldownMin,
   showSelfLock, stats, tradingHoursUtc, combineEquityWinRate, rsiPaperStats, fixedSettings,
-  selfLockUnlockRange, selfLockUnlockTitle, dormant,
+  selfLockUnlockRange, selfLockUnlockTitle, dormant, tradeFlowPaperTrades,
 }: {
   title: string; subtitle: string; table: string; state: any; trades: any[];
   currentPrice: number | null; loading: boolean; onToggled: () => void;
@@ -1429,6 +1429,9 @@ function CompactStochBtcPanel({
   stats?: { total: number; wins: number };
   tradingHoursUtc?: number[] | Record<number, number[]>;
   combineEquityWinRate?: boolean; rsiPaperStats?: { total: number; wins: number; pnlPct: number };
+  // Trade-flow ratio paper trade (2026-10-12) -- recent completed paper trades for THIS bot
+  // specifically, pre-filtered by worker_id at the call site (shared table across both bots).
+  tradeFlowPaperTrades?: any[];
   fixedSettings?: { entryLo: number; entryHi: number; tpPct: number; slPct: number;
                     entryConfirmationMaxPct?: number };
   // Self-lock unlock label -- defaults to the live rule: 2 wins of any kind, OR 1 literal TP.
@@ -1502,6 +1505,71 @@ function CompactStochBtcPanel({
   const unrealizedPct = side && avgEntry && currentPrice
     ? (side === "long" ? (currentPrice - avgEntry) / avgEntry : (avgEntry - currentPrice) / avgEntry) * 100
     : null;
+
+  // Trade-flow ratio paper trade (2026-10-12, direct request: "we need to paper trade this
+  // thing... continuously trading this... put some options to change the settings"). Never
+  // touches real money -- own live side/entry/peak columns, own settings overrides, own trade
+  // log table (passed in as tradeFlowPaperTrades, pre-filtered to this bot).
+  const tfpEnabled: boolean = state?.override_trade_flow_paper_enabled ?? false;
+  const tfpSide = state?.trade_flow_paper_side ?? null;
+  const tfpEntry = state?.trade_flow_paper_entry_price ?? null;
+  const tfpPeak = state?.trade_flow_paper_peak_pct ?? null;
+  const tfpUnrealizedPct = tfpSide && tfpEntry && currentPrice
+    ? (tfpSide === "long" ? (currentPrice - tfpEntry) / tfpEntry : (tfpEntry - currentPrice) / tfpEntry) * 100
+    : null;
+  const tfpLongThreshold: number = state?.override_trade_flow_paper_long_threshold ?? 0.8;
+  const tfpShortThreshold: number = state?.override_trade_flow_paper_short_threshold ?? 0.2;
+  const tfpTp: number = state?.override_trade_flow_paper_tp_pct ?? 0.10;
+  const tfpTrigger: number = state?.override_trade_flow_paper_trigger_pct ?? 0.02;
+  const tfpTrail: number = state?.override_trade_flow_paper_trail_pct ?? 0.01;
+  const [savingTfp, setSavingTfp] = useState(false);
+  const [tfpLongIn, setTfpLongIn] = useState("");
+  const [tfpShortIn, setTfpShortIn] = useState("");
+  const [tfpTpIn, setTfpTpIn] = useState("");
+  const [tfpTriggerIn, setTfpTriggerIn] = useState("");
+  const [tfpTrailIn, setTfpTrailIn] = useState("");
+  const tfpTradesList = tradeFlowPaperTrades ?? [];
+  const tfpWins = tfpTradesList.filter((t: any) => t.pnl_pct > 0).length;
+  const tfpWinRate = tfpTradesList.length ? (100 * tfpWins / tfpTradesList.length).toFixed(1) : "—";
+  const tfpTotalPnlPct = tfpTradesList.reduce((s: number, t: any) => s + (t.pnl_pct ?? 0), 0);
+
+  async function handleToggleTradeFlowPaper() {
+    const next = !tfpEnabled;
+    setSavingTfp(true);
+    const res = await fetch("/api/lighter-btc-initial-settings", {
+      method: "POST", headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ table, tradeFlowPaperEnabled: next }),
+    });
+    if (!res.ok) {
+      const b = await res.json().catch(() => ({}));
+      alert(b.error || "Could not toggle the trade-flow paper trade.");
+    }
+    await onToggled();
+    setSavingTfp(false);
+  }
+
+  async function handleApplyTfpSettings() {
+    const payload: Record<string, string> = {};
+    if (tfpLongIn.trim()) payload.tradeFlowPaperLongThreshold = tfpLongIn.trim();
+    if (tfpShortIn.trim()) payload.tradeFlowPaperShortThreshold = tfpShortIn.trim();
+    if (tfpTpIn.trim()) payload.tradeFlowPaperTp = tfpTpIn.trim();
+    if (tfpTriggerIn.trim()) payload.tradeFlowPaperTrigger = tfpTriggerIn.trim();
+    if (tfpTrailIn.trim()) payload.tradeFlowPaperTrail = tfpTrailIn.trim();
+    if (Object.keys(payload).length === 0) return;
+    setSavingTfp(true);
+    const res = await fetch("/api/lighter-btc-initial-settings", {
+      method: "POST", headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ table, ...payload }),
+    });
+    if (!res.ok) {
+      const b = await res.json().catch(() => ({}));
+      alert(b.error || "Could not apply the trade-flow paper settings.");
+    } else {
+      setTfpLongIn(""); setTfpShortIn(""); setTfpTpIn(""); setTfpTriggerIn(""); setTfpTrailIn("");
+    }
+    await onToggled();
+    setSavingTfp(false);
+  }
 
   const closedTrades = trades.filter((t) => t.pnl_usd != null);
   // True lifetime count when available (stats), not the capped-at-200 fetch used for the
@@ -3068,6 +3136,91 @@ function CompactStochBtcPanel({
         </div>
       )}
       {showLevers && !loading && (
+        <div className="bg-gray-800/60 rounded-lg p-2">
+          {/* 2026-10-12, direct request: "we need to paper trade this thing... continuously
+              trading this... put some options to change the settings." Fully paper -- never
+              places a real order. Entry: live trade-flow ratio crosses a threshold while flat.
+              Exit: TP, or a profit-lock trigger+trail -- deliberately NO stop-loss, same as the
+              one-off manual forward test this continuously runs instead of. */}
+          <div className="flex items-baseline justify-between">
+            <p className="text-gray-500 text-[10px] uppercase">Trade-flow paper trade (no real money)</p>
+            <button
+              onClick={handleToggleTradeFlowPaper}
+              disabled={savingTfp || loading}
+              className={`text-[10px] font-bold px-1.5 py-0.5 rounded disabled:opacity-30 ${
+                tfpEnabled ? "bg-green-500/20 text-green-400" : "bg-gray-700/50 text-gray-500"}`}
+            >
+              {savingTfp ? "…" : tfpEnabled ? "ON" : "OFF"}
+            </button>
+          </div>
+          <p className="text-[11px] text-gray-500 mt-0.5 tabular-nums">
+            {tfpSide ? (
+              <>paper {tfpSide} @ {tfpEntry?.toFixed(1)} — unrealized{" "}
+                <span className={tfpUnrealizedPct != null && tfpUnrealizedPct >= 0 ? "text-green-400" : "text-red-400"}>
+                  {tfpUnrealizedPct != null ? `${tfpUnrealizedPct >= 0 ? "+" : ""}${tfpUnrealizedPct.toFixed(3)}%` : "—"}
+                </span>
+                {tfpPeak != null && <span className="text-gray-600"> (armed, peak +{tfpPeak.toFixed(3)}%)</span>}
+              </>
+            ) : "flat, waiting for a signal"}
+          </p>
+          <p className="text-[11px] text-gray-500 mt-1 tabular-nums">
+            {tfpTradesList.length} paper trades — <span className="text-blue-300">{tfpWinRate}% win</span>,{" "}
+            <span className={tfpTotalPnlPct >= 0 ? "text-green-400" : "text-red-400"}>
+              {tfpTotalPnlPct >= 0 ? "+" : ""}{tfpTotalPnlPct.toFixed(3)}%
+            </span> total
+          </p>
+          <div className="flex gap-1.5 flex-wrap mt-1.5">
+            <div className="flex-1 min-w-[70px]">
+              <p className="text-gray-500 text-[9px] uppercase">Long ≥ <span className="text-gray-600">now {tfpLongThreshold}</span></p>
+              <input value={tfpLongIn} onChange={(e) => setTfpLongIn(e.target.value)} placeholder={String(tfpLongThreshold)}
+                inputMode="decimal" className="w-full bg-gray-900 border border-gray-700 rounded px-1.5 py-1 text-xs text-white tabular-nums focus:outline-none focus:border-blue-500" />
+            </div>
+            <div className="flex-1 min-w-[70px]">
+              <p className="text-gray-500 text-[9px] uppercase">Short ≤ <span className="text-gray-600">now {tfpShortThreshold}</span></p>
+              <input value={tfpShortIn} onChange={(e) => setTfpShortIn(e.target.value)} placeholder={String(tfpShortThreshold)}
+                inputMode="decimal" className="w-full bg-gray-900 border border-gray-700 rounded px-1.5 py-1 text-xs text-white tabular-nums focus:outline-none focus:border-blue-500" />
+            </div>
+            <div className="flex-1 min-w-[70px]">
+              <p className="text-gray-500 text-[9px] uppercase">TP% <span className="text-gray-600">now {tfpTp}</span></p>
+              <input value={tfpTpIn} onChange={(e) => setTfpTpIn(e.target.value)} placeholder={String(tfpTp)}
+                inputMode="decimal" className="w-full bg-gray-900 border border-gray-700 rounded px-1.5 py-1 text-xs text-white tabular-nums focus:outline-none focus:border-blue-500" />
+            </div>
+            <div className="flex-1 min-w-[70px]">
+              <p className="text-gray-500 text-[9px] uppercase">Trigger% <span className="text-gray-600">now {tfpTrigger}</span></p>
+              <input value={tfpTriggerIn} onChange={(e) => setTfpTriggerIn(e.target.value)} placeholder={String(tfpTrigger)}
+                inputMode="decimal" className="w-full bg-gray-900 border border-gray-700 rounded px-1.5 py-1 text-xs text-white tabular-nums focus:outline-none focus:border-blue-500" />
+            </div>
+            <div className="flex-1 min-w-[70px]">
+              <p className="text-gray-500 text-[9px] uppercase">Trail% <span className="text-gray-600">now {tfpTrail}</span></p>
+              <input value={tfpTrailIn} onChange={(e) => setTfpTrailIn(e.target.value)} placeholder={String(tfpTrail)}
+                inputMode="decimal" className="w-full bg-gray-900 border border-gray-700 rounded px-1.5 py-1 text-xs text-white tabular-nums focus:outline-none focus:border-blue-500" />
+            </div>
+            <button onClick={handleApplyTfpSettings} disabled={savingTfp || loading}
+              className="text-xs font-bold px-2.5 py-1 rounded bg-blue-500/20 text-blue-400 hover:bg-blue-500/30 disabled:opacity-30 whitespace-nowrap self-end">
+              {savingTfp ? "…" : "Set"}
+            </button>
+          </div>
+          {tfpTradesList.length > 0 && (
+            <div className="mt-1.5 space-y-0.5 max-h-24 overflow-y-auto">
+              {tfpTradesList.slice(0, 8).map((t: any, i: number) => (
+                <p key={i} className="text-[10px] text-gray-500 tabular-nums">
+                  {t.side} {t.reason}{" "}
+                  <span className={t.pnl_pct >= 0 ? "text-green-400" : "text-red-400"}>
+                    {t.pnl_pct >= 0 ? "+" : ""}{t.pnl_pct.toFixed(3)}%
+                  </span>
+                </p>
+              ))}
+            </div>
+          )}
+          <p className="text-gray-600 text-[9px] leading-snug mt-1">
+            Never places a real order. Enters when the trade-flow ratio crosses a threshold while
+            flat; exits at TP or a profit-lock trigger+trail -- NO stop-loss by design, so a
+            losing paper position can stay open a long time if it never arms. Continuous (tick-
+            level, via the live book), not the 5s-polled one-off test that first validated this.
+          </p>
+        </div>
+      )}
+      {showLevers && !loading && (
         <div className="bg-gray-900/80 border border-gray-700 rounded-lg p-2 space-y-1">
           {/* 2026-10-09, direct request: "we have a bunch of rules that we dont know we need
               to enumerate them" -- read-only, every switch/filter on this bot in one place, so
@@ -3088,6 +3241,7 @@ function CompactStochBtcPanel({
             ["Trail Dwell", curDwell > 0 ? `ON (${curDwell}s)` : "off"],
             ["SL Dwell", curSlDwell > 0 ? `ON (${curSlDwell}s)` : "off"],
             ["HTF alignment block", curHtfTimeframe !== "off" ? `ON (${curHtfTimeframe})` : "off"],
+            ["Trade-flow paper trade", tfpEnabled ? "ON (no real money)" : "off"],
             ["Self-lock / hour ban", "off (compiled, not live-controllable)"],
           ].map(([label, val]) => (
             <div key={label} className="flex items-center justify-between text-[10px]">
@@ -5482,6 +5636,9 @@ export default function Dashboard() {
   const [worker4State,  setWorker4State]  = useState<any>(null);
   const [worker4Trades, setWorker4Trades] = useState<any[]>([]);
   const [worker4Runs,   setWorker4Runs]   = useState<any[]>([]);
+  // Trade-flow ratio paper trade (2026-10-12) -- shared table, worker_id-filtered at fetch time.
+  const [worker1TfpTrades, setWorker1TfpTrades] = useState<any[]>([]);
+  const [worker4TfpTrades, setWorker4TfpTrades] = useState<any[]>([]);
   const [optimalBtcState,  setOptimalBtcState]  = useState<any>(null);
   const [optimalBtcTrades, setOptimalBtcTrades] = useState<any[]>([]);
   const [optimalBtcRuns,   setOptimalBtcRuns]   = useState<any[]>([]);
@@ -5518,6 +5675,8 @@ export default function Dashboard() {
       { data: worker4St },
       { data: worker4Tr },
       { data: worker4Rs },
+      { data: worker1TfpTr },
+      { data: worker4TfpTr },
       { data: optimalBtcSt },
       { data: optimalBtcTr },
       { data: optimalBtcRs },
@@ -5554,6 +5713,8 @@ export default function Dashboard() {
       getSupabase().from("lighter_btc_worker4_state").select("*").eq("id", 1).single(),
       getSupabase().from("lighter_btc_worker4_trades").select("*").order("closed_at", { ascending: false }).limit(200),
       getSupabase().from("lighter_btc_worker4_runs").select("*").order("ran_at", { ascending: false }).limit(30),
+      getSupabase().from("lighter_btc_trade_flow_paper_trades").select("*").eq("worker_id", "worker1").order("closed_at", { ascending: false }).limit(50),
+      getSupabase().from("lighter_btc_trade_flow_paper_trades").select("*").eq("worker_id", "worker4").order("closed_at", { ascending: false }).limit(50),
       getSupabase().from("lighter_btc_optimal_state").select("*").eq("id", 1).single(),
       getSupabase().from("lighter_btc_optimal_trades").select("*").order("closed_at", { ascending: false }).limit(200),
       getSupabase().from("lighter_btc_optimal_runs").select("*").order("ran_at", { ascending: false }).limit(30),
@@ -5597,6 +5758,8 @@ export default function Dashboard() {
     setWorker4State(worker4St ?? null);
     setWorker4Trades(worker4Tr ?? []);
     setWorker4Runs(worker4Rs ?? []);
+    setWorker1TfpTrades(worker1TfpTr ?? []);
+    setWorker4TfpTrades(worker4TfpTr ?? []);
     setOptimalBtcState(optimalBtcSt ?? null);
     setOptimalBtcTrades(optimalBtcTr ?? []);
     setOptimalBtcRuns(optimalBtcRs ?? []);
@@ -5775,6 +5938,7 @@ export default function Dashboard() {
       .subscribe();
     const ch6 = sb.channel("lighter-btc-rsi-paper")
       .on("postgres_changes", { event: "INSERT", schema: "public", table: "lighter_btc_rsi_paper_trades" }, debouncedLoad)
+      .on("postgres_changes", { event: "INSERT", schema: "public", table: "lighter_btc_trade_flow_paper_trades" }, debouncedLoad)
       .subscribe();
     // The three live Lighter state tables aren't on realtime at all (every tick would fire a
     // reload -- too chatty), so a plain metrics write (live_schedule_*, live_wiggle, etc.) with
@@ -5833,6 +5997,7 @@ export default function Dashboard() {
             combineEquityWinRate
             // 2026-10-01: hour ban OFF (trading_hours_utc=None in the live config). Pass
             // tradingHoursUtc={WORKER1_TRADING_HOURS} again when the schedule is restored.
+            tradeFlowPaperTrades={worker1TfpTrades}
           />
           <HedgeDualLegPanel
             environmentRun={hedgeEnvironmentRun}
@@ -5856,6 +6021,7 @@ export default function Dashboard() {
             loading={loading}
             onToggled={load}
             combineEquityWinRate
+            tradeFlowPaperTrades={worker4TfpTrades}
           />
         </div>
 
