@@ -115,6 +115,10 @@ CONFIG = BotConfig(
     # taker-aggressor buy/sell flow from recentTrades, read-only. Requires
     # lighter_btc_worker4_trade_flow_ratio.sql.
     schema_has_trade_flow_ratio_readout=True,
+    # 2026-10-12, direct request ("ok let's build the signal, put it in the wiggle panel"): perp
+    # mark-vs-index premium (crowd positioning), read-only. Requires
+    # lighter_btc_worker4_premium.sql.
+    schema_has_premium_readout=True,
     # 2026-10-12, direct request ("we need to paper trade this thing... continuously trading
     # this... put some options to change the settings"): continuous paper-only shadow of the
     # trade-flow-ratio hypothesis, validated first as a manual forward test. Off by default

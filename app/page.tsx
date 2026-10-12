@@ -5197,6 +5197,12 @@ function MasterSchedulePanel({
   // Real taker-aggressor buy/sell flow (2026-10-12, direct request: "I like it... not the
   // intent, but what is happening") -- from Lighter's recentTrades endpoint, not the order book.
   const liveTradeFlowRatio = worker1State?.live_trade_flow_ratio ?? null;
+  // Perp mark-vs-index premium (2026-10-12, direct request after explaining what funding is:
+  // "ok let's build the signal, put it in the wiggle panel"). ONE signal -- live_current_
+  // funding_rate rides alongside purely as a $-meaningful reference, not a second signal; see
+  // BotConfig.schema_has_premium_readout's docstring for why.
+  const livePremium = worker1State?.live_premium ?? null;
+  const liveFundingRate = worker1State?.live_current_funding_rate ?? null;
 
   const liveMiamiHour = getMiamiHour();
   const worker1Metrics = {
@@ -5439,6 +5445,21 @@ function MasterSchedulePanel({
               {liveTradeFlowRatio != null ? liveTradeFlowRatio.toFixed(3) : "—"}
             </p>
             <p className="text-gray-500 text-[8px] leading-tight mt-0.5">Share of REAL executed volume that was aggressive buying (lifted the ask) vs selling (hit the bid), last ~100 trades. Above 0.5 = more real buying pressure.</p>
+          </div>
+          {/* 2026-10-12, direct request after explaining funding/premium ("ok let's build the
+              signal"): mark-vs-index spread, a live read on crowd positioning -- a stretched
+              premium means one side is paying real money to stay in, which tends to be fragile.
+              Funding rate shown as a small $-meaningful reference underneath, not a second
+              signal -- see run_premium_forever / BotConfig.schema_has_premium_readout. */}
+          <div className="bg-gray-900/50 rounded-lg p-1.5">
+            <p className="text-gray-500 text-[8px] uppercase leading-tight">Premium</p>
+            <p className={`font-bold text-xs tabular-nums ${livePremium == null ? "text-gray-500" : Math.abs(livePremium) >= 0.05 ? "text-amber-400" : "text-gray-300"}`}>
+              {livePremium != null ? `${livePremium >= 0 ? "+" : ""}${livePremium.toFixed(4)}%` : "—"}
+            </p>
+            <p className="text-gray-500 text-[8px] leading-tight mt-0.5">
+              Mark price vs index (fair) price. Positive = perp trading rich, longs are crowded.
+              {liveFundingRate != null && <> Funding now: {liveFundingRate >= 0 ? "+" : ""}{liveFundingRate.toFixed(4)}%.</>}
+            </p>
           </div>
         </div>
       </div>

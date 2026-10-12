@@ -112,6 +112,9 @@ TRADE_FLOW_LOG_RETENTION_DAYS = 14
 MARKET_DATA_BOOK_EVERY = 2.0  # order-book snapshots cost nothing extra (already in memory via
                               # the websocket) -- can log much faster than the tick logger did
 MARKET_DATA_RETENTION_DAYS = 14
+PREMIUM_LOG_EVERY = 10.0  # throttles the WRITE only -- market_stats pushes over its own
+                          # websocket (no REST polling, no WAF exposure at all), so this just
+                          # caps how often that stream gets written to Supabase.
 
 QTY_EPS = 1e-6
 OVERSIZE_FACTOR = 1.5     # real position this much bigger than intended => emergency flatten
@@ -1001,6 +1004,18 @@ class BotConfig:
     # intent, but what is happening"). See compute_trade_flow_ratio /
     # run_trade_flow_ratio_forever. Requires the live_trade_flow_ratio column migration.
     schema_has_trade_flow_ratio_readout: bool = False
+    # Perp premium / funding (2026-10-12, direct request after explaining what funding is: "ok
+    # lets build the signal"). Mark-vs-index spread ("premium") is a live read on crowd
+    # positioning -- a stretched premium means one side is paying real money to stay in, which
+    # tends to be fragile. Deliberately ONE signal, not three: mark_price/index_price/mid_price
+    # are just inputs (BTC's price is already shown elsewhere), and funding_rate is a smoothed/
+    # clamped derivative of the same premium number, not an independent reading -- only premium
+    # itself is published as the live_* readout, with current_funding_rate alongside it purely
+    # as a $-meaningful reference number (what's actually being paid), not a second signal. Pure
+    # observational readout, same "watch before choosing" contract as book depth/trade flow --
+    # gates no entry or exit. See run_premium_forever. Requires the live_premium/
+    # live_current_funding_rate column migration.
+    schema_has_premium_readout: bool = False
     # Stochastic-turn protection (2026-09-28, external research): once a position's unrealized
     # profit reaches 0.75x its (frozen, joint-adaptive) TP, arms a trail on the live stochastic
     # K value instead of price -- closes if K retreats by stoch_turn_retreat_points from its
@@ -2661,6 +2676,70 @@ class StochBot:
                 except Exception:
                     pass  # never let this readout affect trading
             await asyncio.sleep(sleep_s)
+
+    async def run_premium_forever(self):
+        """2026-10-12, direct request after explaining what funding is: "ok let's build the
+        signal, put it in the wiggle panel." Perp mark-vs-index premium -- a live read on crowd
+        positioning (a stretched premium means one side is paying real money to stay in, which
+        tends to be fragile/mean-reverting). See BotConfig.schema_has_premium_readout's
+        docstring for why this publishes exactly ONE signal (premium), not three -- funding_rate
+        is a smoothed/clamped derivative of the same number, published alongside purely as a
+        $-meaningful reference, not a second independent reading.
+
+        Push-based over Lighter's market_stats websocket channel (wss://mainnet.zklighter.
+        elliot.ai/stream, {"type":"subscribe","channel":f"market_stats/{market_index}"}) --
+        confirmed live and auth-free this session. Deliberately its OWN connection via
+        self.http.ws_connect, separate from the SDK-managed order-book/account websocket
+        (self.ws in _ws_session) -- this is read-only market data with no bearing on order
+        placement, so it must never be able to disrupt that connection or vice versa. No REST
+        polling at all, so no WAF exposure (same class of incident as TRADE_FLOW_LOG_EVERY's
+        history) -- PREMIUM_LOG_EVERY only throttles how often a received value gets WRITTEN to
+        Supabase, not how often it's read off the stream."""
+        cfg = self.cfg
+        if not cfg.schema_has_premium_readout:
+            return
+        MAX_BACKOFF_S = 60.0
+        STREAM_URL = "wss://mainnet.zklighter.elliot.ai/stream"
+        backoff = 1.0
+        while True:
+            try:
+                async with self.http.ws_connect(STREAM_URL, heartbeat=30.0) as ws:
+                    await ws.send_json({"type": "subscribe",
+                                        "channel": f"market_stats/{cfg.market_index}"})
+                    backoff = 1.0
+                    last_write = 0.0
+                    async for msg in ws:
+                        if msg.type != aiohttp.WSMsgType.TEXT:
+                            continue
+                        try:
+                            data = jsonlib.loads(msg.data)
+                        except Exception:
+                            continue
+                        stats = data.get("market_stats")
+                        if not stats:
+                            continue
+                        premium = stats.get("premium")
+                        funding = stats.get("current_funding_rate")
+                        now = time.time()
+                        if now - last_write < PREMIUM_LOG_EVERY:
+                            continue
+                        last_write = now
+                        try:
+                            await self.update_state({
+                                "live_premium": float(premium) if premium is not None else None,
+                                "live_current_funding_rate":
+                                    float(funding) if funding is not None else None,
+                            })
+                        except Exception:
+                            pass
+            except Exception as e:
+                try:
+                    await self.log_run("premium_stream_error",
+                                       {"error": str(e)[:300], "backoff_s": backoff})
+                except Exception:
+                    pass  # never let this readout affect trading
+                await asyncio.sleep(backoff)
+                backoff = min(backoff * 2, MAX_BACKOFF_S)
 
     async def run_market_data_logger_forever(self):
         """Single consolidated logger (2026-09-28, direct request): one table, one loop,
@@ -7869,6 +7948,7 @@ class StochBot:
         tick_log_task = asyncio.create_task(self.run_tick_logger_forever())
         trade_flow_log_task = asyncio.create_task(self.run_trade_flow_logger_forever())
         trade_flow_ratio_task = asyncio.create_task(self.run_trade_flow_ratio_forever())
+        premium_task = asyncio.create_task(self.run_premium_forever())
         market_data_log_task = asyncio.create_task(self.run_market_data_logger_forever())
 
         print("Waiting for initial WebSocket data...", flush=True)
@@ -7926,6 +8006,7 @@ class StochBot:
             tick_log_task.cancel()
             trade_flow_log_task.cancel()
             trade_flow_ratio_task.cancel()
+            premium_task.cancel()
             with contextlib.suppress(BaseException):
                 await self.client.api_client.close()
             with contextlib.suppress(BaseException):

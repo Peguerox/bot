@@ -6090,6 +6090,19 @@ async def t_trade_flow_ratio_missing_or_empty_is_none():
           core.compute_trade_flow_ratio([{"size": "oops", "is_maker_ask": True}, {"size": "1", "is_maker_ask": True}]) == 1.0)
 
 
+async def t_premium_readout_defaults_off_and_is_a_true_noop():
+    print("\n[run_premium_forever: schema flag off (the compiled default) -> returns immediately, never touches self.http]")
+    check("schema_has_premium_readout defaults to False", BotConfig.__dataclass_fields__["schema_has_premium_readout"].default is False)
+    ex = FakeExchange()
+    bot = make_bot(ex)  # schema_has_premium_readout left at its False default; bot.http is unset
+    try:
+        await asyncio.wait_for(bot.run_premium_forever(), timeout=2.0)
+    except asyncio.TimeoutError:
+        check("returned promptly instead of entering the stream loop", False)
+    else:
+        check("returned promptly instead of entering the stream loop", True)
+
+
 def _make_trade_flow_paper_bot(ex, **cfg_overrides):
     """make_bot doesn't stub self.sb (the real one would try a live HTTP call) -- this wraps it
     with a capturing fake so trade_flow_paper tests can assert on what got logged."""
@@ -9136,6 +9149,7 @@ async def main():
               t_trade_flow_ratio_all_one_side,
               t_trade_flow_ratio_weighted_by_size_not_count,
               t_trade_flow_ratio_missing_or_empty_is_none,
+              t_premium_readout_defaults_off_and_is_a_true_noop,
               t_trade_flow_paper_opens_long_on_high_ratio,
               t_trade_flow_paper_opens_short_on_low_ratio,
               t_trade_flow_paper_stays_flat_in_neutral_zone,
