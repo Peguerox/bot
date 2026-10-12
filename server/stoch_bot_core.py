@@ -6579,6 +6579,30 @@ class StochBot:
             # at all. Proven necessary 2026-09-23: two disabled, already-flat workers kept
             # hammering a WAF-blocked endpoint once per tick for no reason, which both wastes
             # the retry budget and likely makes an IP-level block look more abusive, not less.
+            #
+            # 2026-10-12, real bug fix, direct report ("unrealized is 0.2 when TP is 0.1"): the
+            # trade-flow paper shadow (and the RSI paper shadow, same contract) used to be
+            # checked much later in this function, past this fast-path return -- so whenever the
+            # REAL bot was disabled+flat (its NORMAL state while only the paper system is in
+            # use, same as Worker 4 right now), the paper position never got checked again at
+            # all, left to drift arbitrarily far past TP/SL with nothing watching, even though
+            # both paper systems' own docstrings already promise "enabled gates new entries
+            # only, an already-open position keeps being managed regardless." Checked here using
+            # the already-free LOCAL order-book read (self.live.best_bid_ask() -- no REST call,
+            # so this doesn't reintroduce the WAF-hammering this fast-path exists to prevent) so
+            # the real contract actually holds, before returning.
+            bb, ba = self.live.best_bid_ask()
+            if bb is not None and ba is not None:
+                if cfg.schema_has_trade_flow_paper_test:
+                    try:
+                        await self._update_trade_flow_paper_shadow(state, bb, ba, self.now_ms())
+                    except Exception as e:
+                        await self.log_run("trade_flow_paper_shadow_error", {"error": str(e)[:300]})
+                if cfg.rsi_paper_test_enabled:
+                    try:
+                        await self._update_rsi_paper_shadow(state, bb, ba, self.now_ms())
+                    except Exception as e:
+                        await self.log_run("rsi_paper_shadow_error", {"error": str(e)[:300]})
             return
 
         if cfg.debug_verbose_tick:

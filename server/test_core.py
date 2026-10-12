@@ -1598,6 +1598,30 @@ async def t_tick_skips_rest_when_disabled_and_flat():
     check("no order attempted either", ex.orders == [], ex.orders)
 
 
+async def t_tick_disabled_and_flat_still_checks_the_trade_flow_paper_shadow():
+    print("\n[tick: disabled AND flat (real bot) still checks an open trade-flow paper position -- real bug, direct report: \"unrealized is 0.2 when TP is 0.1\"]")
+    ex = FakeExchange()
+    bot = _make_trade_flow_paper_bot(ex)
+    # Real bot: disabled and flat -- this is the fast path that used to skip the paper check
+    # entirely, leaving an open paper position unmanaged for as long as the real bot stayed off.
+    bot.state_row["enabled"] = False
+    bot.state_row["side"] = None
+    # An open short paper position, already well past the 0.10% TP against make_bot's default
+    # order book (bid 86000.0 / ask 86001.0 -- a short exits at the ask).
+    bot.trade_flow_paper_side = "short"
+    bot.trade_flow_paper_entry = 86100.0
+    bot.trade_flow_paper_entry_ms = 1700000000000
+    bot.trade_flow_paper_peak_pct = None
+    bot._trade_flow_paper_loaded = True
+    await bot.tick()
+    check("get_position_rest never called -- the WAF-avoidance fast path this bug fix sits inside is still intact",
+          getattr(bot, "get_position_rest_calls", 0) == 0, getattr(bot, "get_position_rest_calls", 0))
+    check("paper position closed (flat again) -- the fast path no longer starves it",
+          bot.trade_flow_paper_side is None, bot.trade_flow_paper_side)
+    check("one trade logged, reason TP",
+          len(bot.sb_calls) == 1 and bot.sb_calls[0][2]["reason"] == "TP", bot.sb_calls)
+
+
 async def t_tick_still_checks_rest_when_disabled_but_open():
     print("\n[tick: disabled but STILL holding a position -> still protects it via REST]")
     entry = 86000.0
@@ -9277,6 +9301,7 @@ async def main():
               t_session_breaker_adaptive_calm_blocked_above_trip_level,
               t_session_breaker_adaptive_calm_resumes_at_or_below_trip_level,
               t_tick_skips_rest_when_disabled_and_flat,
+              t_tick_disabled_and_flat_still_checks_the_trade_flow_paper_shadow,
               t_tick_still_checks_rest_when_disabled_but_open,
               t_tick_close_requested_closes_open_position,
               t_tick_close_requested_works_even_when_disabled,
