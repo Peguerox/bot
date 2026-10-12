@@ -3884,6 +3884,16 @@ function HedgeDualLegPanel({
           : (t.avg_entry_price - t.exit_price) / t.avg_entry_price) * 100;
   const legNotional = (t: any) =>
     t == null || !t.avg_entry_price ? 0 : t.avg_entry_price * (t.base_amount_btc ?? 0);
+  // 2026-10-12, direct report: "the SL is showing green earnings and the living leg is red."
+  // Real bug -- the cycle list's L·/S· labels below were colored by LEG IDENTITY (long always
+  // green, short always amber), not by that leg's own result, so a long leg cut at its SL
+  // showed green (read as a win) while a short leg that profit-locked showed amber instead of
+  // green. legPct's math was always sign-correct; only the color ignored it. Color by the
+  // actual sign now, same gray fallback as everywhere else when there's nothing to show yet.
+  const legColor = (t: any) => {
+    const p = legPct(t);
+    return p == null ? "text-gray-400" : p >= 0 ? "text-green-400" : "text-red-400";
+  };
   // Hover detail for a cycle row -- direct request. Native title attribute rather than a custom
   // popover: it works on every browser, needs no state, and cannot get stuck open.
   const legDetail = (t: any, label: string) => {
@@ -4550,12 +4560,12 @@ function HedgeDualLegPanel({
                     <span className="text-gray-400 truncate">
                       {c.long && c.short ? (
                         <>
-                          <span className="text-green-400">
+                          <span className={legColor(c.long)}>
                             L·{shortReason(c.long.reason)}
                             <span className="text-gray-500"> {legPct(c.long)!.toFixed(3)}%</span>
                           </span>
                           {" / "}
-                          <span className="text-amber-400">
+                          <span className={legColor(c.short)}>
                             S·{shortReason(c.short.reason)}
                             <span className="text-gray-500"> {legPct(c.short)!.toFixed(3)}%</span>
                           </span>
@@ -4565,8 +4575,8 @@ function HedgeDualLegPanel({
                         <>
                           <span className="text-gray-500">⏳ </span>
                           {c.long
-                            ? <><span className="text-green-400">L·{shortReason(c.long.reason)}<span className="text-gray-500"> {legPct(c.long)!.toFixed(3)}%</span></span><span className="text-gray-500"> / short still running</span></>
-                            : <><span className="text-amber-400">S·{shortReason(c.short.reason)}<span className="text-gray-500"> {legPct(c.short)!.toFixed(3)}%</span></span><span className="text-gray-500"> / long still running</span></>}
+                            ? <><span className={legColor(c.long)}>L·{shortReason(c.long.reason)}<span className="text-gray-500"> {legPct(c.long)!.toFixed(3)}%</span></span><span className="text-gray-500"> / short still running</span></>
+                            : <><span className={legColor(c.short)}>S·{shortReason(c.short.reason)}<span className="text-gray-500"> {legPct(c.short)!.toFixed(3)}%</span></span><span className="text-gray-500"> / long still running</span></>}
                         </>
                       ) : (
                         // No partner leg ever entered alongside this one -- a genuinely naked
@@ -4575,8 +4585,8 @@ function HedgeDualLegPanel({
                           <span className="text-red-400 font-bold">UNHEDGED</span>
                           {" "}
                           {c.long
-                            ? <span className="text-green-400">L·{shortReason(c.long.reason)}<span className="text-gray-500"> {legPct(c.long)!.toFixed(3)}%</span> (no short leg)</span>
-                            : <span className="text-amber-400">S·{shortReason(c.short.reason)}<span className="text-gray-500"> {legPct(c.short)!.toFixed(3)}%</span> (no long leg)</span>}
+                            ? <span className={legColor(c.long)}>L·{shortReason(c.long.reason)}<span className="text-gray-500"> {legPct(c.long)!.toFixed(3)}%</span> (no short leg)</span>
+                            : <span className={legColor(c.short)}>S·{shortReason(c.short.reason)}<span className="text-gray-500"> {legPct(c.short)!.toFixed(3)}%</span> (no long leg)</span>}
                         </>
                       )}
                     </span>
