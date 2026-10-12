@@ -942,7 +942,7 @@ class BotConfig:
     # compute_book_level_ratio. Requires the live_book_depth_ratio/live_book_level_ratio column
     # migration.
     schema_has_book_depth_readout: bool = False
-    book_depth_levels: int = 20
+    book_depth_band_pct: float = 0.05
     # Stochastic-turn protection (2026-09-28, external research): once a position's unrealized
     # profit reaches 0.75x its (frozen, joint-adaptive) TP, arms a trail on the live stochastic
     # K value instead of price -- closes if K retreats by stoch_turn_retreat_points from its
@@ -1457,30 +1457,47 @@ def compute_volume_wiggle_ratio(candles, vol_window=10, wiggle_window=5):
     return wig / vol
 
 
-def _book_levels_near_touch(order_book, levels, side):
-    """Shared helper: the `levels` price levels closest to the touch on one side of the book.
-    `order_book["bids"]`/`["asks"]` arrive from the websocket already grouped by price (one
-    {"price", "size"} entry per level, see lighter.WsClient.update_orders) but in arbitrary
-    order -- sorted here (descending for bids, closest-to-mid first; ascending for asks) before
-    slicing, so "top N" means nearest the touch, not whatever order the feed happened to hold
-    them in. Returns [] on missing/malformed data (never guesses depth exists)."""
+def _book_levels_in_band(order_book, band_pct, side):
+    """Shared helper: every price level within `band_pct`% of the TOUCH on one side of the
+    book. `order_book["bids"]`/`["asks"]` arrive from the websocket already grouped by price
+    (one {"price", "size"} entry per level, see lighter.WsClient.update_orders).
+
+    2026-10-12, real-money bug caught live: the first version capped by RANK (top N levels by
+    count) instead of by price. On a real, consistently deep BTC book (confirmed live: 169-171
+    distinct levels resting on each side at a random moment) that cap is hit on BOTH sides
+    almost always, so the level-COUNT ratio was structurally stuck at N/(N+N)=0.5 regardless of
+    real conditions -- direct report, "the level ratio seems not to be working it does not
+    change is always 0.5". A price band instead of a rank cap makes the count genuinely vary
+    with how densely orders are actually spaced near the touch -- checked against real data: at
+    band_pct=0.05, bid/ask level counts were 127/111 (ratio 0.534), clearly off 0.5 and moving
+    with real conditions, vs a band so wide it re-captures the whole book (0.2% was already back
+    near 169/173, saturating toward 0.5 the same way an over-generous rank cap did).
+
+    Returns [] on missing/malformed data (never guesses depth exists)."""
     raw = (order_book or {}).get(side) or []
     try:
         rows = [(float(r["price"]), float(r["size"])) for r in raw if float(r.get("size", 0)) > 0]
     except (TypeError, ValueError, KeyError):
         return []
-    rows.sort(key=lambda r: r[0], reverse=(side == "bids"))
-    return rows[:levels]
+    if not rows:
+        return []
+    touch = max(p for p, _ in rows) if side == "bids" else min(p for p, _ in rows)
+    if touch <= 0:
+        return []
+    lo = touch * (1 - band_pct / 100) if side == "bids" else touch
+    hi = touch if side == "bids" else touch * (1 + band_pct / 100)
+    return [(p, s) for p, s in rows if lo <= p <= hi]
 
 
-def compute_book_depth_ratio(order_book, levels=20):
+def compute_book_depth_ratio(order_book, band_pct=0.05):
     """2026-10-12, direct request ("let's just get the information and then we observe"): total
-    resting SIZE on the bid side vs the ask side, across the `levels` price levels nearest the
+    resting SIZE on the bid side vs the ask side, across every level within `band_pct`% of the
     touch on each side -- bid_depth / (bid_depth + ask_depth). Above 0.5 = more buy-side size
     stacked than sell-side; below 0.5 = the opposite. Read-only observational readout for now,
-    gates nothing. None if either side has no usable levels."""
-    bids = _book_levels_near_touch(order_book, levels, "bids")
-    asks = _book_levels_near_touch(order_book, levels, "asks")
+    gates nothing. None if either side has no usable levels. See _book_levels_in_band's
+    docstring for why a price band, not a rank cap."""
+    bids = _book_levels_in_band(order_book, band_pct, "bids")
+    asks = _book_levels_in_band(order_book, band_pct, "asks")
     if not bids or not asks:
         return None
     bid_depth = sum(size for _, size in bids)
@@ -1491,15 +1508,16 @@ def compute_book_depth_ratio(order_book, levels=20):
     return bid_depth / total
 
 
-def compute_book_level_ratio(order_book, levels=20):
-    """Sibling to compute_book_depth_ratio, same `levels` nearest the touch, but counting
-    distinct price LEVELS instead of weighting by size -- bid_level_count / (bid_level_count +
-    ask_level_count). Captures breadth of interest (how spread out across prices) rather than
-    size of interest; the two ratios can disagree (e.g. many small bids vs few large asks) and
-    that disagreement may itself be informative. Read-only, gates nothing. None if either side
-    has no usable levels."""
-    bids = _book_levels_near_touch(order_book, levels, "bids")
-    asks = _book_levels_near_touch(order_book, levels, "asks")
+def compute_book_level_ratio(order_book, band_pct=0.05):
+    """Sibling to compute_book_depth_ratio, same band, but counting distinct price LEVELS
+    instead of weighting by size -- bid_level_count / (bid_level_count + ask_level_count).
+    Captures breadth of interest (how densely orders are spaced near the touch) rather than size
+    of interest; the two ratios can disagree (e.g. many small bids vs few large asks) and that
+    disagreement may itself be informative. Read-only, gates nothing. None if either side has no
+    usable levels. MUST use a price band, not a rank cap -- see _book_levels_in_band's docstring
+    for the real bug a rank cap caused (structurally stuck at 0.5 on a consistently deep book)."""
+    bids = _book_levels_in_band(order_book, band_pct, "bids")
+    asks = _book_levels_in_band(order_book, band_pct, "asks")
     if not bids or not asks:
         return None
     total = len(bids) + len(asks)
@@ -6231,8 +6249,8 @@ class StochBot:
                     # a missing column must never cost live_k/live_vol_pct above. Reads
                     # self.live.order_book directly (already streaming via the websocket
                     # subscription, zero extra API cost) -- never a new network call.
-                    depth_ratio = compute_book_depth_ratio(self.live.order_book, cfg.book_depth_levels)
-                    level_ratio = compute_book_level_ratio(self.live.order_book, cfg.book_depth_levels)
+                    depth_ratio = compute_book_depth_ratio(self.live.order_book, cfg.book_depth_band_pct)
+                    level_ratio = compute_book_level_ratio(self.live.order_book, cfg.book_depth_band_pct)
                     try:
                         await self.update_state({"live_book_depth_ratio": depth_ratio,
                                                   "live_book_level_ratio": level_ratio})

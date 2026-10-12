@@ -1921,10 +1921,6 @@ function CompactStochBtcPanel({
   const curHtfTimeframe: string = state?.override_htf_alignment_block_timeframe ?? "off";
   const liveHtfK: number | null = state?.live_htf_k ?? null;
   const [savingHtf, setSavingHtf] = useState(false);
-  // Order-book depth/level ratios (2026-10-12, direct request: "let's just get the information
-  // and then we observe"). Purely observational -- no toggle, no filter, nothing to gate yet.
-  const liveBookDepthRatio: number | null = state?.live_book_depth_ratio ?? null;
-  const liveBookLevelRatio: number | null = state?.live_book_level_ratio ?? null;
 
   async function handleSetHtfTimeframe(tf: "off" | "5m" | "10m" | "1h") {
     if (tf === curHtfTimeframe) return;
@@ -2886,35 +2882,6 @@ function CompactStochBtcPanel({
             ran 56-60% win / net LOSS; not-aligned ran 70-81% win / net WIN -- strongest at
             5-minute. Backwards from intuition: agreement usually means a real trend is running,
             which this mean-reversion bot loses against. "off" (default) never blocks.
-          </p>
-        </div>
-      )}
-      {showLevers && !loading && (
-        <div className="bg-gray-800/60 rounded-lg p-2">
-          {/* 2026-10-12, direct request: order-book depth/level ratios, purely observational --
-              no toggle, gates nothing yet. See compute_book_depth_ratio/compute_book_level_ratio
-              (top 20 price levels nearest the touch on each side, from the already-streaming
-              websocket order book, zero extra API cost). */}
-          <p className="text-gray-500 text-[10px] uppercase">Order-book ratios (observe only)</p>
-          <div className="grid grid-cols-2 gap-2 mt-1">
-            <div>
-              <p className="text-[9px] text-gray-600 uppercase">Depth ratio</p>
-              <p className="text-sm font-bold tabular-nums text-gray-300">
-                {liveBookDepthRatio != null ? liveBookDepthRatio.toFixed(3) : "—"}
-              </p>
-            </div>
-            <div>
-              <p className="text-[9px] text-gray-600 uppercase">Level ratio</p>
-              <p className="text-sm font-bold tabular-nums text-gray-300">
-                {liveBookLevelRatio != null ? liveBookLevelRatio.toFixed(3) : "—"}
-              </p>
-            </div>
-          </div>
-          <p className="text-gray-600 text-[9px] leading-snug mt-1">
-            Both are bid-side share of the top 20 price levels nearest the touch: depth ratio
-            weights by resting size, level ratio just counts distinct price levels. Above 0.5 =
-            more on the bid side; below 0.5 = more on the ask side. No filter, no gate -- just
-            watching for now.
           </p>
         </div>
       )}
@@ -4745,11 +4712,9 @@ function MasterSchedulePanel({
   // pattern as every rule field (parsed only at save time) so typing "5." doesn't get snapped
   // back to "5" mid-keystroke.
   const [minHoldSeconds, setMinHoldSeconds] = useState<string>("0");
-  // 2026-10-07, direct request: "leave everything and put like a dropdown... when marked show
-  // all, when not show the ones we see now" -- the curated 6 (ER/Volume/Wiggle/Vol×Wiggle/
-  // Product Rate/Vol rate) stay the default view; checking this reveals the other 3
-  // (Wiggle/Vol, Zebra, Color bal) too, same tiles as before, nothing deleted.
-  const [showAllMetrics, setShowAllMetrics] = useState(false);
+  // 2026-10-07: the "Show all" checkbox (curated 6 vs all 9) was removed 2026-10-12, direct
+  // request ("now we have lots so you dont need the expand all tick anymore just put it in the
+  // line below") -- every metric just shows always now, wrapping to a second row.
   const loadedOnce = useRef(false);
 
   useEffect(() => {
@@ -4910,6 +4875,12 @@ function MasterSchedulePanel({
   // set, so it never had a live reading at all). Needed so both bots can use it as a schedule
   // rule condition, not just Worker 1's panel.
   const liveColorBalance = worker1State?.live_schedule_color_balance ?? null;
+  // Order-book depth/level ratios (2026-10-12) -- published by Worker 1 (and Worker 4) directly
+  // on their own state row, not via the live_schedule_* family above (those are candle-derived;
+  // these come from the websocket order book instead). Same "Worker 1's feed" convention as
+  // every other tile in this box.
+  const liveBookDepthRatio = worker1State?.live_book_depth_ratio ?? null;
+  const liveBookLevelRatio = worker1State?.live_book_level_ratio ?? null;
 
   const liveMiamiHour = getMiamiHour();
   const worker1Metrics = {
@@ -5066,15 +5037,8 @@ function MasterSchedulePanel({
       </div>
 
       <div className="bg-gray-800/60 rounded-lg p-2">
-        <div className="flex items-center justify-between mb-1.5">
-          <p className="text-gray-500 text-[10px] uppercase">Live readings (Worker 1's feed)</p>
-          <label className="flex items-center gap-1 text-[9px] text-gray-500 uppercase cursor-pointer select-none">
-            <input type="checkbox" checked={showAllMetrics} onChange={(e) => setShowAllMetrics(e.target.checked)}
-                   className="accent-blue-500 w-3 h-3" />
-            Show all
-          </label>
-        </div>
-        <div className={`grid gap-1 ${showAllMetrics ? "grid-cols-9" : "grid-cols-6"}`}>
+        <p className="text-gray-500 text-[10px] uppercase mb-1.5">Live readings (Worker 1's feed)</p>
+        <div className="grid grid-cols-6 gap-1">
           <div className="bg-gray-900/50 rounded-lg p-1.5">
             <p className="text-gray-500 text-[8px] uppercase leading-tight">ER 2h</p>
             <p className={`font-bold text-xs tabular-nums ${liveEr == null ? "text-gray-500" : liveEr >= 0.15 ? "text-amber-400" : "text-gray-300"}`}>
@@ -5111,29 +5075,45 @@ function MasterSchedulePanel({
             </p>
             <p className="text-gray-500 text-[8px] leading-tight mt-0.5">Whether trading volume right now is picking up or dying down vs its own recent pace.</p>
           </div>
-          {showAllMetrics && (
-            <>
-              <div className="bg-gray-900/50 rounded-lg p-1.5">
-                <p className="text-gray-500 text-[8px] uppercase leading-tight">Wiggle/Vol</p>
-                <p className={`font-bold text-xs tabular-nums ${liveVolWiggleRatio == null ? "text-gray-500" : liveVolWiggleRatio <= 3.33 ? "text-amber-400" : "text-gray-300"}`}>
-                  {liveVolWiggleRatio != null ? liveVolWiggleRatio.toFixed(3) : "—"}
-                </p>
-                <p className="text-gray-500 text-[8px] leading-tight mt-0.5">How much price is actually moving for the volume behind it. Low = lots of trading, barely any real movement.</p>
-              </div>
-              <div className="bg-gray-900/50 rounded-lg p-1.5">
-                <p className="text-gray-500 text-[8px] uppercase leading-tight">Zebra</p>
-                <p className="font-bold text-xs tabular-nums text-gray-300">{liveZebra != null ? liveZebra.toFixed(1) : "—"}</p>
-                <p className="text-gray-500 text-[8px] leading-tight mt-0.5">Not 0-100 -- flips ÷ avg candle size, so tiny candles inflate it. Low = grinding one way. High = lots of alternation, often on tiny noisy candles.</p>
-              </div>
-              <div className="bg-gray-900/50 rounded-lg p-1.5">
-                <p className="text-gray-500 text-[8px] uppercase leading-tight">Color bal</p>
-                <p className={`font-bold text-xs tabular-nums ${liveColorBalance == null ? "text-gray-500" : liveColorBalance < 50 ? "text-amber-400" : "text-gray-300"}`}>
-                  {liveColorBalance != null ? liveColorBalance.toFixed(0) : "—"}
-                </p>
-                <p className="text-gray-500 text-[8px] leading-tight mt-0.5">Whether the last 5 candles' ups and downs cancel out (high = balanced) or lean one way (low = trending).</p>
-              </div>
-            </>
-          )}
+          <div className="bg-gray-900/50 rounded-lg p-1.5">
+            <p className="text-gray-500 text-[8px] uppercase leading-tight">Wiggle/Vol</p>
+            <p className={`font-bold text-xs tabular-nums ${liveVolWiggleRatio == null ? "text-gray-500" : liveVolWiggleRatio <= 3.33 ? "text-amber-400" : "text-gray-300"}`}>
+              {liveVolWiggleRatio != null ? liveVolWiggleRatio.toFixed(3) : "—"}
+            </p>
+            <p className="text-gray-500 text-[8px] leading-tight mt-0.5">How much price is actually moving for the volume behind it. Low = lots of trading, barely any real movement.</p>
+          </div>
+          <div className="bg-gray-900/50 rounded-lg p-1.5">
+            <p className="text-gray-500 text-[8px] uppercase leading-tight">Zebra</p>
+            <p className="font-bold text-xs tabular-nums text-gray-300">{liveZebra != null ? liveZebra.toFixed(1) : "—"}</p>
+            <p className="text-gray-500 text-[8px] leading-tight mt-0.5">Not 0-100 -- flips ÷ avg candle size, so tiny candles inflate it. Low = grinding one way. High = lots of alternation, often on tiny noisy candles.</p>
+          </div>
+          <div className="bg-gray-900/50 rounded-lg p-1.5">
+            <p className="text-gray-500 text-[8px] uppercase leading-tight">Color bal</p>
+            <p className={`font-bold text-xs tabular-nums ${liveColorBalance == null ? "text-gray-500" : liveColorBalance < 50 ? "text-amber-400" : "text-gray-300"}`}>
+              {liveColorBalance != null ? liveColorBalance.toFixed(0) : "—"}
+            </p>
+            <p className="text-gray-500 text-[8px] leading-tight mt-0.5">Whether the last 5 candles' ups and downs cancel out (high = balanced) or lean one way (low = trending).</p>
+          </div>
+          {/* 2026-10-12, direct request: order-book depth/level ratios, relocated here next to
+              the other live readings (were briefly on each bot's own panel first). Purely
+              observational -- no filter, no gate, just watching for now. Band-based (not rank
+              -based) after a real bug: a rank cap is almost always hit on both sides of a
+              consistently deep book, which locked the level ratio at 0.5 -- see
+              compute_book_depth_ratio / compute_book_level_ratio / _book_levels_in_band. */}
+          <div className="bg-gray-900/50 rounded-lg p-1.5">
+            <p className="text-gray-500 text-[8px] uppercase leading-tight">Book depth ratio</p>
+            <p className={`font-bold text-xs tabular-nums ${liveBookDepthRatio == null ? "text-gray-500" : "text-gray-300"}`}>
+              {liveBookDepthRatio != null ? liveBookDepthRatio.toFixed(3) : "—"}
+            </p>
+            <p className="text-gray-500 text-[8px] leading-tight mt-0.5">Bid-side share of resting SIZE within 0.05% of the touch. Above 0.5 = more buy-side size stacked than sell-side.</p>
+          </div>
+          <div className="bg-gray-900/50 rounded-lg p-1.5">
+            <p className="text-gray-500 text-[8px] uppercase leading-tight">Book level ratio</p>
+            <p className={`font-bold text-xs tabular-nums ${liveBookLevelRatio == null ? "text-gray-500" : "text-gray-300"}`}>
+              {liveBookLevelRatio != null ? liveBookLevelRatio.toFixed(3) : "—"}
+            </p>
+            <p className="text-gray-500 text-[8px] leading-tight mt-0.5">Bid-side share of distinct price LEVELS (not size-weighted) within 0.05% of the touch -- breadth, not size, of interest.</p>
+          </div>
         </div>
       </div>
 
