@@ -144,9 +144,16 @@ export async function POST(req: NextRequest) {
 
   // Trade-flow paper trade Reset (2026-10-12, direct request: "we need a reset button") --
   // same non-destructive stamp-a-cutoff pattern as the real Worker 1 reset: the stats shown on
-  // the dashboard filter trades closed before this timestamp, nothing is ever deleted. Never
-  // touches an in-flight paper position (unlike the real reset, which refuses while a position
-  // is open) -- this is paper-only, there's no real balance to carry forward correctly around.
+  // the dashboard filter trades closed before this timestamp, nothing is ever deleted.
+  // REVISED same day, direct follow-up ("every time I hit reset, it never goes to 0... stop
+  // the ongoing trade"): an open position used to keep running past this stamp and its
+  // eventual close (whatever closed it -- SL/TP/trigger-trail/a swap flip) would land after
+  // the cutoff and still count, so the "reset" stats never actually hit zero while a trade was
+  // open. The worker (StochBot._trade_flow_paper_force_close_if_reset) now notices this fresh
+  // stamp on its next tick and force-closes any open paper position immediately, logging it
+  // with reason RESET for the audit trail -- the dashboard excludes RESET-reason rows from the
+  // win-rate/total-pnl math (but still lists them) so the headline numbers genuinely read 0
+  // right after a reset, in both threshold and swap mode.
   if (body.resetTradeFlowPaper === true) {
     out["trade_flow_paper_history_reset_at"] = new Date().toISOString();
   }

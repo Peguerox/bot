@@ -6157,6 +6157,56 @@ class StochBot:
             self.trade_flow_paper_entry_ms = state.get("trade_flow_paper_entry_time")
             self.trade_flow_paper_peak_pct = state.get("trade_flow_paper_peak_pct")
 
+    async def _trade_flow_paper_force_close_if_reset(self, state, best_bid, best_ask):
+        """2026-10-12, same day, direct follow-up: "every time I hit reset, it never goes to
+        0... stop the ongoing trade for both." The Reset button only ever stamped
+        trade_flow_paper_history_reset_at (a dashboard-side display cutoff) -- it never told
+        the live worker about it, so an open position (threshold OR swap mode, same instance
+        vars) just kept running, and whatever eventually closed it landed AFTER the cutoff and
+        still counted, so the "since reset" stats never actually read zero while a trade was
+        open. Checked at the very top of _update_trade_flow_paper_shadow, before the mode
+        dispatch, so it covers both modes with one check: if there's an open position whose
+        entry predates the freshest reset stamp, force-close it now at the current best
+        bid/ask, log it with reason RESET (never silently dropped -- same "log every exit"
+        convention as every other reason), and go flat. Returns True if it force-closed (the
+        caller returns immediately afterward)."""
+        if self.trade_flow_paper_side is None or self.trade_flow_paper_entry_ms is None:
+            return False
+        reset_at = state.get("trade_flow_paper_history_reset_at")
+        if not reset_at:
+            return False
+        try:
+            reset_ms = parse_iso(reset_at).timestamp() * 1000
+        except Exception:
+            return False
+        if reset_ms <= self.trade_flow_paper_entry_ms:
+            return False
+        cfg = self.cfg
+        side = self.trade_flow_paper_side
+        entry = self.trade_flow_paper_entry
+        close_price = best_bid if side == "long" else best_ask
+        pnl_pct = ((close_price - entry) / entry * 100 if side == "long"
+                  else (entry - close_price) / entry * 100)
+        opened_at = ms_to_iso(self.trade_flow_paper_entry_ms)
+        await self.sb("POST", "lighter_btc_trade_flow_paper_trades", {
+            "worker_id": cfg.worker_id, "side": side, "entry_price": entry,
+            "exit_price": close_price, "pnl_pct": pnl_pct, "reason": "RESET",
+            "entry_ratio": self.trade_flow_paper_entry_ratio, "opened_at": opened_at,
+        })
+        self.trade_flow_paper_side = None
+        self.trade_flow_paper_entry = None
+        self.trade_flow_paper_entry_ms = None
+        self.trade_flow_paper_peak_pct = None
+        self.trade_flow_paper_entry_ratio = None
+        if cfg.schema_has_trade_flow_paper_test:
+            await self.update_state({
+                "trade_flow_paper_side": None,
+                "trade_flow_paper_entry_price": None,
+                "trade_flow_paper_entry_time": None,
+                "trade_flow_paper_peak_pct": None,
+            })
+        return True
+
     async def _update_trade_flow_paper_shadow(self, state, best_bid, best_ask, now_ms):
         """Fully independent paper-only shadow of the trade-flow-ratio hypothesis (2026-10-12,
         direct request: "we need to paper trade this thing... continuously trading this").
@@ -6183,9 +6233,13 @@ class StochBot:
         _update_trade_flow_paper_swap, dispatched to below before any of this threshold-mode
         logic runs. The signal-flip exit (same day, see BotConfig.
         trade_flow_paper_signal_flip_exit_enabled) is handled further down, inside this
-        threshold-mode body only."""
+        threshold-mode body only. The reset force-close (same day, see
+        _trade_flow_paper_force_close_if_reset) is checked first, ahead of the mode dispatch,
+        since it applies to an open position in either mode."""
         cfg = self.cfg
         await self._load_trade_flow_paper_state(state)
+        if await self._trade_flow_paper_force_close_if_reset(state, best_bid, best_ask):
+            return
         (enabled, long_threshold, short_threshold, tp_pct, trigger_pct, trail_pct, sl_pct, mode,
          signal_flip_exit) = self._trade_flow_paper_controls(state)
         ratio = state.get("live_trade_flow_ratio")

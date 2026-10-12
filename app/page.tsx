@@ -1557,11 +1557,19 @@ function CompactStochBtcPanel({
   const tfpRatio: number | null = state?.live_trade_flow_ratio ?? null;
   // Non-destructive reset (same convention as every other Reset button here) -- stamps a cutoff,
   // never deletes trade rows, the panel just hides anything closed before it.
+  // REVISED 2026-10-12, same day, direct follow-up ("every time I hit reset, it never goes to
+  // 0... stop the ongoing trade"): the worker now force-closes any open position the instant it
+  // sees a fresh reset stamp (StochBot._trade_flow_paper_force_close_if_reset), logging it with
+  // reason RESET -- that forced-close row lands AFTER this cutoff (closed_at >= it) so the plain
+  // closed_at filter alone would still count it. tfpCountedTrades excludes reason === "RESET"
+  // from the win-rate/total-pnl math so those headline numbers genuinely read 0 right after a
+  // reset; tfpTradesList (used for the recent-trades list) still includes it for the audit trail.
   const tfpHistoryResetAt: string = state?.trade_flow_paper_history_reset_at ?? "1970-01-01T00:00:00Z";
   const tfpTradesList = (tradeFlowPaperTrades ?? []).filter((t: any) => t.closed_at >= tfpHistoryResetAt);
-  const tfpWins = tfpTradesList.filter((t: any) => t.pnl_pct > 0).length;
-  const tfpWinRate = tfpTradesList.length ? (100 * tfpWins / tfpTradesList.length).toFixed(1) : "—";
-  const tfpTotalPnlPct = tfpTradesList.reduce((s: number, t: any) => s + (t.pnl_pct ?? 0), 0);
+  const tfpCountedTrades = tfpTradesList.filter((t: any) => t.reason !== "RESET");
+  const tfpWins = tfpCountedTrades.filter((t: any) => t.pnl_pct > 0).length;
+  const tfpWinRate = tfpCountedTrades.length ? (100 * tfpWins / tfpCountedTrades.length).toFixed(1) : "—";
+  const tfpTotalPnlPct = tfpCountedTrades.reduce((s: number, t: any) => s + (t.pnl_pct ?? 0), 0);
   const [resettingTfp, setResettingTfp] = useState(false);
 
   async function handleResetTfp() {
@@ -3269,7 +3277,7 @@ function CompactStochBtcPanel({
             ) : tfpMode === "swap" ? "waiting for the first signal to pick a side" : "flat, waiting for a signal"}
           </p>
           <p className="text-[11px] text-gray-500 mt-1 tabular-nums">
-            {tfpTradesList.length} paper trades — <span className="text-blue-300">{tfpWinRate}% win</span>,{" "}
+            {tfpCountedTrades.length} paper trades — <span className="text-blue-300">{tfpWinRate}% win</span>,{" "}
             <span className={tfpTotalPnlPct >= 0 ? "text-green-400" : "text-red-400"}>
               {tfpTotalPnlPct >= 0 ? "+" : ""}{tfpTotalPnlPct.toFixed(3)}%
             </span> total

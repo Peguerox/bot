@@ -6305,6 +6305,74 @@ async def t_trade_flow_paper_signal_flip_exit_requires_the_far_threshold_not_jus
     check("no trade logged", len(bot.sb_calls) == 0, bot.sb_calls)
 
 
+async def t_trade_flow_paper_reset_force_closes_an_open_threshold_position():
+    print("\n[trade-flow paper: Reset force-closes an open THRESHOLD position the instant the worker sees the fresh stamp]")
+    ex = FakeExchange()
+    bot = _make_trade_flow_paper_bot(ex)
+    bot.trade_flow_paper_side = "long"
+    bot.trade_flow_paper_entry = 86000.0
+    bot.trade_flow_paper_entry_ms = 1700000000000
+    bot.trade_flow_paper_peak_pct = None
+    bot.trade_flow_paper_entry_ratio = 0.9
+    bot._trade_flow_paper_loaded = True
+    state = dict(bot.state_row)
+    # Reset stamped AFTER the entry -- must force-close now, even though price is just noise
+    # (not past SL/TP/trigger) and the ratio hasn't flipped at all.
+    state["trade_flow_paper_history_reset_at"] = core.ms_to_iso(1700000030000)
+    state["live_trade_flow_ratio"] = 0.9
+    await bot._update_trade_flow_paper_shadow(state, 86000.5, 86001.0, 1700000060000)
+    check("closed (flat again)", bot.trade_flow_paper_side is None, bot.trade_flow_paper_side)
+    check("one trade logged, reason RESET",
+          len(bot.sb_calls) == 1 and bot.sb_calls[0][2]["reason"] == "RESET", bot.sb_calls)
+
+
+async def t_trade_flow_paper_reset_force_closes_an_open_swap_position():
+    print("\n[trade-flow paper: Reset force-closes an open SWAP position too -- reason RESET, not SWAP]")
+    ex = FakeExchange()
+    bot = _make_trade_flow_paper_bot(ex, trade_flow_paper_mode="swap")
+    bot.trade_flow_paper_side = "long"
+    bot.trade_flow_paper_entry = 86000.0
+    bot.trade_flow_paper_entry_ms = 1700000000000
+    bot._trade_flow_paper_loaded = True
+    state = dict(bot.state_row)
+    state["override_trade_flow_paper_mode"] = "swap"
+    state["trade_flow_paper_history_reset_at"] = core.ms_to_iso(1700000030000)
+    state["live_trade_flow_ratio"] = 0.9  # would normally just hold (still long) in swap mode
+    await bot._update_trade_flow_paper_shadow(state, 86000.5, 86001.0, 1700000060000)
+    check("closed (flat), not holding", bot.trade_flow_paper_side is None, bot.trade_flow_paper_side)
+    check("one trade logged, reason RESET (not SWAP)",
+          len(bot.sb_calls) == 1 and bot.sb_calls[0][2]["reason"] == "RESET", bot.sb_calls)
+
+
+async def t_trade_flow_paper_reset_does_not_close_a_position_opened_after_the_reset_stamp():
+    print("\n[trade-flow paper: Reset does NOT touch a position opened AFTER the reset stamp -- a later trade is safe]")
+    ex = FakeExchange()
+    bot = _make_trade_flow_paper_bot(ex)
+    bot.trade_flow_paper_side = "long"
+    bot.trade_flow_paper_entry = 86000.0
+    bot.trade_flow_paper_entry_ms = 1700000060000  # entered AFTER the reset stamp below
+    bot.trade_flow_paper_peak_pct = None
+    bot._trade_flow_paper_loaded = True
+    state = dict(bot.state_row)
+    state["trade_flow_paper_history_reset_at"] = core.ms_to_iso(1700000000000)  # stale, older reset
+    state["live_trade_flow_ratio"] = 0.9
+    await bot._update_trade_flow_paper_shadow(state, 86000.5, 86001.0, 1700000070000)
+    check("still open -- this trade postdates the reset", bot.trade_flow_paper_side == "long", bot.trade_flow_paper_side)
+    check("no trade logged", len(bot.sb_calls) == 0, bot.sb_calls)
+
+
+async def t_trade_flow_paper_force_close_if_reset_no_op_when_flat():
+    print("\n[trade-flow paper: _trade_flow_paper_force_close_if_reset is a no-op while flat]")
+    ex = FakeExchange()
+    bot = _make_trade_flow_paper_bot(ex)
+    bot._trade_flow_paper_loaded = True
+    state = dict(bot.state_row)
+    state["trade_flow_paper_history_reset_at"] = core.ms_to_iso(1700000030000)
+    closed = await bot._trade_flow_paper_force_close_if_reset(state, 86000.0, 86001.0)
+    check("returns False", closed is False, closed)
+    check("no trade logged", len(bot.sb_calls) == 0, bot.sb_calls)
+
+
 async def t_trade_flow_paper_enabled_gates_new_entry_only():
     print("\n[trade-flow paper: disabling only blocks NEW entries -- an open paper position still gets managed]")
     ex = FakeExchange()
@@ -9080,6 +9148,10 @@ async def main():
               t_trade_flow_paper_signal_flip_exit_off_by_default,
               t_trade_flow_paper_signal_flip_exit_only_fires_while_green,
               t_trade_flow_paper_signal_flip_exit_requires_the_far_threshold_not_just_a_drift,
+              t_trade_flow_paper_reset_force_closes_an_open_threshold_position,
+              t_trade_flow_paper_reset_force_closes_an_open_swap_position,
+              t_trade_flow_paper_reset_does_not_close_a_position_opened_after_the_reset_stamp,
+              t_trade_flow_paper_force_close_if_reset_no_op_when_flat,
               t_trade_flow_paper_enabled_gates_new_entry_only,
               t_trade_flow_paper_controls_override_contract,
               t_trade_flow_paper_swap_opens_initial_side,
