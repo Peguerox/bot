@@ -1421,7 +1421,7 @@ function currentSessionStart(nowUtc: Date): Date {
 function CompactStochBtcPanel({
   title, subtitle, table, state, trades, currentPrice, loading, onToggled, runs, cooldownMin,
   showSelfLock, stats, tradingHoursUtc, combineEquityWinRate, rsiPaperStats, fixedSettings,
-  selfLockUnlockRange, selfLockUnlockTitle, dormant, tradeFlowPaperTrades,
+  selfLockUnlockRange, selfLockUnlockTitle, dormant, tradeFlowPaperTrades, paperLabel,
 }: {
   title: string; subtitle: string; table: string; state: any; trades: any[];
   currentPrice: number | null; loading: boolean; onToggled: () => void;
@@ -1432,6 +1432,10 @@ function CompactStochBtcPanel({
   // Trade-flow ratio paper trade (2026-10-12) -- recent completed paper trades for THIS bot
   // specifically, pre-filtered by worker_id at the call site (shared table across both bots).
   tradeFlowPaperTrades?: any[];
+  // Direct request, 2026-10-12: "let's call it paper 2" -- Worker 1/Worker 4 naming was
+  // colliding with "worker 2"/"worker 4" confusion on the real bots, so each paper instance
+  // gets its own independent label here, decoupled from which real bot hosts it.
+  paperLabel?: string;
   fixedSettings?: { entryLo: number; entryHi: number; tpPct: number; slPct: number;
                     entryConfirmationMaxPct?: number };
   // Self-lock unlock label -- defaults to the live rule: 2 wins of any kind, OR 1 literal TP.
@@ -3171,7 +3175,7 @@ function CompactStochBtcPanel({
               Exit: TP, or a profit-lock trigger+trail -- deliberately NO stop-loss, same as the
               one-off manual forward test this continuously runs instead of. */}
           <div className="flex items-baseline justify-between">
-            <p className="text-gray-500 text-[10px] uppercase">Trade-flow paper trade (no real money)</p>
+            <p className="text-gray-500 text-[10px] uppercase">{paperLabel ?? "Trade-flow paper trade"} (no real money)</p>
             <div className="flex items-center gap-1">
               <button
                 onClick={handleResetTfp}
@@ -3287,7 +3291,7 @@ function CompactStochBtcPanel({
             ["Trail Dwell", curDwell > 0 ? `ON (${curDwell}s)` : "off"],
             ["SL Dwell", curSlDwell > 0 ? `ON (${curSlDwell}s)` : "off"],
             ["HTF alignment block", curHtfTimeframe !== "off" ? `ON (${curHtfTimeframe})` : "off"],
-            ["Trade-flow paper trade", tfpEnabled ? "ON (no real money)" : "off"],
+            [paperLabel ?? "Trade-flow paper trade", tfpEnabled ? "ON (no real money)" : "off"],
             ["Self-lock / hour ban", "off (compiled, not live-controllable)"],
           ].map(([label, val]) => (
             <div key={label} className="flex items-center justify-between text-[10px]">
@@ -6044,6 +6048,7 @@ export default function Dashboard() {
             // 2026-10-01: hour ban OFF (trading_hours_utc=None in the live config). Pass
             // tradingHoursUtc={WORKER1_TRADING_HOURS} again when the schedule is restored.
             tradeFlowPaperTrades={worker1TfpTrades}
+            paperLabel="Paper 1"
           />
           <HedgeDualLegPanel
             environmentRun={hedgeEnvironmentRun}
@@ -6068,6 +6073,7 @@ export default function Dashboard() {
             onToggled={load}
             combineEquityWinRate
             tradeFlowPaperTrades={worker4TfpTrades}
+            paperLabel="Paper 2"
           />
         </div>
 
