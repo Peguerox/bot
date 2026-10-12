@@ -592,6 +592,20 @@ class BotConfig:
     trade_flow_paper_trigger_pct: float = 0.02
     trade_flow_paper_trail_pct: float = 0.01
     trade_flow_paper_sl_pct: float = 0.05
+    # Swap mode (2026-10-12, direct request, "Paper 2" specifically): a totally different shape
+    # from the threshold mode above -- "instead of the usual future bets short or long, just a
+    # swap... you are always on the trade... whatever your indicator says. if going up you are
+    # in the BTC side, if going down you are in the USD side... this will change as often as the
+    # indicator says, even if it swaps multiple times." No TP, no SL, no trigger/trail at all --
+    # purely signal-driven, always in a position (long "BTC side" or short "USD side", never
+    # flat), flips (closes + immediately reopens the other side) the instant the ratio crosses
+    # the OPPOSITE threshold from whichever side it's currently on (the existing long/short
+    # threshold boxes double as a hysteresis band here, so it doesn't whipsaw on every tick the
+    # ratio sits near 0.5 -- it only flips on a real cross of the far threshold, same numbers,
+    # different job). "threshold" (default) keeps the existing TP/SL/trigger+trail behavior
+    # unchanged -- this is an additive mode switch, not a replacement. See
+    # _trade_flow_paper_controls / _update_trade_flow_paper_shadow's swap branch.
+    trade_flow_paper_mode: str = "threshold"  # "threshold" or "swap"
     # 2026-09-26 (Worker 1): promotes the RSI-Stoch signal (see
     # compute_rsi_stoch_confirmed_signal) from paper-only to driving REAL entries/reversals --
     # a straight swap of the top-level signal source. Every downstream gate (trading_hours_utc,
@@ -6074,15 +6088,16 @@ class StochBot:
             })
 
     def _trade_flow_paper_controls(self, state):
-        """(enabled, long_threshold, short_threshold, tp_pct, trigger_pct, trail_pct, sl_pct) for
-        this tick -- same NULL-means-default override contract as _stoch_band_controls. `enabled`
-        itself is live-overridable too (direct request: "put some options to change the
-        settings"), so this paper shadow can be switched on/off from the dashboard without a
-        redeploy, same as every other on/off control in this file. `sl_pct` added 2026-10-12,
-        same day, direct follow-up after a real paper position sat at -0.31% with nothing to
-        catch it -- "we need to be able to change the settings of the stop loss... like every
-        other bot... we have never made a bot it's only just on and off." See BotConfig.
-        trade_flow_paper_* for the compiled defaults."""
+        """(enabled, long_threshold, short_threshold, tp_pct, trigger_pct, trail_pct, sl_pct,
+        mode) for this tick -- same NULL-means-default override contract as
+        _stoch_band_controls. `enabled` itself is live-overridable too (direct request: "put
+        some options to change the settings"), so this paper shadow can be switched on/off from
+        the dashboard without a redeploy, same as every other on/off control in this file.
+        `sl_pct` added 2026-10-12, same day, direct follow-up after a real paper position sat at
+        -0.31% with nothing to catch it. `mode` added same day ("let's turn paper 2 into a swap
+        bot") -- "threshold" (default) is the original TP/SL/trigger+trail behavior; "swap" is
+        the always-in-market rotation, see _update_trade_flow_paper_shadow's swap branch. See
+        BotConfig.trade_flow_paper_* for the compiled defaults."""
         cfg = self.cfg
         enabled = cfg.trade_flow_paper_enabled
         long_threshold = cfg.trade_flow_paper_long_threshold
@@ -6091,6 +6106,7 @@ class StochBot:
         trigger_pct = cfg.trade_flow_paper_trigger_pct
         trail_pct = cfg.trade_flow_paper_trail_pct
         sl_pct = cfg.trade_flow_paper_sl_pct
+        mode = cfg.trade_flow_paper_mode
         if cfg.schema_has_trade_flow_paper_test:
             o = state.get("override_trade_flow_paper_enabled")
             if o is not None: enabled = bool(o)
@@ -6106,7 +6122,9 @@ class StochBot:
             if o is not None: trail_pct = float(o)
             o = state.get("override_trade_flow_paper_sl_pct")
             if o is not None: sl_pct = float(o)
-        return enabled, long_threshold, short_threshold, tp_pct, trigger_pct, trail_pct, sl_pct
+            o = state.get("override_trade_flow_paper_mode")
+            if o is not None: mode = o
+        return enabled, long_threshold, short_threshold, tp_pct, trigger_pct, trail_pct, sl_pct, mode
 
     async def _load_trade_flow_paper_state(self, state):
         if self._trade_flow_paper_loaded:
@@ -6136,12 +6154,23 @@ class StochBot:
         every tick (continuous, via the live websocket book) rather than on a fixed poll
         interval -- this is what fixes the ~22-point exit overshoot the one-off manual test's
         5-second REST polling showed: a real trail-trigger is caught the instant it crosses, not
-        up to 5s late."""
+        up to 5s late.
+
+        This body is the "threshold" mode only (TP/SL/trigger+trail, can go flat between
+        trades). "swap" mode (2026-10-12, same day, Paper 2 specifically) is a totally
+        different, always-in-market rotation with none of that -- see
+        _update_trade_flow_paper_swap, dispatched to below before any of this threshold-mode
+        logic runs."""
         cfg = self.cfg
         await self._load_trade_flow_paper_state(state)
-        enabled, long_threshold, short_threshold, tp_pct, trigger_pct, trail_pct, sl_pct = (
+        enabled, long_threshold, short_threshold, tp_pct, trigger_pct, trail_pct, sl_pct, mode = (
             self._trade_flow_paper_controls(state))
         ratio = state.get("live_trade_flow_ratio")
+
+        if mode == "swap":
+            await self._update_trade_flow_paper_swap(state, best_bid, best_ask, now_ms, ratio,
+                                                      enabled, long_threshold, short_threshold)
+            return
 
         if self.trade_flow_paper_side is None:
             # `enabled` gates new entries only -- an already-open paper position keeps being
@@ -6214,6 +6243,72 @@ class StochBot:
                 "trade_flow_paper_side": None,
                 "trade_flow_paper_entry_price": None,
                 "trade_flow_paper_entry_time": None,
+                "trade_flow_paper_peak_pct": None,
+            })
+
+    async def _update_trade_flow_paper_swap(self, state, best_bid, best_ask, now_ms, ratio,
+                                             enabled, long_threshold, short_threshold):
+        """Swap mode (2026-10-12, direct request, Paper 2 specifically): "instead of the usual
+        future bets short or long, just a swap... you are always on the trade... whatever your
+        indicator says. if going up you are in the BTC side, if going down you are in the USD
+        side... this will change as often as the indicator says, even if it swaps multiple
+        times." Totally different shape from the threshold mode's _update_trade_flow_paper_shadow
+        body above -- NO TP, NO SL, NO trigger/trail at all. Always in a position (long = "BTC
+        side", short = "USD side" -- there is no flat state once started); flips (logs the
+        completed leg with reason="SWAP", immediately opens the other side) the instant the
+        ratio crosses the threshold OPPOSITE whatever side it's currently on. The long/short
+        threshold boxes double as a hysteresis band here -- sitting between them just holds the
+        current side, so it doesn't whipsaw on every tick the ratio drifts near 0.5; it only
+        flips on a genuine cross of the FAR threshold. `enabled` only gates the very first
+        entry (same "gates new entries only" contract as every other toggle in this file) --
+        once a side is established, swapping continues regardless, since there is no flat state
+        to stop at."""
+        cfg = self.cfg
+        if ratio is None:
+            return
+        desired = "long" if ratio >= long_threshold else "short" if ratio <= short_threshold else None
+        current = self.trade_flow_paper_side
+
+        if current is None:
+            if not enabled or desired is None:
+                return
+            self.trade_flow_paper_side = desired
+            self.trade_flow_paper_entry = best_ask if desired == "long" else best_bid
+            self.trade_flow_paper_entry_ms = now_ms
+            self.trade_flow_paper_entry_ratio = ratio
+            if cfg.schema_has_trade_flow_paper_test:
+                await self.update_state({
+                    "trade_flow_paper_side": self.trade_flow_paper_side,
+                    "trade_flow_paper_entry_price": self.trade_flow_paper_entry,
+                    "trade_flow_paper_entry_time": self.trade_flow_paper_entry_ms,
+                    "trade_flow_paper_peak_pct": None,
+                })
+            return
+
+        if desired is None or desired == current:
+            return  # still inside the hysteresis band, or already on the matching side
+
+        close_price = best_bid if current == "long" else best_ask
+        entry = self.trade_flow_paper_entry
+        pnl_pct = ((close_price - entry) / entry * 100 if current == "long"
+                  else (entry - close_price) / entry * 100)
+        opened_at = ms_to_iso(self.trade_flow_paper_entry_ms)
+        await self.sb("POST", "lighter_btc_trade_flow_paper_trades", {
+            "worker_id": cfg.worker_id, "side": current, "entry_price": entry,
+            "exit_price": close_price, "pnl_pct": pnl_pct, "reason": "SWAP",
+            "entry_ratio": self.trade_flow_paper_entry_ratio, "opened_at": opened_at,
+        })
+
+        # Immediately flip -- never flat, per direct instruction ("you are always on the trade").
+        self.trade_flow_paper_side = desired
+        self.trade_flow_paper_entry = best_ask if desired == "long" else best_bid
+        self.trade_flow_paper_entry_ms = now_ms
+        self.trade_flow_paper_entry_ratio = ratio
+        if cfg.schema_has_trade_flow_paper_test:
+            await self.update_state({
+                "trade_flow_paper_side": self.trade_flow_paper_side,
+                "trade_flow_paper_entry_price": self.trade_flow_paper_entry,
+                "trade_flow_paper_entry_time": self.trade_flow_paper_entry_ms,
                 "trade_flow_paper_peak_pct": None,
             })
 

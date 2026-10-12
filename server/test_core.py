@@ -6244,15 +6244,109 @@ async def t_trade_flow_paper_controls_override_contract():
                                      trade_flow_paper_short_threshold=0.2,
                                      trade_flow_paper_tp_pct=0.10, trade_flow_paper_trigger_pct=0.02,
                                      trade_flow_paper_trail_pct=0.01, trade_flow_paper_sl_pct=0.05)
-    enabled, lo, hi, tp, trig, trail, sl = bot._trade_flow_paper_controls({})
+    enabled, lo, hi, tp, trig, trail, sl, mode = bot._trade_flow_paper_controls({})
     check("all compiled defaults with no overrides set",
-          (enabled, lo, hi, tp, trig, trail, sl) == (True, 0.8, 0.2, 0.10, 0.02, 0.01, 0.05),
-          (enabled, lo, hi, tp, trig, trail, sl))
-    state = {"override_trade_flow_paper_tp_pct": 0.25, "override_trade_flow_paper_sl_pct": 0.15}
-    enabled, lo, hi, tp, trig, trail, sl = bot._trade_flow_paper_controls(state)
-    check("only tp and sl overridden, everything else still default",
-          tp == 0.25 and sl == 0.15 and lo == 0.8 and hi == 0.2 and trig == 0.02 and trail == 0.01,
-          (lo, hi, tp, trig, trail, sl))
+          (enabled, lo, hi, tp, trig, trail, sl, mode) == (True, 0.8, 0.2, 0.10, 0.02, 0.01, 0.05, "threshold"),
+          (enabled, lo, hi, tp, trig, trail, sl, mode))
+    state = {"override_trade_flow_paper_tp_pct": 0.25, "override_trade_flow_paper_sl_pct": 0.15,
+             "override_trade_flow_paper_mode": "swap"}
+    enabled, lo, hi, tp, trig, trail, sl, mode = bot._trade_flow_paper_controls(state)
+    check("only tp, sl and mode overridden, everything else still default",
+          tp == 0.25 and sl == 0.15 and mode == "swap" and lo == 0.8 and hi == 0.2 and trig == 0.02 and trail == 0.01,
+          (lo, hi, tp, trig, trail, sl, mode))
+
+
+async def t_trade_flow_paper_swap_opens_initial_side():
+    print("\n[trade-flow paper swap: flat at start -- opens whichever side the first signal gives]")
+    ex = FakeExchange()
+    bot = _make_trade_flow_paper_bot(ex, trade_flow_paper_mode="swap")
+    state = dict(bot.state_row)
+    state["override_trade_flow_paper_mode"] = "swap"
+    state["live_trade_flow_ratio"] = 0.9
+    await bot._update_trade_flow_paper_shadow(state, 86000.0, 86001.0, 1700000000000)
+    check("opened long (BTC side)", bot.trade_flow_paper_side == "long", bot.trade_flow_paper_side)
+    check("entered at the ask", bot.trade_flow_paper_entry == 86001.0, bot.trade_flow_paper_entry)
+    check("no trade logged yet -- nothing to close on the very first entry", len(bot.sb_calls) == 0, bot.sb_calls)
+
+
+async def t_trade_flow_paper_swap_holds_through_the_neutral_zone():
+    print("\n[trade-flow paper swap: ratio between the thresholds -- holds the current side, never closes]")
+    ex = FakeExchange()
+    bot = _make_trade_flow_paper_bot(ex, trade_flow_paper_mode="swap")
+    bot.trade_flow_paper_side = "long"
+    bot.trade_flow_paper_entry = 86000.0
+    bot.trade_flow_paper_entry_ms = 1700000000000
+    bot._trade_flow_paper_loaded = True
+    state = dict(bot.state_row)
+    state["override_trade_flow_paper_mode"] = "swap"
+    # Deep adverse move, but ratio stays in the neutral zone -- no SL in swap mode, must hold.
+    state["live_trade_flow_ratio"] = 0.5
+    await bot._update_trade_flow_paper_shadow(state, 80000.0, 80001.0, 1700000060000)
+    check("still long -- no SL, no exit at all while the ratio sits in the hysteresis band",
+          bot.trade_flow_paper_side == "long", bot.trade_flow_paper_side)
+    check("no trade logged", len(bot.sb_calls) == 0, bot.sb_calls)
+
+
+async def t_trade_flow_paper_swap_flips_on_opposite_threshold_cross():
+    print("\n[trade-flow paper swap: ratio crosses the FAR threshold -- closes the leg and immediately flips]")
+    ex = FakeExchange()
+    bot = _make_trade_flow_paper_bot(ex, trade_flow_paper_mode="swap",
+                                     trade_flow_paper_long_threshold=0.8, trade_flow_paper_short_threshold=0.2)
+    bot.trade_flow_paper_side = "long"
+    bot.trade_flow_paper_entry = 86000.0
+    bot.trade_flow_paper_entry_ms = 1700000000000
+    bot.trade_flow_paper_entry_ratio = 0.9
+    bot._trade_flow_paper_loaded = True
+    state = dict(bot.state_row)
+    state["override_trade_flow_paper_mode"] = "swap"
+    state["live_trade_flow_ratio"] = 0.1  # crosses the short threshold -- flip to short
+    await bot._update_trade_flow_paper_shadow(state, 85000.0, 85001.0, 1700000060000)
+    check("flipped to short (USD side)", bot.trade_flow_paper_side == "short", bot.trade_flow_paper_side)
+    check("new entry at the bid (selling short)", bot.trade_flow_paper_entry == 85000.0, bot.trade_flow_paper_entry)
+    check("one trade logged for the closed long leg, reason SWAP",
+          len(bot.sb_calls) == 1 and bot.sb_calls[0][2]["reason"] == "SWAP", bot.sb_calls)
+    check("closed leg's side recorded correctly as the leg that just ended (long)",
+          bot.sb_calls[0][2]["side"] == "long", bot.sb_calls[0][2])
+    pnl = bot.sb_calls[0][2]["pnl_pct"]
+    check("closed-leg pnl = (85000-86000)/86000*100, a real loss on the long leg",
+          abs(pnl - ((85000.0-86000.0)/86000.0*100)) < 1e-9, pnl)
+
+
+async def t_trade_flow_paper_swap_never_goes_flat():
+    print("\n[trade-flow paper swap: after flipping, still has an open position -- never flat]")
+    ex = FakeExchange()
+    bot = _make_trade_flow_paper_bot(ex, trade_flow_paper_mode="swap")
+    bot.trade_flow_paper_side = "short"
+    bot.trade_flow_paper_entry = 86000.0
+    bot.trade_flow_paper_entry_ms = 1700000000000
+    bot._trade_flow_paper_loaded = True
+    state = dict(bot.state_row)
+    state["override_trade_flow_paper_mode"] = "swap"
+    state["live_trade_flow_ratio"] = 0.95  # crosses the long threshold -- flip to long
+    await bot._update_trade_flow_paper_shadow(state, 87000.0, 87001.0, 1700000060000)
+    check("flipped straight to long -- never passed through a flat state",
+          bot.trade_flow_paper_side == "long", bot.trade_flow_paper_side)
+
+
+async def t_trade_flow_paper_swap_enabled_only_gates_the_first_entry():
+    print("\n[trade-flow paper swap: disabled blocks the FIRST entry, but never stops an established swap sequence]")
+    ex = FakeExchange()
+    bot = _make_trade_flow_paper_bot(ex, trade_flow_paper_mode="swap")
+    state = dict(bot.state_row)
+    state["override_trade_flow_paper_mode"] = "swap"
+    state["override_trade_flow_paper_enabled"] = False
+    state["live_trade_flow_ratio"] = 0.9
+    await bot._update_trade_flow_paper_shadow(state, 86000.0, 86001.0, 1700000000000)
+    check("disabled -- no initial entry", bot.trade_flow_paper_side is None, bot.trade_flow_paper_side)
+    # Now simulate an already-running swap sequence (started before the disable) -- it must
+    # keep flipping regardless, since there's no flat state to stop at.
+    bot.trade_flow_paper_side = "long"
+    bot.trade_flow_paper_entry = 86000.0
+    bot.trade_flow_paper_entry_ms = 1700000000000
+    state["live_trade_flow_ratio"] = 0.1
+    await bot._update_trade_flow_paper_shadow(state, 85000.0, 85001.0, 1700000060000)
+    check("still flips to short even while disabled -- enabled only gates the very first entry",
+          bot.trade_flow_paper_side == "short", bot.trade_flow_paper_side)
 
 
 # Shared fixture for the lock tests below: midpoints [86000,86100,85900,86050,85950] give a
@@ -8893,6 +8987,11 @@ async def main():
               t_trade_flow_paper_sl_checked_before_an_unarmed_trigger,
               t_trade_flow_paper_enabled_gates_new_entry_only,
               t_trade_flow_paper_controls_override_contract,
+              t_trade_flow_paper_swap_opens_initial_side,
+              t_trade_flow_paper_swap_holds_through_the_neutral_zone,
+              t_trade_flow_paper_swap_flips_on_opposite_threshold_cross,
+              t_trade_flow_paper_swap_never_goes_flat,
+              t_trade_flow_paper_swap_enabled_only_gates_the_first_entry,
               t_volume_wiggle_lock_blocks_below_threshold,
               t_volume_wiggle_lock_allows_at_or_above_threshold,
               t_volume_wiggle_lock_off_by_default,

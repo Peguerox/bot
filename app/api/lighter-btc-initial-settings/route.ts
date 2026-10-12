@@ -175,6 +175,18 @@ export async function POST(req: NextRequest) {
     out["override_exit_mode"] = em;
   }
 
+  // Trade-flow paper trade mode selector (2026-10-12, direct request, Paper 2 specifically:
+  // "let's turn paper 2 into a swap bot"). "threshold" (default) is the original TP/SL/
+  // trigger+trail behavior; "swap" is a totally different, always-in-market rotation with none
+  // of that -- see StochBot._update_trade_flow_paper_swap.
+  if (body.tradeFlowPaperMode !== undefined) {
+    const m = body.tradeFlowPaperMode;
+    if (m !== "threshold" && m !== "swap") {
+      return NextResponse.json({ error: `tradeFlowPaperMode must be threshold/swap (got "${m}").` }, { status: 400 });
+    }
+    out["override_trade_flow_paper_mode"] = m;
+  }
+
   // Escalated/leveled SL (2026-10-06, direct request after digging into real trade data --
   // see StochBot/BotConfig.escalated_sl_enabled's docstring in stoch_bot_core.py). When on,
   // REPLACES the plain SL entirely with the 3-tier check. Off by default.

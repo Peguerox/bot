@@ -1530,6 +1530,12 @@ function CompactStochBtcPanel({
   // stop loss... like every other bot"): originally omitted on purpose, added back after a real
   // paper position sat at -0.31% with nothing to catch it. Same 0.05% as Worker 1's real SL.
   const tfpSl: number = state?.override_trade_flow_paper_sl_pct ?? 0.05;
+  // Swap mode (2026-10-12, same day, direct request, Paper 2 specifically: "let's turn paper 2
+  // into a swap bot"). "threshold" (default) is the original TP/SL/trigger+trail behavior;
+  // "swap" is a totally different, always-in-market rotation (BTC side / USD side) with no
+  // TP/SL at all -- see StochBot._update_trade_flow_paper_swap.
+  const tfpMode: string = state?.override_trade_flow_paper_mode ?? "threshold";
+  const [savingTfpMode, setSavingTfpMode] = useState(false);
   const [savingTfp, setSavingTfp] = useState(false);
   const [tfpLongIn, setTfpLongIn] = useState("");
   const [tfpShortIn, setTfpShortIn] = useState("");
@@ -1577,6 +1583,25 @@ function CompactStochBtcPanel({
     }
     await onToggled();
     setSavingTfp(false);
+  }
+
+  async function handleSetTfpMode(mode: "threshold" | "swap") {
+    if (mode === tfpMode) return;
+    if (!confirm(mode === "swap"
+      ? `Switch ${title}'s paper trade to SWAP mode? Always in a position (BTC side or USD side), no TP/SL/trigger -- flips the instant the ratio crosses the opposite threshold. Takes effect immediately.`
+      : `Switch ${title}'s paper trade back to THRESHOLD mode? Restores TP/SL/trigger+trail, can go flat between trades. Takes effect immediately.`
+    )) return;
+    setSavingTfpMode(true);
+    const res = await fetch("/api/lighter-btc-initial-settings", {
+      method: "POST", headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ table, tradeFlowPaperMode: mode }),
+    });
+    if (!res.ok) {
+      const b = await res.json().catch(() => ({}));
+      alert(b.error || "Could not switch the paper trade mode.");
+    }
+    await onToggled();
+    setSavingTfpMode(false);
   }
 
   async function handleApplyTfpSettings() {
@@ -3195,19 +3220,29 @@ function CompactStochBtcPanel({
               </button>
             </div>
           </div>
+          <div className="flex items-center gap-1 mt-1">
+            {(["threshold", "swap"] as const).map((m) => (
+              <button key={m} onClick={() => handleSetTfpMode(m)} disabled={savingTfpMode || loading}
+                className={`text-[9px] font-bold px-1.5 py-0.5 rounded capitalize disabled:opacity-30 ${
+                  tfpMode === m ? "bg-blue-500/30 text-blue-300" : "bg-gray-700/50 text-gray-500 hover:bg-gray-700"
+                }`}>
+                {m === "swap" ? "Swap (always in market)" : "Threshold (TP/SL)"}
+              </button>
+            ))}
+          </div>
           <p className="text-[11px] text-gray-500 mt-0.5 tabular-nums">
             live ratio: <span className="text-blue-300">{tfpRatio != null ? tfpRatio.toFixed(3) : "—"}</span>
             <span className="text-gray-600"> (long ≥ {tfpLongThreshold}, short ≤ {tfpShortThreshold})</span>
           </p>
           <p className="text-[11px] text-gray-500 mt-0.5 tabular-nums">
             {tfpSide ? (
-              <>paper {tfpSide} @ {tfpEntry?.toFixed(1)} — unrealized{" "}
+              <>{tfpMode === "swap" ? (tfpSide === "long" ? "BTC side" : "USD side") : `paper ${tfpSide}`} @ {tfpEntry?.toFixed(1)} — unrealized{" "}
                 <span className={tfpUnrealizedPct != null && tfpUnrealizedPct >= 0 ? "text-green-400" : "text-red-400"}>
                   {tfpUnrealizedPct != null ? `${tfpUnrealizedPct >= 0 ? "+" : ""}${tfpUnrealizedPct.toFixed(3)}%` : "—"}
                 </span>
-                {tfpPeak != null && <span className="text-gray-600"> (armed, peak +{tfpPeak.toFixed(3)}%)</span>}
+                {tfpMode !== "swap" && tfpPeak != null && <span className="text-gray-600"> (armed, peak +{tfpPeak.toFixed(3)}%)</span>}
               </>
-            ) : "flat, waiting for a signal"}
+            ) : tfpMode === "swap" ? "waiting for the first signal to pick a side" : "flat, waiting for a signal"}
           </p>
           <p className="text-[11px] text-gray-500 mt-1 tabular-nums">
             {tfpTradesList.length} paper trades — <span className="text-blue-300">{tfpWinRate}% win</span>,{" "}
@@ -3220,49 +3255,59 @@ function CompactStochBtcPanel({
               Now two clearly labeled groups (when to enter / how to exit), each its own even
               grid, with Set on its own full-width row so it doesn't look tied to just one box. */}
           <div className="mt-1.5">
-            <p className="text-gray-600 text-[9px] uppercase tracking-wide">Entry — when the ratio crosses</p>
+            <p className="text-gray-600 text-[9px] uppercase tracking-wide">
+              {tfpMode === "swap" ? "BTC side / USD side — when the ratio crosses" : "Entry — when the ratio crosses"}
+            </p>
             <div className="grid grid-cols-2 gap-1.5 mt-0.5">
               <div>
-                <p className="text-gray-500 text-[9px] uppercase">Long ≥ <span className="text-gray-600">now {tfpLongThreshold}</span></p>
+                <p className="text-gray-500 text-[9px] uppercase">{tfpMode === "swap" ? "BTC side ≥" : "Long ≥"} <span className="text-gray-600">now {tfpLongThreshold}</span></p>
                 <input value={tfpLongIn} onChange={(e) => setTfpLongIn(e.target.value)} placeholder={String(tfpLongThreshold)}
                   inputMode="decimal" className="w-full bg-gray-900 border border-gray-700 rounded px-1.5 py-1 text-xs text-white tabular-nums focus:outline-none focus:border-blue-500" />
               </div>
               <div>
-                <p className="text-gray-500 text-[9px] uppercase">Short ≤ <span className="text-gray-600">now {tfpShortThreshold}</span></p>
+                <p className="text-gray-500 text-[9px] uppercase">{tfpMode === "swap" ? "USD side ≤" : "Short ≤"} <span className="text-gray-600">now {tfpShortThreshold}</span></p>
                 <input value={tfpShortIn} onChange={(e) => setTfpShortIn(e.target.value)} placeholder={String(tfpShortThreshold)}
                   inputMode="decimal" className="w-full bg-gray-900 border border-gray-700 rounded px-1.5 py-1 text-xs text-white tabular-nums focus:outline-none focus:border-blue-500" />
               </div>
             </div>
           </div>
-          <div className="mt-2">
-            <p className="text-gray-600 text-[9px] uppercase tracking-wide">Exit — how the position closes</p>
-            <div className="grid grid-cols-4 gap-1.5 mt-0.5">
-              <div>
-                <p className="text-gray-500 text-[9px] uppercase">TP%</p>
-                <p className="text-gray-600 text-[9px]">now {tfpTp}</p>
-                <input value={tfpTpIn} onChange={(e) => setTfpTpIn(e.target.value)} placeholder={String(tfpTp)}
-                  inputMode="decimal" className="w-full bg-gray-900 border border-gray-700 rounded px-1.5 py-1 text-xs text-white tabular-nums focus:outline-none focus:border-blue-500" />
-              </div>
-              <div>
-                <p className="text-gray-500 text-[9px] uppercase">Trigger%</p>
-                <p className="text-gray-600 text-[9px]">now {tfpTrigger}</p>
-                <input value={tfpTriggerIn} onChange={(e) => setTfpTriggerIn(e.target.value)} placeholder={String(tfpTrigger)}
-                  inputMode="decimal" className="w-full bg-gray-900 border border-gray-700 rounded px-1.5 py-1 text-xs text-white tabular-nums focus:outline-none focus:border-blue-500" />
-              </div>
-              <div>
-                <p className="text-gray-500 text-[9px] uppercase">Trail%</p>
-                <p className="text-gray-600 text-[9px]">now {tfpTrail}</p>
-                <input value={tfpTrailIn} onChange={(e) => setTfpTrailIn(e.target.value)} placeholder={String(tfpTrail)}
-                  inputMode="decimal" className="w-full bg-gray-900 border border-gray-700 rounded px-1.5 py-1 text-xs text-white tabular-nums focus:outline-none focus:border-blue-500" />
-              </div>
-              <div>
-                <p className="text-gray-500 text-[9px] uppercase">SL%</p>
-                <p className="text-gray-600 text-[9px]">now {tfpSl}</p>
-                <input value={tfpSlIn} onChange={(e) => setTfpSlIn(e.target.value)} placeholder={String(tfpSl)}
-                  inputMode="decimal" className="w-full bg-gray-900 border border-gray-700 rounded px-1.5 py-1 text-xs text-white tabular-nums focus:outline-none focus:border-blue-500" />
+          {tfpMode === "swap" ? (
+            <p className="text-gray-600 text-[9px] leading-snug mt-1.5">
+              Swap mode: always in a position, no TP/SL/trigger -- flips to the other side the
+              instant the ratio crosses the FAR threshold from whichever side it's currently on
+              (sitting between the two boxes above just holds the current side).
+            </p>
+          ) : (
+            <div className="mt-2">
+              <p className="text-gray-600 text-[9px] uppercase tracking-wide">Exit — how the position closes</p>
+              <div className="grid grid-cols-4 gap-1.5 mt-0.5">
+                <div>
+                  <p className="text-gray-500 text-[9px] uppercase">TP%</p>
+                  <p className="text-gray-600 text-[9px]">now {tfpTp}</p>
+                  <input value={tfpTpIn} onChange={(e) => setTfpTpIn(e.target.value)} placeholder={String(tfpTp)}
+                    inputMode="decimal" className="w-full bg-gray-900 border border-gray-700 rounded px-1.5 py-1 text-xs text-white tabular-nums focus:outline-none focus:border-blue-500" />
+                </div>
+                <div>
+                  <p className="text-gray-500 text-[9px] uppercase">Trigger%</p>
+                  <p className="text-gray-600 text-[9px]">now {tfpTrigger}</p>
+                  <input value={tfpTriggerIn} onChange={(e) => setTfpTriggerIn(e.target.value)} placeholder={String(tfpTrigger)}
+                    inputMode="decimal" className="w-full bg-gray-900 border border-gray-700 rounded px-1.5 py-1 text-xs text-white tabular-nums focus:outline-none focus:border-blue-500" />
+                </div>
+                <div>
+                  <p className="text-gray-500 text-[9px] uppercase">Trail%</p>
+                  <p className="text-gray-600 text-[9px]">now {tfpTrail}</p>
+                  <input value={tfpTrailIn} onChange={(e) => setTfpTrailIn(e.target.value)} placeholder={String(tfpTrail)}
+                    inputMode="decimal" className="w-full bg-gray-900 border border-gray-700 rounded px-1.5 py-1 text-xs text-white tabular-nums focus:outline-none focus:border-blue-500" />
+                </div>
+                <div>
+                  <p className="text-gray-500 text-[9px] uppercase">SL%</p>
+                  <p className="text-gray-600 text-[9px]">now {tfpSl}</p>
+                  <input value={tfpSlIn} onChange={(e) => setTfpSlIn(e.target.value)} placeholder={String(tfpSl)}
+                    inputMode="decimal" className="w-full bg-gray-900 border border-gray-700 rounded px-1.5 py-1 text-xs text-white tabular-nums focus:outline-none focus:border-blue-500" />
+                </div>
               </div>
             </div>
-          </div>
+          )}
           <button onClick={handleApplyTfpSettings} disabled={savingTfp || loading}
             className="w-full mt-1.5 text-xs font-bold px-2.5 py-1.5 rounded bg-blue-500/20 text-blue-400 hover:bg-blue-500/30 disabled:opacity-30">
             {savingTfp ? "…" : "Set"}
