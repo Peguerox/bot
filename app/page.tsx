@@ -1522,16 +1522,43 @@ function CompactStochBtcPanel({
   const tfpTp: number = state?.override_trade_flow_paper_tp_pct ?? 0.10;
   const tfpTrigger: number = state?.override_trade_flow_paper_trigger_pct ?? 0.02;
   const tfpTrail: number = state?.override_trade_flow_paper_trail_pct ?? 0.01;
+  // 2026-10-12, same day, direct follow-up ("we need to be able to change the settings of the
+  // stop loss... like every other bot"): originally omitted on purpose, added back after a real
+  // paper position sat at -0.31% with nothing to catch it. Same 0.05% as Worker 1's real SL.
+  const tfpSl: number = state?.override_trade_flow_paper_sl_pct ?? 0.05;
   const [savingTfp, setSavingTfp] = useState(false);
   const [tfpLongIn, setTfpLongIn] = useState("");
   const [tfpShortIn, setTfpShortIn] = useState("");
   const [tfpTpIn, setTfpTpIn] = useState("");
   const [tfpTriggerIn, setTfpTriggerIn] = useState("");
   const [tfpTrailIn, setTfpTrailIn] = useState("");
-  const tfpTradesList = tradeFlowPaperTrades ?? [];
+  const [tfpSlIn, setTfpSlIn] = useState("");
+  // Direct request, 2026-10-12: show the live ratio reading right on this panel too, not just
+  // in the Master Schedule's shared "Live readings" box -- "put the signal on top of it."
+  const tfpRatio: number | null = state?.live_trade_flow_ratio ?? null;
+  // Non-destructive reset (same convention as every other Reset button here) -- stamps a cutoff,
+  // never deletes trade rows, the panel just hides anything closed before it.
+  const tfpHistoryResetAt: string = state?.trade_flow_paper_history_reset_at ?? "1970-01-01T00:00:00Z";
+  const tfpTradesList = (tradeFlowPaperTrades ?? []).filter((t: any) => t.closed_at >= tfpHistoryResetAt);
   const tfpWins = tfpTradesList.filter((t: any) => t.pnl_pct > 0).length;
   const tfpWinRate = tfpTradesList.length ? (100 * tfpWins / tfpTradesList.length).toFixed(1) : "—";
   const tfpTotalPnlPct = tfpTradesList.reduce((s: number, t: any) => s + (t.pnl_pct ?? 0), 0);
+  const [resettingTfp, setResettingTfp] = useState(false);
+
+  async function handleResetTfp() {
+    if (!confirm(`Reset ${title}'s paper trade stats? Hides trades closed before now -- nothing is deleted. The open paper position (if any) is left alone.`)) return;
+    setResettingTfp(true);
+    const res = await fetch("/api/lighter-btc-initial-settings", {
+      method: "POST", headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ table, resetTradeFlowPaper: true }),
+    });
+    if (!res.ok) {
+      const b = await res.json().catch(() => ({}));
+      alert(b.error || "Could not reset the paper trade stats.");
+    }
+    await onToggled();
+    setResettingTfp(false);
+  }
 
   async function handleToggleTradeFlowPaper() {
     const next = !tfpEnabled;
@@ -1555,6 +1582,7 @@ function CompactStochBtcPanel({
     if (tfpTpIn.trim()) payload.tradeFlowPaperTp = tfpTpIn.trim();
     if (tfpTriggerIn.trim()) payload.tradeFlowPaperTrigger = tfpTriggerIn.trim();
     if (tfpTrailIn.trim()) payload.tradeFlowPaperTrail = tfpTrailIn.trim();
+    if (tfpSlIn.trim()) payload.tradeFlowPaperSl = tfpSlIn.trim();
     if (Object.keys(payload).length === 0) return;
     setSavingTfp(true);
     const res = await fetch("/api/lighter-btc-initial-settings", {
@@ -1565,7 +1593,7 @@ function CompactStochBtcPanel({
       const b = await res.json().catch(() => ({}));
       alert(b.error || "Could not apply the trade-flow paper settings.");
     } else {
-      setTfpLongIn(""); setTfpShortIn(""); setTfpTpIn(""); setTfpTriggerIn(""); setTfpTrailIn("");
+      setTfpLongIn(""); setTfpShortIn(""); setTfpTpIn(""); setTfpTriggerIn(""); setTfpTrailIn(""); setTfpSlIn("");
     }
     await onToggled();
     setSavingTfp(false);
@@ -3144,15 +3172,29 @@ function CompactStochBtcPanel({
               one-off manual forward test this continuously runs instead of. */}
           <div className="flex items-baseline justify-between">
             <p className="text-gray-500 text-[10px] uppercase">Trade-flow paper trade (no real money)</p>
-            <button
-              onClick={handleToggleTradeFlowPaper}
-              disabled={savingTfp || loading}
-              className={`text-[10px] font-bold px-1.5 py-0.5 rounded disabled:opacity-30 ${
-                tfpEnabled ? "bg-green-500/20 text-green-400" : "bg-gray-700/50 text-gray-500"}`}
-            >
-              {savingTfp ? "…" : tfpEnabled ? "ON" : "OFF"}
-            </button>
+            <div className="flex items-center gap-1">
+              <button
+                onClick={handleResetTfp}
+                disabled={resettingTfp || loading}
+                className="text-[10px] font-bold px-1.5 py-0.5 rounded bg-gray-700/50 text-gray-400 hover:bg-gray-700 disabled:opacity-30"
+                title="Hide trades closed before now -- nothing is deleted. Doesn't touch an open paper position."
+              >
+                {resettingTfp ? "…" : "Reset"}
+              </button>
+              <button
+                onClick={handleToggleTradeFlowPaper}
+                disabled={savingTfp || loading}
+                className={`text-[10px] font-bold px-1.5 py-0.5 rounded disabled:opacity-30 ${
+                  tfpEnabled ? "bg-green-500/20 text-green-400" : "bg-gray-700/50 text-gray-500"}`}
+              >
+                {savingTfp ? "…" : tfpEnabled ? "ON" : "OFF"}
+              </button>
+            </div>
           </div>
+          <p className="text-[11px] text-gray-500 mt-0.5 tabular-nums">
+            live ratio: <span className="text-blue-300">{tfpRatio != null ? tfpRatio.toFixed(3) : "—"}</span>
+            <span className="text-gray-600"> (long ≥ {tfpLongThreshold}, short ≤ {tfpShortThreshold})</span>
+          </p>
           <p className="text-[11px] text-gray-500 mt-0.5 tabular-nums">
             {tfpSide ? (
               <>paper {tfpSide} @ {tfpEntry?.toFixed(1)} — unrealized{" "}
@@ -3195,6 +3237,11 @@ function CompactStochBtcPanel({
               <input value={tfpTrailIn} onChange={(e) => setTfpTrailIn(e.target.value)} placeholder={String(tfpTrail)}
                 inputMode="decimal" className="w-full bg-gray-900 border border-gray-700 rounded px-1.5 py-1 text-xs text-white tabular-nums focus:outline-none focus:border-blue-500" />
             </div>
+            <div className="flex-1 min-w-[70px]">
+              <p className="text-gray-500 text-[9px] uppercase">SL% <span className="text-gray-600">now {tfpSl}</span></p>
+              <input value={tfpSlIn} onChange={(e) => setTfpSlIn(e.target.value)} placeholder={String(tfpSl)}
+                inputMode="decimal" className="w-full bg-gray-900 border border-gray-700 rounded px-1.5 py-1 text-xs text-white tabular-nums focus:outline-none focus:border-blue-500" />
+            </div>
             <button onClick={handleApplyTfpSettings} disabled={savingTfp || loading}
               className="text-xs font-bold px-2.5 py-1 rounded bg-blue-500/20 text-blue-400 hover:bg-blue-500/30 disabled:opacity-30 whitespace-nowrap self-end">
               {savingTfp ? "…" : "Set"}
@@ -3214,9 +3261,8 @@ function CompactStochBtcPanel({
           )}
           <p className="text-gray-600 text-[9px] leading-snug mt-1">
             Never places a real order. Enters when the trade-flow ratio crosses a threshold while
-            flat; exits at TP or a profit-lock trigger+trail -- NO stop-loss by design, so a
-            losing paper position can stay open a long time if it never arms. Continuous (tick-
-            level, via the live book), not the 5s-polled one-off test that first validated this.
+            flat; exits at SL, TP, or a profit-lock trigger+trail. Continuous (tick-level, via the
+            live book), not the 5s-polled one-off test that first validated this.
           </p>
         </div>
       )}

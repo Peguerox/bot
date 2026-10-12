@@ -53,6 +53,10 @@ const LIMITS = {
   tradeFlowPaperTp: { min: 0.01, max: 2.0, label: "trade-flow paper TP" },
   tradeFlowPaperTrigger: { min: 0.01, max: 1.0, label: "trade-flow paper trigger" },
   tradeFlowPaperTrail: { min: 0, max: 0.5, label: "trade-flow paper trail" },
+  // 2026-10-12, same day, direct follow-up: "we need to be able to change the settings of the
+  // stop loss... like every other bot." Max raised to 100 (same reasoning as the real `sl`
+  // limit above) so it can be set effectively off if ever wanted, without a literal switch.
+  tradeFlowPaperSl: { min: 0.01, max: 100, label: "trade-flow paper stop-loss" },
 };
 
 // Worker 4 (2026-10-10, exact clone of Worker 1, cloned table shape) shares this same route --
@@ -88,6 +92,7 @@ export async function POST(req: NextRequest) {
     ["tradeFlowPaperTp", "override_trade_flow_paper_tp_pct"],
     ["tradeFlowPaperTrigger", "override_trade_flow_paper_trigger_pct"],
     ["tradeFlowPaperTrail", "override_trade_flow_paper_trail_pct"],
+    ["tradeFlowPaperSl", "override_trade_flow_paper_sl_pct"],
   ] as const) {
     const raw = body[key];
     if (raw === undefined || raw === null || raw === "") continue;
@@ -134,6 +139,15 @@ export async function POST(req: NextRequest) {
   // time, not just blanking the pause out directly.
   if (body.clearVolumeJump === true) {
     out["override_volume_jump_cleared_at"] = new Date().toISOString();
+  }
+
+  // Trade-flow paper trade Reset (2026-10-12, direct request: "we need a reset button") --
+  // same non-destructive stamp-a-cutoff pattern as the real Worker 1 reset: the stats shown on
+  // the dashboard filter trades closed before this timestamp, nothing is ever deleted. Never
+  // touches an in-flight paper position (unlike the real reset, which refuses while a position
+  // is open) -- this is paper-only, there's no real balance to carry forward correctly around.
+  if (body.resetTradeFlowPaper === true) {
+    out["trade_flow_paper_history_reset_at"] = new Date().toISOString();
   }
 
   // Release-arm selector (2026-10-03, direct request: "build them both... which one is

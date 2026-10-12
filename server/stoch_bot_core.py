@@ -572,10 +572,14 @@ class BotConfig:
     # independent paper-only shadow, same contract as the RSI paper test above -- never places a
     # real order, never touches real_trading_locked or any real-trading gate. Enters on
     # live_trade_flow_ratio (see compute_trade_flow_ratio / run_trade_flow_ratio_forever)
-    # crossing a long/short threshold; exits on TP or a profit-lock trigger+trail, deliberately
-    # NO stop-loss (direct instruction, validated first as a manual forward paper test before
-    # this continuous version was built -- see PROJECT_HISTORY.md if this needs re-deriving).
-    # All 6 numbers below are live-overridable from the dashboard (override_trade_flow_paper_*),
+    # crossing a long/short threshold; exits on TP, SL, or a profit-lock trigger+trail.
+    # ORIGINALLY built with no SL at all (direct instruction, validated first as a manual
+    # forward paper test) -- REVISED same day, direct follow-up after watching a real paper
+    # position sit at -0.31% unrealized for 7.7 minutes with nothing to catch it ("this was a
+    # mistake... you're gonna be losing forever?"): added trade_flow_paper_sl_pct, same 0.05%
+    # as Worker 1's real SL by direct request, matching the same override convention as every
+    # other number here (not a NULL-means-off gate -- always a real number, same as TP).
+    # All 7 numbers below are live-overridable from the dashboard (override_trade_flow_paper_*),
     # same NULL-means-default convention as every other override in this file -- see
     # _trade_flow_paper_controls. Requires schema_has_trade_flow_paper_test (the table_state
     # columns) AND lighter_btc_trade_flow_paper_trades (the shared trade log, worker_id-tagged
@@ -587,6 +591,7 @@ class BotConfig:
     trade_flow_paper_tp_pct: float = 0.10
     trade_flow_paper_trigger_pct: float = 0.02
     trade_flow_paper_trail_pct: float = 0.01
+    trade_flow_paper_sl_pct: float = 0.05
     # 2026-09-26 (Worker 1): promotes the RSI-Stoch signal (see
     # compute_rsi_stoch_confirmed_signal) from paper-only to driving REAL entries/reversals --
     # a straight swap of the top-level signal source. Every downstream gate (trading_hours_utc,
@@ -6069,14 +6074,15 @@ class StochBot:
             })
 
     def _trade_flow_paper_controls(self, state):
-        """(enabled, long_threshold, short_threshold, tp_pct, trigger_pct, trail_pct) for this
-        tick -- same NULL-means-default override contract as _stoch_band_controls. `enabled`
+        """(enabled, long_threshold, short_threshold, tp_pct, trigger_pct, trail_pct, sl_pct) for
+        this tick -- same NULL-means-default override contract as _stoch_band_controls. `enabled`
         itself is live-overridable too (direct request: "put some options to change the
         settings"), so this paper shadow can be switched on/off from the dashboard without a
-        redeploy, same as every other on/off control in this file. See BotConfig.
-        trade_flow_paper_* for the compiled defaults and the real-money-free rationale for each
-        number (validated first as a manual forward paper test before this continuous version
-        existed)."""
+        redeploy, same as every other on/off control in this file. `sl_pct` added 2026-10-12,
+        same day, direct follow-up after a real paper position sat at -0.31% with nothing to
+        catch it -- "we need to be able to change the settings of the stop loss... like every
+        other bot... we have never made a bot it's only just on and off." See BotConfig.
+        trade_flow_paper_* for the compiled defaults."""
         cfg = self.cfg
         enabled = cfg.trade_flow_paper_enabled
         long_threshold = cfg.trade_flow_paper_long_threshold
@@ -6084,6 +6090,7 @@ class StochBot:
         tp_pct = cfg.trade_flow_paper_tp_pct
         trigger_pct = cfg.trade_flow_paper_trigger_pct
         trail_pct = cfg.trade_flow_paper_trail_pct
+        sl_pct = cfg.trade_flow_paper_sl_pct
         if cfg.schema_has_trade_flow_paper_test:
             o = state.get("override_trade_flow_paper_enabled")
             if o is not None: enabled = bool(o)
@@ -6097,7 +6104,9 @@ class StochBot:
             if o is not None: trigger_pct = float(o)
             o = state.get("override_trade_flow_paper_trail_pct")
             if o is not None: trail_pct = float(o)
-        return enabled, long_threshold, short_threshold, tp_pct, trigger_pct, trail_pct
+            o = state.get("override_trade_flow_paper_sl_pct")
+            if o is not None: sl_pct = float(o)
+        return enabled, long_threshold, short_threshold, tp_pct, trigger_pct, trail_pct, sl_pct
 
     async def _load_trade_flow_paper_state(self, state):
         if self._trade_flow_paper_loaded:
@@ -6119,16 +6128,18 @@ class StochBot:
         run_trade_flow_ratio_forever, read off `state` rather than recomputed here) crosses the
         long or short threshold -- go long at best_ask, short at best_bid.
 
-        Exit: TP at trade_flow_paper_tp_pct, OR a profit-lock trigger+trail (arms once unrealized
-        reaches trigger_pct, tracks the peak since arming, closes once price gives back
-        trail_pct from that peak) -- deliberately NO stop-loss, the user's explicit instruction
-        from the manual forward test this continuous version replaces. Checked every tick
-        (continuous, via the live websocket book) rather than on a fixed poll interval -- this is
-        what fixes the ~22-point exit overshoot the one-off manual test's 5-second REST polling
-        showed: a real trail-trigger is caught the instant it crosses, not up to 5s late."""
+        Exit: SL, TP, OR a profit-lock trigger+trail (arms once unrealized reaches trigger_pct,
+        tracks the peak since arming, closes once price gives back trail_pct from that peak).
+        SL added 2026-10-12, same day, direct follow-up after a real paper position sat at
+        -0.31% unrealized with nothing to catch it -- the original version deliberately had none,
+        per the manual forward test's own instruction, but watching it live changed that. Checked
+        every tick (continuous, via the live websocket book) rather than on a fixed poll
+        interval -- this is what fixes the ~22-point exit overshoot the one-off manual test's
+        5-second REST polling showed: a real trail-trigger is caught the instant it crosses, not
+        up to 5s late."""
         cfg = self.cfg
         await self._load_trade_flow_paper_state(state)
-        enabled, long_threshold, short_threshold, tp_pct, trigger_pct, trail_pct = (
+        enabled, long_threshold, short_threshold, tp_pct, trigger_pct, trail_pct, sl_pct = (
             self._trade_flow_paper_controls(state))
         ratio = state.get("live_trade_flow_ratio")
 
@@ -6161,7 +6172,9 @@ class StochBot:
                           else (entry - check_price) / entry * 100)
 
         reason = None
-        if unrealized_pct >= tp_pct:
+        if unrealized_pct <= -sl_pct:
+            reason = "SL"
+        elif unrealized_pct >= tp_pct:
             reason = "TP"
         else:
             if self.trade_flow_paper_peak_pct is None:

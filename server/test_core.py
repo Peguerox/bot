@@ -6183,20 +6183,37 @@ async def t_trade_flow_paper_trigger_trail_exit():
           bot.sb_calls)
 
 
-async def t_trade_flow_paper_no_stop_loss():
-    print("\n[trade-flow paper: NO stop-loss, by direct instruction -- stays open on an adverse move]")
+async def t_trade_flow_paper_closes_at_sl():
+    print("\n[trade-flow paper: SL closes on an adverse move -- added 2026-10-12 after a real position sat at -0.31% with nothing to catch it]")
     ex = FakeExchange()
-    bot = _make_trade_flow_paper_bot(ex)
+    bot = _make_trade_flow_paper_bot(ex, trade_flow_paper_sl_pct=0.05)
+    bot.trade_flow_paper_side = "long"
+    bot.trade_flow_paper_entry = 86000.0
+    bot.trade_flow_paper_entry_ms = 1700000000000
+    bot.trade_flow_paper_peak_pct = None
+    bot.trade_flow_paper_entry_ratio = 0.9
+    bot._trade_flow_paper_loaded = True
+    state = dict(bot.state_row)
+    sl_price = 86000.0 * (1 - 0.0006)  # past the 0.05% SL
+    await bot._update_trade_flow_paper_shadow(state, sl_price, sl_price + 1, 1700000060000)
+    check("closed on SL", bot.trade_flow_paper_side is None, bot.trade_flow_paper_side)
+    check("one trade logged, reason SL", len(bot.sb_calls) == 1 and bot.sb_calls[0][2]["reason"] == "SL",
+          bot.sb_calls)
+
+
+async def t_trade_flow_paper_sl_checked_before_an_unarmed_trigger():
+    print("\n[trade-flow paper: a small adverse move under the SL threshold does NOT close early]")
+    ex = FakeExchange()
+    bot = _make_trade_flow_paper_bot(ex, trade_flow_paper_sl_pct=0.05)
     bot.trade_flow_paper_side = "long"
     bot.trade_flow_paper_entry = 86000.0
     bot.trade_flow_paper_entry_ms = 1700000000000
     bot.trade_flow_paper_peak_pct = None
     bot._trade_flow_paper_loaded = True
     state = dict(bot.state_row)
-    bad_price = 86000.0 * 0.95  # -5%, never arms the trigger, no SL to catch it
-    await bot._update_trade_flow_paper_shadow(state, bad_price, bad_price + 1, 1700000060000)
-    check("still open -- no stop-loss closes it, by design", bot.trade_flow_paper_side == "long",
-          bot.trade_flow_paper_side)
+    small_adverse = 86000.0 * (1 - 0.0002)  # -0.02%, well short of the 0.05% SL
+    await bot._update_trade_flow_paper_shadow(state, small_adverse, small_adverse + 1, 1700000060000)
+    check("still open -- SL not reached yet", bot.trade_flow_paper_side == "long", bot.trade_flow_paper_side)
     check("no trade logged", len(bot.sb_calls) == 0, bot.sb_calls)
 
 
@@ -6226,16 +6243,16 @@ async def t_trade_flow_paper_controls_override_contract():
     bot = _make_trade_flow_paper_bot(ex, trade_flow_paper_long_threshold=0.8,
                                      trade_flow_paper_short_threshold=0.2,
                                      trade_flow_paper_tp_pct=0.10, trade_flow_paper_trigger_pct=0.02,
-                                     trade_flow_paper_trail_pct=0.01)
-    enabled, lo, hi, tp, trig, trail = bot._trade_flow_paper_controls({})
+                                     trade_flow_paper_trail_pct=0.01, trade_flow_paper_sl_pct=0.05)
+    enabled, lo, hi, tp, trig, trail, sl = bot._trade_flow_paper_controls({})
     check("all compiled defaults with no overrides set",
-          (enabled, lo, hi, tp, trig, trail) == (True, 0.8, 0.2, 0.10, 0.02, 0.01),
-          (enabled, lo, hi, tp, trig, trail))
-    state = {"override_trade_flow_paper_tp_pct": 0.25}
-    enabled, lo, hi, tp, trig, trail = bot._trade_flow_paper_controls(state)
-    check("only tp overridden, everything else still default",
-          tp == 0.25 and lo == 0.8 and hi == 0.2 and trig == 0.02 and trail == 0.01,
-          (lo, hi, tp, trig, trail))
+          (enabled, lo, hi, tp, trig, trail, sl) == (True, 0.8, 0.2, 0.10, 0.02, 0.01, 0.05),
+          (enabled, lo, hi, tp, trig, trail, sl))
+    state = {"override_trade_flow_paper_tp_pct": 0.25, "override_trade_flow_paper_sl_pct": 0.15}
+    enabled, lo, hi, tp, trig, trail, sl = bot._trade_flow_paper_controls(state)
+    check("only tp and sl overridden, everything else still default",
+          tp == 0.25 and sl == 0.15 and lo == 0.8 and hi == 0.2 and trig == 0.02 and trail == 0.01,
+          (lo, hi, tp, trig, trail, sl))
 
 
 # Shared fixture for the lock tests below: midpoints [86000,86100,85900,86050,85950] give a
@@ -8872,7 +8889,8 @@ async def main():
               t_trade_flow_paper_stays_flat_in_neutral_zone,
               t_trade_flow_paper_closes_at_tp,
               t_trade_flow_paper_trigger_trail_exit,
-              t_trade_flow_paper_no_stop_loss,
+              t_trade_flow_paper_closes_at_sl,
+              t_trade_flow_paper_sl_checked_before_an_unarmed_trigger,
               t_trade_flow_paper_enabled_gates_new_entry_only,
               t_trade_flow_paper_controls_override_contract,
               t_volume_wiggle_lock_blocks_below_threshold,
