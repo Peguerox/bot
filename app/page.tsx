@@ -1535,6 +1535,15 @@ function CompactStochBtcPanel({
   // "swap" is a totally different, always-in-market rotation (BTC side / USD side) with no
   // TP/SL at all -- see StochBot._update_trade_flow_paper_swap.
   const tfpMode: string = state?.override_trade_flow_paper_mode ?? "threshold";
+  // Signal-flip exit (2026-10-12, same day, direct request after watching a real Paper 1 trade
+  // go green then ride the ratio's full reversal back down into an SL loss: "if you are
+  // positive and the signal flips, getting out early... we would have won that one"). Threshold
+  // mode only -- closes immediately on a real reversal (crossing the opposite threshold) while
+  // still green, instead of waiting for TP/trigger+trail. Off by default. Since entry just
+  // re-checks "flat + ratio past threshold" every tick, a fresh trade opens on its own if the
+  // ratio swings back through the entry threshold again -- "we can enter again, and win 2 times."
+  const tfpSignalFlipExit: boolean = state?.override_trade_flow_paper_signal_flip_exit ?? false;
+  const [savingTfpFlip, setSavingTfpFlip] = useState(false);
   const [savingTfpMode, setSavingTfpMode] = useState(false);
   const [savingTfp, setSavingTfp] = useState(false);
   const [tfpLongIn, setTfpLongIn] = useState("");
@@ -1583,6 +1592,21 @@ function CompactStochBtcPanel({
     }
     await onToggled();
     setSavingTfp(false);
+  }
+
+  async function handleToggleTfpSignalFlip() {
+    const next = !tfpSignalFlipExit;
+    setSavingTfpFlip(true);
+    const res = await fetch("/api/lighter-btc-initial-settings", {
+      method: "POST", headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ table, tradeFlowPaperSignalFlipExit: next }),
+    });
+    if (!res.ok) {
+      const b = await res.json().catch(() => ({}));
+      alert(b.error || "Could not toggle the signal-flip exit.");
+    }
+    await onToggled();
+    setSavingTfpFlip(false);
   }
 
   async function handleSetTfpMode(mode: "threshold" | "swap") {
@@ -3306,6 +3330,11 @@ function CompactStochBtcPanel({
                     inputMode="decimal" className="w-full bg-gray-900 border border-gray-700 rounded px-1.5 py-1 text-xs text-white tabular-nums focus:outline-none focus:border-blue-500" />
                 </div>
               </div>
+              <button onClick={handleToggleTfpSignalFlip} disabled={savingTfpFlip || loading}
+                className={`w-full mt-1.5 text-[10px] font-semibold px-2 py-1 rounded ${
+                  tfpSignalFlipExit ? "bg-amber-500/20 text-amber-400" : "bg-gray-700/50 text-gray-500"}`}>
+                {savingTfpFlip ? "…" : `Exit early if green & signal flips: ${tfpSignalFlipExit ? "ON" : "off"}`}
+              </button>
             </div>
           )}
           <button onClick={handleApplyTfpSettings} disabled={savingTfp || loading}
@@ -3353,6 +3382,7 @@ function CompactStochBtcPanel({
             ["SL Dwell", curSlDwell > 0 ? `ON (${curSlDwell}s)` : "off"],
             ["HTF alignment block", curHtfTimeframe !== "off" ? `ON (${curHtfTimeframe})` : "off"],
             [paperLabel ?? "Trade-flow paper trade", tfpEnabled ? "ON (no real money)" : "off"],
+            [`${paperLabel ?? "Paper"} signal-flip exit`, tfpMode === "swap" ? "n/a (swap mode)" : (tfpSignalFlipExit ? "ON" : "off")],
             ["Self-lock / hour ban", "off (compiled, not live-controllable)"],
           ].map(([label, val]) => (
             <div key={label} className="flex items-center justify-between text-[10px]">

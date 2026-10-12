@@ -124,6 +124,7 @@ export async function POST(req: NextRequest) {
     ["rateGuardEnabled", "override_volume_rate_guard_enabled"],
     ["jumpGuardEnabled", "override_volume_jump_enabled"],
     ["tradeFlowPaperEnabled", "override_trade_flow_paper_enabled"],
+    ["tradeFlowPaperSignalFlipExit", "override_trade_flow_paper_signal_flip_exit"],
   ] as const) {
     const raw = body[key];
     if (raw === undefined || raw === null) continue;

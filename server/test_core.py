@@ -6217,6 +6217,94 @@ async def t_trade_flow_paper_sl_checked_before_an_unarmed_trigger():
     check("no trade logged", len(bot.sb_calls) == 0, bot.sb_calls)
 
 
+async def t_trade_flow_paper_signal_flip_exit_closes_when_green_and_ratio_reverses():
+    print("\n[trade-flow paper: signal-flip exit -- green but ratio reverses past the opposite threshold -> closes SIGNAL_FLIP]")
+    ex = FakeExchange()
+    bot = _make_trade_flow_paper_bot(ex, trade_flow_paper_signal_flip_exit_enabled=True)
+    bot.trade_flow_paper_side = "long"
+    bot.trade_flow_paper_entry = 86000.0
+    bot.trade_flow_paper_entry_ms = 1700000000000
+    bot.trade_flow_paper_peak_pct = None
+    bot._trade_flow_paper_loaded = True
+    state = dict(bot.state_row)
+    # +0.01%, green but below the 0.02% trigger -- trail never gets a chance to arm.
+    price = 86000.0 * 1.0001
+    state["live_trade_flow_ratio"] = 0.1  # past the short threshold (0.2) -- a real reversal
+    await bot._update_trade_flow_paper_shadow(state, price, price + 1, 1700000060000)
+    check("closed on the flip", bot.trade_flow_paper_side is None, bot.trade_flow_paper_side)
+    check("one trade logged, reason SIGNAL_FLIP",
+          len(bot.sb_calls) == 1 and bot.sb_calls[0][2]["reason"] == "SIGNAL_FLIP", bot.sb_calls)
+
+
+async def t_trade_flow_paper_signal_flip_exit_short_side_mirror():
+    print("\n[trade-flow paper: signal-flip exit mirrors for a short position]")
+    ex = FakeExchange()
+    bot = _make_trade_flow_paper_bot(ex, trade_flow_paper_signal_flip_exit_enabled=True)
+    bot.trade_flow_paper_side = "short"
+    bot.trade_flow_paper_entry = 86000.0
+    bot.trade_flow_paper_entry_ms = 1700000000000
+    bot.trade_flow_paper_peak_pct = None
+    bot._trade_flow_paper_loaded = True
+    state = dict(bot.state_row)
+    price = 86000.0 * 0.9999  # +0.01% for a short, green but below trigger
+    state["live_trade_flow_ratio"] = 0.9  # past the long threshold (0.8) -- a real reversal
+    await bot._update_trade_flow_paper_shadow(state, price - 1, price, 1700000060000)
+    check("closed on the flip", bot.trade_flow_paper_side is None, bot.trade_flow_paper_side)
+    check("one trade logged, reason SIGNAL_FLIP",
+          len(bot.sb_calls) == 1 and bot.sb_calls[0][2]["reason"] == "SIGNAL_FLIP", bot.sb_calls)
+
+
+async def t_trade_flow_paper_signal_flip_exit_off_by_default():
+    print("\n[trade-flow paper: signal-flip exit is OFF by default -- same green+reversed setup just sits in the normal trigger/trail path]")
+    ex = FakeExchange()
+    bot = _make_trade_flow_paper_bot(ex)  # signal_flip_exit_enabled left at its compiled False default
+    bot.trade_flow_paper_side = "long"
+    bot.trade_flow_paper_entry = 86000.0
+    bot.trade_flow_paper_entry_ms = 1700000000000
+    bot.trade_flow_paper_peak_pct = None
+    bot._trade_flow_paper_loaded = True
+    state = dict(bot.state_row)
+    price = 86000.0 * 1.0001
+    state["live_trade_flow_ratio"] = 0.1
+    await bot._update_trade_flow_paper_shadow(state, price, price + 1, 1700000060000)
+    check("still open -- flag is off, no flip exit fires", bot.trade_flow_paper_side == "long", bot.trade_flow_paper_side)
+    check("no trade logged", len(bot.sb_calls) == 0, bot.sb_calls)
+
+
+async def t_trade_flow_paper_signal_flip_exit_only_fires_while_green():
+    print("\n[trade-flow paper: signal-flip exit never fires while red -- SL already owns that case]")
+    ex = FakeExchange()
+    bot = _make_trade_flow_paper_bot(ex, trade_flow_paper_signal_flip_exit_enabled=True, trade_flow_paper_sl_pct=0.05)
+    bot.trade_flow_paper_side = "long"
+    bot.trade_flow_paper_entry = 86000.0
+    bot.trade_flow_paper_entry_ms = 1700000000000
+    bot.trade_flow_paper_peak_pct = None
+    bot._trade_flow_paper_loaded = True
+    state = dict(bot.state_row)
+    price = 86000.0 * (1 - 0.0002)  # -0.02%, red but short of the 0.05% SL
+    state["live_trade_flow_ratio"] = 0.1  # ratio has reversed too, but unrealized isn't positive
+    await bot._update_trade_flow_paper_shadow(state, price, price + 1, 1700000060000)
+    check("still open -- red, so the flip exit doesn't apply", bot.trade_flow_paper_side == "long", bot.trade_flow_paper_side)
+    check("no trade logged", len(bot.sb_calls) == 0, bot.sb_calls)
+
+
+async def t_trade_flow_paper_signal_flip_exit_requires_the_far_threshold_not_just_a_drift():
+    print("\n[trade-flow paper: signal-flip exit requires crossing the FAR threshold -- drifting toward 0.5 alone doesn't count]")
+    ex = FakeExchange()
+    bot = _make_trade_flow_paper_bot(ex, trade_flow_paper_signal_flip_exit_enabled=True)
+    bot.trade_flow_paper_side = "long"
+    bot.trade_flow_paper_entry = 86000.0
+    bot.trade_flow_paper_entry_ms = 1700000000000
+    bot.trade_flow_paper_peak_pct = None
+    bot._trade_flow_paper_loaded = True
+    state = dict(bot.state_row)
+    price = 86000.0 * 1.0001  # green, below trigger
+    state["live_trade_flow_ratio"] = 0.5  # drifted off the entry side but nowhere near the short threshold (0.2)
+    await bot._update_trade_flow_paper_shadow(state, price, price + 1, 1700000060000)
+    check("still open -- not a real reversal", bot.trade_flow_paper_side == "long", bot.trade_flow_paper_side)
+    check("no trade logged", len(bot.sb_calls) == 0, bot.sb_calls)
+
+
 async def t_trade_flow_paper_enabled_gates_new_entry_only():
     print("\n[trade-flow paper: disabling only blocks NEW entries -- an open paper position still gets managed]")
     ex = FakeExchange()
@@ -6244,16 +6332,18 @@ async def t_trade_flow_paper_controls_override_contract():
                                      trade_flow_paper_short_threshold=0.2,
                                      trade_flow_paper_tp_pct=0.10, trade_flow_paper_trigger_pct=0.02,
                                      trade_flow_paper_trail_pct=0.01, trade_flow_paper_sl_pct=0.05)
-    enabled, lo, hi, tp, trig, trail, sl, mode = bot._trade_flow_paper_controls({})
+    enabled, lo, hi, tp, trig, trail, sl, mode, flip = bot._trade_flow_paper_controls({})
     check("all compiled defaults with no overrides set",
-          (enabled, lo, hi, tp, trig, trail, sl, mode) == (True, 0.8, 0.2, 0.10, 0.02, 0.01, 0.05, "threshold"),
-          (enabled, lo, hi, tp, trig, trail, sl, mode))
+          (enabled, lo, hi, tp, trig, trail, sl, mode, flip) ==
+          (True, 0.8, 0.2, 0.10, 0.02, 0.01, 0.05, "threshold", False),
+          (enabled, lo, hi, tp, trig, trail, sl, mode, flip))
     state = {"override_trade_flow_paper_tp_pct": 0.25, "override_trade_flow_paper_sl_pct": 0.15,
-             "override_trade_flow_paper_mode": "swap"}
-    enabled, lo, hi, tp, trig, trail, sl, mode = bot._trade_flow_paper_controls(state)
-    check("only tp, sl and mode overridden, everything else still default",
-          tp == 0.25 and sl == 0.15 and mode == "swap" and lo == 0.8 and hi == 0.2 and trig == 0.02 and trail == 0.01,
-          (lo, hi, tp, trig, trail, sl, mode))
+             "override_trade_flow_paper_mode": "swap", "override_trade_flow_paper_signal_flip_exit": True}
+    enabled, lo, hi, tp, trig, trail, sl, mode, flip = bot._trade_flow_paper_controls(state)
+    check("only tp, sl, mode and signal_flip_exit overridden, everything else still default",
+          tp == 0.25 and sl == 0.15 and mode == "swap" and flip is True and lo == 0.8 and hi == 0.2
+          and trig == 0.02 and trail == 0.01,
+          (lo, hi, tp, trig, trail, sl, mode, flip))
 
 
 async def t_trade_flow_paper_swap_opens_initial_side():
@@ -8985,6 +9075,11 @@ async def main():
               t_trade_flow_paper_trigger_trail_exit,
               t_trade_flow_paper_closes_at_sl,
               t_trade_flow_paper_sl_checked_before_an_unarmed_trigger,
+              t_trade_flow_paper_signal_flip_exit_closes_when_green_and_ratio_reverses,
+              t_trade_flow_paper_signal_flip_exit_short_side_mirror,
+              t_trade_flow_paper_signal_flip_exit_off_by_default,
+              t_trade_flow_paper_signal_flip_exit_only_fires_while_green,
+              t_trade_flow_paper_signal_flip_exit_requires_the_far_threshold_not_just_a_drift,
               t_trade_flow_paper_enabled_gates_new_entry_only,
               t_trade_flow_paper_controls_override_contract,
               t_trade_flow_paper_swap_opens_initial_side,

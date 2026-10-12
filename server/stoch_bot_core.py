@@ -606,6 +606,21 @@ class BotConfig:
     # unchanged -- this is an additive mode switch, not a replacement. See
     # _trade_flow_paper_controls / _update_trade_flow_paper_shadow's swap branch.
     trade_flow_paper_mode: str = "threshold"  # "threshold" or "swap"
+    # Signal-flip exit (2026-10-12, same day, direct request after watching a real Paper 1
+    # trade go green then ride the ratio's full reversal back down into an SL loss, with the
+    # trail never arming because unrealized never reached trigger_pct): threshold mode only.
+    # While a position is open and currently in PROFIT (unrealized_pct > 0), if the ratio
+    # crosses the OPPOSITE threshold from this position's own side (a real reversal, not a
+    # drift toward 0.5 -- same "far threshold" convention as the swap mode's flip condition),
+    # close immediately with reason SIGNAL_FLIP instead of waiting for TP/trigger+trail. Entry
+    # is unchanged (flat + ratio past threshold, checked every tick), so if the ratio later
+    # swings back through the entry threshold again, a fresh trade opens on its own -- direct
+    # request: "we can enter again, and win 2 times" instead of riding one trade through a
+    # reversal into a loss. Checked after SL/TP (an SL or a real TP still wins outright) but
+    # before the trigger+trail arm/check, so it fires before the trail would've been given a
+    # chance to even tighten. Default OFF -- same additive-flag convention as every other
+    # trade_flow_paper_* control, zero behavior change until turned on from the dashboard.
+    trade_flow_paper_signal_flip_exit_enabled: bool = False
     # 2026-09-26 (Worker 1): promotes the RSI-Stoch signal (see
     # compute_rsi_stoch_confirmed_signal) from paper-only to driving REAL entries/reversals --
     # a straight swap of the top-level signal source. Every downstream gate (trading_hours_utc,
@@ -6089,14 +6104,16 @@ class StochBot:
 
     def _trade_flow_paper_controls(self, state):
         """(enabled, long_threshold, short_threshold, tp_pct, trigger_pct, trail_pct, sl_pct,
-        mode) for this tick -- same NULL-means-default override contract as
+        mode, signal_flip_exit) for this tick -- same NULL-means-default override contract as
         _stoch_band_controls. `enabled` itself is live-overridable too (direct request: "put
         some options to change the settings"), so this paper shadow can be switched on/off from
         the dashboard without a redeploy, same as every other on/off control in this file.
         `sl_pct` added 2026-10-12, same day, direct follow-up after a real paper position sat at
         -0.31% with nothing to catch it. `mode` added same day ("let's turn paper 2 into a swap
         bot") -- "threshold" (default) is the original TP/SL/trigger+trail behavior; "swap" is
-        the always-in-market rotation, see _update_trade_flow_paper_shadow's swap branch. See
+        the always-in-market rotation, see _update_trade_flow_paper_shadow's swap branch.
+        `signal_flip_exit` added same day (threshold mode only -- see BotConfig.
+        trade_flow_paper_signal_flip_exit_enabled for the full reasoning). See
         BotConfig.trade_flow_paper_* for the compiled defaults."""
         cfg = self.cfg
         enabled = cfg.trade_flow_paper_enabled
@@ -6107,6 +6124,7 @@ class StochBot:
         trail_pct = cfg.trade_flow_paper_trail_pct
         sl_pct = cfg.trade_flow_paper_sl_pct
         mode = cfg.trade_flow_paper_mode
+        signal_flip_exit = cfg.trade_flow_paper_signal_flip_exit_enabled
         if cfg.schema_has_trade_flow_paper_test:
             o = state.get("override_trade_flow_paper_enabled")
             if o is not None: enabled = bool(o)
@@ -6124,7 +6142,10 @@ class StochBot:
             if o is not None: sl_pct = float(o)
             o = state.get("override_trade_flow_paper_mode")
             if o is not None: mode = o
-        return enabled, long_threshold, short_threshold, tp_pct, trigger_pct, trail_pct, sl_pct, mode
+            o = state.get("override_trade_flow_paper_signal_flip_exit")
+            if o is not None: signal_flip_exit = bool(o)
+        return (enabled, long_threshold, short_threshold, tp_pct, trigger_pct, trail_pct, sl_pct,
+                mode, signal_flip_exit)
 
     async def _load_trade_flow_paper_state(self, state):
         if self._trade_flow_paper_loaded:
@@ -6160,11 +6181,13 @@ class StochBot:
         trades). "swap" mode (2026-10-12, same day, Paper 2 specifically) is a totally
         different, always-in-market rotation with none of that -- see
         _update_trade_flow_paper_swap, dispatched to below before any of this threshold-mode
-        logic runs."""
+        logic runs. The signal-flip exit (same day, see BotConfig.
+        trade_flow_paper_signal_flip_exit_enabled) is handled further down, inside this
+        threshold-mode body only."""
         cfg = self.cfg
         await self._load_trade_flow_paper_state(state)
-        enabled, long_threshold, short_threshold, tp_pct, trigger_pct, trail_pct, sl_pct, mode = (
-            self._trade_flow_paper_controls(state))
+        (enabled, long_threshold, short_threshold, tp_pct, trigger_pct, trail_pct, sl_pct, mode,
+         signal_flip_exit) = self._trade_flow_paper_controls(state)
         ratio = state.get("live_trade_flow_ratio")
 
         if mode == "swap":
@@ -6200,11 +6223,17 @@ class StochBot:
         unrealized_pct = ((check_price - entry) / entry * 100 if side == "long"
                           else (entry - check_price) / entry * 100)
 
+        signal_flipped = (
+            (side == "long" and ratio is not None and ratio <= short_threshold) or
+            (side == "short" and ratio is not None and ratio >= long_threshold))
+
         reason = None
         if unrealized_pct <= -sl_pct:
             reason = "SL"
         elif unrealized_pct >= tp_pct:
             reason = "TP"
+        elif signal_flip_exit and unrealized_pct > 0 and signal_flipped:
+            reason = "SIGNAL_FLIP"
         else:
             if self.trade_flow_paper_peak_pct is None:
                 if unrealized_pct >= trigger_pct:
