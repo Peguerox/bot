@@ -3215,42 +3215,58 @@ function CompactStochBtcPanel({
               {tfpTotalPnlPct >= 0 ? "+" : ""}{tfpTotalPnlPct.toFixed(3)}%
             </span> total
           </p>
-          <div className="flex gap-1.5 flex-wrap mt-1.5">
-            <div className="flex-1 min-w-[70px]">
-              <p className="text-gray-500 text-[9px] uppercase">Long ≥ <span className="text-gray-600">now {tfpLongThreshold}</span></p>
-              <input value={tfpLongIn} onChange={(e) => setTfpLongIn(e.target.value)} placeholder={String(tfpLongThreshold)}
-                inputMode="decimal" className="w-full bg-gray-900 border border-gray-700 rounded px-1.5 py-1 text-xs text-white tabular-nums focus:outline-none focus:border-blue-500" />
+          {/* Reorganized 2026-10-12, direct request ("you have couple of boxes i dont
+              understand can you organize") -- was one uneven 6-box row that wrapped oddly.
+              Now two clearly labeled groups (when to enter / how to exit), each its own even
+              grid, with Set on its own full-width row so it doesn't look tied to just one box. */}
+          <div className="mt-1.5">
+            <p className="text-gray-600 text-[9px] uppercase tracking-wide">Entry — when the ratio crosses</p>
+            <div className="grid grid-cols-2 gap-1.5 mt-0.5">
+              <div>
+                <p className="text-gray-500 text-[9px] uppercase">Long ≥ <span className="text-gray-600">now {tfpLongThreshold}</span></p>
+                <input value={tfpLongIn} onChange={(e) => setTfpLongIn(e.target.value)} placeholder={String(tfpLongThreshold)}
+                  inputMode="decimal" className="w-full bg-gray-900 border border-gray-700 rounded px-1.5 py-1 text-xs text-white tabular-nums focus:outline-none focus:border-blue-500" />
+              </div>
+              <div>
+                <p className="text-gray-500 text-[9px] uppercase">Short ≤ <span className="text-gray-600">now {tfpShortThreshold}</span></p>
+                <input value={tfpShortIn} onChange={(e) => setTfpShortIn(e.target.value)} placeholder={String(tfpShortThreshold)}
+                  inputMode="decimal" className="w-full bg-gray-900 border border-gray-700 rounded px-1.5 py-1 text-xs text-white tabular-nums focus:outline-none focus:border-blue-500" />
+              </div>
             </div>
-            <div className="flex-1 min-w-[70px]">
-              <p className="text-gray-500 text-[9px] uppercase">Short ≤ <span className="text-gray-600">now {tfpShortThreshold}</span></p>
-              <input value={tfpShortIn} onChange={(e) => setTfpShortIn(e.target.value)} placeholder={String(tfpShortThreshold)}
-                inputMode="decimal" className="w-full bg-gray-900 border border-gray-700 rounded px-1.5 py-1 text-xs text-white tabular-nums focus:outline-none focus:border-blue-500" />
-            </div>
-            <div className="flex-1 min-w-[70px]">
-              <p className="text-gray-500 text-[9px] uppercase">TP% <span className="text-gray-600">now {tfpTp}</span></p>
-              <input value={tfpTpIn} onChange={(e) => setTfpTpIn(e.target.value)} placeholder={String(tfpTp)}
-                inputMode="decimal" className="w-full bg-gray-900 border border-gray-700 rounded px-1.5 py-1 text-xs text-white tabular-nums focus:outline-none focus:border-blue-500" />
-            </div>
-            <div className="flex-1 min-w-[70px]">
-              <p className="text-gray-500 text-[9px] uppercase">Trigger% <span className="text-gray-600">now {tfpTrigger}</span></p>
-              <input value={tfpTriggerIn} onChange={(e) => setTfpTriggerIn(e.target.value)} placeholder={String(tfpTrigger)}
-                inputMode="decimal" className="w-full bg-gray-900 border border-gray-700 rounded px-1.5 py-1 text-xs text-white tabular-nums focus:outline-none focus:border-blue-500" />
-            </div>
-            <div className="flex-1 min-w-[70px]">
-              <p className="text-gray-500 text-[9px] uppercase">Trail% <span className="text-gray-600">now {tfpTrail}</span></p>
-              <input value={tfpTrailIn} onChange={(e) => setTfpTrailIn(e.target.value)} placeholder={String(tfpTrail)}
-                inputMode="decimal" className="w-full bg-gray-900 border border-gray-700 rounded px-1.5 py-1 text-xs text-white tabular-nums focus:outline-none focus:border-blue-500" />
-            </div>
-            <div className="flex-1 min-w-[70px]">
-              <p className="text-gray-500 text-[9px] uppercase">SL% <span className="text-gray-600">now {tfpSl}</span></p>
-              <input value={tfpSlIn} onChange={(e) => setTfpSlIn(e.target.value)} placeholder={String(tfpSl)}
-                inputMode="decimal" className="w-full bg-gray-900 border border-gray-700 rounded px-1.5 py-1 text-xs text-white tabular-nums focus:outline-none focus:border-blue-500" />
-            </div>
-            <button onClick={handleApplyTfpSettings} disabled={savingTfp || loading}
-              className="text-xs font-bold px-2.5 py-1 rounded bg-blue-500/20 text-blue-400 hover:bg-blue-500/30 disabled:opacity-30 whitespace-nowrap self-end">
-              {savingTfp ? "…" : "Set"}
-            </button>
           </div>
+          <div className="mt-2">
+            <p className="text-gray-600 text-[9px] uppercase tracking-wide">Exit — how the position closes</p>
+            <div className="grid grid-cols-4 gap-1.5 mt-0.5">
+              <div>
+                <p className="text-gray-500 text-[9px] uppercase">TP%</p>
+                <p className="text-gray-600 text-[9px]">now {tfpTp}</p>
+                <input value={tfpTpIn} onChange={(e) => setTfpTpIn(e.target.value)} placeholder={String(tfpTp)}
+                  inputMode="decimal" className="w-full bg-gray-900 border border-gray-700 rounded px-1.5 py-1 text-xs text-white tabular-nums focus:outline-none focus:border-blue-500" />
+              </div>
+              <div>
+                <p className="text-gray-500 text-[9px] uppercase">Trigger%</p>
+                <p className="text-gray-600 text-[9px]">now {tfpTrigger}</p>
+                <input value={tfpTriggerIn} onChange={(e) => setTfpTriggerIn(e.target.value)} placeholder={String(tfpTrigger)}
+                  inputMode="decimal" className="w-full bg-gray-900 border border-gray-700 rounded px-1.5 py-1 text-xs text-white tabular-nums focus:outline-none focus:border-blue-500" />
+              </div>
+              <div>
+                <p className="text-gray-500 text-[9px] uppercase">Trail%</p>
+                <p className="text-gray-600 text-[9px]">now {tfpTrail}</p>
+                <input value={tfpTrailIn} onChange={(e) => setTfpTrailIn(e.target.value)} placeholder={String(tfpTrail)}
+                  inputMode="decimal" className="w-full bg-gray-900 border border-gray-700 rounded px-1.5 py-1 text-xs text-white tabular-nums focus:outline-none focus:border-blue-500" />
+              </div>
+              <div>
+                <p className="text-gray-500 text-[9px] uppercase">SL%</p>
+                <p className="text-gray-600 text-[9px]">now {tfpSl}</p>
+                <input value={tfpSlIn} onChange={(e) => setTfpSlIn(e.target.value)} placeholder={String(tfpSl)}
+                  inputMode="decimal" className="w-full bg-gray-900 border border-gray-700 rounded px-1.5 py-1 text-xs text-white tabular-nums focus:outline-none focus:border-blue-500" />
+              </div>
+            </div>
+          </div>
+          <button onClick={handleApplyTfpSettings} disabled={savingTfp || loading}
+            className="w-full mt-1.5 text-xs font-bold px-2.5 py-1.5 rounded bg-blue-500/20 text-blue-400 hover:bg-blue-500/30 disabled:opacity-30">
+            {savingTfp ? "…" : "Set"}
+          </button>
           {tfpTradesList.length > 0 && (
             <div className="mt-1.5 space-y-0.5 max-h-24 overflow-y-auto">
               {tfpTradesList.slice(0, 8).map((t: any, i: number) => (
