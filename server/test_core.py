@@ -5984,6 +5984,64 @@ async def t_volume_wiggle_ratio_flat_price_is_zero_not_none():
     check("flat price with real volume -> 0.0, not None", ratio == 0.0, ratio)
 
 
+async def t_book_depth_ratio_basic():
+    print("\n[compute_book_depth_ratio: bid_depth / (bid_depth + ask_depth), size-weighted]")
+    ob = {"bids": [{"price": "100", "size": "3"}, {"price": "99", "size": "1"}],
+          "asks": [{"price": "101", "size": "2"}, {"price": "102", "size": "2"}]}
+    ratio = core.compute_book_depth_ratio(ob, levels=20)
+    # bid depth = 4, ask depth = 4 -> 0.5
+    check("equal depth both sides -> 0.5", ratio is not None and abs(ratio - 0.5) < 1e-9, ratio)
+
+    ob2 = {"bids": [{"price": "100", "size": "9"}], "asks": [{"price": "101", "size": "1"}]}
+    ratio2 = core.compute_book_depth_ratio(ob2, levels=20)
+    check("heavy bid side -> ratio above 0.5", ratio2 is not None and abs(ratio2 - 0.9) < 1e-9, ratio2)
+
+
+async def t_book_level_ratio_basic():
+    print("\n[compute_book_level_ratio: bid_level_count / (bid+ask level count), unweighted by size]")
+    # 3 bid levels (small) vs 1 ask level (huge) -- depth ratio and level ratio should disagree.
+    ob = {"bids": [{"price": "100", "size": "0.1"}, {"price": "99", "size": "0.1"}, {"price": "98", "size": "0.1"}],
+          "asks": [{"price": "101", "size": "10"}]}
+    depth_ratio = core.compute_book_depth_ratio(ob, levels=20)
+    level_ratio = core.compute_book_level_ratio(ob, levels=20)
+    check("level ratio favors bids (3 of 4 levels)", level_ratio is not None and abs(level_ratio - 0.75) < 1e-9, level_ratio)
+    check("depth ratio favors asks instead (0.1*3=0.3 vs 10) -- the two ratios genuinely disagree",
+          depth_ratio is not None and depth_ratio < 0.1, depth_ratio)
+
+
+async def t_book_ratios_only_count_levels_within_the_cap():
+    print("\n[compute_book_depth_ratio / level_ratio: only the `levels` nearest the touch count, not the whole book]")
+    # 25 bid levels at 0.1 each (100 total), but capped to the 20 nearest the touch (99.99..99.80).
+    bids = [{"price": str(100 - i * 0.01), "size": "0.1"} for i in range(1, 26)]
+    asks = [{"price": "101", "size": "2.0"}]
+    ratio = core.compute_book_depth_ratio({"bids": bids, "asks": asks}, levels=20)
+    # top-20 bid depth = 20*0.1 = 2.0, ask depth = 2.0 -> 0.5, NOT 25*0.1=2.5 (which would skew it)
+    check("far-away levels beyond the cap are excluded", ratio is not None and abs(ratio - 0.5) < 1e-9, ratio)
+    level_ratio = core.compute_book_level_ratio({"bids": bids, "asks": asks}, levels=20)
+    check("level count also respects the cap (20 bids, not 25)", level_ratio is not None and abs(level_ratio - 20 / 21) < 1e-9, level_ratio)
+
+
+async def t_book_ratios_sort_unsorted_input_by_proximity_to_touch():
+    print("\n[compute_book_depth_ratio: the feed can hand levels in arbitrary order -- sorted before capping]")
+    # Deliberately out of order; levels=1 should keep only the BEST (closest to mid) on each side.
+    bids = [{"price": "98", "size": "5"}, {"price": "100", "size": "1"}, {"price": "99", "size": "5"}]
+    asks = [{"price": "103", "size": "5"}, {"price": "101", "size": "1"}, {"price": "102", "size": "5"}]
+    ratio = core.compute_book_depth_ratio({"bids": bids, "asks": asks}, levels=1)
+    # Best bid (100, size 1) vs best ask (101, size 1) -> 0.5, not skewed by the larger far levels.
+    check("only the nearest-to-touch level survives the cap, regardless of feed order",
+          ratio is not None and abs(ratio - 0.5) < 1e-9, ratio)
+
+
+async def t_book_ratios_missing_or_empty_side_is_none():
+    print("\n[compute_book_depth_ratio / level_ratio: missing or empty data on either side -> None, never a crash]")
+    check("no order book at all", core.compute_book_depth_ratio(None) is None)
+    check("empty dict", core.compute_book_depth_ratio({}) is None)
+    check("bids present, asks empty", core.compute_book_depth_ratio({"bids": [{"price": "1", "size": "1"}], "asks": []}) is None)
+    check("zero-size levels filtered out, leaving nothing",
+          core.compute_book_depth_ratio({"bids": [{"price": "1", "size": "0"}], "asks": [{"price": "2", "size": "1"}]}) is None)
+    check("level ratio: same missing-side contract", core.compute_book_level_ratio({"bids": [], "asks": [{"price": "1", "size": "1"}]}) is None)
+
+
 # Shared fixture for the lock tests below: midpoints [86000,86100,85900,86050,85950] give a
 # dispersion (wiggle) of exactly sqrt(5000) ~= 70.7107 (raw dollars). Paired with volume=100,
 # wig/vol ~= 0.70711 (small -- lots of volume, little price movement -- the chop signal under
@@ -8604,6 +8662,11 @@ async def main():
               t_volume_wiggle_ratio_needs_both_components,
               t_volume_wiggle_ratio_zero_volume_is_none,
               t_volume_wiggle_ratio_flat_price_is_zero_not_none,
+              t_book_depth_ratio_basic,
+              t_book_level_ratio_basic,
+              t_book_ratios_only_count_levels_within_the_cap,
+              t_book_ratios_sort_unsorted_input_by_proximity_to_touch,
+              t_book_ratios_missing_or_empty_side_is_none,
               t_volume_wiggle_lock_blocks_below_threshold,
               t_volume_wiggle_lock_allows_at_or_above_threshold,
               t_volume_wiggle_lock_off_by_default,

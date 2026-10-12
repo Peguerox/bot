@@ -935,6 +935,14 @@ class BotConfig:
     # direction (long/short/neutral) regardless of which signal mode is active -- "what is the
     # paper bot looking at right now," on all 3 bots. See self.live_k/live_signal.
     schema_has_live_signal: bool = False  # requires the live_signal/live_k column migration
+    # Order-book depth/level ratios (2026-10-12, direct request: "let's just get the information
+    # and then we observe" after a session exploring what Lighter's order book offers beyond
+    # best bid/ask). Purely observational -- gates no entry or exit, same "watch before
+    # choosing" intent as every other live_* readout. See compute_book_depth_ratio /
+    # compute_book_level_ratio. Requires the live_book_depth_ratio/live_book_level_ratio column
+    # migration.
+    schema_has_book_depth_readout: bool = False
+    book_depth_levels: int = 20
     # Stochastic-turn protection (2026-09-28, external research): once a position's unrealized
     # profit reaches 0.75x its (frozen, joint-adaptive) TP, arms a trail on the live stochastic
     # K value instead of price -- closes if K retreats by stoch_turn_retreat_points from its
@@ -1447,6 +1455,57 @@ def compute_volume_wiggle_ratio(candles, vol_window=10, wiggle_window=5):
     if vol is None or wig is None or vol == 0:
         return None
     return wig / vol
+
+
+def _book_levels_near_touch(order_book, levels, side):
+    """Shared helper: the `levels` price levels closest to the touch on one side of the book.
+    `order_book["bids"]`/`["asks"]` arrive from the websocket already grouped by price (one
+    {"price", "size"} entry per level, see lighter.WsClient.update_orders) but in arbitrary
+    order -- sorted here (descending for bids, closest-to-mid first; ascending for asks) before
+    slicing, so "top N" means nearest the touch, not whatever order the feed happened to hold
+    them in. Returns [] on missing/malformed data (never guesses depth exists)."""
+    raw = (order_book or {}).get(side) or []
+    try:
+        rows = [(float(r["price"]), float(r["size"])) for r in raw if float(r.get("size", 0)) > 0]
+    except (TypeError, ValueError, KeyError):
+        return []
+    rows.sort(key=lambda r: r[0], reverse=(side == "bids"))
+    return rows[:levels]
+
+
+def compute_book_depth_ratio(order_book, levels=20):
+    """2026-10-12, direct request ("let's just get the information and then we observe"): total
+    resting SIZE on the bid side vs the ask side, across the `levels` price levels nearest the
+    touch on each side -- bid_depth / (bid_depth + ask_depth). Above 0.5 = more buy-side size
+    stacked than sell-side; below 0.5 = the opposite. Read-only observational readout for now,
+    gates nothing. None if either side has no usable levels."""
+    bids = _book_levels_near_touch(order_book, levels, "bids")
+    asks = _book_levels_near_touch(order_book, levels, "asks")
+    if not bids or not asks:
+        return None
+    bid_depth = sum(size for _, size in bids)
+    ask_depth = sum(size for _, size in asks)
+    total = bid_depth + ask_depth
+    if total == 0:
+        return None
+    return bid_depth / total
+
+
+def compute_book_level_ratio(order_book, levels=20):
+    """Sibling to compute_book_depth_ratio, same `levels` nearest the touch, but counting
+    distinct price LEVELS instead of weighting by size -- bid_level_count / (bid_level_count +
+    ask_level_count). Captures breadth of interest (how spread out across prices) rather than
+    size of interest; the two ratios can disagree (e.g. many small bids vs few large asks) and
+    that disagreement may itself be informative. Read-only, gates nothing. None if either side
+    has no usable levels."""
+    bids = _book_levels_near_touch(order_book, levels, "bids")
+    asks = _book_levels_near_touch(order_book, levels, "asks")
+    if not bids or not asks:
+        return None
+    total = len(bids) + len(asks)
+    if total == 0:
+        return None
+    return len(bids) / total
 
 
 def aggregate_candles(candles, minutes):
@@ -6165,6 +6224,18 @@ class StochBot:
                 if er_2h is not None:
                     try:
                         await self.update_state({"live_er_2h": er_2h, "live_er_2h_direction": er_2h_dir})
+                    except Exception:
+                        pass
+                if cfg.schema_has_book_depth_readout:
+                    # Isolated best-effort write, same reasoning as every other readout here --
+                    # a missing column must never cost live_k/live_vol_pct above. Reads
+                    # self.live.order_book directly (already streaming via the websocket
+                    # subscription, zero extra API cost) -- never a new network call.
+                    depth_ratio = compute_book_depth_ratio(self.live.order_book, cfg.book_depth_levels)
+                    level_ratio = compute_book_level_ratio(self.live.order_book, cfg.book_depth_levels)
+                    try:
+                        await self.update_state({"live_book_depth_ratio": depth_ratio,
+                                                  "live_book_level_ratio": level_ratio})
                     except Exception:
                         pass
                 if cfg.volume_jump_ratio is not None:

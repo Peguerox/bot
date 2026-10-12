@@ -482,6 +482,9 @@ CONFIG = BotConfig(
     # REVERSAL close specifically (never after SL/TP/profit lock/saving lock). See
     # BotConfig.post_reversal_cooldown_seconds.
     post_reversal_cooldown_seconds=120.0,
+    # 2026-10-12, direct request: observational order-book depth/level ratios, read-only, gates
+    # nothing yet. Requires lighter_btc_initial_book_depth.sql.
+    schema_has_book_depth_readout=True,
 )
 
 if __name__ == "__main__":

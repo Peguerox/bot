@@ -1921,6 +1921,10 @@ function CompactStochBtcPanel({
   const curHtfTimeframe: string = state?.override_htf_alignment_block_timeframe ?? "off";
   const liveHtfK: number | null = state?.live_htf_k ?? null;
   const [savingHtf, setSavingHtf] = useState(false);
+  // Order-book depth/level ratios (2026-10-12, direct request: "let's just get the information
+  // and then we observe"). Purely observational -- no toggle, no filter, nothing to gate yet.
+  const liveBookDepthRatio: number | null = state?.live_book_depth_ratio ?? null;
+  const liveBookLevelRatio: number | null = state?.live_book_level_ratio ?? null;
 
   async function handleSetHtfTimeframe(tf: "off" | "5m" | "10m" | "1h") {
     if (tf === curHtfTimeframe) return;
@@ -2882,6 +2886,35 @@ function CompactStochBtcPanel({
             ran 56-60% win / net LOSS; not-aligned ran 70-81% win / net WIN -- strongest at
             5-minute. Backwards from intuition: agreement usually means a real trend is running,
             which this mean-reversion bot loses against. "off" (default) never blocks.
+          </p>
+        </div>
+      )}
+      {showLevers && !loading && (
+        <div className="bg-gray-800/60 rounded-lg p-2">
+          {/* 2026-10-12, direct request: order-book depth/level ratios, purely observational --
+              no toggle, gates nothing yet. See compute_book_depth_ratio/compute_book_level_ratio
+              (top 20 price levels nearest the touch on each side, from the already-streaming
+              websocket order book, zero extra API cost). */}
+          <p className="text-gray-500 text-[10px] uppercase">Order-book ratios (observe only)</p>
+          <div className="grid grid-cols-2 gap-2 mt-1">
+            <div>
+              <p className="text-[9px] text-gray-600 uppercase">Depth ratio</p>
+              <p className="text-sm font-bold tabular-nums text-gray-300">
+                {liveBookDepthRatio != null ? liveBookDepthRatio.toFixed(3) : "—"}
+              </p>
+            </div>
+            <div>
+              <p className="text-[9px] text-gray-600 uppercase">Level ratio</p>
+              <p className="text-sm font-bold tabular-nums text-gray-300">
+                {liveBookLevelRatio != null ? liveBookLevelRatio.toFixed(3) : "—"}
+              </p>
+            </div>
+          </div>
+          <p className="text-gray-600 text-[9px] leading-snug mt-1">
+            Both are bid-side share of the top 20 price levels nearest the touch: depth ratio
+            weights by resting size, level ratio just counts distinct price levels. Above 0.5 =
+            more on the bid side; below 0.5 = more on the ask side. No filter, no gate -- just
+            watching for now.
           </p>
         </div>
       )}

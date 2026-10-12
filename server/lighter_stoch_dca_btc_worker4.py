@@ -108,6 +108,9 @@ CONFIG = BotConfig(
     saving_lock_arm_frac_of_sl=None,
     saving_lock_exit_pct=0.0,
     post_reversal_cooldown_seconds=120.0,
+    # 2026-10-12, direct request: observational order-book depth/level ratios, read-only, gates
+    # nothing yet. Requires lighter_btc_worker4_book_depth.sql.
+    schema_has_book_depth_readout=True,
 )
 
 if __name__ == "__main__":
