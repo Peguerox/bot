@@ -111,6 +111,10 @@ CONFIG = BotConfig(
     # 2026-10-12, direct request: observational order-book depth/level ratios, read-only, gates
     # nothing yet. Requires lighter_btc_worker4_book_depth.sql.
     schema_has_book_depth_readout=True,
+    # 2026-10-12, direct request ("I like it... not the intent, but what is happening"): real
+    # taker-aggressor buy/sell flow from recentTrades, read-only. Requires
+    # lighter_btc_worker4_trade_flow_ratio.sql.
+    schema_has_trade_flow_ratio_readout=True,
 )
 
 if __name__ == "__main__":

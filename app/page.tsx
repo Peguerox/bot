@@ -4881,6 +4881,9 @@ function MasterSchedulePanel({
   // every other tile in this box.
   const liveBookDepthRatio = worker1State?.live_book_depth_ratio ?? null;
   const liveBookLevelRatio = worker1State?.live_book_level_ratio ?? null;
+  // Real taker-aggressor buy/sell flow (2026-10-12, direct request: "I like it... not the
+  // intent, but what is happening") -- from Lighter's recentTrades endpoint, not the order book.
+  const liveTradeFlowRatio = worker1State?.live_trade_flow_ratio ?? null;
 
   const liveMiamiHour = getMiamiHour();
   const worker1Metrics = {
@@ -5113,6 +5116,16 @@ function MasterSchedulePanel({
               {liveBookLevelRatio != null ? liveBookLevelRatio.toFixed(3) : "—"}
             </p>
             <p className="text-gray-500 text-[8px] leading-tight mt-0.5">Bid-side share of distinct price LEVELS (not size-weighted) within 0.05% of the touch -- breadth, not size, of interest.</p>
+          </div>
+          {/* 2026-10-12, direct request ("I like it... not the intent, but what is happening"):
+              real taker-aggressor flow from recentTrades, not standing order-book intent --
+              see compute_trade_flow_ratio / run_trade_flow_ratio_forever. */}
+          <div className="bg-gray-900/50 rounded-lg p-1.5">
+            <p className="text-gray-500 text-[8px] uppercase leading-tight">Trade flow ratio</p>
+            <p className={`font-bold text-xs tabular-nums ${liveTradeFlowRatio == null ? "text-gray-500" : "text-gray-300"}`}>
+              {liveTradeFlowRatio != null ? liveTradeFlowRatio.toFixed(3) : "—"}
+            </p>
+            <p className="text-gray-500 text-[8px] leading-tight mt-0.5">Share of REAL executed volume that was aggressive buying (lifted the ask) vs selling (hit the bid), last ~100 trades. Above 0.5 = more real buying pressure.</p>
           </div>
         </div>
       </div>

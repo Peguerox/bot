@@ -6053,6 +6053,43 @@ async def t_book_ratios_missing_or_empty_side_is_none():
     check("level ratio: same missing-side contract", core.compute_book_level_ratio({"bids": [], "asks": [{"price": "1", "size": "1"}]}) is None)
 
 
+async def t_trade_flow_ratio_basic():
+    print("\n[compute_trade_flow_ratio: buy_volume / (buy_volume + sell_volume) from is_maker_ask]")
+    # is_maker_ask=True -> the resting order was an ASK, so the TAKER crossed it as a BUYER.
+    trades = [{"size": "1", "is_maker_ask": True}, {"size": "1", "is_maker_ask": True},
+              {"size": "1", "is_maker_ask": False}]
+    ratio = core.compute_trade_flow_ratio(trades)
+    check("2 aggressive buys vs 1 aggressive sell -> 2/3", ratio is not None and abs(ratio - 2/3) < 1e-9, ratio)
+
+
+async def t_trade_flow_ratio_all_one_side():
+    print("\n[compute_trade_flow_ratio: all-buy or all-sell flow -> 1.0 or 0.0, not None]")
+    all_buys = [{"size": "5", "is_maker_ask": True}, {"size": "3", "is_maker_ask": True}]
+    all_sells = [{"size": "5", "is_maker_ask": False}]
+    check("all aggressive buys -> 1.0", core.compute_trade_flow_ratio(all_buys) == 1.0)
+    check("all aggressive sells -> 0.0", core.compute_trade_flow_ratio(all_sells) == 0.0)
+
+
+async def t_trade_flow_ratio_weighted_by_size_not_count():
+    print("\n[compute_trade_flow_ratio: weighted by SIZE, one huge sell outweighs many small buys]")
+    trades = ([{"size": "0.1", "is_maker_ask": True}] * 5
+              + [{"size": "10", "is_maker_ask": False}])
+    ratio = core.compute_trade_flow_ratio(trades)
+    # buy=0.5, sell=10 -> 0.5/10.5
+    check("5 small buys outweighed by 1 huge sell -- size-weighted, not trade-count-weighted",
+          ratio is not None and ratio < 0.1, ratio)
+
+
+async def t_trade_flow_ratio_missing_or_empty_is_none():
+    print("\n[compute_trade_flow_ratio: no trades, zero volume, or malformed sizes -> None, never a crash]")
+    check("empty list", core.compute_trade_flow_ratio([]) is None)
+    check("None", core.compute_trade_flow_ratio(None) is None)
+    check("all zero/negative sizes filtered out, leaving nothing",
+          core.compute_trade_flow_ratio([{"size": "0", "is_maker_ask": True}, {"size": "-1", "is_maker_ask": False}]) is None)
+    check("a malformed size is skipped, not a crash, and the rest still counts",
+          core.compute_trade_flow_ratio([{"size": "oops", "is_maker_ask": True}, {"size": "1", "is_maker_ask": True}]) == 1.0)
+
+
 # Shared fixture for the lock tests below: midpoints [86000,86100,85900,86050,85950] give a
 # dispersion (wiggle) of exactly sqrt(5000) ~= 70.7107 (raw dollars). Paired with volume=100,
 # wig/vol ~= 0.70711 (small -- lots of volume, little price movement -- the chop signal under
@@ -8678,6 +8715,10 @@ async def main():
               t_book_ratios_only_count_levels_within_the_price_band,
               t_book_ratios_touch_is_order_independent,
               t_book_ratios_missing_or_empty_side_is_none,
+              t_trade_flow_ratio_basic,
+              t_trade_flow_ratio_all_one_side,
+              t_trade_flow_ratio_weighted_by_size_not_count,
+              t_trade_flow_ratio_missing_or_empty_is_none,
               t_volume_wiggle_lock_blocks_below_threshold,
               t_volume_wiggle_lock_allows_at_or_above_threshold,
               t_volume_wiggle_lock_off_by_default,

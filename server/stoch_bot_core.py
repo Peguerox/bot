@@ -943,6 +943,10 @@ class BotConfig:
     # migration.
     schema_has_book_depth_readout: bool = False
     book_depth_band_pct: float = 0.05
+    # Real taker-aggressor buy/sell flow (2026-10-12, direct request: "I like it... not the
+    # intent, but what is happening"). See compute_trade_flow_ratio /
+    # run_trade_flow_ratio_forever. Requires the live_trade_flow_ratio column migration.
+    schema_has_trade_flow_ratio_readout: bool = False
     # Stochastic-turn protection (2026-09-28, external research): once a position's unrealized
     # profit reaches 0.75x its (frozen, joint-adaptive) TP, arms a trail on the live stochastic
     # K value instead of price -- closes if K retreats by stoch_turn_retreat_points from its
@@ -1524,6 +1528,38 @@ def compute_book_level_ratio(order_book, band_pct=0.05):
     if total == 0:
         return None
     return len(bids) / total
+
+
+def compute_trade_flow_ratio(trades):
+    """2026-10-12, direct request after exploring Lighter's recentTrades endpoint: real executed
+    taker-aggressor flow, not standing order-book intent -- "what is happening, not the intent."
+    `trades` is a list of {"size": ..., "is_maker_ask": ...} dicts (same shape recentTrades
+    returns, see run_trade_flow_logger_forever). is_maker_ask=True means the resting order was
+    an ASK, so the taker that crossed it was a BUYER (aggressive buy); is_maker_ask=False means
+    the resting order was a bid, so the taker was a SELLER (aggressive sell).
+
+    buy_volume / (buy_volume + sell_volume) over whatever trades are passed in -- same 0-1,
+    "above 0.5 = more buy pressure" convention as compute_book_depth_ratio, for a consistent
+    read across both panel tiles. None if there are no trades or zero volume (never guesses)."""
+    if not trades:
+        return None
+    buy_volume = 0.0
+    sell_volume = 0.0
+    for t in trades:
+        try:
+            size = float(t.get("size", 0) or 0)
+        except (TypeError, ValueError):
+            continue
+        if size <= 0:
+            continue
+        if t.get("is_maker_ask"):
+            buy_volume += size
+        else:
+            sell_volume += size
+    total = buy_volume + sell_volume
+    if total == 0:
+        return None
+    return buy_volume / total
 
 
 def aggregate_candles(candles, minutes):
@@ -2510,6 +2546,57 @@ class StochBot:
                                         "backoff_s": sleep_s})
                 except Exception:
                     pass  # never let trade-flow logging affect trading
+            await asyncio.sleep(sleep_s)
+
+    async def run_trade_flow_ratio_forever(self):
+        """2026-10-12, direct request ("I like it... not the intent, but what is happening"):
+        real taker-aggressor buy/sell flow from Lighter's recentTrades endpoint, published as a
+        single live ratio -- see compute_trade_flow_ratio. Deliberately NOT the same path as
+        run_trade_flow_logger_forever above: this never writes individual trade rows to
+        Supabase, it just fetches the current batch, computes one number in memory, and
+        publishes that -- much lighter, and independent of trade_flow_log_defers_to (which
+        governs the separate full-trade-logging table, currently off for every bot).
+
+        Same WAF-safety contract as the full logger (same endpoint, real 2026-09-27 incident):
+        TRADE_FLOW_LOG_EVERY (30s) cadence, content-type-based WAF detection, exponential
+        backoff capped at MAX_BACKOFF_S, a longer forced pause on a WAF-shaped response. Two
+        bots polling this independently at 30s each is still far below the 3s cadence that
+        caused the real incident."""
+        cfg = self.cfg
+        if not cfg.schema_has_trade_flow_ratio_readout:
+            return
+        MAX_BACKOFF_S = 300.0
+        WAF_BACKOFF_S = 600.0
+        consecutive_errors = 0
+        while True:
+            sleep_s = TRADE_FLOW_LOG_EVERY
+            try:
+                url = (f"https://mainnet.zklighter.elliot.ai/api/v1/recentTrades"
+                       f"?market_id={cfg.market_index}&limit=100")
+                async with self.http.get(url) as resp:
+                    text = await resp.text()
+                    content_type = resp.headers.get("Content-Type", "")
+                    if resp.status >= 400 or "json" not in content_type:
+                        consecutive_errors += 1
+                        sleep_s = WAF_BACKOFF_S
+                        raise RuntimeError(f"recentTrades {resp.status} ct={content_type}: {text[:150]}")
+                    data = jsonlib.loads(text)
+                ratio = compute_trade_flow_ratio(data.get("trades", []))
+                try:
+                    await self.update_state({"live_trade_flow_ratio": ratio})
+                except Exception:
+                    pass
+                consecutive_errors = 0
+            except Exception as e:
+                consecutive_errors += 1
+                if sleep_s == TRADE_FLOW_LOG_EVERY:
+                    sleep_s = min(TRADE_FLOW_LOG_EVERY * (2 ** consecutive_errors), MAX_BACKOFF_S)
+                try:
+                    await self.log_run("trade_flow_ratio_error",
+                                       {"error": str(e)[:300], "consecutive": consecutive_errors,
+                                        "backoff_s": sleep_s})
+                except Exception:
+                    pass  # never let this readout affect trading
             await asyncio.sleep(sleep_s)
 
     async def run_market_data_logger_forever(self):
@@ -7416,6 +7503,7 @@ class StochBot:
         candle_task = asyncio.create_task(self.run_candle_refresh_forever())
         tick_log_task = asyncio.create_task(self.run_tick_logger_forever())
         trade_flow_log_task = asyncio.create_task(self.run_trade_flow_logger_forever())
+        trade_flow_ratio_task = asyncio.create_task(self.run_trade_flow_ratio_forever())
         market_data_log_task = asyncio.create_task(self.run_market_data_logger_forever())
 
         print("Waiting for initial WebSocket data...", flush=True)
@@ -7472,6 +7560,7 @@ class StochBot:
             candle_task.cancel()
             tick_log_task.cancel()
             trade_flow_log_task.cancel()
+            trade_flow_ratio_task.cancel()
             with contextlib.suppress(BaseException):
                 await self.client.api_client.close()
             with contextlib.suppress(BaseException):
