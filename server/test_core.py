@@ -4791,8 +4791,11 @@ async def t_live_configs_match_their_stated_rules():
               leg.profit_lock_trigger_pct == 0.05, leg.profit_lock_trigger_pct)
         check(f"hedge {name} leg: profit-lock trail back to 0.01%",
               leg.profit_lock_trail_pct == 0.01, leg.profit_lock_trail_pct)
-        check(f"hedge {name} leg: breakeven floor OFF (did not exist in the original)",
-              leg.breakeven_floor_enabled is False, leg.breakeven_floor_enabled)
+        # 2026-10-13, direct request (ATR/volume adaptive exits): breakeven floor back ON.
+        check(f"hedge {name} leg: breakeven floor ON (ATR-adaptive deploy, 2026-10-13)",
+              leg.breakeven_floor_enabled is True, leg.breakeven_floor_enabled)
+        check(f"hedge {name} leg: breakeven floor arm margin still the compiled 0.01pp default",
+              leg.breakeven_floor_arm_margin_pct == 0.01, leg.breakeven_floor_arm_margin_pct)
         check(f"hedge {name} leg: fixed survivor floor OFF",
               leg.fixed_partner_cut_floor_pct is None, leg.fixed_partner_cut_floor_pct)
         check(f"hedge {name} leg: partner-cut-arms-trail OFF (needs the breakeven floor)",
@@ -4852,6 +4855,25 @@ async def t_live_configs_match_their_stated_rules():
     check("exactly one hedge leg owns the shared pressure signal",
           [hedge.LONG_CONFIG.pressure_signal_owner,
            hedge.SHORT_CONFIG.pressure_signal_owner].count(True) == 1)
+    # 2026-10-13, direct request (ATR/volume adaptive exits): both legs run the feature, but
+    # only one computes it -- same "exactly one owner" shape as the pressure signal above, so a
+    # mismatch here can't leave the two legs silently computing two different readings.
+    check("hedge legs: SAME atr_adaptive_exits_enabled",
+          hedge.LONG_CONFIG.atr_adaptive_exits_enabled == hedge.SHORT_CONFIG.atr_adaptive_exits_enabled)
+    check("exactly one hedge leg owns the ATR-adaptive computation",
+          [hedge.LONG_CONFIG.atr_adaptive_owner, hedge.SHORT_CONFIG.atr_adaptive_owner].count(True) == 1)
+    check("hedge legs: SAME ATR-adaptive multipliers/windows/bound (would silently diverge if ever both computed)",
+          (hedge.LONG_CONFIG.atr_adaptive_window, hedge.LONG_CONFIG.atr_adaptive_volume_window,
+           hedge.LONG_CONFIG.atr_adaptive_reference_volume, hedge.LONG_CONFIG.atr_adaptive_volume_exponent,
+           hedge.LONG_CONFIG.atr_adaptive_volume_clamp, hedge.LONG_CONFIG.atr_adaptive_sl_mult,
+           hedge.LONG_CONFIG.atr_adaptive_trigger_mult, hedge.LONG_CONFIG.atr_adaptive_trail_mult,
+           hedge.LONG_CONFIG.atr_adaptive_bound)
+          ==
+          (hedge.SHORT_CONFIG.atr_adaptive_window, hedge.SHORT_CONFIG.atr_adaptive_volume_window,
+           hedge.SHORT_CONFIG.atr_adaptive_reference_volume, hedge.SHORT_CONFIG.atr_adaptive_volume_exponent,
+           hedge.SHORT_CONFIG.atr_adaptive_volume_clamp, hedge.SHORT_CONFIG.atr_adaptive_sl_mult,
+           hedge.SHORT_CONFIG.atr_adaptive_trigger_mult, hedge.SHORT_CONFIG.atr_adaptive_trail_mult,
+           hedge.SHORT_CONFIG.atr_adaptive_bound))
 
 
 def _hide_fills(bot, ex, hidden_reads):
@@ -6103,6 +6125,137 @@ async def t_premium_readout_defaults_off_and_is_a_true_noop():
         check("returned promptly instead of entering the stream loop", False)
     else:
         check("returned promptly instead of entering the stream loop", True)
+
+
+def _flat_candles(n, base, half_range, v, t0=1700000000000):
+    """Constant h/l/c/v candles -- a clean, hand-computable fixture for ATR/volume tests.
+    Every closed bar has the same true range (2*half_range, since h-l dominates |h-prevC|/
+    |l-prevC| when c never moves) and the same volume."""
+    return [{"t": t0 + i * 60000, "o": base, "h": base + half_range, "l": base - half_range,
+             "c": base, "v": v} for i in range(n)]
+
+
+async def t_compute_atr_pct_basic():
+    print("\n[compute_atr_pct: constant $2 true range on a $10000 price -> exactly 0.02%]")
+    # window=5 needs 6 closed bars + 1 forming candle.
+    candles = _flat_candles(7, base=10000.0, half_range=1.0, v=5.0)
+    atr = core.compute_atr_pct(candles, window=5)
+    check("0.02% (2 / 10000 * 100)", atr is not None and abs(atr - 0.02) < 1e-9, atr)
+
+
+async def t_compute_atr_pct_none_with_too_little_history():
+    print("\n[compute_atr_pct: fewer than window+1 closed candles -> None, never a crash]")
+    candles = _flat_candles(4, base=10000.0, half_range=1.0, v=5.0)  # only 3 closed for window=5
+    check("None", core.compute_atr_pct(candles, window=5) is None)
+
+
+async def t_atr_adaptive_exits_matches_the_worked_example():
+    print("\n[compute_atr_adaptive_exits: reproduces the exact worked example -- scale 0.02% -> SL 0.0675%, trigger 0.045%, trail 0.012%]")
+    candles = _flat_candles(7, base=10000.0, half_range=1.0, v=5.0)  # ATR 0.02%, volume == reference (factor 1.0)
+    out = core.compute_atr_adaptive_exits(candles, atr_window=5, volume_window=5, reference_volume=5.0)
+    check("got a reading", out is not None, out)
+    check("scale == 0.02%", abs(out["scale"] - 0.02) < 1e-9, out["scale"])
+    check("SL == 0.0675% (0.02 * 3.375)", abs(out["sl_pct"] - 0.0675) < 1e-9, out["sl_pct"])
+    check("trigger == 0.045% (0.02 * 2.25)", abs(out["trigger_pct"] - 0.045) < 1e-9, out["trigger_pct"])
+    check("trail == 0.012% (0.02 * 0.60)", abs(out["trail_pct"] - 0.012) < 1e-9, out["trail_pct"])
+
+
+async def t_atr_adaptive_exits_clamps_into_bound():
+    print("\n[compute_atr_adaptive_exits: a huge ATR clamps every output to the bound's upper edge]")
+    candles = _flat_candles(7, base=10000.0, half_range=500.0, v=5.0)  # $1000 true range -> scale 10%
+    out = core.compute_atr_adaptive_exits(candles, atr_window=5, volume_window=5, reference_volume=5.0,
+                                          bound=(0.01, 0.10))
+    check("SL clamped to 0.10%", out["sl_pct"] == 0.10, out["sl_pct"])
+    check("trigger clamped to 0.10%", out["trigger_pct"] == 0.10, out["trigger_pct"])
+    check("trail clamped to 0.10%", out["trail_pct"] == 0.10, out["trail_pct"])
+
+
+async def t_atr_adaptive_exits_clamps_into_bound_at_the_floor():
+    print("\n[compute_atr_adaptive_exits: a tiny ATR clamps every output to the bound's lower edge]")
+    candles = _flat_candles(7, base=10000.0, half_range=0.001, v=5.0)  # near-zero true range
+    out = core.compute_atr_adaptive_exits(candles, atr_window=5, volume_window=5, reference_volume=5.0,
+                                          bound=(0.01, 0.10))
+    check("SL floored to 0.01%", out["sl_pct"] == 0.01, out["sl_pct"])
+    check("trigger floored to 0.01%", out["trigger_pct"] == 0.01, out["trigger_pct"])
+    check("trail floored to 0.01%", out["trail_pct"] == 0.01, out["trail_pct"])
+
+
+async def t_atr_adaptive_exits_volume_above_reference_scales_up():
+    print("\n[compute_atr_adaptive_exits: volume above reference multiplies scale up, not down]")
+    low_vol = _flat_candles(7, base=10000.0, half_range=1.0, v=5.0)
+    high_vol = _flat_candles(7, base=10000.0, half_range=1.0, v=80.0)  # 16x reference
+    out_low = core.compute_atr_adaptive_exits(low_vol, atr_window=5, volume_window=5, reference_volume=5.0)
+    out_high = core.compute_atr_adaptive_exits(high_vol, atr_window=5, volume_window=5, reference_volume=5.0)
+    # (80/5)**0.25 == 2.0 exactly
+    check("scale exactly doubles at 16x reference volume (16**0.25 == 2)",
+          abs(out_high["scale"] - out_low["scale"] * 2) < 1e-9, (out_low["scale"], out_high["scale"]))
+
+
+async def t_atr_adaptive_exits_none_with_too_little_history():
+    print("\n[compute_atr_adaptive_exits: not enough candle history -> None, never a crash]")
+    candles = _flat_candles(3, base=10000.0, half_range=1.0, v=5.0)
+    check("None", core.compute_atr_adaptive_exits(candles, atr_window=15) is None)
+
+
+async def t_atr_adaptive_exits_zero_volume_does_not_crash():
+    print("\n[compute_atr_adaptive_exits: zero traded volume -> clamps to the volume floor, never a crash or zero scale]")
+    candles = _flat_candles(7, base=10000.0, half_range=1.0, v=0.0)
+    out = core.compute_atr_adaptive_exits(candles, atr_window=5, volume_window=5, reference_volume=5.0,
+                                          volume_clamp=(0.25, 4.0))
+    check("got a reading, not None", out is not None, out)
+    check("volume factor clamped to the 0.25 floor (0.02% * 0.25 = 0.005%)",
+          abs(out["scale"] - 0.02 * 0.25) < 1e-9, out["scale"])
+
+
+def _atr_adaptive_hedge_leg(**kw):
+    """_hedge_leg plus a real cycle_partner_table and a stubbed _partner_is_flat (always True,
+    since there's no real partner row in these tests) so try_enter actually runs -- for testing
+    the ATR-adaptive entry hook's override_* writes, not the cycle barrier itself."""
+    bot = _hedge_leg(cycle_partner_table="other_leg_state", **kw)
+    async def partner_is_flat():
+        return True
+    bot._partner_is_flat = partner_is_flat
+    return bot
+
+
+async def t_atr_adaptive_entry_hook_writes_override_columns_before_entering():
+    print("\n[hedge entry hook: ATR-adaptive hub values get written to override_sl_pct/trigger/trail right before try_enter]")
+    hub = {"scale": 0.02, "sl_pct": 0.0675, "trigger_pct": 0.045, "trail_pct": 0.012}
+    bot = _atr_adaptive_hedge_leg(atr_adaptive_exits_enabled=True)
+    bot.atr_adaptive_hub = hub
+    await bot.tick()
+    check("entered", bot.state_row.get("side") is not None, bot.state_row.get("side"))
+    check("override_sl_pct written from the hub", bot.state_row.get("override_sl_pct") == 0.0675,
+          bot.state_row.get("override_sl_pct"))
+    check("override_profit_lock_trigger written from the hub", bot.state_row.get("override_profit_lock_trigger") == 0.045,
+          bot.state_row.get("override_profit_lock_trigger"))
+    check("override_profit_lock_trail written from the hub", bot.state_row.get("override_profit_lock_trail") == 0.012,
+          bot.state_row.get("override_profit_lock_trail"))
+
+
+async def t_atr_adaptive_entry_hook_skips_silently_when_hub_not_ready():
+    print("\n[hedge entry hook: hub has no reading yet -- entry still happens, overrides untouched]")
+    hub = {"scale": None, "sl_pct": None, "trigger_pct": None, "trail_pct": None}
+    bot = _atr_adaptive_hedge_leg(atr_adaptive_exits_enabled=True)
+    bot.atr_adaptive_hub = hub
+    await bot.tick()
+    check("still entered -- a cold hub never blocks or delays the entry itself",
+          bot.state_row.get("side") is not None, bot.state_row.get("side"))
+    check("no override written", "override_sl_pct" not in bot.state_row or bot.state_row.get("override_sl_pct") is None,
+          bot.state_row.get("override_sl_pct"))
+
+
+async def t_atr_adaptive_entry_hook_off_by_default():
+    print("\n[hedge entry hook: atr_adaptive_exits_enabled off (the compiled default) -- hub never consulted, never written]")
+    check("atr_adaptive_exits_enabled defaults to False",
+          BotConfig.__dataclass_fields__["atr_adaptive_exits_enabled"].default is False)
+    hub = {"scale": 0.02, "sl_pct": 0.0675, "trigger_pct": 0.045, "trail_pct": 0.012}
+    bot = _atr_adaptive_hedge_leg()  # flag left off
+    bot.atr_adaptive_hub = hub
+    await bot.tick()
+    check("entered", bot.state_row.get("side") is not None, bot.state_row.get("side"))
+    check("no override written", "override_sl_pct" not in bot.state_row or bot.state_row.get("override_sl_pct") is None,
+          bot.state_row.get("override_sl_pct"))
 
 
 # Shared fixture for the lock tests below: midpoints [86000,86100,85900,86050,85950] give a
@@ -8735,6 +8888,17 @@ async def main():
               t_trade_flow_ratio_weighted_by_size_not_count,
               t_trade_flow_ratio_missing_or_empty_is_none,
               t_premium_readout_defaults_off_and_is_a_true_noop,
+              t_compute_atr_pct_basic,
+              t_compute_atr_pct_none_with_too_little_history,
+              t_atr_adaptive_exits_matches_the_worked_example,
+              t_atr_adaptive_exits_clamps_into_bound,
+              t_atr_adaptive_exits_clamps_into_bound_at_the_floor,
+              t_atr_adaptive_exits_volume_above_reference_scales_up,
+              t_atr_adaptive_exits_none_with_too_little_history,
+              t_atr_adaptive_exits_zero_volume_does_not_crash,
+              t_atr_adaptive_entry_hook_writes_override_columns_before_entering,
+              t_atr_adaptive_entry_hook_skips_silently_when_hub_not_ready,
+              t_atr_adaptive_entry_hook_off_by_default,
               t_volume_wiggle_lock_blocks_below_threshold,
               t_volume_wiggle_lock_allows_at_or_above_threshold,
               t_volume_wiggle_lock_off_by_default,

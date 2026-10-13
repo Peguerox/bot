@@ -750,6 +750,36 @@ class BotConfig:
     # runs ends at ~$0 (reason BREAKEVEN_LOCK); one that runs past floor + trail is still ridden
     # by the trail (reason PROFIT_LOCK). Needs breakeven_floor_enabled. False = old behaviour.
     profit_lock_respects_breakeven_floor: bool = False
+    # ATR/volume adaptive SL/trigger/trail (2026-10-13, direct request, hedge-specific): replaces
+    # the fixed override_sl_pct/override_profit_lock_trigger/override_profit_lock_trail numbers
+    # with ones computed fresh at every new cycle's entry from compute_atr_adaptive_exits -- an
+    # honest new hypothesis brought over from a different research session, not something with a
+    # track record on THIS system. "These values update at the next paired entry; the current
+    # trade retains the settings above" -- implemented by WRITING the computed numbers into the
+    # SAME override_* columns the manual dashboard levers already use, at the moment of entry,
+    # so the existing exit logic needs zero changes and the values naturally stay frozen for the
+    # life of that position until the next entry overwrites them again.
+    #
+    # Both legs must use the IDENTICAL computed numbers (same class of requirement as equal
+    # fixed_leg_usd -- the breakeven floor's math assumes directly comparable notional/levels).
+    # Guaranteed by the owner/hub pattern already used for pressure_signal_owner: ONE leg
+    # (atr_adaptive_owner=True) computes compute_atr_adaptive_exits off its own candles every
+    # tick and publishes it into a shared in-process dict (self.atr_adaptive_hub, wired in
+    # lighter_hedge_dual_leg.py's main()); both legs read that SAME object at their own entry
+    # moment, never recomputing independently.
+    atr_adaptive_exits_enabled: bool = False
+    atr_adaptive_owner: bool = False
+    atr_adaptive_window: int = 15
+    atr_adaptive_volume_window: int = 10
+    atr_adaptive_reference_volume: float = 5.0
+    atr_adaptive_volume_exponent: float = 0.25
+    atr_adaptive_volume_clamp: tuple = (0.25, 4.0)
+    # The other session's own experimental multipliers -- not independently validated here, kept
+    # as named fields specifically so they're visible and easy to revisit rather than buried.
+    atr_adaptive_sl_mult: float = 3.375
+    atr_adaptive_trigger_mult: float = 2.25
+    atr_adaptive_trail_mult: float = 0.60
+    atr_adaptive_bound: tuple = (0.01, 0.10)
     # 2026-10-01, direct request ("saving lock"): rescue a trade that went against us but came
     # back. Once unrealized has been at or below -(saving_lock_arm_frac_of_sl x the live SL), the
     # position closes the moment unrealized recovers to saving_lock_exit_pct (0 = entry price),
@@ -1258,6 +1288,68 @@ def compute_true_range_pct(candles):
         return None
     tr = max(last["h"] - last["l"], abs(last["h"] - prev_close), abs(last["l"] - prev_close))
     return tr / last["c"] * 100
+
+
+def compute_atr_pct(candles, window=15):
+    """Average true range over the trailing `window` CLOSED candles, as a % of the latest
+    closed candle's close -- same true-range definition as compute_true_range_pct (high-low,
+    OR the gap from the prior close, whichever is larger), just averaged over a window instead
+    of read off a single candle. Needs window+1 closed candles (each true-range value needs
+    its own prior close). None if there isn't enough history yet."""
+    closed = candles[:-1]
+    if len(closed) < window + 1:
+        return None
+    bars = closed[-(window + 1):]
+    last_close = bars[-1]["c"]
+    if last_close <= 0:
+        return None
+    ranges = [max(bars[i]["h"] - bars[i]["l"], abs(bars[i]["h"] - bars[i-1]["c"]),
+                  abs(bars[i]["l"] - bars[i-1]["c"])) for i in range(1, len(bars))]
+    return sum(ranges) / window / last_close * 100
+
+
+def compute_atr_adaptive_exits(candles, atr_window=15, volume_window=10, reference_volume=5.0,
+                               volume_exponent=0.25, volume_clamp=(0.25, 4.0),
+                               sl_mult=3.375, trigger_mult=2.25, trail_mult=0.60,
+                               bound=(0.01, 0.10)):
+    """2026-10-13, direct request (brought over from a different research session, not a
+    strategy with a track record on THIS system -- an honest new hypothesis, not a proven
+    edge): a continuously-adaptive SL/trigger/trail for the hedge, replacing fixed numbers with
+    ones scaled off how much the market has actually been moving.
+
+    scale = (15-bar ATR % of price) * clamp((10-bar avg traded volume / reference_volume)
+             ** volume_exponent, *volume_clamp)
+
+    The ATR term is "how big are recent candles, as a %"; the volume term nudges that up in
+    busy markets and down in quiet ones (a 0.25 exponent makes volume a mild adjustment, not a
+    dominant one -- doubling volume only multiplies scale by roughly 1.19). SL/trigger/trail
+    are then scale times a fixed multiplier, each clamped into `bound` so a dead-quiet or
+    extremely volatile market can never push a stop to 0 or past 0.10%.
+
+    These multipliers (3.375 / 2.25 / 0.60) and the volume exponent/clamp are the other
+    session's own experimental choices, not independently validated here -- kept as named,
+    overridable BotConfig fields specifically so they're visible and easy to revisit rather
+    than buried as magic numbers.
+
+    Returns a dict {scale, sl_pct, trigger_pct, trail_pct}, or None if there isn't enough
+    candle history yet (startup, or a candle-fetch gap) -- callers must treat None as "don't
+    have a fresh reading," never as "zero volatility.\""""
+    atr_pct = compute_atr_pct(candles, atr_window)
+    if atr_pct is None:
+        return None
+    volume = compute_candle_volume_avg(candles, volume_window)
+    if volume is None or reference_volume <= 0:
+        return None
+    lo_v, hi_v = volume_clamp
+    volume_factor = min(max((volume / reference_volume) ** volume_exponent, lo_v), hi_v)
+    scale = atr_pct * volume_factor
+    lo_b, hi_b = bound
+    return {
+        "scale": scale,
+        "sl_pct": min(max(scale * sl_mult, lo_b), hi_b),
+        "trigger_pct": min(max(scale * trigger_mult, lo_b), hi_b),
+        "trail_pct": min(max(scale * trail_mult, lo_b), hi_b),
+    }
 
 
 def compute_entry_stoch_k(candles, window=5):
@@ -2116,6 +2208,10 @@ class StochBot:
         # Shared in-process barrier for hedge cycle entries -- see _cycle_gate_clear_to_enter.
         # Wired by lighter_hedge_dual_leg.py's main(); None for every standalone bot.
         self.cycle_hub = None
+        # ATR/volume adaptive SL/trigger/trail hub -- see BotConfig.atr_adaptive_exits_enabled's
+        # docstring. Same wiring convention as cycle_hub/pressure_signal_hub: None for every bot
+        # that doesn't use it, a shared dict handed in by lighter_hedge_dual_leg.py's main().
+        self.atr_adaptive_hub = None
         # Set the tick the barrier clears this leg to enter, consumed by try_enter -- see
         # schema_has_cycle_id. Not restored across a restart because it is only needed for the
         # brief window between a clearance and the entry it was granted for.
@@ -6271,6 +6367,21 @@ class StochBot:
                 # here means the follower always reads a reading at most one tick old.
                 if self.pressure_signal_hub is not None:
                     self.pressure_signal_hub["signal"] = owner_signal
+            # ATR/volume adaptive SL/trigger/trail (2026-10-13) -- same every-tick-publish
+            # reasoning as the pressure hub just above: the owner leg refreshes the shared hub
+            # every tick (not just at its own entry) so the follower leg never reads a stale or
+            # missing reading at the moment IT enters. See BotConfig.atr_adaptive_exits_enabled.
+            if cfg.atr_adaptive_exits_enabled and cfg.atr_adaptive_owner and self.atr_adaptive_hub is not None:
+                exits = compute_atr_adaptive_exits(
+                    self.candles, atr_window=cfg.atr_adaptive_window,
+                    volume_window=cfg.atr_adaptive_volume_window,
+                    reference_volume=cfg.atr_adaptive_reference_volume,
+                    volume_exponent=cfg.atr_adaptive_volume_exponent,
+                    volume_clamp=cfg.atr_adaptive_volume_clamp,
+                    sl_mult=cfg.atr_adaptive_sl_mult, trigger_mult=cfg.atr_adaptive_trigger_mult,
+                    trail_mult=cfg.atr_adaptive_trail_mult, bound=cfg.atr_adaptive_bound)
+                if exits is not None:
+                    self.atr_adaptive_hub.update(exits)
         elif cfg.use_joint_adaptive:
             entry_signal, reversal_signal, candle_ts = self.compute_joint_adaptive_signal()
         elif cfg.use_adaptive_window:
@@ -7545,6 +7656,27 @@ class StochBot:
                 if cfg.debug_verbose_tick:
                     print(f"[{cfg.worker_id}] tick: effective_signal={effective_signal} enabled={state.get('enabled')} partner_flat={partner_flat}", flush=True)
                 if wants_in and partner_flat:
+                    # ATR/volume adaptive SL/trigger/trail (2026-10-13): write the shared hub's
+                    # current reading into THIS leg's own override_* columns right before
+                    # entering, so both legs freeze the SAME numbers for this cycle and the
+                    # native stop order (placed inside try_enter, below) is sized off the fresh
+                    # values rather than whatever was live before this cycle. "Current trade
+                    # retains its settings, next entry recomputes" falls out naturally: nothing
+                    # else writes these columns while a position is open, and this write only
+                    # ever happens again at the NEXT entry. If the hub hasn't produced a reading
+                    # yet (owner still warming up on candle history), skip silently and enter on
+                    # whatever override/compiled values are already live -- never block or delay
+                    # the entry itself for this.
+                    if cfg.atr_adaptive_exits_enabled and self.atr_adaptive_hub is not None:
+                        hub_sl = self.atr_adaptive_hub.get("sl_pct")
+                        if hub_sl is not None:
+                            adaptive_patch = {
+                                "override_sl_pct": hub_sl,
+                                "override_profit_lock_trigger": self.atr_adaptive_hub["trigger_pct"],
+                                "override_profit_lock_trail": self.atr_adaptive_hub["trail_pct"],
+                            }
+                            await self.update_state(adaptive_patch)
+                            state.update(adaptive_patch)
                     # one_cycle_per_candle: this candle is spent the moment an entry is attempted.
                     self._last_cycle_candle_t = self._current_candle_t()
                     via = "entry" if entry_signal is not None else "mirror_paper"

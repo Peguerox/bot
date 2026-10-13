@@ -244,7 +244,8 @@ LONG_CONFIG = BotConfig(
     #   - schema_has_cycle_id / schema_has_entry_features: dashboard pairing and hover-only
     #     documentation, no effect on any trading decision.
     tp_pct=0.10, sl_pct=0.03,
-    fixed_leg_usd=10.0,  # direct request: same $ per leg, not the account's full balance; back from 12.0 (temp SOL test) now that the hedge is back on BTC
+    # 2026-10-13, direct request (ATR/volume adaptive exits): $10 -> $20 per leg.
+    fixed_leg_usd=20.0,
     pressure_bias_enabled=False,
     require_pressure_to_enter=False,  # REVERTED: no entry gate, always try to be in when flat
     pressure_signal_owner=True,  # harmless readout only now -- K no longer gates anything
@@ -253,14 +254,23 @@ LONG_CONFIG = BotConfig(
     cycle_partner_table="lighter_stoch_dca_btc_state",  # KEPT -- see note above
     disable_literal_tp=True,
     profit_lock_enabled=True,
-    profit_lock_trigger_pct=0.05,  # REVERTED to the original backtested pair
-    profit_lock_trail_pct=0.01,
+    profit_lock_trigger_pct=0.05,  # static fallback; live SL/trigger/trail come from the ATR
+    profit_lock_trail_pct=0.01,    # adaptive hub below once it has a reading -- see atr_adaptive_*
     schema_has_profit_lock=True,
-    breakeven_floor_enabled=False,  # REVERTED -- did not exist in the original
+    # 2026-10-13, direct request: ON, 0.01pp arm margin (the compiled default, unchanged).
+    breakeven_floor_enabled=True,
     fixed_partner_cut_floor_pct=None,
     schema_has_breakeven_floor=False,
     partner_cut_arms_trail_immediately=False,
     profit_lock_respects_breakeven_floor=False,
+    # ATR/volume adaptive SL/trigger/trail (2026-10-13, direct request -- see
+    # BotConfig.atr_adaptive_exits_enabled's docstring for the full mechanism). LONG is the
+    # owner: computes compute_atr_adaptive_exits every tick, publishes to the shared hub wired
+    # in main() below; both legs read it at their own entry. Multipliers/windows are the
+    # compiled defaults (3.375/2.25/0.60, 15-bar ATR, 10-bar volume, ref 5.0 BTC, bound
+    # 0.01%-0.10%) -- an honest new hypothesis, not a proven edge on this system.
+    atr_adaptive_exits_enabled=True,
+    atr_adaptive_owner=True,
     color_balance_index_min=None,  # REVERTED -- no index gate, either direction
     color_balance_index_max=None,
     color_balance_index_invert=False,
@@ -335,21 +345,27 @@ SHORT_CONFIG = BotConfig(
     # See LONG_CONFIG's docstring -- full revert to the 2026-09-29 original, infra/correctness
     # fixes kept.
     tp_pct=0.10, sl_pct=0.03,
-    fixed_leg_usd=10.0,  # direct request: same $ per leg, not the account's full balance; back from 12.0 (temp SOL test) now that the hedge is back on BTC
+    # 2026-10-13, direct request (ATR/volume adaptive exits): $10 -> $20 per leg.
+    fixed_leg_usd=20.0,
     pressure_bias_enabled=False,
     require_pressure_to_enter=False,  # REVERTED: no entry gate, always try to be in when flat
     debug_verbose_tick=False,
     cycle_partner_table="lighter_btc_optimal_state",  # KEPT -- see LONG_CONFIG's note
     disable_literal_tp=True,
     profit_lock_enabled=True,
-    profit_lock_trigger_pct=0.05,  # REVERTED to the original backtested pair
-    profit_lock_trail_pct=0.01,
+    profit_lock_trigger_pct=0.05,  # static fallback; live SL/trigger/trail come from the ATR
+    profit_lock_trail_pct=0.01,    # adaptive hub below once it has a reading -- see atr_adaptive_*
     schema_has_profit_lock=True,
-    breakeven_floor_enabled=False,  # REVERTED -- did not exist in the original
+    # 2026-10-13, direct request: ON, 0.01pp arm margin (the compiled default, unchanged).
+    breakeven_floor_enabled=True,
     fixed_partner_cut_floor_pct=None,
     schema_has_breakeven_floor=False,
     partner_cut_arms_trail_immediately=False,
     profit_lock_respects_breakeven_floor=False,
+    # ATR/volume adaptive SL/trigger/trail -- see LONG_CONFIG's docstring. SHORT is never the
+    # owner; it only reads the shared hub LONG publishes into.
+    atr_adaptive_exits_enabled=True,
+    atr_adaptive_owner=False,
     color_balance_index_min=None,  # REVERTED -- no index gate, either direction
     color_balance_index_max=None,
     color_balance_index_invert=False,
@@ -412,6 +428,13 @@ async def main():
     shared_cycle_hub = StochBot.new_cycle_hub([LONG_CONFIG.worker_id, SHORT_CONFIG.worker_id])
     long_bot.cycle_hub = shared_cycle_hub
     short_bot.cycle_hub = shared_cycle_hub
+    # 2026-10-13: ATR/volume adaptive SL/trigger/trail -- same owner/hub pattern as
+    # shared_pressure_hub above. LONG_CONFIG.atr_adaptive_owner=True computes it every tick;
+    # both legs read this SAME object at their own entry moment. See
+    # BotConfig.atr_adaptive_exits_enabled's docstring.
+    shared_atr_adaptive_hub = {"scale": None, "sl_pct": None, "trigger_pct": None, "trail_pct": None}
+    long_bot.atr_adaptive_hub = shared_atr_adaptive_hub
+    short_bot.atr_adaptive_hub = shared_atr_adaptive_hub
     # 2026-10-07: one Lighter position read for both legs instead of one each (WAF rate limits).
     shared_account_hub = AccountReadHub(member_count=2)
     long_bot.account_hub = shared_account_hub
