@@ -1421,7 +1421,7 @@ function currentSessionStart(nowUtc: Date): Date {
 function CompactStochBtcPanel({
   title, subtitle, table, state, trades, currentPrice, loading, onToggled, runs, cooldownMin,
   showSelfLock, stats, tradingHoursUtc, combineEquityWinRate, rsiPaperStats, fixedSettings,
-  selfLockUnlockRange, selfLockUnlockTitle, dormant, tradeFlowPaperTrades, paperLabel,
+  selfLockUnlockRange, selfLockUnlockTitle, dormant,
 }: {
   title: string; subtitle: string; table: string; state: any; trades: any[];
   currentPrice: number | null; loading: boolean; onToggled: () => void;
@@ -1429,13 +1429,6 @@ function CompactStochBtcPanel({
   stats?: { total: number; wins: number };
   tradingHoursUtc?: number[] | Record<number, number[]>;
   combineEquityWinRate?: boolean; rsiPaperStats?: { total: number; wins: number; pnlPct: number };
-  // Trade-flow ratio paper trade (2026-10-12) -- recent completed paper trades for THIS bot
-  // specifically, pre-filtered by worker_id at the call site (shared table across both bots).
-  tradeFlowPaperTrades?: any[];
-  // Direct request, 2026-10-12: "let's call it paper 2" -- Worker 1/Worker 4 naming was
-  // colliding with "worker 2"/"worker 4" confusion on the real bots, so each paper instance
-  // gets its own independent label here, decoupled from which real bot hosts it.
-  paperLabel?: string;
   fixedSettings?: { entryLo: number; entryHi: number; tpPct: number; slPct: number;
                     entryConfirmationMaxPct?: number };
   // Self-lock unlock label -- defaults to the live rule: 2 wins of any kind, OR 1 literal TP.
@@ -1509,156 +1502,6 @@ function CompactStochBtcPanel({
   const unrealizedPct = side && avgEntry && currentPrice
     ? (side === "long" ? (currentPrice - avgEntry) / avgEntry : (avgEntry - currentPrice) / avgEntry) * 100
     : null;
-
-  // Trade-flow ratio paper trade (2026-10-12, direct request: "we need to paper trade this
-  // thing... continuously trading this... put some options to change the settings"). Never
-  // touches real money -- own live side/entry/peak columns, own settings overrides, own trade
-  // log table (passed in as tradeFlowPaperTrades, pre-filtered to this bot).
-  const tfpEnabled: boolean = state?.override_trade_flow_paper_enabled ?? false;
-  const tfpSide = state?.trade_flow_paper_side ?? null;
-  const tfpEntry = state?.trade_flow_paper_entry_price ?? null;
-  const tfpPeak = state?.trade_flow_paper_peak_pct ?? null;
-  const tfpUnrealizedPct = tfpSide && tfpEntry && currentPrice
-    ? (tfpSide === "long" ? (currentPrice - tfpEntry) / tfpEntry : (tfpEntry - currentPrice) / tfpEntry) * 100
-    : null;
-  const tfpLongThreshold: number = state?.override_trade_flow_paper_long_threshold ?? 0.8;
-  const tfpShortThreshold: number = state?.override_trade_flow_paper_short_threshold ?? 0.2;
-  const tfpTp: number = state?.override_trade_flow_paper_tp_pct ?? 0.10;
-  const tfpTrigger: number = state?.override_trade_flow_paper_trigger_pct ?? 0.02;
-  const tfpTrail: number = state?.override_trade_flow_paper_trail_pct ?? 0.01;
-  // 2026-10-12, same day, direct follow-up ("we need to be able to change the settings of the
-  // stop loss... like every other bot"): originally omitted on purpose, added back after a real
-  // paper position sat at -0.31% with nothing to catch it. Same 0.05% as Worker 1's real SL.
-  const tfpSl: number = state?.override_trade_flow_paper_sl_pct ?? 0.05;
-  // Swap mode (2026-10-12, same day, direct request, Paper 2 specifically: "let's turn paper 2
-  // into a swap bot"). "threshold" (default) is the original TP/SL/trigger+trail behavior;
-  // "swap" is a totally different, always-in-market rotation (BTC side / USD side) with no
-  // TP/SL at all -- see StochBot._update_trade_flow_paper_swap.
-  const tfpMode: string = state?.override_trade_flow_paper_mode ?? "threshold";
-  // Signal-flip exit (2026-10-12, same day, direct request after watching a real Paper 1 trade
-  // go green then ride the ratio's full reversal back down into an SL loss: "if you are
-  // positive and the signal flips, getting out early... we would have won that one"). Threshold
-  // mode only -- closes immediately on a real reversal (crossing the opposite threshold) while
-  // still green, instead of waiting for TP/trigger+trail. Off by default. Since entry just
-  // re-checks "flat + ratio past threshold" every tick, a fresh trade opens on its own if the
-  // ratio swings back through the entry threshold again -- "we can enter again, and win 2 times."
-  const tfpSignalFlipExit: boolean = state?.override_trade_flow_paper_signal_flip_exit ?? false;
-  const [savingTfpFlip, setSavingTfpFlip] = useState(false);
-  const [savingTfpMode, setSavingTfpMode] = useState(false);
-  const [savingTfp, setSavingTfp] = useState(false);
-  const [tfpLongIn, setTfpLongIn] = useState("");
-  const [tfpShortIn, setTfpShortIn] = useState("");
-  const [tfpTpIn, setTfpTpIn] = useState("");
-  const [tfpTriggerIn, setTfpTriggerIn] = useState("");
-  const [tfpTrailIn, setTfpTrailIn] = useState("");
-  const [tfpSlIn, setTfpSlIn] = useState("");
-  // Direct request, 2026-10-12: show the live ratio reading right on this panel too, not just
-  // in the Master Schedule's shared "Live readings" box -- "put the signal on top of it."
-  const tfpRatio: number | null = state?.live_trade_flow_ratio ?? null;
-  // Non-destructive reset (same convention as every other Reset button here) -- stamps a cutoff,
-  // never deletes trade rows, the panel just hides anything closed before it.
-  // REVISED 2026-10-12, same day, direct follow-up ("every time I hit reset, it never goes to
-  // 0... stop the ongoing trade"): the worker now force-closes any open position the instant it
-  // sees a fresh reset stamp (StochBot._trade_flow_paper_force_close_if_reset), logging it with
-  // reason RESET -- that forced-close row lands AFTER this cutoff (closed_at >= it) so the plain
-  // closed_at filter alone would still count it. tfpCountedTrades excludes reason === "RESET"
-  // from the win-rate/total-pnl math so those headline numbers genuinely read 0 right after a
-  // reset; tfpTradesList (used for the recent-trades list) still includes it for the audit trail.
-  const tfpHistoryResetAt: string = state?.trade_flow_paper_history_reset_at ?? "1970-01-01T00:00:00Z";
-  const tfpTradesList = (tradeFlowPaperTrades ?? []).filter((t: any) => t.closed_at >= tfpHistoryResetAt);
-  const tfpCountedTrades = tfpTradesList.filter((t: any) => t.reason !== "RESET");
-  const tfpWins = tfpCountedTrades.filter((t: any) => t.pnl_pct > 0).length;
-  const tfpWinRate = tfpCountedTrades.length ? (100 * tfpWins / tfpCountedTrades.length).toFixed(1) : "—";
-  const tfpTotalPnlPct = tfpCountedTrades.reduce((s: number, t: any) => s + (t.pnl_pct ?? 0), 0);
-  const [resettingTfp, setResettingTfp] = useState(false);
-
-  async function handleResetTfp() {
-    if (!confirm(`Reset ${title}'s paper trade stats? Hides trades closed before now -- nothing is deleted. The open paper position (if any) is left alone.`)) return;
-    setResettingTfp(true);
-    const res = await fetch("/api/lighter-btc-initial-settings", {
-      method: "POST", headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ table, resetTradeFlowPaper: true }),
-    });
-    if (!res.ok) {
-      const b = await res.json().catch(() => ({}));
-      alert(b.error || "Could not reset the paper trade stats.");
-    }
-    await onToggled();
-    setResettingTfp(false);
-  }
-
-  async function handleToggleTradeFlowPaper() {
-    const next = !tfpEnabled;
-    setSavingTfp(true);
-    const res = await fetch("/api/lighter-btc-initial-settings", {
-      method: "POST", headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ table, tradeFlowPaperEnabled: next }),
-    });
-    if (!res.ok) {
-      const b = await res.json().catch(() => ({}));
-      alert(b.error || "Could not toggle the trade-flow paper trade.");
-    }
-    await onToggled();
-    setSavingTfp(false);
-  }
-
-  async function handleToggleTfpSignalFlip() {
-    const next = !tfpSignalFlipExit;
-    setSavingTfpFlip(true);
-    const res = await fetch("/api/lighter-btc-initial-settings", {
-      method: "POST", headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ table, tradeFlowPaperSignalFlipExit: next }),
-    });
-    if (!res.ok) {
-      const b = await res.json().catch(() => ({}));
-      alert(b.error || "Could not toggle the signal-flip exit.");
-    }
-    await onToggled();
-    setSavingTfpFlip(false);
-  }
-
-  async function handleSetTfpMode(mode: "threshold" | "swap") {
-    if (mode === tfpMode) return;
-    if (!confirm(mode === "swap"
-      ? `Switch ${title}'s paper trade to SWAP mode? Always in a position (BTC side or USD side), no TP/SL/trigger -- flips the instant the ratio crosses the opposite threshold. Takes effect immediately.`
-      : `Switch ${title}'s paper trade back to THRESHOLD mode? Restores TP/SL/trigger+trail, can go flat between trades. Takes effect immediately.`
-    )) return;
-    setSavingTfpMode(true);
-    const res = await fetch("/api/lighter-btc-initial-settings", {
-      method: "POST", headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ table, tradeFlowPaperMode: mode }),
-    });
-    if (!res.ok) {
-      const b = await res.json().catch(() => ({}));
-      alert(b.error || "Could not switch the paper trade mode.");
-    }
-    await onToggled();
-    setSavingTfpMode(false);
-  }
-
-  async function handleApplyTfpSettings() {
-    const payload: Record<string, string> = {};
-    if (tfpLongIn.trim()) payload.tradeFlowPaperLongThreshold = tfpLongIn.trim();
-    if (tfpShortIn.trim()) payload.tradeFlowPaperShortThreshold = tfpShortIn.trim();
-    if (tfpTpIn.trim()) payload.tradeFlowPaperTp = tfpTpIn.trim();
-    if (tfpTriggerIn.trim()) payload.tradeFlowPaperTrigger = tfpTriggerIn.trim();
-    if (tfpTrailIn.trim()) payload.tradeFlowPaperTrail = tfpTrailIn.trim();
-    if (tfpSlIn.trim()) payload.tradeFlowPaperSl = tfpSlIn.trim();
-    if (Object.keys(payload).length === 0) return;
-    setSavingTfp(true);
-    const res = await fetch("/api/lighter-btc-initial-settings", {
-      method: "POST", headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ table, ...payload }),
-    });
-    if (!res.ok) {
-      const b = await res.json().catch(() => ({}));
-      alert(b.error || "Could not apply the trade-flow paper settings.");
-    } else {
-      setTfpLongIn(""); setTfpShortIn(""); setTfpTpIn(""); setTfpTriggerIn(""); setTfpTrailIn(""); setTfpSlIn("");
-    }
-    await onToggled();
-    setSavingTfp(false);
-  }
 
   const closedTrades = trades.filter((t) => t.pnl_usd != null);
   // True lifetime count when available (stats), not the capped-at-200 fetch used for the
@@ -3225,150 +3068,6 @@ function CompactStochBtcPanel({
         </div>
       )}
       {showLevers && !loading && (
-        <div className="bg-gray-800/60 rounded-lg p-2">
-          {/* 2026-10-12, direct request: "we need to paper trade this thing... continuously
-              trading this... put some options to change the settings." Fully paper -- never
-              places a real order. Entry: live trade-flow ratio crosses a threshold while flat.
-              Exit: TP, or a profit-lock trigger+trail -- deliberately NO stop-loss, same as the
-              one-off manual forward test this continuously runs instead of. */}
-          <div className="flex items-baseline justify-between">
-            <p className="text-gray-500 text-[10px] uppercase">{paperLabel ?? "Trade-flow paper trade"} (no real money)</p>
-            <div className="flex items-center gap-1">
-              <button
-                onClick={handleResetTfp}
-                disabled={resettingTfp || loading}
-                className="text-[10px] font-bold px-1.5 py-0.5 rounded bg-gray-700/50 text-gray-400 hover:bg-gray-700 disabled:opacity-30"
-                title="Hide trades closed before now -- nothing is deleted. Doesn't touch an open paper position."
-              >
-                {resettingTfp ? "…" : "Reset"}
-              </button>
-              <button
-                onClick={handleToggleTradeFlowPaper}
-                disabled={savingTfp || loading}
-                className={`text-[10px] font-bold px-1.5 py-0.5 rounded disabled:opacity-30 ${
-                  tfpEnabled ? "bg-green-500/20 text-green-400" : "bg-gray-700/50 text-gray-500"}`}
-              >
-                {savingTfp ? "…" : tfpEnabled ? "ON" : "OFF"}
-              </button>
-            </div>
-          </div>
-          <div className="flex items-center gap-1 mt-1">
-            {(["threshold", "swap"] as const).map((m) => (
-              <button key={m} onClick={() => handleSetTfpMode(m)} disabled={savingTfpMode || loading}
-                className={`text-[9px] font-bold px-1.5 py-0.5 rounded capitalize disabled:opacity-30 ${
-                  tfpMode === m ? "bg-blue-500/30 text-blue-300" : "bg-gray-700/50 text-gray-500 hover:bg-gray-700"
-                }`}>
-                {m === "swap" ? "Swap (always in market)" : "Threshold (TP/SL)"}
-              </button>
-            ))}
-          </div>
-          <p className="text-[11px] text-gray-500 mt-0.5 tabular-nums">
-            live ratio: <span className="text-blue-300">{tfpRatio != null ? tfpRatio.toFixed(3) : "—"}</span>
-            <span className="text-gray-600"> (long ≥ {tfpLongThreshold}, short ≤ {tfpShortThreshold})</span>
-          </p>
-          <p className="text-[11px] text-gray-500 mt-0.5 tabular-nums">
-            {tfpSide ? (
-              <>{tfpMode === "swap" ? (tfpSide === "long" ? "BTC side" : "USD side") : `paper ${tfpSide}`} @ {tfpEntry?.toFixed(1)} — unrealized{" "}
-                <span className={tfpUnrealizedPct != null && tfpUnrealizedPct >= 0 ? "text-green-400" : "text-red-400"}>
-                  {tfpUnrealizedPct != null ? `${tfpUnrealizedPct >= 0 ? "+" : ""}${tfpUnrealizedPct.toFixed(3)}%` : "—"}
-                </span>
-                {tfpMode !== "swap" && tfpPeak != null && <span className="text-gray-600"> (armed, peak +{tfpPeak.toFixed(3)}%)</span>}
-              </>
-            ) : tfpMode === "swap" ? "waiting for the first signal to pick a side" : "flat, waiting for a signal"}
-          </p>
-          <p className="text-[11px] text-gray-500 mt-1 tabular-nums">
-            {tfpCountedTrades.length} paper trades — <span className="text-blue-300">{tfpWinRate}% win</span>,{" "}
-            <span className={tfpTotalPnlPct >= 0 ? "text-green-400" : "text-red-400"}>
-              {tfpTotalPnlPct >= 0 ? "+" : ""}{tfpTotalPnlPct.toFixed(3)}%
-            </span> total
-          </p>
-          {/* Reorganized 2026-10-12, direct request ("you have couple of boxes i dont
-              understand can you organize") -- was one uneven 6-box row that wrapped oddly.
-              Now two clearly labeled groups (when to enter / how to exit), each its own even
-              grid, with Set on its own full-width row so it doesn't look tied to just one box. */}
-          <div className="mt-1.5">
-            <p className="text-gray-600 text-[9px] uppercase tracking-wide">
-              {tfpMode === "swap" ? "BTC side / USD side — when the ratio crosses" : "Entry — when the ratio crosses"}
-            </p>
-            <div className="grid grid-cols-2 gap-1.5 mt-0.5">
-              <div>
-                <p className="text-gray-500 text-[9px] uppercase">{tfpMode === "swap" ? "BTC side ≥" : "Long ≥"} <span className="text-gray-600">now {tfpLongThreshold}</span></p>
-                <input value={tfpLongIn} onChange={(e) => setTfpLongIn(e.target.value)} placeholder={String(tfpLongThreshold)}
-                  inputMode="decimal" className="w-full bg-gray-900 border border-gray-700 rounded px-1.5 py-1 text-xs text-white tabular-nums focus:outline-none focus:border-blue-500" />
-              </div>
-              <div>
-                <p className="text-gray-500 text-[9px] uppercase">{tfpMode === "swap" ? "USD side ≤" : "Short ≤"} <span className="text-gray-600">now {tfpShortThreshold}</span></p>
-                <input value={tfpShortIn} onChange={(e) => setTfpShortIn(e.target.value)} placeholder={String(tfpShortThreshold)}
-                  inputMode="decimal" className="w-full bg-gray-900 border border-gray-700 rounded px-1.5 py-1 text-xs text-white tabular-nums focus:outline-none focus:border-blue-500" />
-              </div>
-            </div>
-          </div>
-          {tfpMode === "swap" ? (
-            <p className="text-gray-600 text-[9px] leading-snug mt-1.5">
-              Swap mode: always in a position, no TP/SL/trigger -- flips to the other side the
-              instant the ratio crosses the FAR threshold from whichever side it's currently on
-              (sitting between the two boxes above just holds the current side).
-            </p>
-          ) : (
-            <div className="mt-2">
-              <p className="text-gray-600 text-[9px] uppercase tracking-wide">Exit — how the position closes</p>
-              <div className="grid grid-cols-4 gap-1.5 mt-0.5">
-                <div>
-                  <p className="text-gray-500 text-[9px] uppercase">TP%</p>
-                  <p className="text-gray-600 text-[9px]">now {tfpTp}</p>
-                  <input value={tfpTpIn} onChange={(e) => setTfpTpIn(e.target.value)} placeholder={String(tfpTp)}
-                    inputMode="decimal" className="w-full bg-gray-900 border border-gray-700 rounded px-1.5 py-1 text-xs text-white tabular-nums focus:outline-none focus:border-blue-500" />
-                </div>
-                <div>
-                  <p className="text-gray-500 text-[9px] uppercase">Trigger%</p>
-                  <p className="text-gray-600 text-[9px]">now {tfpTrigger}</p>
-                  <input value={tfpTriggerIn} onChange={(e) => setTfpTriggerIn(e.target.value)} placeholder={String(tfpTrigger)}
-                    inputMode="decimal" className="w-full bg-gray-900 border border-gray-700 rounded px-1.5 py-1 text-xs text-white tabular-nums focus:outline-none focus:border-blue-500" />
-                </div>
-                <div>
-                  <p className="text-gray-500 text-[9px] uppercase">Trail%</p>
-                  <p className="text-gray-600 text-[9px]">now {tfpTrail}</p>
-                  <input value={tfpTrailIn} onChange={(e) => setTfpTrailIn(e.target.value)} placeholder={String(tfpTrail)}
-                    inputMode="decimal" className="w-full bg-gray-900 border border-gray-700 rounded px-1.5 py-1 text-xs text-white tabular-nums focus:outline-none focus:border-blue-500" />
-                </div>
-                <div>
-                  <p className="text-gray-500 text-[9px] uppercase">SL%</p>
-                  <p className="text-gray-600 text-[9px]">now {tfpSl}</p>
-                  <input value={tfpSlIn} onChange={(e) => setTfpSlIn(e.target.value)} placeholder={String(tfpSl)}
-                    inputMode="decimal" className="w-full bg-gray-900 border border-gray-700 rounded px-1.5 py-1 text-xs text-white tabular-nums focus:outline-none focus:border-blue-500" />
-                </div>
-              </div>
-              <button onClick={handleToggleTfpSignalFlip} disabled={savingTfpFlip || loading}
-                className={`w-full mt-1.5 text-[10px] font-semibold px-2 py-1 rounded ${
-                  tfpSignalFlipExit ? "bg-amber-500/20 text-amber-400" : "bg-gray-700/50 text-gray-500"}`}>
-                {savingTfpFlip ? "…" : `Exit early if green & signal flips: ${tfpSignalFlipExit ? "ON" : "off"}`}
-              </button>
-            </div>
-          )}
-          <button onClick={handleApplyTfpSettings} disabled={savingTfp || loading}
-            className="w-full mt-1.5 text-xs font-bold px-2.5 py-1.5 rounded bg-blue-500/20 text-blue-400 hover:bg-blue-500/30 disabled:opacity-30">
-            {savingTfp ? "…" : "Set"}
-          </button>
-          {tfpTradesList.length > 0 && (
-            <div className="mt-1.5 space-y-0.5 max-h-24 overflow-y-auto">
-              {tfpTradesList.slice(0, 8).map((t: any, i: number) => (
-                <p key={i} className="text-[10px] text-gray-500 tabular-nums">
-                  {t.side} {t.reason}{" "}
-                  <span className={t.pnl_pct >= 0 ? "text-green-400" : "text-red-400"}>
-                    {t.pnl_pct >= 0 ? "+" : ""}{t.pnl_pct.toFixed(3)}%
-                  </span>
-                </p>
-              ))}
-            </div>
-          )}
-          <p className="text-gray-600 text-[9px] leading-snug mt-1">
-            Never places a real order. Enters when the trade-flow ratio crosses a threshold while
-            flat; exits at SL, TP, or a profit-lock trigger+trail. Continuous (tick-level, via the
-            live book), not the 5s-polled one-off test that first validated this.
-          </p>
-        </div>
-      )}
-      {showLevers && !loading && (
         <div className="bg-gray-900/80 border border-gray-700 rounded-lg p-2 space-y-1">
           {/* 2026-10-09, direct request: "we have a bunch of rules that we dont know we need
               to enumerate them" -- read-only, every switch/filter on this bot in one place, so
@@ -3389,8 +3088,6 @@ function CompactStochBtcPanel({
             ["Trail Dwell", curDwell > 0 ? `ON (${curDwell}s)` : "off"],
             ["SL Dwell", curSlDwell > 0 ? `ON (${curSlDwell}s)` : "off"],
             ["HTF alignment block", curHtfTimeframe !== "off" ? `ON (${curHtfTimeframe})` : "off"],
-            [paperLabel ?? "Trade-flow paper trade", tfpEnabled ? "ON (no real money)" : "off"],
-            [`${paperLabel ?? "Paper"} signal-flip exit`, tfpMode === "swap" ? "n/a (swap mode)" : (tfpSignalFlipExit ? "ON" : "off")],
             ["Self-lock / hour ban", "off (compiled, not live-controllable)"],
           ].map(([label, val]) => (
             <div key={label} className="flex items-center justify-between text-[10px]">
@@ -5816,9 +5513,6 @@ export default function Dashboard() {
   const [worker4State,  setWorker4State]  = useState<any>(null);
   const [worker4Trades, setWorker4Trades] = useState<any[]>([]);
   const [worker4Runs,   setWorker4Runs]   = useState<any[]>([]);
-  // Trade-flow ratio paper trade (2026-10-12) -- shared table, worker_id-filtered at fetch time.
-  const [worker1TfpTrades, setWorker1TfpTrades] = useState<any[]>([]);
-  const [worker4TfpTrades, setWorker4TfpTrades] = useState<any[]>([]);
   const [optimalBtcState,  setOptimalBtcState]  = useState<any>(null);
   const [optimalBtcTrades, setOptimalBtcTrades] = useState<any[]>([]);
   const [optimalBtcRuns,   setOptimalBtcRuns]   = useState<any[]>([]);
@@ -5855,8 +5549,6 @@ export default function Dashboard() {
       { data: worker4St },
       { data: worker4Tr },
       { data: worker4Rs },
-      { data: worker1TfpTr },
-      { data: worker4TfpTr },
       { data: optimalBtcSt },
       { data: optimalBtcTr },
       { data: optimalBtcRs },
@@ -5893,8 +5585,6 @@ export default function Dashboard() {
       getSupabase().from("lighter_btc_worker4_state").select("*").eq("id", 1).single(),
       getSupabase().from("lighter_btc_worker4_trades").select("*").order("closed_at", { ascending: false }).limit(200),
       getSupabase().from("lighter_btc_worker4_runs").select("*").order("ran_at", { ascending: false }).limit(30),
-      getSupabase().from("lighter_btc_trade_flow_paper_trades").select("*").eq("worker_id", "worker1").order("closed_at", { ascending: false }).limit(50),
-      getSupabase().from("lighter_btc_trade_flow_paper_trades").select("*").eq("worker_id", "worker4").order("closed_at", { ascending: false }).limit(50),
       getSupabase().from("lighter_btc_optimal_state").select("*").eq("id", 1).single(),
       getSupabase().from("lighter_btc_optimal_trades").select("*").order("closed_at", { ascending: false }).limit(200),
       getSupabase().from("lighter_btc_optimal_runs").select("*").order("ran_at", { ascending: false }).limit(30),
@@ -5938,8 +5628,6 @@ export default function Dashboard() {
     setWorker4State(worker4St ?? null);
     setWorker4Trades(worker4Tr ?? []);
     setWorker4Runs(worker4Rs ?? []);
-    setWorker1TfpTrades(worker1TfpTr ?? []);
-    setWorker4TfpTrades(worker4TfpTr ?? []);
     setOptimalBtcState(optimalBtcSt ?? null);
     setOptimalBtcTrades(optimalBtcTr ?? []);
     setOptimalBtcRuns(optimalBtcRs ?? []);
@@ -6118,7 +5806,6 @@ export default function Dashboard() {
       .subscribe();
     const ch6 = sb.channel("lighter-btc-rsi-paper")
       .on("postgres_changes", { event: "INSERT", schema: "public", table: "lighter_btc_rsi_paper_trades" }, debouncedLoad)
-      .on("postgres_changes", { event: "INSERT", schema: "public", table: "lighter_btc_trade_flow_paper_trades" }, debouncedLoad)
       .subscribe();
     // The three live Lighter state tables aren't on realtime at all (every tick would fire a
     // reload -- too chatty), so a plain metrics write (live_schedule_*, live_wiggle, etc.) with
@@ -6177,8 +5864,6 @@ export default function Dashboard() {
             combineEquityWinRate
             // 2026-10-01: hour ban OFF (trading_hours_utc=None in the live config). Pass
             // tradingHoursUtc={WORKER1_TRADING_HOURS} again when the schedule is restored.
-            tradeFlowPaperTrades={worker1TfpTrades}
-            paperLabel="Paper 1"
           />
           <HedgeDualLegPanel
             environmentRun={hedgeEnvironmentRun}
@@ -6202,8 +5887,6 @@ export default function Dashboard() {
             loading={loading}
             onToggled={load}
             combineEquityWinRate
-            tradeFlowPaperTrades={worker4TfpTrades}
-            paperLabel="Paper 2"
           />
         </div>
 

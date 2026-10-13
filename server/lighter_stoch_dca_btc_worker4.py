@@ -119,13 +119,6 @@ CONFIG = BotConfig(
     # mark-vs-index premium (crowd positioning), read-only. Requires
     # lighter_btc_worker4_premium.sql.
     schema_has_premium_readout=True,
-    # 2026-10-12, direct request ("we need to paper trade this thing... continuously trading
-    # this... put some options to change the settings"): continuous paper-only shadow of the
-    # trade-flow-ratio hypothesis, validated first as a manual forward test. Off by default
-    # (trade_flow_paper_enabled=False) even with the schema on -- the dashboard toggle is what
-    # actually turns it on, same as escalated_sl_enabled's contract. Requires
-    # lighter_btc_worker4_trade_flow_paper.sql.
-    schema_has_trade_flow_paper_test=True,
 )
 
 if __name__ == "__main__":

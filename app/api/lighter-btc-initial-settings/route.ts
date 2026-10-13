@@ -46,17 +46,6 @@ const LIMITS = {
   // 2026-10-04, direct request: "change the window of stochastic for worker 1". Integer candle
   // count; governs both the entry and reversal bands (see StochBot._stoch_window_control).
   stochWindow: { min: 2, max: 50, label: "stochastic window" },
-  // 2026-10-12, direct request: paper-only trade-flow-ratio shadow, "put some options to change
-  // the settings". Thresholds are a 0-1 ratio (buy_volume share), not a percentage.
-  tradeFlowPaperLongThreshold: { min: 0.5, max: 1.0, label: "trade-flow paper long threshold" },
-  tradeFlowPaperShortThreshold: { min: 0.0, max: 0.5, label: "trade-flow paper short threshold" },
-  tradeFlowPaperTp: { min: 0.01, max: 2.0, label: "trade-flow paper TP" },
-  tradeFlowPaperTrigger: { min: 0.01, max: 1.0, label: "trade-flow paper trigger" },
-  tradeFlowPaperTrail: { min: 0, max: 0.5, label: "trade-flow paper trail" },
-  // 2026-10-12, same day, direct follow-up: "we need to be able to change the settings of the
-  // stop loss... like every other bot." Max raised to 100 (same reasoning as the real `sl`
-  // limit above) so it can be set effectively off if ever wanted, without a literal switch.
-  tradeFlowPaperSl: { min: 0.01, max: 100, label: "trade-flow paper stop-loss" },
 };
 
 // Worker 4 (2026-10-10, exact clone of Worker 1, cloned table shape) shares this same route --
@@ -87,12 +76,6 @@ export async function POST(req: NextRequest) {
     ["wiggleVolRiseExit", "override_wiggle_vol_rise_exit_pct"],
     ["rateGuard", "override_volume_rate_guard_threshold"],
     ["stochWindow", "override_stoch_window"],
-    ["tradeFlowPaperLongThreshold", "override_trade_flow_paper_long_threshold"],
-    ["tradeFlowPaperShortThreshold", "override_trade_flow_paper_short_threshold"],
-    ["tradeFlowPaperTp", "override_trade_flow_paper_tp_pct"],
-    ["tradeFlowPaperTrigger", "override_trade_flow_paper_trigger_pct"],
-    ["tradeFlowPaperTrail", "override_trade_flow_paper_trail_pct"],
-    ["tradeFlowPaperSl", "override_trade_flow_paper_sl_pct"],
   ] as const) {
     const raw = body[key];
     if (raw === undefined || raw === null || raw === "") continue;
@@ -123,8 +106,6 @@ export async function POST(req: NextRequest) {
     ["wiggleVolRiseExitEnabled", "override_wiggle_vol_rise_exit_enabled"],
     ["rateGuardEnabled", "override_volume_rate_guard_enabled"],
     ["jumpGuardEnabled", "override_volume_jump_enabled"],
-    ["tradeFlowPaperEnabled", "override_trade_flow_paper_enabled"],
-    ["tradeFlowPaperSignalFlipExit", "override_trade_flow_paper_signal_flip_exit"],
   ] as const) {
     const raw = body[key];
     if (raw === undefined || raw === null) continue;
@@ -140,22 +121,6 @@ export async function POST(req: NextRequest) {
   // time, not just blanking the pause out directly.
   if (body.clearVolumeJump === true) {
     out["override_volume_jump_cleared_at"] = new Date().toISOString();
-  }
-
-  // Trade-flow paper trade Reset (2026-10-12, direct request: "we need a reset button") --
-  // same non-destructive stamp-a-cutoff pattern as the real Worker 1 reset: the stats shown on
-  // the dashboard filter trades closed before this timestamp, nothing is ever deleted.
-  // REVISED same day, direct follow-up ("every time I hit reset, it never goes to 0... stop
-  // the ongoing trade"): an open position used to keep running past this stamp and its
-  // eventual close (whatever closed it -- SL/TP/trigger-trail/a swap flip) would land after
-  // the cutoff and still count, so the "reset" stats never actually hit zero while a trade was
-  // open. The worker (StochBot._trade_flow_paper_force_close_if_reset) now notices this fresh
-  // stamp on its next tick and force-closes any open paper position immediately, logging it
-  // with reason RESET for the audit trail -- the dashboard excludes RESET-reason rows from the
-  // win-rate/total-pnl math (but still lists them) so the headline numbers genuinely read 0
-  // right after a reset, in both threshold and swap mode.
-  if (body.resetTradeFlowPaper === true) {
-    out["trade_flow_paper_history_reset_at"] = new Date().toISOString();
   }
 
   // Release-arm selector (2026-10-03, direct request: "build them both... which one is
@@ -181,18 +146,6 @@ export async function POST(req: NextRequest) {
       return NextResponse.json({ error: `exitMode must be trail/tp (got "${em}").` }, { status: 400 });
     }
     out["override_exit_mode"] = em;
-  }
-
-  // Trade-flow paper trade mode selector (2026-10-12, direct request, Paper 2 specifically:
-  // "let's turn paper 2 into a swap bot"). "threshold" (default) is the original TP/SL/
-  // trigger+trail behavior; "swap" is a totally different, always-in-market rotation with none
-  // of that -- see StochBot._update_trade_flow_paper_swap.
-  if (body.tradeFlowPaperMode !== undefined) {
-    const m = body.tradeFlowPaperMode;
-    if (m !== "threshold" && m !== "swap") {
-      return NextResponse.json({ error: `tradeFlowPaperMode must be threshold/swap (got "${m}").` }, { status: 400 });
-    }
-    out["override_trade_flow_paper_mode"] = m;
   }
 
   // Escalated/leveled SL (2026-10-06, direct request after digging into real trade data --
@@ -265,23 +218,6 @@ export async function POST(req: NextRequest) {
       { status: 400 }
     );
   }
-  const paperTrig = (out["override_trade_flow_paper_trigger_pct"] as number | undefined) ?? cur?.override_trade_flow_paper_trigger_pct;
-  const paperTrail = (out["override_trade_flow_paper_trail_pct"] as number | undefined) ?? cur?.override_trade_flow_paper_trail_pct;
-  if (paperTrig != null && paperTrail != null && paperTrail > paperTrig) {
-    return NextResponse.json(
-      { error: `Trade-flow paper trail (${paperTrail}%) must not be larger than its trigger (${paperTrig}%).` },
-      { status: 400 }
-    );
-  }
-  const paperLong = (out["override_trade_flow_paper_long_threshold"] as number | undefined) ?? cur?.override_trade_flow_paper_long_threshold;
-  const paperShort = (out["override_trade_flow_paper_short_threshold"] as number | undefined) ?? cur?.override_trade_flow_paper_short_threshold;
-  if (paperLong != null && paperShort != null && paperLong <= paperShort) {
-    return NextResponse.json(
-      { error: `Trade-flow paper long threshold (${paperLong}) must be greater than the short threshold (${paperShort}).` },
-      { status: 400 }
-    );
-  }
-
   const { error } = await sb.from(table).update(out).eq("id", 1);
   if (error) {
     return NextResponse.json({ error: error.message }, { status: 500 });

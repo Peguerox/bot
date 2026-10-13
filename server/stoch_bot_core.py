@@ -570,60 +570,6 @@ class BotConfig:
     # in-flight paper position across restarts.
     rsi_paper_test_enabled: bool = False
     schema_has_rsi_paper_test: bool = False
-    # Trade-flow ratio paper trade (2026-10-12, direct request: "we need to paper trade this
-    # thing... continuously trading this... put some options to change the settings"). Fully
-    # independent paper-only shadow, same contract as the RSI paper test above -- never places a
-    # real order, never touches real_trading_locked or any real-trading gate. Enters on
-    # live_trade_flow_ratio (see compute_trade_flow_ratio / run_trade_flow_ratio_forever)
-    # crossing a long/short threshold; exits on TP, SL, or a profit-lock trigger+trail.
-    # ORIGINALLY built with no SL at all (direct instruction, validated first as a manual
-    # forward paper test) -- REVISED same day, direct follow-up after watching a real paper
-    # position sit at -0.31% unrealized for 7.7 minutes with nothing to catch it ("this was a
-    # mistake... you're gonna be losing forever?"): added trade_flow_paper_sl_pct, same 0.05%
-    # as Worker 1's real SL by direct request, matching the same override convention as every
-    # other number here (not a NULL-means-off gate -- always a real number, same as TP).
-    # All 7 numbers below are live-overridable from the dashboard (override_trade_flow_paper_*),
-    # same NULL-means-default convention as every other override in this file -- see
-    # _trade_flow_paper_controls. Requires schema_has_trade_flow_paper_test (the table_state
-    # columns) AND lighter_btc_trade_flow_paper_trades (the shared trade log, worker_id-tagged
-    # same as lighter_btc_rsi_paper_trades).
-    trade_flow_paper_enabled: bool = False
-    schema_has_trade_flow_paper_test: bool = False
-    trade_flow_paper_long_threshold: float = 0.8
-    trade_flow_paper_short_threshold: float = 0.2
-    trade_flow_paper_tp_pct: float = 0.10
-    trade_flow_paper_trigger_pct: float = 0.02
-    trade_flow_paper_trail_pct: float = 0.01
-    trade_flow_paper_sl_pct: float = 0.05
-    # Swap mode (2026-10-12, direct request, "Paper 2" specifically): a totally different shape
-    # from the threshold mode above -- "instead of the usual future bets short or long, just a
-    # swap... you are always on the trade... whatever your indicator says. if going up you are
-    # in the BTC side, if going down you are in the USD side... this will change as often as the
-    # indicator says, even if it swaps multiple times." No TP, no SL, no trigger/trail at all --
-    # purely signal-driven, always in a position (long "BTC side" or short "USD side", never
-    # flat), flips (closes + immediately reopens the other side) the instant the ratio crosses
-    # the OPPOSITE threshold from whichever side it's currently on (the existing long/short
-    # threshold boxes double as a hysteresis band here, so it doesn't whipsaw on every tick the
-    # ratio sits near 0.5 -- it only flips on a real cross of the far threshold, same numbers,
-    # different job). "threshold" (default) keeps the existing TP/SL/trigger+trail behavior
-    # unchanged -- this is an additive mode switch, not a replacement. See
-    # _trade_flow_paper_controls / _update_trade_flow_paper_shadow's swap branch.
-    trade_flow_paper_mode: str = "threshold"  # "threshold" or "swap"
-    # Signal-flip exit (2026-10-12, same day, direct request after watching a real Paper 1
-    # trade go green then ride the ratio's full reversal back down into an SL loss, with the
-    # trail never arming because unrealized never reached trigger_pct): threshold mode only.
-    # While a position is open and currently in PROFIT (unrealized_pct > 0), if the ratio
-    # crosses the OPPOSITE threshold from this position's own side (a real reversal, not a
-    # drift toward 0.5 -- same "far threshold" convention as the swap mode's flip condition),
-    # close immediately with reason SIGNAL_FLIP instead of waiting for TP/trigger+trail. Entry
-    # is unchanged (flat + ratio past threshold, checked every tick), so if the ratio later
-    # swings back through the entry threshold again, a fresh trade opens on its own -- direct
-    # request: "we can enter again, and win 2 times" instead of riding one trade through a
-    # reversal into a loss. Checked after SL/TP (an SL or a real TP still wins outright) but
-    # before the trigger+trail arm/check, so it fires before the trail would've been given a
-    # chance to even tighten. Default OFF -- same additive-flag convention as every other
-    # trade_flow_paper_* control, zero behavior change until turned on from the dashboard.
-    trade_flow_paper_signal_flip_exit_enabled: bool = False
     # 2026-09-26 (Worker 1): promotes the RSI-Stoch signal (see
     # compute_rsi_stoch_confirmed_signal) from paper-only to driving REAL entries/reversals --
     # a straight swap of the top-level signal source. Every downstream gate (trading_hours_utc,
@@ -2054,15 +2000,6 @@ class StochBot:
         self.rsi_paper_entry = None
         self.rsi_paper_entry_ms = None
         self._rsi_paper_loaded = False
-        # Trade-flow ratio paper trade (2026-10-12, direct request: "we need to paper trade this
-        # thing... continuously trading this"). Fully independent shadow -- never reads or writes
-        # anything real-trading related. See _update_trade_flow_paper_shadow.
-        self.trade_flow_paper_side = None
-        self.trade_flow_paper_entry = None
-        self.trade_flow_paper_entry_ms = None
-        self.trade_flow_paper_peak_pct = None
-        self.trade_flow_paper_entry_ratio = None
-        self._trade_flow_paper_loaded = False
         # Adaptive V2 signal -- live formula output, for dashboard display (see
         # compute_adaptive_stoch_signal)
         self.adaptive_last_vol_pct = None
@@ -6181,299 +6118,6 @@ class StochBot:
                 "rsi_paper_entry_time": self.rsi_paper_entry_ms,
             })
 
-    def _trade_flow_paper_controls(self, state):
-        """(enabled, long_threshold, short_threshold, tp_pct, trigger_pct, trail_pct, sl_pct,
-        mode, signal_flip_exit) for this tick -- same NULL-means-default override contract as
-        _stoch_band_controls. `enabled` itself is live-overridable too (direct request: "put
-        some options to change the settings"), so this paper shadow can be switched on/off from
-        the dashboard without a redeploy, same as every other on/off control in this file.
-        `sl_pct` added 2026-10-12, same day, direct follow-up after a real paper position sat at
-        -0.31% with nothing to catch it. `mode` added same day ("let's turn paper 2 into a swap
-        bot") -- "threshold" (default) is the original TP/SL/trigger+trail behavior; "swap" is
-        the always-in-market rotation, see _update_trade_flow_paper_shadow's swap branch.
-        `signal_flip_exit` added same day (threshold mode only -- see BotConfig.
-        trade_flow_paper_signal_flip_exit_enabled for the full reasoning). See
-        BotConfig.trade_flow_paper_* for the compiled defaults."""
-        cfg = self.cfg
-        enabled = cfg.trade_flow_paper_enabled
-        long_threshold = cfg.trade_flow_paper_long_threshold
-        short_threshold = cfg.trade_flow_paper_short_threshold
-        tp_pct = cfg.trade_flow_paper_tp_pct
-        trigger_pct = cfg.trade_flow_paper_trigger_pct
-        trail_pct = cfg.trade_flow_paper_trail_pct
-        sl_pct = cfg.trade_flow_paper_sl_pct
-        mode = cfg.trade_flow_paper_mode
-        signal_flip_exit = cfg.trade_flow_paper_signal_flip_exit_enabled
-        if cfg.schema_has_trade_flow_paper_test:
-            o = state.get("override_trade_flow_paper_enabled")
-            if o is not None: enabled = bool(o)
-            o = state.get("override_trade_flow_paper_long_threshold")
-            if o is not None: long_threshold = float(o)
-            o = state.get("override_trade_flow_paper_short_threshold")
-            if o is not None: short_threshold = float(o)
-            o = state.get("override_trade_flow_paper_tp_pct")
-            if o is not None: tp_pct = float(o)
-            o = state.get("override_trade_flow_paper_trigger_pct")
-            if o is not None: trigger_pct = float(o)
-            o = state.get("override_trade_flow_paper_trail_pct")
-            if o is not None: trail_pct = float(o)
-            o = state.get("override_trade_flow_paper_sl_pct")
-            if o is not None: sl_pct = float(o)
-            o = state.get("override_trade_flow_paper_mode")
-            if o is not None: mode = o
-            o = state.get("override_trade_flow_paper_signal_flip_exit")
-            if o is not None: signal_flip_exit = bool(o)
-        return (enabled, long_threshold, short_threshold, tp_pct, trigger_pct, trail_pct, sl_pct,
-                mode, signal_flip_exit)
-
-    async def _load_trade_flow_paper_state(self, state):
-        if self._trade_flow_paper_loaded:
-            return
-        self._trade_flow_paper_loaded = True
-        if self.cfg.schema_has_trade_flow_paper_test:
-            self.trade_flow_paper_side = state.get("trade_flow_paper_side")
-            self.trade_flow_paper_entry = state.get("trade_flow_paper_entry_price")
-            self.trade_flow_paper_entry_ms = state.get("trade_flow_paper_entry_time")
-            self.trade_flow_paper_peak_pct = state.get("trade_flow_paper_peak_pct")
-
-    async def _trade_flow_paper_force_close_if_reset(self, state, best_bid, best_ask):
-        """2026-10-12, same day, direct follow-up: "every time I hit reset, it never goes to
-        0... stop the ongoing trade for both." The Reset button only ever stamped
-        trade_flow_paper_history_reset_at (a dashboard-side display cutoff) -- it never told
-        the live worker about it, so an open position (threshold OR swap mode, same instance
-        vars) just kept running, and whatever eventually closed it landed AFTER the cutoff and
-        still counted, so the "since reset" stats never actually read zero while a trade was
-        open. Checked at the very top of _update_trade_flow_paper_shadow, before the mode
-        dispatch, so it covers both modes with one check: if there's an open position whose
-        entry predates the freshest reset stamp, force-close it now at the current best
-        bid/ask, log it with reason RESET (never silently dropped -- same "log every exit"
-        convention as every other reason), and go flat. Returns True if it force-closed (the
-        caller returns immediately afterward)."""
-        if self.trade_flow_paper_side is None or self.trade_flow_paper_entry_ms is None:
-            return False
-        reset_at = state.get("trade_flow_paper_history_reset_at")
-        if not reset_at:
-            return False
-        try:
-            reset_ms = parse_iso(reset_at).timestamp() * 1000
-        except Exception:
-            return False
-        if reset_ms <= self.trade_flow_paper_entry_ms:
-            return False
-        cfg = self.cfg
-        side = self.trade_flow_paper_side
-        entry = self.trade_flow_paper_entry
-        close_price = best_bid if side == "long" else best_ask
-        pnl_pct = ((close_price - entry) / entry * 100 if side == "long"
-                  else (entry - close_price) / entry * 100)
-        opened_at = ms_to_iso(self.trade_flow_paper_entry_ms)
-        await self.sb("POST", "lighter_btc_trade_flow_paper_trades", {
-            "worker_id": cfg.worker_id, "side": side, "entry_price": entry,
-            "exit_price": close_price, "pnl_pct": pnl_pct, "reason": "RESET",
-            "entry_ratio": self.trade_flow_paper_entry_ratio, "opened_at": opened_at,
-        })
-        self.trade_flow_paper_side = None
-        self.trade_flow_paper_entry = None
-        self.trade_flow_paper_entry_ms = None
-        self.trade_flow_paper_peak_pct = None
-        self.trade_flow_paper_entry_ratio = None
-        if cfg.schema_has_trade_flow_paper_test:
-            await self.update_state({
-                "trade_flow_paper_side": None,
-                "trade_flow_paper_entry_price": None,
-                "trade_flow_paper_entry_time": None,
-                "trade_flow_paper_peak_pct": None,
-            })
-        return True
-
-    async def _update_trade_flow_paper_shadow(self, state, best_bid, best_ask, now_ms):
-        """Fully independent paper-only shadow of the trade-flow-ratio hypothesis (2026-10-12,
-        direct request: "we need to paper trade this thing... continuously trading this").
-        Never places a real order, never touches real_trading_locked or any other real-trading
-        state -- only logs simulated fills to lighter_btc_trade_flow_paper_trades.
-
-        Entry: flat, and live_trade_flow_ratio (published every ~30s by
-        run_trade_flow_ratio_forever, read off `state` rather than recomputed here) crosses the
-        long or short threshold -- go long at best_ask, short at best_bid.
-
-        Exit: SL, TP, OR a profit-lock trigger+trail (arms once unrealized reaches trigger_pct,
-        tracks the peak since arming, closes once price gives back trail_pct from that peak).
-        SL added 2026-10-12, same day, direct follow-up after a real paper position sat at
-        -0.31% unrealized with nothing to catch it -- the original version deliberately had none,
-        per the manual forward test's own instruction, but watching it live changed that. Checked
-        every tick (continuous, via the live websocket book) rather than on a fixed poll
-        interval -- this is what fixes the ~22-point exit overshoot the one-off manual test's
-        5-second REST polling showed: a real trail-trigger is caught the instant it crosses, not
-        up to 5s late.
-
-        This body is the "threshold" mode only (TP/SL/trigger+trail, can go flat between
-        trades). "swap" mode (2026-10-12, same day, Paper 2 specifically) is a totally
-        different, always-in-market rotation with none of that -- see
-        _update_trade_flow_paper_swap, dispatched to below before any of this threshold-mode
-        logic runs. The signal-flip exit (same day, see BotConfig.
-        trade_flow_paper_signal_flip_exit_enabled) is handled further down, inside this
-        threshold-mode body only. The reset force-close (same day, see
-        _trade_flow_paper_force_close_if_reset) is checked first, ahead of the mode dispatch,
-        since it applies to an open position in either mode."""
-        cfg = self.cfg
-        await self._load_trade_flow_paper_state(state)
-        if await self._trade_flow_paper_force_close_if_reset(state, best_bid, best_ask):
-            return
-        (enabled, long_threshold, short_threshold, tp_pct, trigger_pct, trail_pct, sl_pct, mode,
-         signal_flip_exit) = self._trade_flow_paper_controls(state)
-        ratio = state.get("live_trade_flow_ratio")
-
-        if mode == "swap":
-            await self._update_trade_flow_paper_swap(state, best_bid, best_ask, now_ms, ratio,
-                                                      enabled, long_threshold, short_threshold)
-            return
-
-        if self.trade_flow_paper_side is None:
-            # `enabled` gates new entries only -- an already-open paper position keeps being
-            # managed to close below regardless, same contract as every other enabled toggle.
-            if not enabled or ratio is None:
-                return
-            signal = "long" if ratio >= long_threshold else "short" if ratio <= short_threshold else None
-            if signal is None:
-                return
-            self.trade_flow_paper_side = signal
-            self.trade_flow_paper_entry = best_ask if signal == "long" else best_bid
-            self.trade_flow_paper_entry_ms = now_ms
-            self.trade_flow_paper_peak_pct = None
-            self.trade_flow_paper_entry_ratio = ratio
-            if cfg.schema_has_trade_flow_paper_test:
-                await self.update_state({
-                    "trade_flow_paper_side": self.trade_flow_paper_side,
-                    "trade_flow_paper_entry_price": self.trade_flow_paper_entry,
-                    "trade_flow_paper_entry_time": self.trade_flow_paper_entry_ms,
-                    "trade_flow_paper_peak_pct": None,
-                })
-            return
-
-        side = self.trade_flow_paper_side
-        entry = self.trade_flow_paper_entry
-        check_price = best_bid if side == "long" else best_ask
-        unrealized_pct = ((check_price - entry) / entry * 100 if side == "long"
-                          else (entry - check_price) / entry * 100)
-
-        signal_flipped = (
-            (side == "long" and ratio is not None and ratio <= short_threshold) or
-            (side == "short" and ratio is not None and ratio >= long_threshold))
-
-        reason = None
-        if unrealized_pct <= -sl_pct:
-            reason = "SL"
-        elif unrealized_pct >= tp_pct:
-            reason = "TP"
-        elif signal_flip_exit and unrealized_pct > 0 and signal_flipped:
-            reason = "SIGNAL_FLIP"
-        else:
-            if self.trade_flow_paper_peak_pct is None:
-                if unrealized_pct >= trigger_pct:
-                    self.trade_flow_paper_peak_pct = unrealized_pct
-            else:
-                self.trade_flow_paper_peak_pct = max(self.trade_flow_paper_peak_pct, unrealized_pct)
-                if self.trade_flow_paper_peak_pct - unrealized_pct >= trail_pct:
-                    reason = "TRIGGER_TRAIL"
-
-        if reason is None:
-            # Persist the live peak so a restart mid-armed-trail doesn't lose it -- same
-            # isolated-write-every-tick cost as every other live_* readout in this file.
-            if cfg.schema_has_trade_flow_paper_test:
-                try:
-                    await self.update_state({"trade_flow_paper_peak_pct": self.trade_flow_paper_peak_pct})
-                except Exception:
-                    pass
-            return
-
-        close_price = check_price
-        pnl_pct = unrealized_pct
-        opened_at = ms_to_iso(self.trade_flow_paper_entry_ms)
-        await self.sb("POST", "lighter_btc_trade_flow_paper_trades", {
-            "worker_id": cfg.worker_id, "side": side, "entry_price": entry,
-            "exit_price": close_price, "pnl_pct": pnl_pct, "reason": reason,
-            "entry_ratio": self.trade_flow_paper_entry_ratio, "opened_at": opened_at,
-        })
-
-        self.trade_flow_paper_side = None
-        self.trade_flow_paper_entry = None
-        self.trade_flow_paper_entry_ms = None
-        self.trade_flow_paper_peak_pct = None
-        self.trade_flow_paper_entry_ratio = None
-        if cfg.schema_has_trade_flow_paper_test:
-            await self.update_state({
-                "trade_flow_paper_side": None,
-                "trade_flow_paper_entry_price": None,
-                "trade_flow_paper_entry_time": None,
-                "trade_flow_paper_peak_pct": None,
-            })
-
-    async def _update_trade_flow_paper_swap(self, state, best_bid, best_ask, now_ms, ratio,
-                                             enabled, long_threshold, short_threshold):
-        """Swap mode (2026-10-12, direct request, Paper 2 specifically): "instead of the usual
-        future bets short or long, just a swap... you are always on the trade... whatever your
-        indicator says. if going up you are in the BTC side, if going down you are in the USD
-        side... this will change as often as the indicator says, even if it swaps multiple
-        times." Totally different shape from the threshold mode's _update_trade_flow_paper_shadow
-        body above -- NO TP, NO SL, NO trigger/trail at all. Always in a position (long = "BTC
-        side", short = "USD side" -- there is no flat state once started); flips (logs the
-        completed leg with reason="SWAP", immediately opens the other side) the instant the
-        ratio crosses the threshold OPPOSITE whatever side it's currently on. The long/short
-        threshold boxes double as a hysteresis band here -- sitting between them just holds the
-        current side, so it doesn't whipsaw on every tick the ratio drifts near 0.5; it only
-        flips on a genuine cross of the FAR threshold. `enabled` only gates the very first
-        entry (same "gates new entries only" contract as every other toggle in this file) --
-        once a side is established, swapping continues regardless, since there is no flat state
-        to stop at."""
-        cfg = self.cfg
-        if ratio is None:
-            return
-        desired = "long" if ratio >= long_threshold else "short" if ratio <= short_threshold else None
-        current = self.trade_flow_paper_side
-
-        if current is None:
-            if not enabled or desired is None:
-                return
-            self.trade_flow_paper_side = desired
-            self.trade_flow_paper_entry = best_ask if desired == "long" else best_bid
-            self.trade_flow_paper_entry_ms = now_ms
-            self.trade_flow_paper_entry_ratio = ratio
-            if cfg.schema_has_trade_flow_paper_test:
-                await self.update_state({
-                    "trade_flow_paper_side": self.trade_flow_paper_side,
-                    "trade_flow_paper_entry_price": self.trade_flow_paper_entry,
-                    "trade_flow_paper_entry_time": self.trade_flow_paper_entry_ms,
-                    "trade_flow_paper_peak_pct": None,
-                })
-            return
-
-        if desired is None or desired == current:
-            return  # still inside the hysteresis band, or already on the matching side
-
-        close_price = best_bid if current == "long" else best_ask
-        entry = self.trade_flow_paper_entry
-        pnl_pct = ((close_price - entry) / entry * 100 if current == "long"
-                  else (entry - close_price) / entry * 100)
-        opened_at = ms_to_iso(self.trade_flow_paper_entry_ms)
-        await self.sb("POST", "lighter_btc_trade_flow_paper_trades", {
-            "worker_id": cfg.worker_id, "side": current, "entry_price": entry,
-            "exit_price": close_price, "pnl_pct": pnl_pct, "reason": "SWAP",
-            "entry_ratio": self.trade_flow_paper_entry_ratio, "opened_at": opened_at,
-        })
-
-        # Immediately flip -- never flat, per direct instruction ("you are always on the trade").
-        self.trade_flow_paper_side = desired
-        self.trade_flow_paper_entry = best_ask if desired == "long" else best_bid
-        self.trade_flow_paper_entry_ms = now_ms
-        self.trade_flow_paper_entry_ratio = ratio
-        if cfg.schema_has_trade_flow_paper_test:
-            await self.update_state({
-                "trade_flow_paper_side": self.trade_flow_paper_side,
-                "trade_flow_paper_entry_price": self.trade_flow_paper_entry,
-                "trade_flow_paper_entry_time": self.trade_flow_paper_entry_ms,
-                "trade_flow_paper_peak_pct": None,
-            })
-
     # ── One decision cycle ──────────────────────────────────────────────────────────────────
     async def tick(self):
         cfg = self.cfg
@@ -6580,24 +6224,18 @@ class StochBot:
             # hammering a WAF-blocked endpoint once per tick for no reason, which both wastes
             # the retry budget and likely makes an IP-level block look more abusive, not less.
             #
-            # 2026-10-12, real bug fix, direct report ("unrealized is 0.2 when TP is 0.1"): the
-            # trade-flow paper shadow (and the RSI paper shadow, same contract) used to be
-            # checked much later in this function, past this fast-path return -- so whenever the
-            # REAL bot was disabled+flat (its NORMAL state while only the paper system is in
-            # use, same as Worker 4 right now), the paper position never got checked again at
-            # all, left to drift arbitrarily far past TP/SL with nothing watching, even though
-            # both paper systems' own docstrings already promise "enabled gates new entries
-            # only, an already-open position keeps being managed regardless." Checked here using
-            # the already-free LOCAL order-book read (self.live.best_bid_ask() -- no REST call,
-            # so this doesn't reintroduce the WAF-hammering this fast-path exists to prevent) so
-            # the real contract actually holds, before returning.
+            # 2026-10-12, real bug fix, direct report ("unrealized is 0.2 when TP is 0.1"): a
+            # paper-shadow feature used to be checked much later in this function, past this
+            # fast-path return -- so whenever the REAL bot was disabled+flat (its NORMAL state
+            # while only a paper system is in use), an open paper position never got checked
+            # again at all, left to drift arbitrarily far past TP/SL with nothing watching, even
+            # though the paper system's own docstring already promised "enabled gates new
+            # entries only, an already-open position keeps being managed regardless." Checked
+            # here using the already-free LOCAL order-book read (self.live.best_bid_ask() -- no
+            # REST call, so this doesn't reintroduce the WAF-hammering this fast-path exists to
+            # prevent) so the real contract actually holds, before returning.
             bb, ba = self.live.best_bid_ask()
             if bb is not None and ba is not None:
-                if cfg.schema_has_trade_flow_paper_test:
-                    try:
-                        await self._update_trade_flow_paper_shadow(state, bb, ba, self.now_ms())
-                    except Exception as e:
-                        await self.log_run("trade_flow_paper_shadow_error", {"error": str(e)[:300]})
                 if cfg.rsi_paper_test_enabled:
                     try:
                         await self._update_rsi_paper_shadow(state, bb, ba, self.now_ms())
@@ -7289,15 +6927,6 @@ class StochBot:
                 await self._update_rsi_paper_shadow(state, best_bid, best_ask, self.now_ms())
             except Exception as e:
                 await self.log_run("rsi_paper_shadow_error", {"error": str(e)[:300]})
-
-        if cfg.schema_has_trade_flow_paper_test:
-            # Gated on the schema flag, not trade_flow_paper_enabled directly -- the live
-            # dashboard override needs to be able to turn this on even when the compiled
-            # default is off. Same isolated-failure contract as the RSI paper shadow above.
-            try:
-                await self._update_trade_flow_paper_shadow(state, best_bid, best_ask, self.now_ms())
-            except Exception as e:
-                await self.log_run("trade_flow_paper_shadow_error", {"error": str(e)[:300]})
 
         if cfg.self_lock_enabled:
             await self._update_paper_shadow(state, paper_entry_signal, paper_reversal_signal,
