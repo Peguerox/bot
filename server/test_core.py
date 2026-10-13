@@ -4791,11 +4791,14 @@ async def t_live_configs_match_their_stated_rules():
               leg.profit_lock_trigger_pct == 0.05, leg.profit_lock_trigger_pct)
         check(f"hedge {name} leg: profit-lock trail back to 0.01%",
               leg.profit_lock_trail_pct == 0.01, leg.profit_lock_trail_pct)
-        # 2026-10-13, direct request (ATR/volume adaptive exits): breakeven floor back ON.
-        check(f"hedge {name} leg: breakeven floor ON (ATR-adaptive deploy, 2026-10-13)",
-              leg.breakeven_floor_enabled is True, leg.breakeven_floor_enabled)
-        check(f"hedge {name} leg: breakeven floor arm margin still the compiled 0.01pp default",
-              leg.breakeven_floor_arm_margin_pct == 0.01, leg.breakeven_floor_arm_margin_pct)
+        # 2026-10-13: ATR-adaptive exits (and the breakeven floor turned on alongside it) tried
+        # live and reverted the same day -- "this formula sucks, wanna revert it back?" -- after
+        # 22 real paired cycles came back 27.3% win / -$0.019, confirmed via the
+        # hedge-v3-before-atr-adaptive tag. Back to breakeven floor OFF, matching the original.
+        check(f"hedge {name} leg: breakeven floor OFF (did not exist in the original; ATR-adaptive tried and reverted 2026-10-13)",
+              leg.breakeven_floor_enabled is False, leg.breakeven_floor_enabled)
+        check(f"hedge {name} leg: ATR-adaptive exits OFF (tried and reverted 2026-10-13)",
+              leg.atr_adaptive_exits_enabled is False, leg.atr_adaptive_exits_enabled)
         check(f"hedge {name} leg: fixed survivor floor OFF",
               leg.fixed_partner_cut_floor_pct is None, leg.fixed_partner_cut_floor_pct)
         check(f"hedge {name} leg: partner-cut-arms-trail OFF (needs the breakeven floor)",
@@ -4855,25 +4858,13 @@ async def t_live_configs_match_their_stated_rules():
     check("exactly one hedge leg owns the shared pressure signal",
           [hedge.LONG_CONFIG.pressure_signal_owner,
            hedge.SHORT_CONFIG.pressure_signal_owner].count(True) == 1)
-    # 2026-10-13, direct request (ATR/volume adaptive exits): both legs run the feature, but
-    # only one computes it -- same "exactly one owner" shape as the pressure signal above, so a
-    # mismatch here can't leave the two legs silently computing two different readings.
-    check("hedge legs: SAME atr_adaptive_exits_enabled",
-          hedge.LONG_CONFIG.atr_adaptive_exits_enabled == hedge.SHORT_CONFIG.atr_adaptive_exits_enabled)
-    check("exactly one hedge leg owns the ATR-adaptive computation",
-          [hedge.LONG_CONFIG.atr_adaptive_owner, hedge.SHORT_CONFIG.atr_adaptive_owner].count(True) == 1)
-    check("hedge legs: SAME ATR-adaptive multipliers/windows/bound (would silently diverge if ever both computed)",
-          (hedge.LONG_CONFIG.atr_adaptive_window, hedge.LONG_CONFIG.atr_adaptive_volume_window,
-           hedge.LONG_CONFIG.atr_adaptive_reference_volume, hedge.LONG_CONFIG.atr_adaptive_volume_exponent,
-           hedge.LONG_CONFIG.atr_adaptive_volume_clamp, hedge.LONG_CONFIG.atr_adaptive_sl_mult,
-           hedge.LONG_CONFIG.atr_adaptive_trigger_mult, hedge.LONG_CONFIG.atr_adaptive_trail_mult,
-           hedge.LONG_CONFIG.atr_adaptive_bound)
-          ==
-          (hedge.SHORT_CONFIG.atr_adaptive_window, hedge.SHORT_CONFIG.atr_adaptive_volume_window,
-           hedge.SHORT_CONFIG.atr_adaptive_reference_volume, hedge.SHORT_CONFIG.atr_adaptive_volume_exponent,
-           hedge.SHORT_CONFIG.atr_adaptive_volume_clamp, hedge.SHORT_CONFIG.atr_adaptive_sl_mult,
-           hedge.SHORT_CONFIG.atr_adaptive_trigger_mult, hedge.SHORT_CONFIG.atr_adaptive_trail_mult,
-           hedge.SHORT_CONFIG.atr_adaptive_bound))
+    # 2026-10-13: ATR-adaptive exits tried live and reverted the same day (27.3% win / -$0.019
+    # over 22 real paired cycles) -- pinned OFF on both legs so it can't silently drift back in
+    # without a deliberate re-enable. The feature itself (compute_atr_adaptive_exits and the
+    # entry-hook wiring) is left in stoch_bot_core.py, just unused here.
+    check("hedge legs: ATR-adaptive exits OFF on both (tried and reverted 2026-10-13)",
+          hedge.LONG_CONFIG.atr_adaptive_exits_enabled is False
+          and hedge.SHORT_CONFIG.atr_adaptive_exits_enabled is False)
 
 
 def _hide_fills(bot, ex, hidden_reads):
