@@ -244,8 +244,9 @@ LONG_CONFIG = BotConfig(
     #   - schema_has_cycle_id / schema_has_entry_features: dashboard pairing and hover-only
     #     documentation, no effect on any trading decision.
     tp_pct=0.10, sl_pct=0.03,
-    # 2026-10-13, direct request (ATR/volume adaptive exits): $10 -> $20 per leg.
-    fixed_leg_usd=20.0,
+    # 2026-10-13, direct request (ATR/volume adaptive exits): $10 -> $20 -> $15 per leg
+    # (walked back from $20 same day, direct follow-up: "i dont want to trade with leverage").
+    fixed_leg_usd=15.0,
     pressure_bias_enabled=False,
     require_pressure_to_enter=False,  # REVERTED: no entry gate, always try to be in when flat
     pressure_signal_owner=True,  # harmless readout only now -- K no longer gates anything
@@ -345,8 +346,9 @@ SHORT_CONFIG = BotConfig(
     # See LONG_CONFIG's docstring -- full revert to the 2026-09-29 original, infra/correctness
     # fixes kept.
     tp_pct=0.10, sl_pct=0.03,
-    # 2026-10-13, direct request (ATR/volume adaptive exits): $10 -> $20 per leg.
-    fixed_leg_usd=20.0,
+    # 2026-10-13, direct request (ATR/volume adaptive exits): $10 -> $20 -> $15 per leg
+    # (walked back from $20 same day, direct follow-up: "i dont want to trade with leverage").
+    fixed_leg_usd=15.0,
     pressure_bias_enabled=False,
     require_pressure_to_enter=False,  # REVERTED: no entry gate, always try to be in when flat
     debug_verbose_tick=False,
