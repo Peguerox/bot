@@ -5398,7 +5398,7 @@ async def t_balance_gate_off_by_default():
 
 
 async def t_entry_features_persisted_on_entry_and_carried_to_trade_log():
-    print("\n[entry features: K/balance-index/vol/dispersion snapshotted on entry, carried to the trade row]")
+    print("\n[entry features: K/balance-index/vol/dispersion/zebra snapshotted on entry, carried to the trade row]")
     ex = FakeExchange()
     bot = make_bot(ex, candles_kind="long", schema_has_entry_features=True)
     await bot.tick()
@@ -5406,6 +5406,13 @@ async def t_entry_features_persisted_on_entry_and_carried_to_trade_log():
     for key in ("entry_k", "entry_balance_index", "entry_vol_pct", "entry_dispersion"):
         check(f"{key} persisted to state, not None",
               bot.state_row.get(key) is not None, bot.state_row.get(key))
+    # entry_zebra legitimately comes back None here -- this fixture's candles are mostly dojis
+    # (open == close), and compute_zebra_size_index needs at least 2 colored closed candles in
+    # its window to mean anything. Still check the KEY got written (even as None), separately
+    # from "is it a real number" -- see t_entry_zebra_computed_and_carried_to_trade_log below
+    # for the real-variation fixture that actually exercises the computed value.
+    check("entry_zebra key written to state (None is valid here -- mostly-doji fixture)",
+          "entry_zebra" in bot.state_row, bot.state_row.get("entry_zebra"))
     snapshot = {k: bot.state_row[k] for k in
                 ("entry_k", "entry_balance_index", "entry_vol_pct", "entry_dispersion")}
     check("entry K is numeric, not a long/short signal",
@@ -5422,13 +5429,31 @@ async def t_entry_features_persisted_on_entry_and_carried_to_trade_log():
           ef)
 
 
+async def t_entry_zebra_computed_and_carried_to_trade_log():
+    print("\n[entry_zebra: a real number on a fixture with actual color variation, carried to the trade row same as the others]")
+    ex = FakeExchange()
+    bot = make_bot(ex, candles=make_chop_candles(), schema_has_entry_features=True)
+    await bot.tick()
+    check("entered", bot.state_row["side"] in ("long", "short"), bot.state_row["side"])
+    zebra = bot.state_row.get("entry_zebra")
+    check("entry_zebra is a real number, not None",
+          isinstance(zebra, (int, float)) and not isinstance(zebra, bool), zebra)
+    side = bot.state_row["side"]
+    ok = await bot.close_all("SL", dict(bot.state_row), side,
+                             bot.state_row["legs"], 1.0, 1.0, 1)
+    check("close succeeded", ok is True)
+    ef = bot.trade_kwargs[-1].get("entry_features")
+    check("trade row carries the same entry_zebra value",
+          ef is not None and ef.get("entry_zebra") == zebra, ef)
+
+
 async def t_entry_features_never_touched_without_schema_flag():
     print("\n[entry features: a bot without the migration never reads or writes these columns]")
     ex = FakeExchange()
     bot = make_bot(ex, candles_kind="long")  # schema_has_entry_features defaults False
     await bot.tick()
     check("entered", bot.state_row["side"] == "long", bot.state_row["side"])
-    for key in ("entry_k", "entry_balance_index", "entry_vol_pct", "entry_dispersion"):
+    for key in ("entry_k", "entry_balance_index", "entry_vol_pct", "entry_dispersion", "entry_zebra"):
         check(f"{key} never written -- key absent from the row",
               key not in bot.state_row, bot.state_row.get(key))
 
@@ -9207,6 +9232,7 @@ async def main():
               t_balance_gate_allows_inside_band,
               t_balance_gate_off_by_default,
               t_entry_features_persisted_on_entry_and_carried_to_trade_log,
+              t_entry_zebra_computed_and_carried_to_trade_log,
               t_entry_features_never_touched_without_schema_flag,
               t_entry_features_numeric_k_does_not_change_live_signal,
               t_entry_features_write_failure_is_visible_and_keeps_the_fill,

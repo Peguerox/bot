@@ -5148,6 +5148,7 @@ class StochBot:
                           "entry_balance_index": state_before.get("entry_balance_index"),
                           "entry_vol_pct": state_before.get("entry_vol_pct"),
                           "entry_dispersion": state_before.get("entry_dispersion"),
+                          "entry_zebra": state_before.get("entry_zebra"),
                           "entry_settings_snapshot": state_before.get("entry_settings_snapshot")}
                 await self.log_trade(state_before["side"], ae, implied, qty, pnl,
                                      "EMERGENCY_FLATTEN", len(legs),
@@ -5332,6 +5333,15 @@ class StochBot:
                 "entry_balance_index": compute_color_weighted_balance_index(self.candles, 5),
                 "entry_vol_pct": self._measure_vol_pct(10),
                 "entry_dispersion": compute_intrabar_dispersion(self.candles, 5),
+                # 2026-10-13, direct request: "make sure we record the zebra values for the
+                # trades... I think the hedge bot will benefit from this info since we need big
+                # candles with lots of variation for hedge to work." Previously only ever a live
+                # readout (live_zebra_index, overwritten every tick) -- never persisted per
+                # trade, so answering "did zebra matter" always meant reconstructing it from raw
+                # candle history after the fact (expensive, and only as far back as candle
+                # history actually reaches). Same window (5) as entry_dispersion/
+                # entry_balance_index above, same requires-schema_has_entry_features gate.
+                "entry_zebra": compute_zebra_size_index(self.candles, 5),
             }
             entry_detail["entry_features"] = snapshot
             try:
@@ -5523,6 +5533,7 @@ class StochBot:
                   "entry_balance_index": state.get("entry_balance_index"),
                   "entry_vol_pct": state.get("entry_vol_pct"),
                   "entry_dispersion": state.get("entry_dispersion"),
+                  "entry_zebra": state.get("entry_zebra"),
                   "entry_settings_snapshot": state.get("entry_settings_snapshot")}
         await self.log_trade(side, ae, exit_price, qty, pnl, reason, len(legs),
                              ms_to_iso(state.get("first_entry_time")), cycle_id=cycle_id,
@@ -6996,6 +7007,7 @@ class StochBot:
                       "entry_balance_index": state.get("entry_balance_index"),
                       "entry_vol_pct": state.get("entry_vol_pct"),
                       "entry_dispersion": state.get("entry_dispersion"),
+                      "entry_zebra": state.get("entry_zebra"),
                       "entry_settings_snapshot": state.get("entry_settings_snapshot")}
             await self.log_trade(side, ae, implied_exit, qty, pnl, ext_reason, len(legs),
                                  ms_to_iso(state.get("first_entry_time")), cycle_id=ext_cycle_id,
