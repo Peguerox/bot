@@ -1920,7 +1920,18 @@ class LiveState:
                 self.account[k] = v
         self.acct_updated_at = time.time()
 
-    def best_bid_ask(self):
+    def best_bid_ask(self, max_age=10.0):
+        """Real bug, found 2026-10-14: this returned whatever book it last received with no
+        check on how old it was -- if the websocket silently stalled, every caller would keep
+        trading on a frozen quote forever, not just until the next real update. Only 2 of the
+        7 real call sites were already guarding with book_fresh() themselves; the other 5
+        called this directly. Checking staleness HERE, once, protects all of them uniformly --
+        every caller already handles a (None, None) "no book yet" result (see their own
+        None-checks), so a stale book now fails exactly the same safe way as no book at all,
+        with zero caller changes needed. See book_fresh() for the freshness check itself
+        (still used standalone by its own 2 callers)."""
+        if time.time() - self.ob_updated_at >= max_age:
+            return None, None
         bids = self.order_book.get("bids") or []
         asks = self.order_book.get("asks") or []
         if not bids or not asks:
@@ -2104,6 +2115,9 @@ class StochBot:
         # a requirement for correctness within one continuous run.
         self.profit_lock_peak_pct = None
         self._profit_lock_restored = False
+        # See BotConfig.wiggle_vol_rise_exit_pct -- same restart-survival gap as
+        # profit_lock_peak_pct above, fixed the same way (restore once from the DB).
+        self._wiggle_baseline_restored = False
         self._saving_trough_pct = None  # see BotConfig.saving_lock_arm_frac_of_sl
         # Dwell (2026-10-03, direct request: "a dwell strategy... used in both fixed TP and
         # trail"). A single shared tracker is enough -- tp_enabled and trail_enabled are
@@ -7254,6 +7268,22 @@ class StochBot:
                 # dwell; inert if never configured, no baseline was captured at entry (not
                 # enough candle history), or the baseline was exactly 0 (would make any
                 # positive reading look like an infinite rise).
+                #
+                # Real bug, found 2026-10-14: self._entry_wiggle_vol_ratio is in-process only
+                # (see its own reset points) -- a restart while a position is open (e.g. a
+                # Render redeploy, which keeps the old and new instance alive together for
+                # 30-60s on every push) left this guard silently inert for that position's
+                # entire remaining life, since the fresh instance never captured its own entry
+                # baseline. Same restart-survival gap profit_lock_peak_pct already had, fixed
+                # the same way: the real value was already being persisted all along, inside
+                # entry_settings_snapshot (see _entry_settings_snapshot) -- just never read back.
+                if not self._wiggle_baseline_restored:
+                    self._wiggle_baseline_restored = True
+                    if self._entry_wiggle_vol_ratio is None and ae:
+                        snap = state.get("entry_settings_snapshot") or {}
+                        restored = snap.get("entry_wiggle_vol_ratio")
+                        if restored is not None:
+                            self._entry_wiggle_vol_ratio = restored
                 rise_pct = self._wiggle_vol_rise_exit_pct(state)
                 baseline = self._entry_wiggle_vol_ratio
                 if rise_pct is not None and baseline is not None and baseline > 0:

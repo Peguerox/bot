@@ -8456,6 +8456,101 @@ async def t_wiggle_vol_rise_exit_baseline_captured_at_real_entry_and_reset_on_cl
           bot._entry_wiggle_vol_ratio is None, bot._entry_wiggle_vol_ratio)
 
 
+async def t_wiggle_vol_rise_exit_baseline_restored_from_db_after_restart():
+    print("\n[wiggle/vol rise exit: a restarted instance restores the baseline from the DB]")
+    print("  real bug, 2026-10-14: a redeploy while a position was open left this guard")
+    print("  silently inert for that position's whole remaining life -- the baseline is")
+    print("  in-process only and a fresh instance never recomputes it for a position it")
+    print("  didn't itself open. The real value was already persisted in")
+    print("  entry_settings_snapshot all along; this just reads it back once.")
+    entry = 86000.0
+    before = _wiggle_vol_candles(vol=5.0, shift=5.0)
+    after = _wiggle_vol_candles(vol=5.0, shift=40.0)
+    ratio_before = core.compute_volume_wiggle_ratio(before)
+    ratio_after = core.compute_volume_wiggle_ratio(after)
+    actual_rise_pct = (ratio_after - ratio_before) / ratio_before * 100
+    ex = FakeExchange(position=round(10.0 / entry, 5), collateral=10.0)
+    state = _escalated_state(entry, age_s=60)
+    # Simulates what a prior run already wrote at entry -- see _entry_settings_snapshot.
+    state["entry_settings_snapshot"] = {"entry_wiggle_vol_ratio": ratio_before}
+    bot = make_bot(ex, state=state, candles=after, sl_pct=0.5, tp_pct=0.5,
+                    entry_lo=-1000, entry_hi=1000, reversal_lo=-1000, reversal_hi=1000,
+                    wiggle_vol_rise_exit_pct=actual_rise_pct - 5, schema_has_exit_overrides=True,
+                    schema_has_regime_overrides=True)
+    # Deliberately NOT setting bot._entry_wiggle_vol_ratio -- a brand new instance, same as
+    # right after a restart, never had the chance to compute it itself.
+    check("baseline starts None -- a fresh instance, nothing captured yet",
+          bot._entry_wiggle_vol_ratio is None)
+    bot.live.order_book = {"bids": [{"price": str(entry)}], "asks": [{"price": str(entry + 1)}]}
+    await bot.tick()
+    # No separate "baseline == ratio_before" check here -- the close in this same tick resets
+    # the tracker back to None (see the baseline-reset-on-close test above), so the only
+    # observable proof the restore actually happened is that the guard fired at all, using a
+    # threshold calibrated so it ONLY fires if the restored (not a fresh/None) baseline was used.
+    check("closed via WIGGLE_VOL_RISE -- the restored baseline was actually used",
+          bot.state_row["side"] is None, bot.state_row["side"])
+    check("reason is WIGGLE_VOL_RISE",
+          any(a == "closed" and d.get("reason") == "WIGGLE_VOL_RISE" for a, d in bot.runs),
+          [(a, d.get("reason")) for a, d in bot.runs if a == "closed"])
+
+
+async def t_wiggle_vol_rise_exit_restore_only_tried_once_per_boot():
+    print("\n[wiggle/vol rise exit: the DB restore attempt only happens once per boot]")
+    entry = 86000.0
+    candles = _wiggle_vol_candles(vol=5.0, shift=5.0)
+    ex = FakeExchange(position=round(10.0 / entry, 5), collateral=10.0)
+    state = _escalated_state(entry, age_s=60)
+    state["entry_settings_snapshot"] = {"entry_wiggle_vol_ratio": 7.0}
+    bot = make_bot(ex, state=state, candles=candles, sl_pct=0.5, tp_pct=0.5,
+                    entry_lo=-1000, entry_hi=1000, reversal_lo=-1000, reversal_hi=1000,
+                    wiggle_vol_rise_exit_pct=1000.0, schema_has_exit_overrides=True,
+                    schema_has_regime_overrides=True)
+    bot.live.order_book = {"bids": [{"price": str(entry)}], "asks": [{"price": str(entry + 1)}]}
+    await bot.tick()
+    check("restored on the first tick", bot._entry_wiggle_vol_ratio == 7.0, bot._entry_wiggle_vol_ratio)
+    check("still open -- threshold set absurdly high on purpose",
+          bot.state_row["side"] == "long", bot.state_row["side"])
+    # Simulate the DB value changing underneath it (it never would mid-position in real life,
+    # but this is the cleanest way to prove restore doesn't run again on every tick).
+    bot.state_row["entry_settings_snapshot"] = {"entry_wiggle_vol_ratio": 99.0}
+    await bot.tick()
+    check("unchanged on a later tick -- restore does not re-run every tick",
+          bot._entry_wiggle_vol_ratio == 7.0, bot._entry_wiggle_vol_ratio)
+
+
+async def t_best_bid_ask_stale_book_returns_none():
+    print("\n[best_bid_ask: a stale order book returns (None, None), not a frozen price]")
+    print("  real bug, 2026-10-14: this never checked the book's own age -- if the websocket")
+    print("  silently stalled, every caller kept trading on a frozen quote indefinitely. Only")
+    print("  2 of 7 real call sites guarded with book_fresh() themselves; the other 5 called")
+    print("  this directly, so the check now lives in the accessor itself.")
+    live = LiveState(1, 1)
+    live.order_book = {"bids": [{"price": "86000.0"}], "asks": [{"price": "86001.0"}]}
+    live.ob_updated_at = time.time() - 30.0  # older than the default 10s max_age
+    bid, ask = live.best_bid_ask()
+    check("stale book -> (None, None)", bid is None and ask is None, (bid, ask))
+
+
+async def t_best_bid_ask_fresh_book_still_returns_prices():
+    print("\n[best_bid_ask: a fresh order book is unaffected by the staleness check]")
+    live = LiveState(1, 1)
+    live.order_book = {"bids": [{"price": "86000.0"}, {"price": "85999.0"}],
+                        "asks": [{"price": "86001.0"}, {"price": "86002.0"}]}
+    live.ob_updated_at = time.time()
+    bid, ask = live.best_bid_ask()
+    check("fresh book -> real best bid", bid == 86000.0, bid)
+    check("fresh book -> real best ask", ask == 86001.0, ask)
+
+
+async def t_best_bid_ask_respects_custom_max_age():
+    print("\n[best_bid_ask: a wider max_age tolerates an otherwise-stale book]")
+    live = LiveState(1, 1)
+    live.order_book = {"bids": [{"price": "86000.0"}], "asks": [{"price": "86001.0"}]}
+    live.ob_updated_at = time.time() - 30.0
+    bid, ask = live.best_bid_ask(max_age=60.0)
+    check("within the wider window -> still returns real prices", bid == 86000.0 and ask == 86001.0, (bid, ask))
+
+
 def _htf_candles(n_bins, minutes=5, trend="down", base=86000.0, step=20.0):
     """n_bins calendar-aligned `minutes`-sized bins worth of 1-min candles (n_bins*minutes + 1
     one-min bars, the extra one left as the currently-forming last bin), timestamps anchored to
@@ -9139,6 +9234,11 @@ async def main():
               t_wiggle_vol_rise_exit_inert_without_a_captured_baseline,
               t_wiggle_vol_rise_exit_inert_when_baseline_is_exactly_zero,
               t_wiggle_vol_rise_exit_baseline_captured_at_real_entry_and_reset_on_close,
+              t_wiggle_vol_rise_exit_baseline_restored_from_db_after_restart,
+              t_wiggle_vol_rise_exit_restore_only_tried_once_per_boot,
+              t_best_bid_ask_stale_book_returns_none,
+              t_best_bid_ask_fresh_book_still_returns_prices,
+              t_best_bid_ask_respects_custom_max_age,
               t_aggregate_candles_calendar_aligned_bins,
               t_compute_stoch_k_matches_hand_calc,
               t_compute_stoch_k_none_without_enough_history,
