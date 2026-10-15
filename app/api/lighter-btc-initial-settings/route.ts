@@ -46,6 +46,12 @@ const LIMITS = {
   // 2026-10-04, direct request: "change the window of stochastic for worker 1". Integer candle
   // count; governs both the entry and reversal bands (see StochBot._stoch_window_control).
   stochWindow: { min: 2, max: 50, label: "stochastic window" },
+  // 2026-10-15, direct request: an external backtest audit on real tick execution found
+  // gating fresh entries on compute_volume_wiggle_ratio() sitting inside [min, max) turned a
+  // losing sample net positive. Distinct from wiggleLock above (a single floor on the same
+  // ratio) -- this is a two-sided band. See BotConfig.entry_wiggle_ratio_enabled/_min/_max.
+  entryWiggleRatioMin: { min: 0, max: 1000, label: "entry wiggle/vol ratio band low" },
+  entryWiggleRatioMax: { min: 0, max: 1000, label: "entry wiggle/vol ratio band high" },
 };
 
 // Worker 4 (2026-10-10, exact clone of Worker 1, cloned table shape) shares this same route --
@@ -76,6 +82,8 @@ export async function POST(req: NextRequest) {
     ["wiggleVolRiseExit", "override_wiggle_vol_rise_exit_pct"],
     ["rateGuard", "override_volume_rate_guard_threshold"],
     ["stochWindow", "override_stoch_window"],
+    ["entryWiggleRatioMin", "override_entry_wiggle_ratio_min"],
+    ["entryWiggleRatioMax", "override_entry_wiggle_ratio_max"],
   ] as const) {
     const raw = body[key];
     if (raw === undefined || raw === null || raw === "") continue;
@@ -106,6 +114,7 @@ export async function POST(req: NextRequest) {
     ["wiggleVolRiseExitEnabled", "override_wiggle_vol_rise_exit_enabled"],
     ["rateGuardEnabled", "override_volume_rate_guard_enabled"],
     ["jumpGuardEnabled", "override_volume_jump_enabled"],
+    ["entryWiggleRatioEnabled", "override_entry_wiggle_ratio_enabled"],
   ] as const) {
     const raw = body[key];
     if (raw === undefined || raw === null) continue;
@@ -215,6 +224,14 @@ export async function POST(req: NextRequest) {
   if (reversalLo != null && reversalHi != null && reversalLo >= reversalHi) {
     return NextResponse.json(
       { error: `Reversal band low (${reversalLo}) must be less than reversal band high (${reversalHi}).` },
+      { status: 400 }
+    );
+  }
+  const wiggleRatioLo = (out["override_entry_wiggle_ratio_min"] as number | undefined) ?? cur?.override_entry_wiggle_ratio_min;
+  const wiggleRatioHi = (out["override_entry_wiggle_ratio_max"] as number | undefined) ?? cur?.override_entry_wiggle_ratio_max;
+  if (wiggleRatioLo != null && wiggleRatioHi != null && wiggleRatioLo >= wiggleRatioHi) {
+    return NextResponse.json(
+      { error: `Entry wiggle/vol ratio low (${wiggleRatioLo}) must be less than high (${wiggleRatioHi}).` },
       { status: 400 }
     );
   }

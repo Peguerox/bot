@@ -1982,6 +1982,60 @@ function CompactStochBtcPanel({
     setSavingSignal(null);
   }
 
+  // Entry wiggle/vol ratio gate (2026-10-15, direct request): an external backtest audit on
+  // real tick execution found gating fresh entries on compute_volume_wiggle_ratio() sitting
+  // inside [min, max) turned a losing sample net positive. Reuses the SAME live reading the
+  // volume/wiggle lock above already publishes (live_volume_wiggle_ratio) -- this is a
+  // two-sided band on that identical metric, not a separate computation. Compiled off
+  // everywhere; off here too (??false, not ??true) until an override actually turns it on.
+  const curEntryWiggleRatioEnabled: boolean = state?.override_entry_wiggle_ratio_enabled ?? false;
+  const curEntryWiggleRatioMin: number | null = state?.override_entry_wiggle_ratio_min ?? null;
+  const curEntryWiggleRatioMax: number | null = state?.override_entry_wiggle_ratio_max ?? null;
+  const entryWiggleRatioActive = curEntryWiggleRatioEnabled
+    && (liveWiggleRatio == null
+        || (curEntryWiggleRatioMin != null && liveWiggleRatio < curEntryWiggleRatioMin)
+        || (curEntryWiggleRatioMax != null && liveWiggleRatio > curEntryWiggleRatioMax));
+  const [entryWiggleRatioMinIn, setEntryWiggleRatioMinIn] = useState("");
+  const [entryWiggleRatioMaxIn, setEntryWiggleRatioMaxIn] = useState("");
+
+  async function handleToggleEntryWiggleRatio(next: boolean) {
+    if (!confirm(`Turn the entry wiggle/vol ratio gate ${next ? "ON" : "OFF"} for ${title}? Takes effect immediately.`)) return;
+    setSavingSignal("entryWiggleRatioEnabled");
+    const res = await fetch("/api/lighter-btc-initial-settings", {
+      method: "POST", headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ table, entryWiggleRatioEnabled: next }),
+    });
+    if (!res.ok) {
+      const b = await res.json().catch(() => ({}));
+      alert(b.error || "Could not apply the change.");
+    }
+    await onToggled();
+    setSavingSignal(null);
+  }
+
+  async function handleSetEntryWiggleRatioBand() {
+    if (!entryWiggleRatioMinIn.trim() && !entryWiggleRatioMaxIn.trim()) return;
+    const lo = entryWiggleRatioMinIn.trim() || String(curEntryWiggleRatioMin ?? "off");
+    const hi = entryWiggleRatioMaxIn.trim() || String(curEntryWiggleRatioMax ?? "off");
+    if (!confirm(`Set the entry wiggle/vol ratio band to ${lo} / ${hi} for ${title}? Takes effect immediately.`)) return;
+    setSavingSignal("entryWiggleRatioBand");
+    const payload: Record<string, string> = {};
+    if (entryWiggleRatioMinIn.trim()) payload.entryWiggleRatioMin = entryWiggleRatioMinIn.trim();
+    if (entryWiggleRatioMaxIn.trim()) payload.entryWiggleRatioMax = entryWiggleRatioMaxIn.trim();
+    const res = await fetch("/api/lighter-btc-initial-settings", {
+      method: "POST", headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ table, ...payload }),
+    });
+    if (!res.ok) {
+      const b = await res.json().catch(() => ({}));
+      alert(b.error || "Could not apply the change.");
+    } else {
+      setEntryWiggleRatioMinIn(""); setEntryWiggleRatioMaxIn("");
+    }
+    await onToggled();
+    setSavingSignal(null);
+  }
+
   async function handleToggleSignal(key: "stochastic" | "zebra" | "flip", label: string, next: boolean) {
     if (!confirm(`Turn ${label} ${next ? "ON" : "OFF"} for ${title}? Takes effect immediately.`)) return;
     setSavingSignal(key);
@@ -2946,6 +3000,79 @@ function CompactStochBtcPanel({
           </p>
         </div>
       )}
+      {showLevers && !loading && (
+        <div className="bg-gray-800/60 rounded-lg p-2">
+          {/* 2026-10-15, direct request: a research candidate from an external backtest audit
+              on real tick execution -- only let a fresh entry through while wiggle/vol sits
+              inside this band. Off by default; built so this exact strategy can be compared
+              side by side with different settings on Worker 1 vs Worker 4. */}
+          <div className="flex items-baseline justify-between">
+            <p className="text-gray-500 text-[10px] uppercase">Entry wiggle/vol ratio gate</p>
+            <button
+              onClick={() => handleToggleEntryWiggleRatio(!curEntryWiggleRatioEnabled)}
+              disabled={savingSignal !== null || loading}
+              className={`text-[10px] font-bold px-1.5 py-0.5 rounded disabled:opacity-30 ${
+                curEntryWiggleRatioEnabled ? "bg-blue-500/20 text-blue-300" : "bg-gray-700/50 text-gray-500"
+              }`}
+            >
+              {savingSignal === "entryWiggleRatioEnabled" ? "…" : curEntryWiggleRatioEnabled ? "ON" : "OFF"}
+            </button>
+          </div>
+          <p className="font-bold text-sm tabular-nums">
+            <span className={!curEntryWiggleRatioEnabled ? "text-gray-500" : entryWiggleRatioActive ? "text-red-400" : "text-green-400"}>
+              {!curEntryWiggleRatioEnabled ? "OFF" : entryWiggleRatioActive ? "BLOCKING" : "not blocking"}
+            </span>
+            <span className="text-[10px] font-normal text-gray-500 ml-1.5">
+              {curEntryWiggleRatioEnabled ? (entryWiggleRatioActive ? "outside band -- entries skipped" : "inside band -- entries allowed") : "switch is off -- never blocks"}
+            </span>
+          </p>
+          <p className="text-[11px] text-gray-500 mt-0.5 tabular-nums">
+            latest reading (same as the volume/wiggle lock above):{" "}
+            <span className={liveWiggleRatio == null ? "text-gray-500"
+              : (curEntryWiggleRatioMin != null && liveWiggleRatio < curEntryWiggleRatioMin)
+                || (curEntryWiggleRatioMax != null && liveWiggleRatio > curEntryWiggleRatioMax)
+                ? "text-red-400" : "text-gray-400"}>
+              {liveWiggleRatio != null ? liveWiggleRatio.toFixed(2) : "—"}
+            </span>
+          </p>
+          <div className="flex items-end gap-1.5 mt-1.5">
+            <div className="flex-1">
+              <p className="text-gray-500 text-[9px] uppercase">
+                Band <span className="text-gray-600">now {curEntryWiggleRatioMin ?? "off"} / {curEntryWiggleRatioMax ?? "off"}</span>
+              </p>
+              <div className="flex items-center gap-1.5">
+                <input
+                  value={entryWiggleRatioMinIn}
+                  onChange={(e) => setEntryWiggleRatioMinIn(e.target.value)}
+                  placeholder={curEntryWiggleRatioMin != null ? String(curEntryWiggleRatioMin) : "e.g. 5"}
+                  inputMode="decimal"
+                  className="w-full bg-gray-900 border border-gray-700 rounded px-1.5 py-1 text-xs text-white tabular-nums focus:outline-none focus:border-blue-500"
+                />
+                <span className="text-gray-600 text-xs">/</span>
+                <input
+                  value={entryWiggleRatioMaxIn}
+                  onChange={(e) => setEntryWiggleRatioMaxIn(e.target.value)}
+                  placeholder={curEntryWiggleRatioMax != null ? String(curEntryWiggleRatioMax) : "e.g. 12"}
+                  inputMode="decimal"
+                  className="w-full bg-gray-900 border border-gray-700 rounded px-1.5 py-1 text-xs text-white tabular-nums focus:outline-none focus:border-blue-500"
+                />
+              </div>
+            </div>
+            <button
+              onClick={handleSetEntryWiggleRatioBand}
+              disabled={savingSignal !== null || loading || (!entryWiggleRatioMinIn.trim() && !entryWiggleRatioMaxIn.trim())}
+              className="text-xs font-bold px-2.5 py-1 rounded bg-blue-500/20 text-blue-400 hover:bg-blue-500/30 disabled:opacity-30 whitespace-nowrap"
+            >
+              {savingSignal === "entryWiggleRatioBand" ? "…" : "Set"}
+            </button>
+          </div>
+          <p className="text-gray-600 text-[9px] leading-snug mt-1">
+            Only lets a fresh entry through while wiggle/vol sits inside this band -- missing
+            data blocks too (fails closed, unlike the volume-rate guard above). Research
+            candidate: 5 / 12 is the recommended starting band. Never blocks an exit.
+          </p>
+        </div>
+      )}
       {showLevers && liveCandleVolume != null && liveCandleVolume >= curVolThreshold && !loading && (() => {
         const dots = liveStreakLen != null ? "●".repeat(Math.min(liveStreakLen, 5)) + (liveStreakLen > 5 ? "+" : "") : "—";
         const dirLabel = liveStreakDir === "long" ? "GREEN" : liveStreakDir === "short" ? "RED" : "—";
@@ -3082,6 +3209,7 @@ function CompactStochBtcPanel({
             ["Wiggle/volume lock", curWiggleLockEnabled ? `ON (< ${curWiggleLockThreshold ?? "—"})` : "off"],
             ["Wiggle/vol rise exit", curWiggleVolRiseEnabled && curWiggleVolRisePct != null ? `ON (+${curWiggleVolRisePct}%)` : "off"],
             ["Volume-rate guard", curRateGuardEnabled ? `ON (> ${curRateGuardThreshold ?? "—"}%)` : "off"],
+            ["Entry wiggle/vol ratio gate", curEntryWiggleRatioEnabled ? `ON (${curEntryWiggleRatioMin ?? "—"} / ${curEntryWiggleRatioMax ?? "—"})` : "off"],
             ["Stochastic signal", stochasticOn ? "ON" : "off"],
             ["Zebra gate", zebraOn ? "ON" : "off"],
             ["Flip regime", flipOn ? "ON" : "off"],
