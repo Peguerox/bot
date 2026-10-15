@@ -396,6 +396,23 @@ class BotConfig:
     # _volume_rate_guard_allows_cycle.
     volume_rate_guard_threshold: Optional[float] = None
     volume_rate_guard_lookback: int = 5
+    # Entry wiggle/vol RATIO band (2026-10-15, direct request): an external backtest audit on
+    # real tick-by-tick execution (not just candle closes) found that gating fresh entries on
+    # compute_volume_wiggle_ratio() sitting inside [entry_wiggle_ratio_min, _max) -- not just
+    # below the volume_rate_guard_threshold above -- turned a losing Worker 4 sample net
+    # negative into net positive in replay (research/ -- see the "Quiet Strategy" analysis).
+    # Distinct from wiggle_vol_rise_exit_pct (an EXIT guard watching this same ratio RISE after
+    # entry) and from volume_rate_guard_threshold (a different metric, volume's own % change --
+    # this one is the plain wiggle/volume ratio itself). Compiled off (None/None) everywhere by
+    # direct request -- built so it CAN be turned on live via the override_* columns below, but
+    # deliberately not turned on anywhere yet; that is the user's own call once they're ready.
+    # Fails CLOSED on missing data (unlike volume_rate_guard_threshold, which fails open) --
+    # matches the recommendation's own stated contract. Never touches an exit, only ever blocks
+    # a fresh entry, same contract as every other gate here. See
+    # _update_entry_wiggle_ratio_gate / _entry_wiggle_ratio_gate_allows_cycle.
+    entry_wiggle_ratio_enabled: bool = False
+    entry_wiggle_ratio_min: Optional[float] = None
+    entry_wiggle_ratio_max: Optional[float] = None
     # Higher-timeframe stochastic alignment block (2026-10-09, direct request after a real-data
     # study on 449 real Worker 1 trades): compares the 1-minute stochastic signal that's about
     # to fire against the SAME stochastic computed on a longer timeframe (5m/10m/1h, see
@@ -2269,6 +2286,8 @@ class StochBot:
         self._entry_wiggle_vol_ratio = None
         self._last_volume_rate_pct = None  # see _update_volume_rate_guard
         self._volume_rate_guard_active = False
+        self._last_entry_wiggle_ratio = None  # see _update_entry_wiggle_ratio_gate
+        self._entry_wiggle_ratio_gate_active = False
         self._last_htf_k = None  # see BotConfig.htf_alignment_block_timeframe, dashboard readout
         # Schedule rules (2026-10-04, direct request: a master panel that applies different
         # Worker 1 / hedge settings automatically by hour and/or live ER/volume/wiggle/rate
@@ -3967,6 +3986,42 @@ class StochBot:
         self._volume_rate_guard_active is set earlier in the SAME tick."""
         return not self._volume_rate_guard_active
 
+    def _update_entry_wiggle_ratio_gate(self, state):
+        """See BotConfig.entry_wiggle_ratio_enabled/_min/_max. Unlike every other optional gate
+        in this file, this one FAILS CLOSED on missing data (blocks) rather than failing open --
+        a deliberate difference from volume_rate_guard, matching the external recommendation's
+        own stated contract ("fail closed for missing or unverified stale inputs"). Always
+        caches self._last_entry_wiggle_ratio for the dashboard/entry snapshot even when disabled,
+        same "watch before choosing" reasoning as every other readout here. Never touches an
+        exit, only ever blocks a fresh entry."""
+        cfg = self.cfg
+        enabled = cfg.entry_wiggle_ratio_enabled
+        lo, hi = cfg.entry_wiggle_ratio_min, cfg.entry_wiggle_ratio_max
+        if cfg.schema_has_regime_overrides:
+            o = state.get("override_entry_wiggle_ratio_enabled")
+            if o is not None:
+                enabled = bool(o)
+            o = state.get("override_entry_wiggle_ratio_min")
+            if o is not None:
+                lo = float(o)
+            o = state.get("override_entry_wiggle_ratio_max")
+            if o is not None:
+                hi = float(o)
+        ratio = compute_volume_wiggle_ratio(self.candles)
+        self._last_entry_wiggle_ratio = ratio
+        if not enabled:
+            self._entry_wiggle_ratio_gate_active = False
+            return False
+        out_of_band = ratio is None or (lo is not None and ratio < lo) or (hi is not None and ratio > hi)
+        self._entry_wiggle_ratio_gate_active = out_of_band
+        return out_of_band
+
+    def _entry_wiggle_ratio_gate_allows_cycle(self):
+        """See _update_entry_wiggle_ratio_gate -- same 'fixed_direction bots never consult
+        entry_signal' reasoning as every other optional gate above.
+        self._entry_wiggle_ratio_gate_active is set earlier in the SAME tick."""
+        return not self._entry_wiggle_ratio_gate_active
+
     def _htf_alignment_blocks_entry(self, state, signal):
         """See BotConfig.htf_alignment_block_timeframe's docstring. `signal` is the fresh
         entry/reversal direction ('long'/'short') about to be acted on -- returns True if the
@@ -4304,7 +4359,7 @@ class StochBot:
         return (self._hedge_entry_allows_cycle() and self._environment_allows_cycle() and self._has_entry_pressure() and self._cycle_gap_elapsed()
                 and self._has_entry_dispersion() and self._candle_unused()
                 and self._volume_jump_allows_cycle() and self._volume_wiggle_allows_cycle()
-                and self._volume_rate_guard_allows_cycle())
+                and self._volume_rate_guard_allows_cycle() and self._entry_wiggle_ratio_gate_allows_cycle())
 
     def _reversal_cooldown_active(self):
         """See BotConfig.post_reversal_cooldown_seconds."""
@@ -6879,6 +6934,13 @@ class StochBot:
         if volume_rate_guard_active:
             entry_signal = None
 
+        # See BotConfig.entry_wiggle_ratio_enabled -- same contract as every gate here, never
+        # touches an exit. Compiled off (and not yet turned on live) everywhere as of
+        # 2026-10-15 -- see the BotConfig field's own docstring.
+        entry_wiggle_ratio_gate_active = self._update_entry_wiggle_ratio_gate(state)
+        if entry_wiggle_ratio_gate_active:
+            entry_signal = None
+
         # See BotConfig.htf_alignment_block_timeframe. Called unconditionally (same "watch
         # before choosing" pattern as every gate above) so the dashboard readout stays fresh
         # even on a tick with no signal; the method itself returns False when signal is None.
@@ -7594,7 +7656,7 @@ class StochBot:
                 reopen_htf_blocked = self._htf_alignment_blocks_entry(state, reversal_signal)
                 if (self.entry_vol_paused or intrabar_dispersion_blocked or zebra_blocked
                         or balance_blocked or self._reversal_cooldown_active() or volume_jump_active
-                        or volume_wiggle_locked or volume_rate_guard_active
+                        or volume_wiggle_locked or volume_rate_guard_active or entry_wiggle_ratio_gate_active
                         or (cfg.self_lock_enabled and self.real_trading_locked)
                         or (cfg.trading_hours_utc is not None
                             and self._apply_trading_hours_gate(reversal_signal) is None)

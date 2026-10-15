@@ -6461,6 +6461,104 @@ async def t_volume_rate_guard_blocks_a_hedge_style_cycle():
     check("fixed_direction leg does not want a new cycle while blocked", bot._wants_new_cycle() is False)
 
 
+async def t_entry_wiggle_ratio_gate_off_by_default():
+    print("\n[entry wiggle/vol ratio gate: off by default -- never blocks regardless of reading]")
+    bot = make_bot(FakeExchange(), candles_kind="mid")  # min/max default None, enabled defaults False
+    bot.candles = _wiggle_vol_candles(vol=5.0, shift=5.0)
+    active = bot._update_entry_wiggle_ratio_gate(bot.state_row)
+    check("never blocks when unconfigured", active is False, active)
+
+
+async def t_entry_wiggle_ratio_gate_blocks_below_min():
+    print("\n[entry wiggle/vol ratio gate: blocks a fresh entry when the ratio is BELOW min]")
+    candles = _wiggle_vol_candles(vol=5.0, shift=5.0)
+    ratio = core.compute_volume_wiggle_ratio(candles)
+    bot = make_bot(FakeExchange(), candles_kind="mid", entry_wiggle_ratio_enabled=True,
+                    entry_wiggle_ratio_min=ratio + 1, entry_wiggle_ratio_max=ratio + 100,
+                    schema_has_regime_overrides=True)
+    bot.candles = candles
+    active = bot._update_entry_wiggle_ratio_gate(bot.state_row)
+    check("gate active -- ratio sits below min", active is True, active)
+    check("_entry_wiggle_ratio_gate_allows_cycle reflects the block",
+          bot._entry_wiggle_ratio_gate_allows_cycle() is False)
+
+
+async def t_entry_wiggle_ratio_gate_blocks_above_max():
+    print("\n[entry wiggle/vol ratio gate: blocks a fresh entry when the ratio is ABOVE max]")
+    candles = _wiggle_vol_candles(vol=5.0, shift=5.0)
+    ratio = core.compute_volume_wiggle_ratio(candles)
+    bot = make_bot(FakeExchange(), candles_kind="mid", entry_wiggle_ratio_enabled=True,
+                    entry_wiggle_ratio_min=0.0, entry_wiggle_ratio_max=ratio - 0.5,
+                    schema_has_regime_overrides=True)
+    bot.candles = candles
+    active = bot._update_entry_wiggle_ratio_gate(bot.state_row)
+    check("gate active -- ratio sits above max", active is True, active)
+
+
+async def t_entry_wiggle_ratio_gate_allows_inside_band():
+    print("\n[entry wiggle/vol ratio gate: stays inactive while the ratio sits inside [min, max]]")
+    candles = _wiggle_vol_candles(vol=5.0, shift=5.0)
+    ratio = core.compute_volume_wiggle_ratio(candles)
+    bot = make_bot(FakeExchange(), candles_kind="mid", entry_wiggle_ratio_enabled=True,
+                    entry_wiggle_ratio_min=ratio - 1, entry_wiggle_ratio_max=ratio + 1,
+                    schema_has_regime_overrides=True)
+    bot.candles = candles
+    active = bot._update_entry_wiggle_ratio_gate(bot.state_row)
+    check("not active", active is False, active)
+    check("_entry_wiggle_ratio_gate_allows_cycle reflects the allow",
+          bot._entry_wiggle_ratio_gate_allows_cycle() is True)
+
+
+async def t_entry_wiggle_ratio_gate_fails_closed_on_missing_data():
+    print("\n[entry wiggle/vol ratio gate: enabled but no reading yet -> blocks, never guesses]")
+    print("  unlike volume_rate_guard (fails OPEN on missing data), this one fails CLOSED --")
+    print("  the explicit recommendation this gate implements requires that contract.")
+    bot = make_bot(FakeExchange(), candles_kind="mid", entry_wiggle_ratio_enabled=True,
+                    entry_wiggle_ratio_min=5.0, entry_wiggle_ratio_max=12.0,
+                    schema_has_regime_overrides=True)
+    bot.candles = []  # nowhere near enough history for compute_volume_wiggle_ratio
+    active = bot._update_entry_wiggle_ratio_gate(bot.state_row)
+    check("blocks -- no reading to check against", active is True, active)
+
+
+async def t_entry_wiggle_ratio_gate_live_override():
+    print("\n[entry wiggle/vol ratio gate: override_entry_wiggle_ratio_* picks the band live]")
+    candles = _wiggle_vol_candles(vol=5.0, shift=5.0)
+    ratio = core.compute_volume_wiggle_ratio(candles)
+    bot = make_bot(FakeExchange(), candles_kind="mid", schema_has_regime_overrides=True)  # compiled off
+    bot.candles = candles
+    bot.state_row["override_entry_wiggle_ratio_enabled"] = True
+    bot.state_row["override_entry_wiggle_ratio_min"] = ratio + 1
+    bot.state_row["override_entry_wiggle_ratio_max"] = ratio + 100
+    active = bot._update_entry_wiggle_ratio_gate(bot.state_row)
+    check("blocks via the live override even though compiled off", active is True, active)
+
+
+async def t_entry_wiggle_ratio_gate_override_ignored_without_schema_flag():
+    print("\n[entry wiggle/vol ratio gate: schema_has_regime_overrides=False ignores the override]")
+    candles = _wiggle_vol_candles(vol=5.0, shift=5.0)
+    ratio = core.compute_volume_wiggle_ratio(candles)
+    bot = make_bot(FakeExchange(), candles_kind="mid", schema_has_regime_overrides=False)
+    bot.candles = candles
+    bot.state_row["override_entry_wiggle_ratio_enabled"] = True
+    bot.state_row["override_entry_wiggle_ratio_min"] = ratio + 1
+    bot.state_row["override_entry_wiggle_ratio_max"] = ratio + 100
+    active = bot._update_entry_wiggle_ratio_gate(bot.state_row)
+    check("still inactive -- override present but the schema flag is off", active is False, active)
+
+
+async def t_entry_wiggle_ratio_gate_blocks_a_hedge_style_cycle():
+    print("\n[entry wiggle/vol ratio gate: blocks a fixed_direction leg's _wants_new_cycle too]")
+    candles = _wiggle_vol_candles(vol=5.0, shift=5.0)
+    ratio = core.compute_volume_wiggle_ratio(candles)
+    bot = _hedge_leg(entry_wiggle_ratio_enabled=True, entry_wiggle_ratio_min=ratio + 1,
+                      entry_wiggle_ratio_max=ratio + 100)
+    bot.candles = candles
+    active = bot._update_entry_wiggle_ratio_gate(bot.state_row)
+    check("active", active is True, active)
+    check("fixed_direction leg does not want a new cycle while blocked", bot._wants_new_cycle() is False)
+
+
 async def t_volume_jump_ratio_basic():
     print("\n[compute_volume_jump_ratio: hand-computed example]")
     candles = _jump_candles([1.0] * 10 + [5.0])
@@ -9026,6 +9124,14 @@ async def main():
               t_volume_rate_guard_override_ignored_without_schema_flag,
               t_volume_rate_guard_enabled_switch_overrides_without_losing_threshold,
               t_volume_rate_guard_blocks_a_hedge_style_cycle,
+              t_entry_wiggle_ratio_gate_off_by_default,
+              t_entry_wiggle_ratio_gate_blocks_below_min,
+              t_entry_wiggle_ratio_gate_blocks_above_max,
+              t_entry_wiggle_ratio_gate_allows_inside_band,
+              t_entry_wiggle_ratio_gate_fails_closed_on_missing_data,
+              t_entry_wiggle_ratio_gate_live_override,
+              t_entry_wiggle_ratio_gate_override_ignored_without_schema_flag,
+              t_entry_wiggle_ratio_gate_blocks_a_hedge_style_cycle,
               t_volume_jump_ratio_basic,
               t_volume_jump_ratio_needs_full_lookback,
               t_volume_jump_ratio_zero_baseline,
