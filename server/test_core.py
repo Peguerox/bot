@@ -8616,6 +8616,81 @@ async def t_wiggle_vol_rise_exit_restore_only_tried_once_per_boot():
           bot._entry_wiggle_vol_ratio == 7.0, bot._entry_wiggle_vol_ratio)
 
 
+def _stale_signal_candles():
+    """make_candles("long") on its own reads as FRESH (the one-candle-earlier reshuffle lands
+    on a plain, unmodified candle -- see _prior_candle_signal's docstring). Modifying one more
+    candle at the tail makes the one-candle-earlier reading long too, i.e. genuinely stale."""
+    candles = make_candles("long")
+    candles[-3]["c"] = candles[-3]["l"]
+    return candles
+
+
+def _base_state(**over):
+    state = {
+        "id": 1, "side": None, "legs": [], "first_entry_price": None, "first_entry_time": None,
+        "dca_level": 0, "seed_usd": 20.0, "realized_pnl_usd": 0.0,
+        "collateral_before_entry": None, "enabled": True,
+        "consecutive_entry_failures": 0, "last_processed_candle_ts": 0,
+    }
+    state.update(over)
+    return state
+
+
+async def t_require_fresh_signal_override_disables_the_staleness_check():
+    print("\n[require fresh signal: override=False lets a compiled-True bot enter on a stale signal]")
+    print("  direct request, 2026-10-16: \"can you make needs fresh signal a toggle\" -- for")
+    print("  Worker 1, Worker 4 and the hedge.")
+    candles = _stale_signal_candles()
+    ex = FakeExchange()
+    state = _base_state(override_require_fresh_signal=False)
+    bot = make_bot(ex, state=state, candles=candles, require_fresh_signal=True,
+                    schema_has_regime_overrides=True)
+    bot.live.order_book = {"bids": [{"price": "86000.0"}], "asks": [{"price": "86001.0"}]}
+    await bot.tick()
+    check("entered despite a stale signal -- override turned the check off",
+          bot.state_row["side"] == "long", bot.state_row["side"])
+
+
+async def t_require_fresh_signal_override_enables_the_staleness_check():
+    print("\n[require fresh signal: override=True blocks a stale signal even though compiled off]")
+    candles = _stale_signal_candles()
+    ex = FakeExchange()
+    state = _base_state(override_require_fresh_signal=True)
+    bot = make_bot(ex, state=state, candles=candles, require_fresh_signal=False,
+                    schema_has_regime_overrides=True)
+    bot.live.order_book = {"bids": [{"price": "86000.0"}], "asks": [{"price": "86001.0"}]}
+    await bot.tick()
+    check("did not enter -- override turned the check on, signal is stale",
+          bot.state_row["side"] is None, bot.state_row["side"])
+
+
+async def t_require_fresh_signal_a_genuinely_fresh_signal_still_enters_either_way():
+    print("\n[require fresh signal: a genuinely FRESH signal enters regardless of the setting]")
+    candles = make_candles("long")  # fresh by construction, see _stale_signal_candles's docstring
+    for override in (True, False, None):
+        ex = FakeExchange()
+        state = _base_state(override_require_fresh_signal=override)
+        bot = make_bot(ex, state=state, candles=[dict(c) for c in candles], require_fresh_signal=True,
+                        schema_has_regime_overrides=True)
+        bot.live.order_book = {"bids": [{"price": "86000.0"}], "asks": [{"price": "86001.0"}]}
+        await bot.tick()
+        check(f"entered with override={override} -- nothing stale to block",
+              bot.state_row["side"] == "long", (override, bot.state_row["side"]))
+
+
+async def t_require_fresh_signal_override_ignored_without_schema_flag():
+    print("\n[require fresh signal: schema_has_regime_overrides=False ignores the override]")
+    candles = _stale_signal_candles()
+    ex = FakeExchange()
+    state = _base_state(override_require_fresh_signal=False)
+    bot = make_bot(ex, state=state, candles=candles, require_fresh_signal=True,
+                    schema_has_regime_overrides=False)
+    bot.live.order_book = {"bids": [{"price": "86000.0"}], "asks": [{"price": "86001.0"}]}
+    await bot.tick()
+    check("still did not enter -- override present but the schema flag is off, compiled True wins",
+          bot.state_row["side"] is None, bot.state_row["side"])
+
+
 async def t_best_bid_ask_stale_book_returns_none():
     print("\n[best_bid_ask: a stale order book returns (None, None), not a frozen price]")
     print("  real bug, 2026-10-14: this never checked the book's own age -- if the websocket")
@@ -9342,6 +9417,10 @@ async def main():
               t_wiggle_vol_rise_exit_baseline_captured_at_real_entry_and_reset_on_close,
               t_wiggle_vol_rise_exit_baseline_restored_from_db_after_restart,
               t_wiggle_vol_rise_exit_restore_only_tried_once_per_boot,
+              t_require_fresh_signal_override_disables_the_staleness_check,
+              t_require_fresh_signal_override_enables_the_staleness_check,
+              t_require_fresh_signal_a_genuinely_fresh_signal_still_enters_either_way,
+              t_require_fresh_signal_override_ignored_without_schema_flag,
               t_best_bid_ask_stale_book_returns_none,
               t_best_bid_ask_fresh_book_still_returns_prices,
               t_best_bid_ask_respects_custom_max_age,

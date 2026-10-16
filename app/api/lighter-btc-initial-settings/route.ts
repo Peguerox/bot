@@ -115,6 +115,10 @@ export async function POST(req: NextRequest) {
     ["rateGuardEnabled", "override_volume_rate_guard_enabled"],
     ["jumpGuardEnabled", "override_volume_jump_enabled"],
     ["entryWiggleRatioEnabled", "override_entry_wiggle_ratio_enabled"],
+    // 2026-10-16, direct request: "can you make needs fresh signal a toggle" -- previously
+    // compiled-only (BotConfig.require_fresh_signal). See StochBot's require_fresh local in
+    // tick() for the override-read side.
+    ["requireFreshSignal", "override_require_fresh_signal"],
   ] as const) {
     const raw = body[key];
     if (raw === undefined || raw === null) continue;

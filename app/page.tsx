@@ -1637,6 +1637,30 @@ function CompactStochBtcPanel({
     await onToggled();
     setSavingEscalatedSl(false);
   }
+  // Require-fresh-signal (2026-10-16, direct request: "can you make needs fresh signal a
+  // toggle" -- for Worker 1, Worker 4 and the hedge). Previously compiled-only; defaults to ON
+  // here since that's the compiled value on both bots that use this panel today.
+  const requireFreshSignalOn: boolean = state?.override_require_fresh_signal ?? true;
+  const [savingRequireFreshSignal, setSavingRequireFreshSignal] = useState(false);
+  async function handleToggleRequireFreshSignal() {
+    const next = !requireFreshSignalOn;
+    if (!confirm(
+      next
+        ? `Turn ON require-fresh-signal for ${title}? Only enters on the exact candle a signal first appears -- a signal that's already been sitting active for 2+ candles is skipped. Takes effect immediately.`
+        : `Turn OFF require-fresh-signal for ${title}? Will enter on a signal even if it's been active for a while, not just the fresh flip. Takes effect immediately.`
+    )) return;
+    setSavingRequireFreshSignal(true);
+    const res = await fetch("/api/lighter-btc-initial-settings", {
+      method: "POST", headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ table, requireFreshSignal: next }),
+    });
+    if (!res.ok) {
+      const b = await res.json().catch(() => ({}));
+      alert(b.error || "Could not toggle require-fresh-signal.");
+    }
+    await onToggled();
+    setSavingRequireFreshSignal(false);
+  }
   // Signal on/off toggles -- NULL on the row means "use the compiled default", which is True
   // for all three signal toggles. Must match BotConfig's own defaults in _regime_controls.
   const stochasticOn = state?.override_stochastic_enabled ?? true;
@@ -3153,6 +3177,23 @@ function CompactStochBtcPanel({
               -0.12% is the hard cap regardless. The SL box below is ignored while this is on.
             </p>
           </div>
+          <div className="bg-gray-800/60 rounded-lg p-2">
+            <div className="flex items-center justify-between">
+              <p className="text-gray-500 text-[9px] uppercase">
+                Require fresh signal <span className={requireFreshSignalOn ? "text-green-400" : "text-gray-600"}>{requireFreshSignalOn ? "ON" : "OFF"}</span>
+              </p>
+              <button onClick={handleToggleRequireFreshSignal} disabled={savingRequireFreshSignal || loading}
+                className={`text-[11px] font-bold px-2.5 py-1 rounded disabled:opacity-30 ${
+                  requireFreshSignalOn ? "bg-green-500/20 text-green-400" : "bg-gray-700/50 text-gray-500"}`}>
+                {savingRequireFreshSignal ? "…" : requireFreshSignalOn ? "Turn OFF" : "Turn ON"}
+              </button>
+            </div>
+            <p className="text-gray-600 text-[9px] leading-snug mt-1">
+              ON (the usual setting): only enters on the exact candle a signal first appears --
+              skips a signal that's already been sitting active for 2+ candles. OFF: enters on
+              any matching signal, fresh or not. Was compiled-only before; now live-tunable here.
+            </p>
+          </div>
           <div className="grid grid-cols-3 gap-1.5">
             {([["SL", slIn, setSlIn, curSl, "%"],
                ["Trigger", trigIn, setTrigIn, curTrig, "%"],
@@ -3203,7 +3244,7 @@ function CompactStochBtcPanel({
           <p className="text-gray-400 text-[10px] uppercase font-bold">Status overview -- everything on/off</p>
           {[
             ["Exit mode", curExitMode],
-            ["Require fresh signal", "ON (compiled, not live-controllable)"],
+            ["Require fresh signal", requireFreshSignalOn ? "ON" : "off"],
             ["Escalated SL", escalatedSlOn ? "ON" : "off"],
             ["Volume jump guard", curJumpGuardEnabled ? `ON (release: ${curReleaseMode})` : "off"],
             ["Wiggle/volume lock", curWiggleLockEnabled ? `ON (< ${curWiggleLockThreshold ?? "—"})` : "off"],

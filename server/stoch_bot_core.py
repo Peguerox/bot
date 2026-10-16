@@ -6823,8 +6823,16 @@ class StochBot:
         # shadow always sees the plain, ungated signal, regardless of what else is layered on.
         paper_entry_signal, paper_reversal_signal = entry_signal, reversal_signal
 
-        prior_signal = self._prior_candle_signal() if cfg.require_fresh_signal else None
-        if cfg.require_fresh_signal and entry_signal is not None and entry_signal == prior_signal:
+        # Live-overridable (2026-10-16, direct request: "can you make needs fresh signal a
+        # toggle" -- for Worker 1, Worker 4 AND the hedge). Same contract as every other
+        # override here; None (no override set) keeps the compiled default.
+        require_fresh = cfg.require_fresh_signal
+        if cfg.schema_has_regime_overrides:
+            o = state.get("override_require_fresh_signal")
+            if o is not None:
+                require_fresh = bool(o)
+        prior_signal = self._prior_candle_signal() if require_fresh else None
+        if require_fresh and entry_signal is not None and entry_signal == prior_signal:
             # Stale -- this direction was ALREADY true one candle ago, not a fresh flip. Empirical
             # finding (2026-09-28): fresh entries won 65% of the time vs 43% for signals that had
             # already been sitting active for 2+ candles. Wait for the next genuine flip instead
@@ -7646,7 +7654,7 @@ class StochBot:
                     except Exception as e:
                         await self.log_run("flow_entry_filter_error", {"error": str(e)[:300], "via": "reversal"})
                         reopen_flow_blocked = True
-                reopen_stale = (cfg.require_fresh_signal and reversal_signal == prior_signal)
+                reopen_stale = (require_fresh and reversal_signal == prior_signal)
                 reopen_burned = (cfg.red_exit_burns_signal
                                  and reversal_signal == self._burned_signal)
                 if reopen_burned and self._burn_reclaimed_by_k():
