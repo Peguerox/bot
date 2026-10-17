@@ -1544,7 +1544,6 @@ function CompactStochBtcPanel({
   const [trigIn, setTrigIn] = useState("");
   const [trailIn, setTrailIn] = useState("");
   const [savingSettings, setSavingSettings] = useState(false);
-  const liveVol: number | null = state?.live_vol_pct ?? null;
   const liveZebra: number | null = state?.live_zebra_index ?? null;
   // 2026-10-05, direct report: "the BTC volume on the universal panel is not the same as the
   // BTC volume on the Worker 1 panel" -- both are compute_candle_volume_avg(candles, 10), same
@@ -3203,20 +3202,108 @@ function CompactStochBtcPanel({
         );
       })()}
       {showLevers && !loading && (
-        <div className="bg-gray-800/60 rounded-lg p-2 space-y-2">
-          <div className="flex items-baseline justify-between">
-            <p className="text-gray-500 text-[10px] uppercase">Volatility (1-min range, 10m)</p>
-            <p className="font-bold text-sm tabular-nums">
-              <span className={liveVol == null ? "text-gray-500"
-                : liveVol >= 0.10 ? "text-red-400"
-                : liveVol >= 0.06 ? "text-amber-400" : "text-green-400"}>
-                {liveVol != null ? liveVol.toFixed(4) + "%" : "—"}
-              </span>
-              <span className="text-[10px] font-normal text-gray-500 ml-1.5">
-                {liveVol == null ? "" : liveVol >= 0.10 ? "HIGH" : liveVol >= 0.06 ? "elevated" : "calm"}
-              </span>
+        <div className="bg-gray-800/60 rounded-lg p-2">
+          <div className="flex items-center justify-between">
+            <p className="text-gray-500 text-[9px] uppercase">
+              Require fresh signal <span className={requireFreshSignalOn ? "text-green-400" : "text-gray-600"}>{requireFreshSignalOn ? "ON" : "OFF"}</span>
             </p>
+            <button onClick={handleToggleRequireFreshSignal} disabled={savingRequireFreshSignal || loading}
+              className={`text-[11px] font-bold px-2.5 py-1 rounded disabled:opacity-30 ${
+                requireFreshSignalOn ? "bg-green-500/20 text-green-400" : "bg-gray-700/50 text-gray-500"}`}>
+              {savingRequireFreshSignal ? "…" : requireFreshSignalOn ? "Turn OFF" : "Turn ON"}
+            </button>
           </div>
+          <p className="text-gray-600 text-[9px] leading-snug mt-1">
+            ON (the usual setting): only enters on the exact candle a signal first appears --
+            skips a signal that's already been sitting active for 2+ candles. OFF: enters on
+            any matching signal, fresh or not. Was compiled-only before; now live-tunable here.
+          </p>
+        </div>
+      )}
+      {showLevers && !loading && (
+        <div className="bg-gray-800/60 rounded-lg p-2">
+          {/* 2026-10-17, direct request: only enter in a window of hours after a confirmed
+              real volume*wiggle "product" peak. See BotConfig.peak_window_enabled's docstring
+              for the causal (no future-peeking) peak-detection algorithm these numbers drive.
+              2026-10-17, relocated out of the trail/tp box: "that panel is for trail vs tp",
+              this is an entry-side gate and belongs with the other entry gates above. */}
+          <div className="flex items-baseline justify-between">
+            <p className="text-gray-500 text-[10px] uppercase">Peak window</p>
+            <button
+              onClick={handleTogglePeakWindow}
+              disabled={savingPeakWindow || loading}
+              className={`text-[10px] font-bold px-1.5 py-0.5 rounded disabled:opacity-30 ${
+                curPeakWindowEnabled ? "bg-blue-500/20 text-blue-300" : "bg-gray-700/50 text-gray-500"
+              }`}
+            >
+              {savingPeakWindow ? "…" : curPeakWindowEnabled ? "ON" : "OFF"}
+            </button>
+          </div>
+          <p className="font-bold text-sm tabular-nums">
+            <span className={!curPeakWindowEnabled ? "text-gray-500" : livePeakActive ? "text-red-400" : "text-green-400"}>
+              {!curPeakWindowEnabled ? "OFF" : livePeakActive ? "BLOCKING" : "allowed"}
+            </span>
+            <span className="text-[10px] font-normal text-gray-500 ml-1.5">
+              {curPeakWindowEnabled
+                ? (livePeakHoursSince != null ? `${livePeakHoursSince.toFixed(2)}h since the last peak` : "no peak confirmed yet")
+                : "switch is off -- never blocks"}
+            </span>
+          </p>
+          <p className="text-[11px] text-gray-500 mt-0.5 tabular-nums">
+            latest product reading: <span className="text-gray-400">{livePeakProduct != null ? Math.round(livePeakProduct) : "—"}</span>
+          </p>
+          <p className="text-gray-500 text-[9px] uppercase mt-2">
+            Peak definition <span className="text-gray-600">now {curPeakFloor ?? "off"} floor / {curPeakConfirm ?? "—"}min confirm / {curPeakSeparation ?? "—"}h apart</span>
+          </p>
+          <div className="flex items-end gap-1.5 mt-1">
+            <input value={peakFloorIn} onChange={(e) => setPeakFloorIn(e.target.value)}
+              placeholder={curPeakFloor != null ? String(curPeakFloor) : "floor e.g. 1000"}
+              inputMode="decimal"
+              className="w-full bg-gray-900 border border-gray-700 rounded px-1.5 py-1 text-xs text-white tabular-nums focus:outline-none focus:border-blue-500" />
+            <input value={peakConfirmIn} onChange={(e) => setPeakConfirmIn(e.target.value)}
+              placeholder={curPeakConfirm != null ? String(curPeakConfirm) : "confirm min e.g. 45"}
+              inputMode="decimal"
+              className="w-full bg-gray-900 border border-gray-700 rounded px-1.5 py-1 text-xs text-white tabular-nums focus:outline-none focus:border-blue-500" />
+            <input value={peakSeparationIn} onChange={(e) => setPeakSeparationIn(e.target.value)}
+              placeholder={curPeakSeparation != null ? String(curPeakSeparation) : "sep hrs e.g. 6"}
+              inputMode="decimal"
+              className="w-full bg-gray-900 border border-gray-700 rounded px-1.5 py-1 text-xs text-white tabular-nums focus:outline-none focus:border-blue-500" />
+            <button onClick={handleSetPeakDefinition}
+              disabled={savingPeakWindow || loading || (!peakFloorIn.trim() && !peakConfirmIn.trim() && !peakSeparationIn.trim())}
+              className="text-xs font-bold px-2.5 py-1 rounded bg-blue-500/20 text-blue-400 hover:bg-blue-500/30 disabled:opacity-30 whitespace-nowrap">
+              {savingPeakWindow ? "…" : "Set"}
+            </button>
+          </div>
+          <p className="text-gray-500 text-[9px] uppercase mt-2">
+            Trading window <span className="text-gray-600">now {curPeakStart ?? "off"}-{curPeakEnd ?? "off"}h after the peak</span>
+          </p>
+          <div className="flex items-end gap-1.5 mt-1">
+            <input value={peakStartIn} onChange={(e) => setPeakStartIn(e.target.value)}
+              placeholder={curPeakStart != null ? String(curPeakStart) : "start hrs e.g. 2"}
+              inputMode="decimal"
+              className="w-full bg-gray-900 border border-gray-700 rounded px-1.5 py-1 text-xs text-white tabular-nums focus:outline-none focus:border-blue-500" />
+            <span className="text-gray-600 text-xs pb-1">/</span>
+            <input value={peakEndIn} onChange={(e) => setPeakEndIn(e.target.value)}
+              placeholder={curPeakEnd != null ? String(curPeakEnd) : "end hrs e.g. 6"}
+              inputMode="decimal"
+              className="w-full bg-gray-900 border border-gray-700 rounded px-1.5 py-1 text-xs text-white tabular-nums focus:outline-none focus:border-blue-500" />
+            <button onClick={handleSetPeakWindowHours}
+              disabled={savingPeakWindow || loading || (!peakStartIn.trim() && !peakEndIn.trim())}
+              className="text-xs font-bold px-2.5 py-1 rounded bg-blue-500/20 text-blue-400 hover:bg-blue-500/30 disabled:opacity-30 whitespace-nowrap">
+              {savingPeakWindow ? "…" : "Set"}
+            </button>
+          </div>
+          <p className="text-gray-600 text-[9px] leading-snug mt-2">
+            A "peak" confirms when the product (volume&times;wiggle) crosses the floor and
+            holds for the confirm minutes without being beaten. Entries are only allowed
+            between start-end hours after that peak's own timestamp -- before the first peak
+            ever confirms, this blocks entirely (fails closed). Research default: 1000 floor /
+            45min confirm / 6h apart / 2-6h window. Never blocks an exit.
+          </p>
+        </div>
+      )}
+      {showLevers && !loading && (
+        <div className="bg-gray-800/60 rounded-lg p-2 space-y-2">
           <div>
             <p className="text-gray-500 text-[9px] uppercase">
               Exit mode <span className="text-gray-600">now {curExitMode}</span>
@@ -3256,101 +3343,6 @@ function CompactStochBtcPanel({
               Replaces the plain SL below with 3 tiers, built from real trade data: -0.05% within
               2 min AND volume under 3 BTC/min exits early; -0.10% AND volume under 3 also exits;
               -0.12% is the hard cap regardless. The SL box below is ignored while this is on.
-            </p>
-          </div>
-          <div className="bg-gray-800/60 rounded-lg p-2">
-            <div className="flex items-center justify-between">
-              <p className="text-gray-500 text-[9px] uppercase">
-                Require fresh signal <span className={requireFreshSignalOn ? "text-green-400" : "text-gray-600"}>{requireFreshSignalOn ? "ON" : "OFF"}</span>
-              </p>
-              <button onClick={handleToggleRequireFreshSignal} disabled={savingRequireFreshSignal || loading}
-                className={`text-[11px] font-bold px-2.5 py-1 rounded disabled:opacity-30 ${
-                  requireFreshSignalOn ? "bg-green-500/20 text-green-400" : "bg-gray-700/50 text-gray-500"}`}>
-                {savingRequireFreshSignal ? "…" : requireFreshSignalOn ? "Turn OFF" : "Turn ON"}
-              </button>
-            </div>
-            <p className="text-gray-600 text-[9px] leading-snug mt-1">
-              ON (the usual setting): only enters on the exact candle a signal first appears --
-              skips a signal that's already been sitting active for 2+ candles. OFF: enters on
-              any matching signal, fresh or not. Was compiled-only before; now live-tunable here.
-            </p>
-          </div>
-          <div className="bg-gray-800/60 rounded-lg p-2">
-            {/* 2026-10-17, direct request: only enter in a window of hours after a confirmed
-                real volume*wiggle "product" peak. See BotConfig.peak_window_enabled's docstring
-                for the causal (no future-peeking) peak-detection algorithm these numbers drive. */}
-            <div className="flex items-baseline justify-between">
-              <p className="text-gray-500 text-[10px] uppercase">Peak window</p>
-              <button
-                onClick={handleTogglePeakWindow}
-                disabled={savingPeakWindow || loading}
-                className={`text-[10px] font-bold px-1.5 py-0.5 rounded disabled:opacity-30 ${
-                  curPeakWindowEnabled ? "bg-blue-500/20 text-blue-300" : "bg-gray-700/50 text-gray-500"
-                }`}
-              >
-                {savingPeakWindow ? "…" : curPeakWindowEnabled ? "ON" : "OFF"}
-              </button>
-            </div>
-            <p className="font-bold text-sm tabular-nums">
-              <span className={!curPeakWindowEnabled ? "text-gray-500" : livePeakActive ? "text-red-400" : "text-green-400"}>
-                {!curPeakWindowEnabled ? "OFF" : livePeakActive ? "BLOCKING" : "allowed"}
-              </span>
-              <span className="text-[10px] font-normal text-gray-500 ml-1.5">
-                {curPeakWindowEnabled
-                  ? (livePeakHoursSince != null ? `${livePeakHoursSince.toFixed(2)}h since the last peak` : "no peak confirmed yet")
-                  : "switch is off -- never blocks"}
-              </span>
-            </p>
-            <p className="text-[11px] text-gray-500 mt-0.5 tabular-nums">
-              latest product reading: <span className="text-gray-400">{livePeakProduct != null ? Math.round(livePeakProduct) : "—"}</span>
-            </p>
-            <p className="text-gray-500 text-[9px] uppercase mt-2">
-              Peak definition <span className="text-gray-600">now {curPeakFloor ?? "off"} floor / {curPeakConfirm ?? "—"}min confirm / {curPeakSeparation ?? "—"}h apart</span>
-            </p>
-            <div className="flex items-end gap-1.5 mt-1">
-              <input value={peakFloorIn} onChange={(e) => setPeakFloorIn(e.target.value)}
-                placeholder={curPeakFloor != null ? String(curPeakFloor) : "floor e.g. 1000"}
-                inputMode="decimal"
-                className="w-full bg-gray-900 border border-gray-700 rounded px-1.5 py-1 text-xs text-white tabular-nums focus:outline-none focus:border-blue-500" />
-              <input value={peakConfirmIn} onChange={(e) => setPeakConfirmIn(e.target.value)}
-                placeholder={curPeakConfirm != null ? String(curPeakConfirm) : "confirm min e.g. 45"}
-                inputMode="decimal"
-                className="w-full bg-gray-900 border border-gray-700 rounded px-1.5 py-1 text-xs text-white tabular-nums focus:outline-none focus:border-blue-500" />
-              <input value={peakSeparationIn} onChange={(e) => setPeakSeparationIn(e.target.value)}
-                placeholder={curPeakSeparation != null ? String(curPeakSeparation) : "sep hrs e.g. 6"}
-                inputMode="decimal"
-                className="w-full bg-gray-900 border border-gray-700 rounded px-1.5 py-1 text-xs text-white tabular-nums focus:outline-none focus:border-blue-500" />
-              <button onClick={handleSetPeakDefinition}
-                disabled={savingPeakWindow || loading || (!peakFloorIn.trim() && !peakConfirmIn.trim() && !peakSeparationIn.trim())}
-                className="text-xs font-bold px-2.5 py-1 rounded bg-blue-500/20 text-blue-400 hover:bg-blue-500/30 disabled:opacity-30 whitespace-nowrap">
-                {savingPeakWindow ? "…" : "Set"}
-              </button>
-            </div>
-            <p className="text-gray-500 text-[9px] uppercase mt-2">
-              Trading window <span className="text-gray-600">now {curPeakStart ?? "off"}-{curPeakEnd ?? "off"}h after the peak</span>
-            </p>
-            <div className="flex items-end gap-1.5 mt-1">
-              <input value={peakStartIn} onChange={(e) => setPeakStartIn(e.target.value)}
-                placeholder={curPeakStart != null ? String(curPeakStart) : "start hrs e.g. 2"}
-                inputMode="decimal"
-                className="w-full bg-gray-900 border border-gray-700 rounded px-1.5 py-1 text-xs text-white tabular-nums focus:outline-none focus:border-blue-500" />
-              <span className="text-gray-600 text-xs pb-1">/</span>
-              <input value={peakEndIn} onChange={(e) => setPeakEndIn(e.target.value)}
-                placeholder={curPeakEnd != null ? String(curPeakEnd) : "end hrs e.g. 6"}
-                inputMode="decimal"
-                className="w-full bg-gray-900 border border-gray-700 rounded px-1.5 py-1 text-xs text-white tabular-nums focus:outline-none focus:border-blue-500" />
-              <button onClick={handleSetPeakWindowHours}
-                disabled={savingPeakWindow || loading || (!peakStartIn.trim() && !peakEndIn.trim())}
-                className="text-xs font-bold px-2.5 py-1 rounded bg-blue-500/20 text-blue-400 hover:bg-blue-500/30 disabled:opacity-30 whitespace-nowrap">
-                {savingPeakWindow ? "…" : "Set"}
-              </button>
-            </div>
-            <p className="text-gray-600 text-[9px] leading-snug mt-2">
-              A "peak" confirms when the product (volume&times;wiggle) crosses the floor and
-              holds for the confirm minutes without being beaten. Entries are only allowed
-              between start-end hours after that peak's own timestamp -- before the first peak
-              ever confirms, this blocks entirely (fails closed). Research default: 1000 floor /
-              45min confirm / 6h apart / 2-6h window. Never blocks an exit.
             </p>
           </div>
           <div className="grid grid-cols-3 gap-1.5">
