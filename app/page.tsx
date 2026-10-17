@@ -2060,6 +2060,87 @@ function CompactStochBtcPanel({
     setSavingSignal(null);
   }
 
+  // Peak window (2026-10-17, direct request: "build the peak rule with a panel where we can
+  // modify the rules and on/off toggle"). Research: real trades cluster into wins a specific
+  // number of hours after a real volume*wiggle "product" spike -- see
+  // BotConfig.peak_window_enabled's docstring for the causal detection algorithm.
+  const curPeakWindowEnabled: boolean = state?.override_peak_window_enabled ?? false;
+  const curPeakFloor: number | null = state?.override_peak_window_floor ?? null;
+  const curPeakConfirm: number | null = state?.override_peak_window_confirm_minutes ?? null;
+  const curPeakSeparation: number | null = state?.override_peak_window_min_separation_hours ?? null;
+  const curPeakStart: number | null = state?.override_peak_window_start_hours ?? null;
+  const curPeakEnd: number | null = state?.override_peak_window_end_hours ?? null;
+  const livePeakProduct: number | null = state?.live_peak_product ?? null;
+  const livePeakHoursSince: number | null = state?.live_peak_hours_since ?? null;
+  const livePeakActive: boolean | null = state?.live_peak_window_active ?? null;
+  const [savingPeakWindow, setSavingPeakWindow] = useState(false);
+  const [peakFloorIn, setPeakFloorIn] = useState("");
+  const [peakConfirmIn, setPeakConfirmIn] = useState("");
+  const [peakSeparationIn, setPeakSeparationIn] = useState("");
+  const [peakStartIn, setPeakStartIn] = useState("");
+  const [peakEndIn, setPeakEndIn] = useState("");
+
+  async function handleTogglePeakWindow() {
+    const next = !curPeakWindowEnabled;
+    if (!confirm(`Turn the peak window ${next ? "ON" : "OFF"} for ${title}? When ON, only allowed to enter in the configured window after a confirmed peak -- blocks entirely until the first peak confirms. Takes effect immediately.`)) return;
+    setSavingPeakWindow(true);
+    const res = await fetch("/api/lighter-btc-initial-settings", {
+      method: "POST", headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ table, peakWindowEnabled: next }),
+    });
+    if (!res.ok) {
+      const b = await res.json().catch(() => ({}));
+      alert(b.error || "Could not toggle the peak window.");
+    }
+    await onToggled();
+    setSavingPeakWindow(false);
+  }
+
+  async function handleSetPeakDefinition() {
+    if (!peakFloorIn.trim() && !peakConfirmIn.trim() && !peakSeparationIn.trim()) return;
+    if (!confirm(`Set the peak definition for ${title}? Takes effect immediately.`)) return;
+    setSavingPeakWindow(true);
+    const payload: Record<string, string> = {};
+    if (peakFloorIn.trim()) payload.peakWindowFloor = peakFloorIn.trim();
+    if (peakConfirmIn.trim()) payload.peakWindowConfirmMinutes = peakConfirmIn.trim();
+    if (peakSeparationIn.trim()) payload.peakWindowSeparationHours = peakSeparationIn.trim();
+    const res = await fetch("/api/lighter-btc-initial-settings", {
+      method: "POST", headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ table, ...payload }),
+    });
+    if (!res.ok) {
+      const b = await res.json().catch(() => ({}));
+      alert(b.error || "Could not apply the change.");
+    } else {
+      setPeakFloorIn(""); setPeakConfirmIn(""); setPeakSeparationIn("");
+    }
+    await onToggled();
+    setSavingPeakWindow(false);
+  }
+
+  async function handleSetPeakWindowHours() {
+    if (!peakStartIn.trim() && !peakEndIn.trim()) return;
+    const lo = peakStartIn.trim() || String(curPeakStart ?? "off");
+    const hi = peakEndIn.trim() || String(curPeakEnd ?? "off");
+    if (!confirm(`Set the peak trading window to ${lo}-${hi}h after the peak for ${title}? Takes effect immediately.`)) return;
+    setSavingPeakWindow(true);
+    const payload: Record<string, string> = {};
+    if (peakStartIn.trim()) payload.peakWindowStartHours = peakStartIn.trim();
+    if (peakEndIn.trim()) payload.peakWindowEndHours = peakEndIn.trim();
+    const res = await fetch("/api/lighter-btc-initial-settings", {
+      method: "POST", headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ table, ...payload }),
+    });
+    if (!res.ok) {
+      const b = await res.json().catch(() => ({}));
+      alert(b.error || "Could not apply the change.");
+    } else {
+      setPeakStartIn(""); setPeakEndIn("");
+    }
+    await onToggled();
+    setSavingPeakWindow(false);
+  }
+
   async function handleToggleSignal(key: "stochastic" | "zebra" | "flip", label: string, next: boolean) {
     if (!confirm(`Turn ${label} ${next ? "ON" : "OFF"} for ${title}? Takes effect immediately.`)) return;
     setSavingSignal(key);
@@ -3194,6 +3275,84 @@ function CompactStochBtcPanel({
               any matching signal, fresh or not. Was compiled-only before; now live-tunable here.
             </p>
           </div>
+          <div className="bg-gray-800/60 rounded-lg p-2">
+            {/* 2026-10-17, direct request: only enter in a window of hours after a confirmed
+                real volume*wiggle "product" peak. See BotConfig.peak_window_enabled's docstring
+                for the causal (no future-peeking) peak-detection algorithm these numbers drive. */}
+            <div className="flex items-baseline justify-between">
+              <p className="text-gray-500 text-[10px] uppercase">Peak window</p>
+              <button
+                onClick={handleTogglePeakWindow}
+                disabled={savingPeakWindow || loading}
+                className={`text-[10px] font-bold px-1.5 py-0.5 rounded disabled:opacity-30 ${
+                  curPeakWindowEnabled ? "bg-blue-500/20 text-blue-300" : "bg-gray-700/50 text-gray-500"
+                }`}
+              >
+                {savingPeakWindow ? "…" : curPeakWindowEnabled ? "ON" : "OFF"}
+              </button>
+            </div>
+            <p className="font-bold text-sm tabular-nums">
+              <span className={!curPeakWindowEnabled ? "text-gray-500" : livePeakActive ? "text-red-400" : "text-green-400"}>
+                {!curPeakWindowEnabled ? "OFF" : livePeakActive ? "BLOCKING" : "allowed"}
+              </span>
+              <span className="text-[10px] font-normal text-gray-500 ml-1.5">
+                {curPeakWindowEnabled
+                  ? (livePeakHoursSince != null ? `${livePeakHoursSince.toFixed(2)}h since the last peak` : "no peak confirmed yet")
+                  : "switch is off -- never blocks"}
+              </span>
+            </p>
+            <p className="text-[11px] text-gray-500 mt-0.5 tabular-nums">
+              latest product reading: <span className="text-gray-400">{livePeakProduct != null ? Math.round(livePeakProduct) : "—"}</span>
+            </p>
+            <p className="text-gray-500 text-[9px] uppercase mt-2">
+              Peak definition <span className="text-gray-600">now {curPeakFloor ?? "off"} floor / {curPeakConfirm ?? "—"}min confirm / {curPeakSeparation ?? "—"}h apart</span>
+            </p>
+            <div className="flex items-end gap-1.5 mt-1">
+              <input value={peakFloorIn} onChange={(e) => setPeakFloorIn(e.target.value)}
+                placeholder={curPeakFloor != null ? String(curPeakFloor) : "floor e.g. 1000"}
+                inputMode="decimal"
+                className="w-full bg-gray-900 border border-gray-700 rounded px-1.5 py-1 text-xs text-white tabular-nums focus:outline-none focus:border-blue-500" />
+              <input value={peakConfirmIn} onChange={(e) => setPeakConfirmIn(e.target.value)}
+                placeholder={curPeakConfirm != null ? String(curPeakConfirm) : "confirm min e.g. 45"}
+                inputMode="decimal"
+                className="w-full bg-gray-900 border border-gray-700 rounded px-1.5 py-1 text-xs text-white tabular-nums focus:outline-none focus:border-blue-500" />
+              <input value={peakSeparationIn} onChange={(e) => setPeakSeparationIn(e.target.value)}
+                placeholder={curPeakSeparation != null ? String(curPeakSeparation) : "sep hrs e.g. 6"}
+                inputMode="decimal"
+                className="w-full bg-gray-900 border border-gray-700 rounded px-1.5 py-1 text-xs text-white tabular-nums focus:outline-none focus:border-blue-500" />
+              <button onClick={handleSetPeakDefinition}
+                disabled={savingPeakWindow || loading || (!peakFloorIn.trim() && !peakConfirmIn.trim() && !peakSeparationIn.trim())}
+                className="text-xs font-bold px-2.5 py-1 rounded bg-blue-500/20 text-blue-400 hover:bg-blue-500/30 disabled:opacity-30 whitespace-nowrap">
+                {savingPeakWindow ? "…" : "Set"}
+              </button>
+            </div>
+            <p className="text-gray-500 text-[9px] uppercase mt-2">
+              Trading window <span className="text-gray-600">now {curPeakStart ?? "off"}-{curPeakEnd ?? "off"}h after the peak</span>
+            </p>
+            <div className="flex items-end gap-1.5 mt-1">
+              <input value={peakStartIn} onChange={(e) => setPeakStartIn(e.target.value)}
+                placeholder={curPeakStart != null ? String(curPeakStart) : "start hrs e.g. 2"}
+                inputMode="decimal"
+                className="w-full bg-gray-900 border border-gray-700 rounded px-1.5 py-1 text-xs text-white tabular-nums focus:outline-none focus:border-blue-500" />
+              <span className="text-gray-600 text-xs pb-1">/</span>
+              <input value={peakEndIn} onChange={(e) => setPeakEndIn(e.target.value)}
+                placeholder={curPeakEnd != null ? String(curPeakEnd) : "end hrs e.g. 6"}
+                inputMode="decimal"
+                className="w-full bg-gray-900 border border-gray-700 rounded px-1.5 py-1 text-xs text-white tabular-nums focus:outline-none focus:border-blue-500" />
+              <button onClick={handleSetPeakWindowHours}
+                disabled={savingPeakWindow || loading || (!peakStartIn.trim() && !peakEndIn.trim())}
+                className="text-xs font-bold px-2.5 py-1 rounded bg-blue-500/20 text-blue-400 hover:bg-blue-500/30 disabled:opacity-30 whitespace-nowrap">
+                {savingPeakWindow ? "…" : "Set"}
+              </button>
+            </div>
+            <p className="text-gray-600 text-[9px] leading-snug mt-2">
+              A "peak" confirms when the product (volume&times;wiggle) crosses the floor and
+              holds for the confirm minutes without being beaten. Entries are only allowed
+              between start-end hours after that peak's own timestamp -- before the first peak
+              ever confirms, this blocks entirely (fails closed). Research default: 1000 floor /
+              45min confirm / 6h apart / 2-6h window. Never blocks an exit.
+            </p>
+          </div>
           <div className="grid grid-cols-3 gap-1.5">
             {([["SL", slIn, setSlIn, curSl, "%"],
                ["Trigger", trigIn, setTrigIn, curTrig, "%"],
@@ -3251,6 +3410,7 @@ function CompactStochBtcPanel({
             ["Wiggle/vol rise exit", curWiggleVolRiseEnabled && curWiggleVolRisePct != null ? `ON (+${curWiggleVolRisePct}%)` : "off"],
             ["Volume-rate guard", curRateGuardEnabled ? `ON (> ${curRateGuardThreshold ?? "—"}%)` : "off"],
             ["Entry wiggle/vol ratio gate", curEntryWiggleRatioEnabled ? `ON (${curEntryWiggleRatioMin ?? "—"} / ${curEntryWiggleRatioMax ?? "—"})` : "off"],
+            ["Peak window", curPeakWindowEnabled ? `ON (${curPeakStart ?? "—"}-${curPeakEnd ?? "—"}h)` : "off"],
             ["Stochastic signal", stochasticOn ? "ON" : "off"],
             ["Zebra gate", zebraOn ? "ON" : "off"],
             ["Flip regime", flipOn ? "ON" : "off"],

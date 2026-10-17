@@ -413,6 +413,33 @@ class BotConfig:
     entry_wiggle_ratio_enabled: bool = False
     entry_wiggle_ratio_min: Optional[float] = None
     entry_wiggle_ratio_max: Optional[float] = None
+    # Peak window (2026-10-17, direct request: "build the peak rule with a panel where we can
+    # modify the rules and on/off toggle"). Research finding: real trades cluster into wins a
+    # specific number of hours after a real volume*wiggle "product" spike, not right at it and
+    # not long after -- see research/ for the backtest. A "peak" here is detected CAUSALLY (no
+    # future-peeking, unlike the first backtest pass): product crosses peak_window_floor, and
+    # nothing beats that reading for peak_window_confirm_minutes straight minutes (confirms a
+    # real local top, not still climbing) -- the bot only "knows" about a peak that many minutes
+    # after it actually happened. A new candidate is only considered
+    # peak_window_min_separation_hours after the last CONFIRMED peak, so this fires roughly a
+    # couple of times a day, not on every bump. Entries are allowed only in
+    # [peak_window_start_hours, peak_window_end_hours) after the last confirmed peak's own
+    # timestamp; before the first peak ever confirms, or wherever this bot has no persisted
+    # peak yet after a restart, it fails CLOSED (blocks) rather than guessing. Compiled off
+    # everywhere by direct request -- built so it CAN be turned on live via the override_*
+    # columns, not turned on anywhere yet. Never touches an exit. See
+    # _update_peak_window_guard / _peak_window_allows_cycle.
+    peak_window_enabled: bool = False
+    peak_window_floor: Optional[float] = None
+    peak_window_confirm_minutes: Optional[float] = None
+    peak_window_min_separation_hours: Optional[float] = None
+    peak_window_start_hours: Optional[float] = None
+    peak_window_end_hours: Optional[float] = None
+    # Gates the peak-window override reads AND the persisted peak_window_last_confirmed_t/_v
+    # columns (survives a restart -- see the restore block in _update_peak_window_guard; same
+    # restart-survival lesson as the wiggle_vol_rise_exit baseline fix earlier this session).
+    # Same "a flag gates both the read and the write" contract as every schema_has_* flag here.
+    schema_has_peak_window: bool = False
     # Higher-timeframe stochastic alignment block (2026-10-09, direct request after a real-data
     # study on 449 real Worker 1 trades): compares the 1-minute stochastic signal that's about
     # to fire against the SAME stochastic computed on a longer timeframe (5m/10m/1h, see
@@ -2288,6 +2315,17 @@ class StochBot:
         self._volume_rate_guard_active = False
         self._last_entry_wiggle_ratio = None  # see _update_entry_wiggle_ratio_gate
         self._entry_wiggle_ratio_gate_active = False
+        # See _update_peak_window_guard. _peak_candidate is (time_ms, value) for the reading
+        # currently being timed for confirmation, or None. _peak_last_confirmed_t/_v are the
+        # most recent CONFIRMED peak -- in-process only until schema_has_peak_window lets them
+        # persist, same restart-survival shape as profit_lock_peak_pct.
+        self._peak_candidate = None
+        self._peak_last_confirmed_t = None
+        self._peak_last_confirmed_v = None
+        self._peak_window_restored = False
+        self._peak_window_active = False
+        self._live_peak_product = None
+        self._peak_window_metrics_last_persist_ts = 0.0
         self._last_htf_k = None  # see BotConfig.htf_alignment_block_timeframe, dashboard readout
         # Schedule rules (2026-10-04, direct request: a master panel that applies different
         # Worker 1 / hedge settings automatically by hour and/or live ER/volume/wiggle/rate
@@ -4022,6 +4060,103 @@ class StochBot:
         self._entry_wiggle_ratio_gate_active is set earlier in the SAME tick."""
         return not self._entry_wiggle_ratio_gate_active
 
+    async def _update_peak_window_guard(self, state):
+        """See BotConfig.peak_window_enabled and its docstring for the full research context.
+        Runs the causal peak-confirmation state machine every tick, restores the last confirmed
+        peak from the DB once per boot (schema_has_peak_window only), and returns whether a
+        fresh entry is currently blocked. Fails CLOSED: disabled or missing config means never
+        blocks (inert); enabled but no peak has ever confirmed (including right after a fresh
+        restart, before restore runs or if nothing was ever persisted) means ALWAYS blocks,
+        same fail-closed contract as entry_wiggle_ratio_enabled."""
+        cfg = self.cfg
+        enabled = cfg.peak_window_enabled
+        floor = cfg.peak_window_floor
+        confirm_min = cfg.peak_window_confirm_minutes
+        sep_h = cfg.peak_window_min_separation_hours
+        win_start = cfg.peak_window_start_hours
+        win_end = cfg.peak_window_end_hours
+        if cfg.schema_has_regime_overrides:
+            o = state.get("override_peak_window_enabled")
+            if o is not None: enabled = bool(o)
+            o = state.get("override_peak_window_floor")
+            if o is not None: floor = float(o)
+            o = state.get("override_peak_window_confirm_minutes")
+            if o is not None: confirm_min = float(o)
+            o = state.get("override_peak_window_min_separation_hours")
+            if o is not None: sep_h = float(o)
+            o = state.get("override_peak_window_start_hours")
+            if o is not None: win_start = float(o)
+            o = state.get("override_peak_window_end_hours")
+            if o is not None: win_end = float(o)
+
+        if not enabled or None in (floor, confirm_min, sep_h, win_start, win_end):
+            self._peak_window_active = False
+            return False
+
+        if cfg.schema_has_peak_window and not self._peak_window_restored:
+            self._peak_window_restored = True
+            if self._peak_last_confirmed_t is None:
+                restored_t = state.get("peak_window_last_confirmed_t")
+                if restored_t is not None:
+                    self._peak_last_confirmed_t = float(restored_t)
+                    self._peak_last_confirmed_v = state.get("peak_window_last_confirmed_v")
+
+        now_ms = time.time() * 1000
+        product = None
+        vol = compute_candle_volume_avg(self.candles, 10)
+        wig = compute_intrabar_dispersion(self.candles, 5)
+        if vol is not None and wig is not None:
+            product = vol * wig
+        self._live_peak_product = product
+
+        just_confirmed = False
+        if self._peak_candidate is not None and product is not None and product > self._peak_candidate[1]:
+            self._peak_candidate = (now_ms, product)
+        elif (self._peak_candidate is None and product is not None and product >= floor
+              and (self._peak_last_confirmed_t is None
+                   or (now_ms - self._peak_last_confirmed_t) >= sep_h * 3600000)):
+            self._peak_candidate = (now_ms, product)
+
+        if self._peak_candidate is not None:
+            held_for_min = (now_ms - self._peak_candidate[0]) / 60000
+            if held_for_min >= confirm_min:
+                self._peak_last_confirmed_t, self._peak_last_confirmed_v = self._peak_candidate
+                self._peak_candidate = None
+                just_confirmed = True
+
+        if just_confirmed and cfg.schema_has_peak_window:
+            try:
+                await self.update_state({
+                    "peak_window_last_confirmed_t": self._peak_last_confirmed_t,
+                    "peak_window_last_confirmed_v": self._peak_last_confirmed_v,
+                })
+            except Exception:
+                pass
+
+        hours_since = ((now_ms - self._peak_last_confirmed_t) / 3600000
+                       if self._peak_last_confirmed_t is not None else None)
+        active = hours_since is None or not (win_start <= hours_since < win_end)
+        self._peak_window_active = active
+
+        if cfg.schema_has_peak_window and now_ms/1000 - self._peak_window_metrics_last_persist_ts >= 5.0:
+            self._peak_window_metrics_last_persist_ts = now_ms/1000
+            try:
+                await self.update_state({
+                    "live_peak_product": product,
+                    "live_peak_hours_since": hours_since,
+                    "live_peak_window_active": active,
+                })
+            except Exception:
+                pass
+
+        return active
+
+    def _peak_window_allows_cycle(self):
+        """See _update_peak_window_guard -- same 'fixed_direction bots never consult
+        entry_signal' reasoning as every other optional gate above.
+        self._peak_window_active is set earlier in the SAME tick."""
+        return not self._peak_window_active
+
     def _htf_alignment_blocks_entry(self, state, signal):
         """See BotConfig.htf_alignment_block_timeframe's docstring. `signal` is the fresh
         entry/reversal direction ('long'/'short') about to be acted on -- returns True if the
@@ -4359,7 +4494,8 @@ class StochBot:
         return (self._hedge_entry_allows_cycle() and self._environment_allows_cycle() and self._has_entry_pressure() and self._cycle_gap_elapsed()
                 and self._has_entry_dispersion() and self._candle_unused()
                 and self._volume_jump_allows_cycle() and self._volume_wiggle_allows_cycle()
-                and self._volume_rate_guard_allows_cycle() and self._entry_wiggle_ratio_gate_allows_cycle())
+                and self._volume_rate_guard_allows_cycle() and self._entry_wiggle_ratio_gate_allows_cycle()
+                and self._peak_window_allows_cycle())
 
     def _reversal_cooldown_active(self):
         """See BotConfig.post_reversal_cooldown_seconds."""
@@ -6949,6 +7085,12 @@ class StochBot:
         if entry_wiggle_ratio_gate_active:
             entry_signal = None
 
+        # See BotConfig.peak_window_enabled -- same contract as every gate here, never touches
+        # an exit. Compiled off (and not yet turned on live) everywhere as of 2026-10-17.
+        peak_window_active = await self._update_peak_window_guard(state)
+        if peak_window_active:
+            entry_signal = None
+
         # See BotConfig.htf_alignment_block_timeframe. Called unconditionally (same "watch
         # before choosing" pattern as every gate above) so the dashboard readout stays fresh
         # even on a tick with no signal; the method itself returns False when signal is None.
@@ -7665,6 +7807,7 @@ class StochBot:
                 if (self.entry_vol_paused or intrabar_dispersion_blocked or zebra_blocked
                         or balance_blocked or self._reversal_cooldown_active() or volume_jump_active
                         or volume_wiggle_locked or volume_rate_guard_active or entry_wiggle_ratio_gate_active
+                        or peak_window_active
                         or (cfg.self_lock_enabled and self.real_trading_locked)
                         or (cfg.trading_hours_utc is not None
                             and self._apply_trading_hours_gate(reversal_signal) is None)

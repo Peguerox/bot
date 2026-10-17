@@ -445,6 +445,9 @@ CONFIG = BotConfig(
     # lighter_btc_initial_regime_overrides.sql. See BotConfig.schema_has_regime_overrides /
     # StochBot._regime_controls.
     schema_has_regime_overrides=True,
+    # 2026-10-17: enables the peak-window override columns/persistence -- the feature itself
+    # (peak_window_enabled) stays compiled off; this only makes the live toggle usable.
+    schema_has_peak_window=True,
     # 2026-10-09, direct request after a real-data study (449 real trades): block a fresh entry
     # when the longer-timeframe stochastic AGREES with the 1-minute signal -- found backwards
     # from intuition (alignment meant WORSE outcomes, 56-60% win/net loss vs 70-81% win/net win

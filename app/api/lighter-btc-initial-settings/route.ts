@@ -52,6 +52,14 @@ const LIMITS = {
   // ratio) -- this is a two-sided band. See BotConfig.entry_wiggle_ratio_enabled/_min/_max.
   entryWiggleRatioMin: { min: 0, max: 1000, label: "entry wiggle/vol ratio band low" },
   entryWiggleRatioMax: { min: 0, max: 1000, label: "entry wiggle/vol ratio band high" },
+  // 2026-10-17, direct request: "build the peak rule with a panel where we can modify the
+  // rules and on/off toggle". See BotConfig.peak_window_enabled's docstring for the research
+  // and the causal peak-detection algorithm these five numbers define.
+  peakWindowFloor: { min: 1, max: 1_000_000, label: "peak window product floor" },
+  peakWindowConfirmMinutes: { min: 1, max: 300, label: "peak window confirm minutes" },
+  peakWindowSeparationHours: { min: 0, max: 24, label: "peak window min separation (hours)" },
+  peakWindowStartHours: { min: 0, max: 48, label: "peak window start (hours after peak)" },
+  peakWindowEndHours: { min: 0, max: 48, label: "peak window end (hours after peak)" },
 };
 
 // Worker 4 (2026-10-10, exact clone of Worker 1, cloned table shape) shares this same route --
@@ -84,6 +92,11 @@ export async function POST(req: NextRequest) {
     ["stochWindow", "override_stoch_window"],
     ["entryWiggleRatioMin", "override_entry_wiggle_ratio_min"],
     ["entryWiggleRatioMax", "override_entry_wiggle_ratio_max"],
+    ["peakWindowFloor", "override_peak_window_floor"],
+    ["peakWindowConfirmMinutes", "override_peak_window_confirm_minutes"],
+    ["peakWindowSeparationHours", "override_peak_window_min_separation_hours"],
+    ["peakWindowStartHours", "override_peak_window_start_hours"],
+    ["peakWindowEndHours", "override_peak_window_end_hours"],
   ] as const) {
     const raw = body[key];
     if (raw === undefined || raw === null || raw === "") continue;
@@ -119,6 +132,7 @@ export async function POST(req: NextRequest) {
     // compiled-only (BotConfig.require_fresh_signal). See StochBot's require_fresh local in
     // tick() for the override-read side.
     ["requireFreshSignal", "override_require_fresh_signal"],
+    ["peakWindowEnabled", "override_peak_window_enabled"],
   ] as const) {
     const raw = body[key];
     if (raw === undefined || raw === null) continue;
@@ -236,6 +250,14 @@ export async function POST(req: NextRequest) {
   if (wiggleRatioLo != null && wiggleRatioHi != null && wiggleRatioLo >= wiggleRatioHi) {
     return NextResponse.json(
       { error: `Entry wiggle/vol ratio low (${wiggleRatioLo}) must be less than high (${wiggleRatioHi}).` },
+      { status: 400 }
+    );
+  }
+  const peakStart = (out["override_peak_window_start_hours"] as number | undefined) ?? cur?.override_peak_window_start_hours;
+  const peakEnd = (out["override_peak_window_end_hours"] as number | undefined) ?? cur?.override_peak_window_end_hours;
+  if (peakStart != null && peakEnd != null && peakStart >= peakEnd) {
+    return NextResponse.json(
+      { error: `Peak window start (${peakStart}h) must be less than end (${peakEnd}h).` },
       { status: 400 }
     );
   }

@@ -6559,6 +6559,130 @@ async def t_entry_wiggle_ratio_gate_blocks_a_hedge_style_cycle():
     check("fixed_direction leg does not want a new cycle while blocked", bot._wants_new_cycle() is False)
 
 
+async def t_peak_window_off_by_default():
+    print("\n[peak window: off by default -- never blocks regardless of state]")
+    bot = make_bot(FakeExchange(), candles_kind="mid")
+    bot.state_row["peak_window_last_confirmed_t"] = None
+    active = await bot._update_peak_window_guard(bot.state_row)
+    check("never blocks when unconfigured", active is False, active)
+
+
+async def t_peak_window_blocks_when_no_peak_confirmed_yet():
+    print("\n[peak window: enabled but no peak has ever confirmed -> blocks, never guesses]")
+    bot = make_bot(FakeExchange(), candles_kind="mid",
+                    peak_window_enabled=True, peak_window_floor=10_000_000,
+                    peak_window_confirm_minutes=45, peak_window_min_separation_hours=6,
+                    peak_window_start_hours=2, peak_window_end_hours=6)
+    active = await bot._update_peak_window_guard(bot.state_row)
+    check("blocks -- nothing has ever confirmed as a peak", active is True, active)
+    check("_peak_window_allows_cycle reflects the block", bot._peak_window_allows_cycle() is False)
+
+
+async def t_peak_window_candidate_confirms_after_held_long_enough():
+    print("\n[peak window: a candidate held past confirm_minutes becomes a confirmed peak]")
+    bot = make_bot(FakeExchange(), candles_kind="mid",
+                    peak_window_enabled=True, peak_window_floor=1.0,
+                    peak_window_confirm_minutes=45, peak_window_min_separation_hours=6,
+                    peak_window_start_hours=2, peak_window_end_hours=6)
+    # Seed a candidate that's already been sitting for 46 minutes, at a value no real candle
+    # data (tiny product from make_candles' flat mid fixture) could beat -- it should confirm
+    # on this tick rather than being overwritten by a fresh (lower) reading.
+    now_ms = time.time() * 1000
+    bot._peak_candidate = (now_ms - 46 * 60000, 999999.0)
+    await bot._update_peak_window_guard(bot.state_row)
+    check("candidate cleared after confirming", bot._peak_candidate is None, bot._peak_candidate)
+    check("last confirmed time set", bot._peak_last_confirmed_t is not None)
+    check("last confirmed value carried over", bot._peak_last_confirmed_v == 999999.0,
+          bot._peak_last_confirmed_v)
+
+
+async def t_peak_window_allows_inside_the_window():
+    print("\n[peak window: allows a fresh entry inside [start, end) hours since the peak]")
+    bot = make_bot(FakeExchange(), candles_kind="mid",
+                    peak_window_enabled=True, peak_window_floor=1.0,
+                    peak_window_confirm_minutes=45, peak_window_min_separation_hours=6,
+                    peak_window_start_hours=2, peak_window_end_hours=6)
+    bot._peak_last_confirmed_t = time.time() * 1000 - 3 * 3600000  # 3h ago -- inside 2-6h
+    active = await bot._update_peak_window_guard(bot.state_row)
+    check("not active -- 3h since the peak sits inside 2-6h", active is False, active)
+    check("_peak_window_allows_cycle reflects the allow", bot._peak_window_allows_cycle() is True)
+
+
+async def t_peak_window_blocks_outside_the_window():
+    print("\n[peak window: blocks both too-soon and too-late relative to the peak]")
+    bot = make_bot(FakeExchange(), candles_kind="mid",
+                    peak_window_enabled=True, peak_window_floor=1.0,
+                    peak_window_confirm_minutes=45, peak_window_min_separation_hours=6,
+                    peak_window_start_hours=2, peak_window_end_hours=6)
+    bot._peak_last_confirmed_t = time.time() * 1000 - 1 * 3600000  # 1h ago -- before the window
+    active = await bot._update_peak_window_guard(bot.state_row)
+    check("blocks -- too soon after the peak", active is True, active)
+
+    bot2 = make_bot(FakeExchange(), candles_kind="mid",
+                     peak_window_enabled=True, peak_window_floor=1.0,
+                     peak_window_confirm_minutes=45, peak_window_min_separation_hours=6,
+                     peak_window_start_hours=2, peak_window_end_hours=6)
+    bot2._peak_last_confirmed_t = time.time() * 1000 - 7 * 3600000  # 7h ago -- past the window
+    active2 = await bot2._update_peak_window_guard(bot2.state_row)
+    check("blocks -- too long after the peak", active2 is True, active2)
+
+
+async def t_peak_window_live_override_turns_it_on():
+    print("\n[peak window: override_peak_window_* turns it on live, compiled off]")
+    bot = make_bot(FakeExchange(), candles_kind="mid", schema_has_regime_overrides=True)
+    bot._peak_last_confirmed_t = time.time() * 1000 - 3 * 3600000
+    bot.state_row["override_peak_window_enabled"] = True
+    bot.state_row["override_peak_window_floor"] = 1.0
+    bot.state_row["override_peak_window_confirm_minutes"] = 45
+    bot.state_row["override_peak_window_min_separation_hours"] = 6
+    bot.state_row["override_peak_window_start_hours"] = 2
+    bot.state_row["override_peak_window_end_hours"] = 6
+    active = await bot._update_peak_window_guard(bot.state_row)
+    check("allows via the live override even though compiled off", active is False, active)
+
+
+async def t_peak_window_override_ignored_without_schema_flag():
+    print("\n[peak window: schema_has_regime_overrides=False ignores the override]")
+    bot = make_bot(FakeExchange(), candles_kind="mid", schema_has_regime_overrides=False)
+    bot._peak_last_confirmed_t = time.time() * 1000 - 3 * 3600000
+    bot.state_row["override_peak_window_enabled"] = True
+    bot.state_row["override_peak_window_floor"] = 1.0
+    bot.state_row["override_peak_window_confirm_minutes"] = 45
+    bot.state_row["override_peak_window_min_separation_hours"] = 6
+    bot.state_row["override_peak_window_start_hours"] = 2
+    bot.state_row["override_peak_window_end_hours"] = 6
+    active = await bot._update_peak_window_guard(bot.state_row)
+    check("still inactive -- override present but the schema flag is off", active is False, active)
+
+
+async def t_peak_window_restores_persisted_peak_after_restart():
+    print("\n[peak window: restores the last confirmed peak from the DB after a restart]")
+    print("  same restart-survival fix as the wiggle_vol_rise_exit baseline earlier this session.")
+    bot = make_bot(FakeExchange(), candles_kind="mid", schema_has_peak_window=True,
+                    peak_window_enabled=True, peak_window_floor=1.0,
+                    peak_window_confirm_minutes=45, peak_window_min_separation_hours=6,
+                    peak_window_start_hours=2, peak_window_end_hours=6)
+    persisted_t = time.time() * 1000 - 3 * 3600000  # 3h ago -- inside 2-6h
+    bot.state_row["peak_window_last_confirmed_t"] = persisted_t
+    bot.state_row["peak_window_last_confirmed_v"] = 1234.5
+    check("fresh instance -- nothing captured yet", bot._peak_last_confirmed_t is None)
+    active = await bot._update_peak_window_guard(bot.state_row)
+    check("restored from the DB and used on the very first tick -- allows (inside 2-6h)",
+          active is False, active)
+    check("in-process value now matches what was persisted",
+          abs(bot._peak_last_confirmed_t - persisted_t) < 1, bot._peak_last_confirmed_t)
+
+
+async def t_peak_window_blocks_a_hedge_style_cycle():
+    print("\n[peak window: blocks a fixed_direction leg's _wants_new_cycle too]")
+    bot = _hedge_leg(peak_window_enabled=True, peak_window_floor=10_000_000,
+                      peak_window_confirm_minutes=45, peak_window_min_separation_hours=6,
+                      peak_window_start_hours=2, peak_window_end_hours=6)
+    active = await bot._update_peak_window_guard(bot.state_row)
+    check("active -- no peak ever confirmed", active is True, active)
+    check("fixed_direction leg does not want a new cycle while blocked", bot._wants_new_cycle() is False)
+
+
 async def t_volume_jump_ratio_basic():
     print("\n[compute_volume_jump_ratio: hand-computed example]")
     candles = _jump_candles([1.0] * 10 + [5.0])
@@ -9207,6 +9331,15 @@ async def main():
               t_entry_wiggle_ratio_gate_live_override,
               t_entry_wiggle_ratio_gate_override_ignored_without_schema_flag,
               t_entry_wiggle_ratio_gate_blocks_a_hedge_style_cycle,
+              t_peak_window_off_by_default,
+              t_peak_window_blocks_when_no_peak_confirmed_yet,
+              t_peak_window_candidate_confirms_after_held_long_enough,
+              t_peak_window_allows_inside_the_window,
+              t_peak_window_blocks_outside_the_window,
+              t_peak_window_live_override_turns_it_on,
+              t_peak_window_override_ignored_without_schema_flag,
+              t_peak_window_restores_persisted_peak_after_restart,
+              t_peak_window_blocks_a_hedge_style_cycle,
               t_volume_jump_ratio_basic,
               t_volume_jump_ratio_needs_full_lookback,
               t_volume_jump_ratio_zero_baseline,

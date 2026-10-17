@@ -101,6 +101,9 @@ CONFIG = BotConfig(
     schema_has_regime_overrides=True,
     htf_alignment_block_available=True,
     schedule_rules_enabled=True,
+    # 2026-10-17: enables the peak-window override columns/persistence -- the feature itself
+    # (peak_window_enabled) stays compiled off; this only makes the live toggle usable.
+    schema_has_peak_window=True,
     schedule_rules_bot_key="worker4",
     schema_has_schedule_metrics=True,
     schema_has_schedule_rule_tracking=True,
