@@ -5579,19 +5579,19 @@ function MasterSchedulePanel({
             </p>
             {rule.worker1_enabled !== false && (
               <p className="text-[10px] text-gray-400 leading-snug mt-1">
-                <span className="text-gray-600">W1:</span>{" "}
+                <span className="text-sky-400 font-bold">W1:</span>{" "}
                 {formatSettingsLine(rule.worker1, WORKER1_SETTINGS_LABELS) || <span className="text-gray-600">no settings set</span>}
               </p>
             )}
             {rule.hedge_enabled !== false && (
               <p className="text-[10px] text-gray-400 leading-snug">
-                <span className="text-gray-600">Hedge:</span>{" "}
+                <span className="text-purple-400 font-bold">Hedge:</span>{" "}
                 {formatSettingsLine(rule.hedge, HEDGE_SETTINGS_LABELS) || <span className="text-gray-600">no settings set</span>}
               </p>
             )}
             {rule.worker4_enabled !== false && (
               <p className="text-[10px] text-gray-400 leading-snug">
-                <span className="text-gray-600">W4:</span>{" "}
+                <span className="text-amber-400 font-bold">W4:</span>{" "}
                 {formatSettingsLine(rule.worker4, WORKER4_SETTINGS_LABELS) || <span className="text-gray-600">no settings set</span>}
               </p>
             )}
@@ -5629,9 +5629,9 @@ function MasterSchedulePanel({
                     {condField("Color bal", i, "color_balance_min", "color_balance_max", rule)}
                   </div>
                 </div>
-                <div>
+                <div className="rounded-lg border-l-2 border-sky-500/60 bg-sky-500/5 pl-2 py-1.5">
                   <div className="flex items-center justify-between mb-1 flex-wrap gap-1">
-                    <p className="text-gray-500 text-[9px] uppercase">Worker 1 settings (blank = leave alone)</p>
+                    <p className="text-sky-400 text-[9px] uppercase font-bold">Worker 1 settings (blank = leave alone)</p>
                     <div className="flex gap-1">
                       {/* Tri-state (2026-10-06, direct request: "we need to put another option
                           Dont change when matched -- so whatever is happening in 1 rule does not
@@ -5687,9 +5687,9 @@ function MasterSchedulePanel({
                     </div>
                   </div>
                 </div>
-                <div>
+                <div className="rounded-lg border-l-2 border-purple-500/60 bg-purple-500/5 pl-2 py-1.5">
                   <div className="flex items-center justify-between mb-1 flex-wrap gap-1">
-                    <p className="text-gray-500 text-[9px] uppercase">Hedge settings (blank = leave alone)</p>
+                    <p className="text-purple-400 text-[9px] uppercase font-bold">Hedge settings (blank = leave alone)</p>
                     <div className="flex gap-1">
                       {([[true, "ON when matched", "bg-green-500/20 text-green-400"],
                          [false, "OFF when matched", "bg-red-500/20 text-red-400"],
@@ -5716,9 +5716,9 @@ function MasterSchedulePanel({
                     {settingsField("SL Dwell", i, "hedge", "sl_dwell_seconds", rule)}
                   </div>
                 </div>
-                <div>
+                <div className="rounded-lg border-l-2 border-amber-500/60 bg-amber-500/5 pl-2 py-1.5">
                   <div className="flex items-center justify-between mb-1 flex-wrap gap-1">
-                    <p className="text-gray-500 text-[9px] uppercase">Worker 4 settings (blank = leave alone)</p>
+                    <p className="text-amber-400 text-[9px] uppercase font-bold">Worker 4 settings (blank = leave alone)</p>
                     <div className="flex gap-1">
                       {([[true, "ON when matched", "bg-green-500/20 text-green-400"],
                          [false, "OFF when matched", "bg-red-500/20 text-red-400"],
