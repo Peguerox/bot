@@ -165,6 +165,42 @@ async def t_tick_error_never_propagates():
         core.TICK_EVERY = orig_tick_every
 
 
+async def t_participation_cap_never_produces_a_nonadjacent_pair():
+    # Regression test for the real 2026-10-18 incident: a pair whose entry/exit were 6 levels
+    # apart (0.75%) and negative, when every completed pair in this design must be exactly one
+    # adjacent level apart (and therefore always profitable). Root cause was letting `lvl` jump
+    # to match the real close price even when the volume cap only allowed a few fills.
+    bot, fake = make_bot(base_state(order_type="limit", spacing_pct=0.125))
+    step = math.log(1 + 0.125 / 100)
+
+    # Candle 1: big uncapped drop opens several buys (high volume -> cap is generous).
+    p0 = 10.0
+    low1 = p0 * math.exp(-5 * step)
+    c1 = candle(1000, p0, p0, low1, low1, 1_000_000)
+    await bot.process_candle(c1, fake.state)
+    state_after_1 = (await bot.sb("GET", f"{core.TABLE_STATE}?id=eq.1"))[0]
+    level_after_1 = bot._last_level
+
+    # Candle 2: price WANTS to rise back up 5 levels, but volume is tiny -- the participation
+    # cap should allow at most ~1 fill (order size at $10,000/15-down-levels is large relative
+    # to 1 LIT of real volume).
+    high2 = p0 * math.exp(2 * step)
+    c2 = candle(2000, low1, high2, low1, high2, 350.0)  # enough real volume for ~1 fill, not all 5
+    await bot.process_candle(c2, state_after_1)
+
+    check("lvl does not jump ahead of the fills the volume cap actually allowed",
+          bot._last_level < level_after_1 + 5, (level_after_1, bot._last_level))
+    check("the capped candle actually produced at least one real pair to check", len(fake.trades) >= 1, fake.trades)
+    if fake.trades:
+        for t in fake.trades:
+            ratio = t["exit_price"] / t["entry_price"]
+            levels_apart = abs(math.log(ratio) / step)
+            check(f"trade id={len(fake.trades)} entry/exit are exactly one level apart",
+                  abs(levels_apart - 1) < 0.01, levels_apart)
+            check(f"trade id={len(fake.trades)} is profitable (adjacent-level pairs always are)",
+                  t["pnl_usd"] > 0, t["pnl_usd"])
+
+
 async def t_cold_start_does_not_replay_backlog():
     # Regression test for the real 2026-10-18 incident: Lighter's candles API does not honor
     # count_back (confirmed live: asked for 5, got 500, spanning ~8 hours back). The first tick
@@ -200,6 +236,7 @@ async def main():
               t_limit_fills_respect_participation_cap,
               t_compounding_updates_current_capital,
               t_cold_start_does_not_replay_backlog,
+              t_participation_cap_never_produces_a_nonadjacent_pair,
               t_tick_error_never_propagates):
         try:
             await t()

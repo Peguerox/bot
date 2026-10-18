@@ -199,49 +199,63 @@ class LitGridPaper:
         if self._last_level is None:
             self._last_level = level_of(path[0], step)
         lvl = self._last_level
-        events = []
-        for i in range(1, len(path)):
-            new_lvl = level_of(path[i], step)
-            while new_lvl > lvl:
-                lvl += 1
-                events.append(("sell", math.exp(lvl * step)))
-            while new_lvl < lvl:
-                lvl -= 1
-                events.append(("buy", math.exp(lvl * step)))
-        self._last_level = lvl
 
+        # Fill budget for this candle (limit only -- market fills are unlimited, taker always
+        # gets filled). Correctness-critical: when the budget runs out mid-candle, `lvl` must
+        # stop exactly where fills stopped, NOT jump ahead to match the real close price. Every
+        # completed pair in this design is supposed to be exactly one adjacent level apart (the
+        # LIFO stack is built from a continuous level walk) -- letting `lvl` outrun the fills
+        # actually taken broke that invariant and produced the non-adjacent, sometimes-negative
+        # pairs found live 2026-10-18 (trade entry/exit six levels apart instead of one). The
+        # unfilled remainder is simply deferred to a later tick, like a real resting order still
+        # waiting for enough volume to fill against.
+        fill_budget = None
         if order_type == "limit":
-            cap = int((PARTICIPATION * (candle.get("v") or 0)) / order_size) if order_size > 0 else 0
-            take = events[:max(0, cap)]
-        else:
-            take = events
+            fill_budget = int((PARTICIPATION * (candle.get("v") or 0)) / order_size) if order_size > 0 else 0
+        fills_used = 0
 
         realized_pnl = 0.0
         closed_at = datetime.fromtimestamp(candle["t"] / 1000, tz=timezone.utc).isoformat()
-        for side, price in take:
-            if side == "sell":
-                if open_buys:
-                    entry = open_buys.pop()
-                    pnl = (price - entry["price"]) * entry["qty"]
-                    if order_type == "market":
-                        pnl -= (MARKET_ROUNDTRIP_COST_PCT / 100.0) * ((price + entry["price"]) / 2) * entry["qty"]
-                    realized_pnl += pnl
-                    await self.log_trade("buy_then_sell", entry["opened_at"], closed_at,
-                                          entry["price"], price, entry["qty"], pnl, order_type)
-                else:
-                    open_sells.append({"price": price, "qty": order_size, "opened_at": closed_at})
-            else:
-                if open_sells:
-                    entry = open_sells.pop()
-                    pnl = (entry["price"] - price) * entry["qty"]
-                    if order_type == "market":
-                        pnl -= (MARKET_ROUNDTRIP_COST_PCT / 100.0) * ((price + entry["price"]) / 2) * entry["qty"]
-                    realized_pnl += pnl
-                    await self.log_trade("sell_then_buy", entry["opened_at"], closed_at,
-                                          entry["price"], price, entry["qty"], pnl, order_type)
-                else:
-                    open_buys.append({"price": price, "qty": order_size, "opened_at": closed_at})
 
+        def budget_left():
+            return fill_budget is None or fills_used < fill_budget
+
+        for i in range(1, len(path)):
+            if not budget_left():
+                break
+            target_lvl = level_of(path[i], step)
+            while lvl != target_lvl and budget_left():
+                if target_lvl > lvl:
+                    lvl += 1
+                    side, price = "sell", math.exp(lvl * step)
+                else:
+                    lvl -= 1
+                    side, price = "buy", math.exp(lvl * step)
+                fills_used += 1
+                if side == "sell":
+                    if open_buys:
+                        entry = open_buys.pop()
+                        pnl = (price - entry["price"]) * entry["qty"]
+                        if order_type == "market":
+                            pnl -= (MARKET_ROUNDTRIP_COST_PCT / 100.0) * ((price + entry["price"]) / 2) * entry["qty"]
+                        realized_pnl += pnl
+                        await self.log_trade("buy_then_sell", entry["opened_at"], closed_at,
+                                              entry["price"], price, entry["qty"], pnl, order_type)
+                    else:
+                        open_sells.append({"price": price, "qty": order_size, "opened_at": closed_at})
+                else:
+                    if open_sells:
+                        entry = open_sells.pop()
+                        pnl = (entry["price"] - price) * entry["qty"]
+                        if order_type == "market":
+                            pnl -= (MARKET_ROUNDTRIP_COST_PCT / 100.0) * ((price + entry["price"]) / 2) * entry["qty"]
+                        realized_pnl += pnl
+                        await self.log_trade("sell_then_buy", entry["opened_at"], closed_at,
+                                              entry["price"], price, entry["qty"], pnl, order_type)
+                    else:
+                        open_buys.append({"price": price, "qty": order_size, "opened_at": closed_at})
+
+        self._last_level = lvl
         new_capital = float(state["current_capital_usd"]) + realized_pnl if state["compounding_enabled"] else float(state["current_capital_usd"])
         await self.update_state({
             "live_price": candle["c"],
@@ -268,7 +282,13 @@ class LitGridPaper:
             # starting clean from "now". Bootstrap to the latest candle only; nothing before it
             # is processed.
             self._last_candle_t = candles[-1]["t"]
+            center_price = candles[-1]["c"]
             self._last_level = level_of(candle_path(candles[-1])[0], math.log(1 + float(state["spacing_pct"]) / 100.0))
+            await self.log_run("grid_armed", {
+                "center_price": center_price, "center_level": self._last_level,
+                "spacing_pct": state["spacing_pct"],
+                "levels_up": state["levels_up"], "levels_down": state["levels_down"],
+            })
             return
         for c in candles:
             if c["t"] <= self._last_candle_t:
