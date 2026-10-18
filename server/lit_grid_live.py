@@ -1068,6 +1068,19 @@ class LitGridLive:
         cur_lvl = level_of(price / anchor, step, reference=self._window_center)
         self._window_center = cur_lvl
 
+        # Fixed grid (direct request: "5 up + 15 down = 20 orders, unless we change it"): on an
+        # anchored grid the lines run from -levels_down to +levels_up around the start price and
+        # never slide. A resting buy below the bottom line (left over from an older rule, or from
+        # lowering levels_down) is cancelled so the order count stays levels_up + levels_down.
+        grid_bottom = -levels_down
+        if anchored:
+            for rows in resting.values():
+                for r in rows:
+                    if r["side"] == "buy" and int(r["level"]) < grid_bottom:
+                        if not self._lock_held:
+                            return
+                        await self.cancel_order_row(r)
+
         # Window-chasing removed entirely (direct request, eighth pass): a resting buy used to
         # get cancelled the moment its own level fell outside the window's current top edge,
         # even though price had never actually reached its real limit price -- repeated
@@ -1174,13 +1187,15 @@ class LitGridLive:
                     base_capital_remaining -= from_base
             else:
                 if anchored:
-                    # Highest free line at or below price, then levels_down lines from there.
-                    top = cur_lvl
-                    while top in holdings:
-                        top -= 1
+                    # One empty line next to price, buys on every line below it down to the fixed
+                    # bottom: the empty line is the lowest held lot's line (its sell sits one line
+                    # up), or with nothing held, the line at price.
+                    top = min(min(holdings) - 1, cur_lvl) if holdings else cur_lvl - 1
+                    bottom = grid_bottom
                 else:
                     top = cur_lvl - 1
-                for lvl in range(top, top - levels_down, -1):
+                    bottom = top - levels_down + 1
+                for lvl in range(top, bottom - 1, -1):
                     if not self._lock_held:
                         return
                     if lvl in snap.buy_levels or lvl in snap.sell_closes or lvl in holdings:

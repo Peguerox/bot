@@ -1128,6 +1128,33 @@ async def t_grid_after_cold_start_is_exactly_spacing_from_start_price():
           buys == want_buys, (buys, want_buys))
 
 
+async def t_anchored_grid_keeps_exactly_levels_up_plus_levels_down_orders():
+    # Direct request: 5 up + 15 down = 20 orders. Live bug: after the buy at line -1 filled, the
+    # ladder slid to -2..-16 and the old -16 buy stayed -- 21 orders.
+    P = 2.87055
+    held = [{"id": 10 + k, "level": k, "side": "buy", "status": "filled", "filled_qty": 2.16,
+             "filled_price": 2.8706, "size": 2.16} for k in range(-1, 5)]
+    sells = [{"id": 30 + k, "level": k + 1, "side": "sell", "status": "open", "closes_level": k,
+              "client_order_index": 300 + k, "exchange_order_id": 3000 + k, "size": 2.16,
+              "limit_price": core.round_price(P * 1.00125 ** (k + 1))} for k in range(-1, 5)]
+    buys = [{"id": 60 - k, "level": k, "side": "buy", "status": "open",
+             "client_order_index": 600 - k, "exchange_order_id": 6000 - k, "size": 2.16,
+             "limit_price": core.round_price(P * 1.00125 ** k)} for k in range(-16, -1)]
+    bot, fake = make_bot(base_state(levels_up=5, levels_down=15, order_size_lit=2.16,
+                                     usdc_balance=500.0, grid_anchor_price=P),
+                          orders=held + sells + buys)
+    await bot.maintain_window(fake.state, round(P / 1.00125, 5))
+    open_rows = [o for o in fake.orders if o["status"] in ("open", "pending")]
+    check("the stray buy below the bottom line (-16) is cancelled",
+          next(o for o in fake.orders if o["side"] == "buy" and o["level"] == -16)["status"] == "cancel_requested",
+          [o for o in fake.orders if o["level"] == -16])
+    check("no new buy is placed below -15 or on the held line",
+          not any(o["side"] == "buy" and o["status"] in ("open", "pending") and (o["level"] < -15 or o["level"] == -1)
+                  for o in fake.orders), open_rows)
+    check("exactly 20 orders remain (6 sells + 14 buys while one lot is held at -1)",
+          len(open_rows) == 20, len(open_rows))
+
+
 async def t_maintain_window_cold_start_budget_uses_real_price_not_theoretical_level_price():
     # The deep levels' theoretical grid price is much cheaper than live price -- a cold start's
     # REAL cost is what the live price actually charges, not each level's own (cheaper)
@@ -1712,6 +1739,7 @@ async def main():
               t_maintain_window_cold_start_fills_via_real_market_buys,
               t_levels_up_and_levels_down_are_independent,
         t_grid_after_cold_start_is_exactly_spacing_from_start_price,
+        t_anchored_grid_keeps_exactly_levels_up_plus_levels_down_orders,
               t_maintain_window_cold_start_budget_uses_real_price_not_theoretical_level_price,
               t_maintain_window_reverts_to_resting_limit_ladder_after_the_first_ever_fill,
               t_maintain_window_accumulates_resting_buys_as_price_drifts_without_cancelling_old_ones,
