@@ -594,6 +594,53 @@ async def t_fetch_current_price_returns_none_on_empty_trades():
     check("no trades logged when the price feed returns nothing", len(fake.trades) == 0, fake.trades)
 
 
+async def t_rate_limited_errors_back_off_before_retrying():
+    # Live incident (2026-10-18): polling every TICK_EVERY=3s on top of Worker 1/2's own request
+    # volume from the same IP tripped Lighter's rate limit, and the loop just kept retrying at
+    # the normal 3s cadence on every 429, never backing off. Must now sleep progressively longer
+    # on consecutive 429s, capped, and reset the moment a tick succeeds again.
+    class RateLimitedBot:
+        def __init__(self, *_):
+            pass
+        async def log_run(self, *_a, **_k):
+            pass
+        async def acquire_lock(self):
+            raise RuntimeError("fetch_current_price 429 ct=application/json: Too Many Requests!")
+        async def tick(self):
+            pass
+        async def release_lock(self):
+            pass
+
+    orig_cls = core.LitGridPaper
+    orig_tick_every = core.TICK_EVERY
+    orig_sleep = asyncio.sleep
+    sleeps = []
+
+    async def fake_sleep(secs):
+        sleeps.append(secs)
+        if len(sleeps) >= 4:
+            raise asyncio.CancelledError()
+        await orig_sleep(0)  # yield without really waiting
+
+    core.LitGridPaper = RateLimitedBot
+    core.TICK_EVERY = 3.0
+    asyncio.sleep = fake_sleep
+    try:
+        try:
+            await run_lit_grid_paper()
+        except asyncio.CancelledError:
+            pass
+    finally:
+        core.LitGridPaper = orig_cls
+        core.TICK_EVERY = orig_tick_every
+        asyncio.sleep = orig_sleep
+
+    check("the first retry after a 429 waits longer than the normal tick interval",
+          len(sleeps) >= 2 and sleeps[0] > core.TICK_EVERY, sleeps)
+    check("backoff grows on repeated 429s instead of staying flat at the normal cadence",
+          len(sleeps) >= 2 and sleeps[1] > sleeps[0], sleeps)
+
+
 async def main():
     t_level_math_matches_validated_logic()
     t_levels_for_drawdown_matches_known_values()
@@ -618,7 +665,8 @@ async def main():
               t_disabling_resets_in_memory_tracking,
               t_cold_start_arms_without_error_and_writes_state,
               t_fetch_current_price_returns_none_on_empty_trades,
-              t_tick_error_never_propagates):
+              t_tick_error_never_propagates,
+              t_rate_limited_errors_back_off_before_retrying):
         try:
             await t()
         except Exception as e:

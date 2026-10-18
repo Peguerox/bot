@@ -109,6 +109,13 @@ LOCK_STALE_AFTER = 30.0
 # round-trip noise through log()/exp() (~1e-12 relative) while leaving genuine small moves (which
 # clear a boundary by a much larger margin) completely unaffected.
 LEVEL_GUARD_FRAC = 0.02
+# Backoff on a 429 from Lighter's API (2026-10-18, live incident: polling every TICK_EVERY=3s on
+# top of Worker 1 and Worker 2's own request volume from the same IP tripped Lighter's rate
+# limit, and the tick loop was just retrying at the normal 3s cadence every time, never backing
+# off). Doubles on each consecutive rate-limited tick, capped, and resets the moment a tick
+# succeeds again.
+RATE_LIMIT_BACKOFF_START = 15.0
+RATE_LIMIT_BACKOFF_MAX = 120.0
 
 
 def level_of(price: float, step: float, reference: int = None) -> int:
@@ -596,16 +603,25 @@ async def run_lit_grid_paper():
     async with aiohttp.ClientSession() as http:
         bot = LitGridPaper(http)
         await bot.log_run("started", {})
+        backoff = RATE_LIMIT_BACKOFF_START
         try:
             while True:
+                sleep_for = TICK_EVERY
                 try:
                     if await bot.acquire_lock():
                         await bot.tick()
+                    backoff = RATE_LIMIT_BACKOFF_START  # any clean pass resets the backoff
                 except Exception as e:
+                    msg = str(e)
                     try:
-                        await bot.log_run("tick_error", {"error": str(e)[:300]})
+                        await bot.log_run("tick_error", {"error": msg[:300]})
                     except Exception:
                         print(f"[lit-grid] tick_error (and log_run also failed): {e}", flush=True)
-                await asyncio.sleep(TICK_EVERY)
+                    if "429" in msg or "Too Many Requests" in msg:
+                        # Back off instead of hammering the rate limit at the normal cadence --
+                        # doubles each consecutive hit, capped, reset on the next clean pass.
+                        sleep_for = backoff
+                        backoff = min(backoff * 2, RATE_LIMIT_BACKOFF_MAX)
+                await asyncio.sleep(sleep_for)
         finally:
             await bot.release_lock()
