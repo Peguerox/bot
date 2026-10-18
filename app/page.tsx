@@ -1576,6 +1576,12 @@ function LitGridLivePanel({
             color={pnlColor(botProfit)}
           />
           <Stat label="Unrealized PNL" value={fmtUsd(unrealizedPnl)} sub={fmtPct(unrealizedPct)} color={pnlColor(unrealizedPnl)} />
+          <Stat
+            label="Total Account Value"
+            value={totalValue != null ? `$${totalValue.toFixed(2)}` : "—"}
+            sub="USDC + LIT at live price (profit included)"
+            color="text-white"
+          />
           <Stat label="Investment" value={`$${capitalUsd.toFixed(2)}`} sub="set via Settings" color="text-gray-300" />
           <Stat
             label="Live Price"
