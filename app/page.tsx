@@ -1442,6 +1442,14 @@ function LitGridPaperPanel({
   const totalPnlPct = capitalUsd > 0 ? (totalPnl / capitalUsd) * 100 : 0;
   const botProfitPct = capitalUsd > 0 ? (botProfit / capitalUsd) * 100 : 0;
 
+  // Two nearest grid lines around the live price -- the next trigger in each direction, so you
+  // can see at a glance how close the next buy/sell actually is without doing the math yourself.
+  const spacingPctNum = st?.spacing_pct != null ? Number(st.spacing_pct) : null;
+  const nextBuyPrice = spacingPctNum != null && st?.live_level != null
+    ? Math.exp(st.live_level * Math.log(1 + spacingPctNum / 100)) : null;
+  const nextSellPrice = spacingPctNum != null && st?.live_level != null
+    ? Math.exp((st.live_level + 1) * Math.log(1 + spacingPctNum / 100)) : null;
+
   const [spacingIn, setSpacingIn] = useState("");
   const [upIn, setUpIn] = useState("");
   const [downIn, setDownIn] = useState("");
@@ -1525,8 +1533,10 @@ function LitGridPaperPanel({
           </div>
         </div>
         <p className="text-gray-500 text-xs">
-          Geometric grid, paired buy-low/sell-high cycles · PAPER ONLY, no real orders · live Lighter LIT/USDC candles ·
-          limit fills capped at 25% of real candle volume, market fills pay an assumed ~0.103% round-trip spread
+          Real Bitsgap-style grid (confirmed against their own docs 2026-10-18): each buy ties to a specific sell one
+          level above, re-armed on every fill · funded proportionally (LIT for the up side, USDC for the down side),
+          not 50/50 · PAPER ONLY, no real orders · live Lighter LIT/USDC candles · limit fills capped at 25% of real
+          candle volume, market fills pay an assumed ~0.103% round-trip spread
         </p>
       </div>
 
@@ -1569,9 +1579,25 @@ function LitGridPaperPanel({
           <Stat
             label="Live Price"
             value={st?.live_price != null ? `$${Number(st.live_price).toFixed(4)}` : "—"}
-            sub={st?.live_level != null ? `level ${st.live_level}` : "—"}
+            sub={
+              nextBuyPrice != null && nextSellPrice != null
+                ? `buy@$${nextBuyPrice.toFixed(4)} · sell@$${nextSellPrice.toFixed(4)}`
+                : st?.live_level != null ? `level ${st.live_level}` : "—"
+            }
             color="text-gray-300"
           />
+        </div>
+      )}
+      {!loading && nextBuyPrice != null && nextSellPrice != null && (
+        <div className="grid grid-cols-2 gap-2">
+          <div className="bg-gray-950/50 rounded-lg p-2.5">
+            <p className="text-green-400 text-[10px] uppercase font-bold">Next Buy (below)</p>
+            <p className="text-green-300 text-sm font-mono">${nextBuyPrice.toFixed(4)}</p>
+          </div>
+          <div className="bg-gray-950/50 rounded-lg p-2.5">
+            <p className="text-amber-400 text-[10px] uppercase font-bold">Next Sell (above)</p>
+            <p className="text-amber-300 text-sm font-mono">${nextSellPrice.toFixed(4)}</p>
+          </div>
         </div>
       )}
       {!loading && (
