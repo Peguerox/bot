@@ -206,6 +206,51 @@ across a partial failure. Rather than patch each symptom again, the mutable coun
   position, so an order that only partially filled before the rest was cancelled doesn't
   attribute the WHOLE intended reservation to a position that's actually smaller.
 
+EIGHTH-PASS CHANGES (2026-10-18), two direct-request behavior changes plus four findings from a
+seventh independent audit:
+
+  - Window-chasing removed entirely (direct request): a resting buy used to get cancelled the
+    moment price drifted close enough that its OWN level fell outside the window's current top
+    edge -- even though price had never actually reached its real limit price. Repeated
+    cancel/replace cycles like this could burn through a one-shot allowance (when one is set)
+    with zero real fills ever happening -- nothing bought, nothing to sell, and no slots left to
+    try again. A resting buy is now cancelled ONLY by an explicit spacing change or a flatten,
+    never by the window simply moving. The window still governs where NEW buys get placed each
+    tick; it no longer un-places existing ones.
+  - Cold-start initial fill (direct request): the resting-limit ladder only ever fills if price
+    drifts down into it, which might never happen -- a fresh (or freshly reset) bot could sit at
+    zero inventory indefinitely. The very first time this bot has never filled a buy and
+    currently holds nothing, every level across the configured levels_down depth is bought with
+    a REAL MARKET order instead of a resting limit, right away, subject to the exact same
+    budget/allowance/bucket-funding checks as an ordinary buy. The instant any buy has ever
+    filled, every subsequent buy -- including refilling a level that later sells back to empty
+    -- goes through the normal resting-limit ladder again, unaffected. The budget check for a
+    cold-start buy uses the real LIVE price (what will actually be paid), not each level's
+    theoretical grid price, which would have understated the real cost for the deeper levels.
+  - [P1] A reconcile row-write failure could mean the write actually committed and only the
+    HTTP response was lost -- not that nothing happened. Treating that as "definitely not
+    persisted" (previous pass's assumption) left the bot's cash/holdings view silently wrong
+    with no pause. A row-write exception now also fails closed: it pauses new entries and resets
+    the balance-refresh timer so the very next tick forces a fresh, authoritative check instead
+    of waiting out the normal interval on a cache that might already be stale.
+  - [P1] check_balance_divergence() advanced its own refresh timer BEFORE persisting the fresh
+    balance it had just read -- if that save failed, the next tick's throttle check believed a
+    refresh had just succeeded and skipped doing a real one, trusting old cash with the pause
+    flag still false. The save is now inside the same guarded block as the read, and the timer
+    only advances once that save has actually succeeded.
+  - [P2] funded_from_bucket_usd was written in a SEPARATE PATCH after the order's own row was
+    already created -- if that second write failed, the order was real and open but its
+    reservation was invisible to _bucket_balances(), letting the derived "available" figure
+    overstate what was actually free. It's now included in the SAME insert that creates the
+    order's ledger row in the first place, for both the ordinary ladder and the cold-start path.
+  - [P2] The base capital_usd budget was being charged for the FULL cost of every holding and
+    resting buy, including the share that was actually funded by cover_drop -- the same dollar
+    was then subtracted a SECOND time from cover_drop's own derived figure, double-charging it
+    against both budgets. capital_committed for the base budget now excludes each holding's and
+    resting buy's bucket-funded share (tracked via the same funded_from_bucket_usd/
+    bucket_cost_total this file already maintains), so a position entirely funded by profit no
+    longer eats into the user's own configured capital_usd at all.
+
 Nothing in this codebase has placed a real LIMIT order before this (stoch_bot_core.py's
 place_order only ever sends MARKET orders; native SL/TP are the only conditional orders that
 exist). The Lighter SDK (lighter.SignerClient.create_order) supports real ORDER_TYPE_LIMIT with
@@ -415,7 +460,8 @@ class LitGridLive:
             print(f"  (lit-grid-live log_run failed: {e})", flush=True)
 
     # ── Order ledger ─────────────────────────────────────────────────────────────────────────
-    async def place_grid_order(self, level, side, limit_price, size, closes_level=None):
+    async def place_grid_order(self, level, side, limit_price, size, closes_level=None,
+                                funded_from_bucket_usd=0.0):
         # Lock validated BEFORE anything else (external audit fix, fifth pass): checking AFTER
         # the send let exactly one action slip through per lock-loss event.
         if not await self._touch_lock_heartbeat():
@@ -425,6 +471,11 @@ class LitGridLive:
             "level": level, "side": side, "client_order_index": co_idx,
             "status": "pending", "limit_price": limit_price, "size": size,
             "placed_at": now_iso(), "closes_level": closes_level,
+            # Written in the SAME insert as the row itself, never a separate follow-up PATCH
+            # (external audit fix, eighth pass): a failed follow-up write used to leave a real,
+            # open order with an invisible reservation, overstating what _bucket_balances()
+            # thought was still free.
+            "funded_from_bucket_usd": round(funded_from_bucket_usd, 8),
         }
         inserted = await self.sb("POST", TABLE_ORDERS, row)
         row_id = inserted[0]["id"]
@@ -527,6 +578,15 @@ class LitGridLive:
         gross["profit_bucket_rest_usd"] = round(gross["profit_bucket_rest_usd"], 8)
         gross["profit_bucket_compound_usd"] = round(gross["profit_bucket_compound_usd"], 8)
         return gross
+
+    async def _has_ever_bought(self):
+        """Whether any buy has EVER been confirmed filled, ever, for this bot -- the cold-start
+        detector (direct request, eighth pass). A fresh enable, or a reset that wiped the order
+        ledger, reads as never-bought again, which is exactly the point: each genuinely fresh
+        start gets the eager initial fill; every tick after that first fill goes through the
+        normal resting-limit ladder."""
+        rows = await self.sb("GET", f"{TABLE_ORDERS}?side=eq.buy&status=eq.filled&select=id&limit=1")
+        return bool(rows)
 
     async def reconcile_pending_orders(self, profit_mode=None):
         """Checks every non-terminal ledger row against the exchange's own account_orders().
@@ -631,9 +691,16 @@ class LitGridLive:
                 try:
                     await self.sb("PATCH", f"{TABLE_ORDERS}?id=eq.{r['id']}", patch)
                 except Exception as e:
+                    # The write may have actually committed and only the HTTP response was
+                    # lost -- NOT proof that nothing persisted (external audit fix, eighth
+                    # pass). Fails closed: pauses new entries and forces the very next tick to
+                    # run a fresh, authoritative balance check instead of trusting a cache that
+                    # might already be wrong, rather than just logging and moving on.
                     await self.log_run("reconcile_row_write_failed", {"row_id": r["id"], "error": str(e)[:200]})
                     all_ok = False
-                    continue  # not counted -- recomputed correctly next pass since nothing persisted
+                    self._balance_paused = True
+                    self._last_balance_check = 0.0
+                    continue
                 usdc_delta += row_usdc_delta
                 await self.log_run("reconciled_order", {
                     "row_id": r["id"], "raw_status": status_raw, "terminal": terminal,
@@ -671,19 +738,25 @@ class LitGridLive:
         """Returns (safe_to_trade, did_refresh). did_refresh tells the caller whether this call
         actually re-read the real exchange balance (vs. returning the cached pause-state because
         the periodic interval hadn't elapsed) -- callers use it to know whether a locally-tracked
-        cash delta is still needed on top (external audit fix P2-7)."""
+        cash delta is still needed on top (external audit fix P2-7).
+
+        The fresh balance's SAVE is inside the same guarded block as its READ, and the refresh
+        timer only advances once that save has actually succeeded (external audit fix, eighth
+        pass): advancing the timer first meant a failed save left the next tick believing a
+        refresh had just succeeded, so it skipped doing a real one and kept trusting stale cash
+        with the pause flag still false."""
         now = time.time()
         if now - self._last_balance_check < BALANCE_RECONCILE_EVERY:
             return not self._balance_paused, False
         try:
             holdings = await self.current_holdings()
             real_usdc, real_lit = await self.real_balances()
+            await self.update_state({"usdc_balance": real_usdc, "lit_balance": real_lit})
         except Exception as e:
             await self.log_run("balance_check_failed", {"error": str(e)[:200]})
             self._balance_paused = True
             return False, False
         self._last_balance_check = now
-        await self.update_state({"usdc_balance": real_usdc, "lit_balance": real_lit})
         ledger_lit = sum(h["qty"] for h in holdings.values())
         diverged = abs(ledger_lit - real_lit) > BALANCE_DIVERGENCE_TOLERANCE_LIT
         if diverged and not self._balance_paused:
@@ -923,13 +996,18 @@ class LitGridLive:
         resting = await self.resting_orders_by_level()
         snap = LiveSnapshot(resting)
 
-        for lvl, rows in list(resting.items()):
-            for r in rows:
-                if not self._lock_held:
-                    return
-                if r["side"] == "buy" and (lvl > cur_lvl - 1 or lvl < cur_lvl - levels_down):
-                    if await self.cancel_order_row(r):
-                        snap.buy_levels.discard(lvl)
+        # Cold-start detector (direct request, eighth pass) -- computed once per call, before
+        # anything below can change holdings/has-ever-bought, so the whole buy-placement section
+        # treats this tick consistently as either a cold start or not, never a mix.
+        is_cold_start = not holdings and not await self._has_ever_bought()
+
+        # Window-chasing removed entirely (direct request, eighth pass): a resting buy used to
+        # get cancelled the moment its own level fell outside the window's current top edge,
+        # even though price had never actually reached its real limit price -- repeated
+        # cancel/replace cycles like that could burn through a one-shot allowance with zero real
+        # fills ever happening. A resting buy is now cancelled ONLY by an explicit spacing change
+        # or a flatten (elsewhere in this file); this window now only decides where NEW buys get
+        # placed, never un-places existing ones.
 
         # Place sells FIRST. Conflict detection compares REAL integer price ticks, never a
         # recomputed display level (external audit fix P2-8). If a conflicting buy is found, it
@@ -961,15 +1039,27 @@ class LitGridLive:
                 float(r["limit_price"]) * float(r["size"])
                 for rows in resting.values() for r in rows if r["side"] == "buy"
             )
+            # The base budget now excludes each holding's/resting buy's own bucket-funded share
+            # (external audit fix, eighth pass): charging the FULL cost of a position that was
+            # actually funded by cover_drop against capital_usd double-counted that same dollar,
+            # since _bucket_balances() already subtracts it from cover_drop's own derived figure.
+            resting_buy_bucket_cost = sum(
+                float(r.get("funded_from_bucket_usd") or 0)
+                for rows in resting.values() for r in rows if r["side"] == "buy"
+            )
             real_usdc = float(state.get("usdc_balance") or 0)
             holdings_cost = sum(h["qty"] * h["cost"] for h in holdings.values())
-            capital_committed = holdings_cost + resting_buy_cost
+            holdings_bucket_cost = sum(h.get("bucket_cost_total", 0.0) for h in holdings.values())
+            capital_committed_base_only = (
+                (holdings_cost - holdings_bucket_cost) + (resting_buy_cost - resting_buy_bucket_cost)
+            )
             # Compound bucket folded into the SPENDING ceiling too, not just the sizing basis
             # above (external audit fix, sixth pass: a bigger order size from compounding used
             # to just consume the old, unexpanded budget sooner instead of the compound bucket
             # actually funding more depth -- the two bases must agree).
             compound_bucket = float(state.get("profit_bucket_compound_usd") or 0)
-            base_capital_remaining = max(0.0, (float(state["capital_usd"]) + compound_bucket) - capital_committed)
+            base_capital_remaining = max(
+                0.0, (float(state["capital_usd"]) + compound_bucket) - capital_committed_base_only)
             # Cover-drop bucket extends the ceiling ON TOP OF that, never replacing it -- only
             # reached once the (compound-inclusive) base budget is exhausted (direct request,
             # profit allocation feature). state["profit_bucket_cover_drop_usd"] is this tick's
@@ -977,9 +1067,11 @@ class LitGridLive:
             # here) -- there is no separate decrement to write at the end of this loop anymore
             # (external audit fix, seventh pass): available_usdc below is the single running
             # total that already correctly shrinks by each buy's full cost regardless of which
-            # sub-budget it's attributed to, and the per-buy funded_from_bucket_usd tag written
-            # below is the only durable fact _bucket_balances() needs to derive the post-spend
-            # figure correctly on the very next tick.
+            # sub-budget it's attributed to, and the per-buy funded_from_bucket_usd tag (written
+            # atomically with the order itself, external audit fix eighth pass) is the only
+            # durable fact _bucket_balances() needs to derive the post-spend figure correctly on
+            # the very next tick. The real-cash ceiling below always uses the FULL resting cost
+            # regardless of attribution -- real cash doesn't care which sub-budget funded it.
             cover_drop_bucket = float(state.get("profit_bucket_cover_drop_usd") or 0)
             available_usdc = min(real_usdc - resting_buy_cost, base_capital_remaining + cover_drop_bucket)
 
@@ -991,7 +1083,11 @@ class LitGridLive:
                 if max_open_buys is not None and lifetime_buy_count >= max_open_buys:
                     break
                 limit_price = round_price(math.exp(lvl * step))
-                cost = limit_price * order_size
+                # A cold-start fill executes as a real market order, so its REAL cost is
+                # whatever the live price actually is right now -- not this level's theoretical
+                # (and, for the deeper levels, much lower) grid price, which would understate
+                # what will actually be paid (external audit consideration, eighth pass).
+                cost = (price * order_size) if is_cold_start else (limit_price * order_size)
                 if cost > available_usdc:
                     break
                 if max_open_buys is not None:
@@ -999,7 +1095,14 @@ class LitGridLive:
                     if reserved is None:
                         break  # another instance/tick already consumed the last slot
                     lifetime_buy_count = reserved
-                row_id = await self.place_grid_order(lvl, "buy", limit_price, order_size)
+                from_base = min(cost, base_capital_remaining)
+                from_bucket_amount = cost - from_base
+                if is_cold_start:
+                    row_id = await self.market_buy_level(
+                        lvl, order_size, funded_from_bucket_usd=from_bucket_amount)
+                else:
+                    row_id = await self.place_grid_order(
+                        lvl, "buy", limit_price, order_size, funded_from_bucket_usd=from_bucket_amount)
                 if row_id is None:
                     # Confirmed rejection (or the lock was lost -- caught by the loop-top check
                     # next iteration either way): no money was spent, so no charge against
@@ -1010,12 +1113,7 @@ class LitGridLive:
                     continue
                 snap.buy_levels.add(lvl)
                 available_usdc -= cost
-                from_base = min(cost, base_capital_remaining)
                 base_capital_remaining -= from_base
-                from_bucket_amount = cost - from_base
-                if from_bucket_amount > 0:
-                    await self.sb("PATCH", f"{TABLE_ORDERS}?id=eq.{row_id}",
-                                  {"funded_from_bucket_usd": round(from_bucket_amount, 8)})
 
     async def market_sell_level(self, level, qty):
         # Lock validated BEFORE anything else (external audit fix, fifth pass): this function
@@ -1050,6 +1148,46 @@ class LitGridLive:
                 return None
         except Exception as e:
             await self.log_run("flatten_sell_unknown", {"row_id": row_id, "error": str(e)[:200]})
+            return row_id
+        await self.sb("PATCH", f"{TABLE_ORDERS}?id=eq.{row_id}", {"status": "open"})
+        return row_id
+
+    async def market_buy_level(self, level, qty, funded_from_bucket_usd=0.0):
+        """Real market buy for the cold-start initial fill (direct request, eighth pass): the
+        resting-limit ladder only ever fills if price drifts down into it, which might never
+        happen. The very first time this bot has nothing bought, each configured level is filled
+        with a real market buy like this one instead of a resting limit, right away. Mirrors
+        market_sell_level's own IOC-style execution band, just on the buy side."""
+        if not await self._touch_lock_heartbeat():
+            return None
+        sized = clamp_order_size(qty)
+        if sized is None:
+            return None
+        price = self.live.best_mid()
+        if price is None:
+            return None
+        band_price = round_price(price * 1.005)
+        co_idx = int(time.time() * 1000) % 500_000_000
+        row = {"level": level, "side": "buy", "client_order_index": co_idx,
+               "status": "pending", "limit_price": band_price, "size": sized, "placed_at": now_iso(),
+               "funded_from_bucket_usd": round(funded_from_bucket_usd, 8)}
+        inserted = await self.sb("POST", TABLE_ORDERS, row)
+        row_id = inserted[0]["id"]
+        try:
+            _o, _r, err = await asyncio.wait_for(
+                self.client.create_market_order(
+                    market_index=MARKET_ID, client_order_index=co_idx,
+                    base_amount=size_to_int(sized), avg_execution_price=price_to_int(band_price),
+                    is_ask=False, reduce_only=False,
+                ),
+                timeout=ORDER_TIMEOUT,
+            )
+            if err:
+                await self.sb("PATCH", f"{TABLE_ORDERS}?id=eq.{row_id}",
+                               {"status": "rejected", "error": str(err)[:200]})
+                return None
+        except Exception as e:
+            await self.log_run("initial_fill_buy_unknown", {"row_id": row_id, "error": str(e)[:200]})
             return row_id
         await self.sb("PATCH", f"{TABLE_ORDERS}?id=eq.{row_id}", {"status": "open"})
         return row_id

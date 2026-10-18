@@ -216,6 +216,14 @@ class FakeSignerClient:
         return "fake-token", None
 
 
+def force_not_cold_start(bot):
+    """Monkeypatches _has_ever_bought() to True so a test exercising the ORDINARY resting-limit
+    ladder isn't accidentally treated as a cold start (eighth-pass change: a cold start now fills
+    via real market orders instead) -- without polluting fake.orders with an extra buy row that
+    would throw off every buy-count/index assertion elsewhere in that test."""
+    bot._has_ever_bought = lambda: _async_return(True)
+
+
 def base_state(**over):
     st = {
         "enabled": True, "spacing_pct": 0.125, "levels_up": 15, "levels_down": 3,
@@ -460,6 +468,7 @@ async def t_real_balances_prefers_margin_balance_over_plain_balance():
 
 async def t_maintain_window_places_buys_in_the_active_down_window():
     bot, fake = make_bot(base_state(levels_down=3, order_size_lit=1.70, usdc_balance=500.0))
+    force_not_cold_start(bot)
     step = math.log(1 + 0.125 / 100)
     price = 3.10
     cur_lvl = level_of(price, step)
@@ -580,6 +589,7 @@ async def t_maintain_window_max_open_buys_is_a_persistent_lifetime_cap():
 async def t_maintain_window_increments_lifetime_buy_count_persistently():
     bot, fake = make_bot(base_state(levels_down=3, order_size_lit=1.70, usdc_balance=500.0,
                                      max_open_buys=1, lifetime_buy_count=0))
+    force_not_cold_start(bot)
     await bot.maintain_window(fake.state, 3.10)
     check("lifetime_buy_count is incremented and persisted after the one allowed buy",
           fake.state["lifetime_buy_count"] == 1, fake.state["lifetime_buy_count"])
@@ -595,14 +605,20 @@ async def t_maintain_window_recomputes_order_size_when_missing():
           fake.state.get("order_size_lit"))
 
 
-async def t_maintain_window_cancels_buys_that_drifted_out_of_window():
+async def t_maintain_window_never_cancels_a_resting_buy_just_because_price_moved():
+    # Direct request (eighth pass): window-chasing removed entirely -- a resting buy is no
+    # longer cancelled just because price drifted far enough that its own level fell outside
+    # the window's current edges. Only an explicit spacing change or a flatten cancels it now;
+    # repeated cancel/replace cycles on pure price movement used to be able to burn through a
+    # one-shot allowance with zero real fills ever happening.
     stale = {"id": 1, "level": 500, "side": "buy", "status": "open", "client_order_index": 1,
              "exchange_order_id": 77, "limit_price": 1.0, "size": 1.70}
     bot, fake = make_bot(base_state(levels_down=3, order_size_lit=1.70, usdc_balance=500.0), orders=[stale])
+    force_not_cold_start(bot)
     await bot.maintain_window(fake.state, 3.10)
-    check("a resting buy far outside the active window gets a cancel request sent",
-          fake.orders[0]["status"] == "cancel_requested", fake.orders[0])
-    check("cancellation actually hit the (fake) exchange", 77 in bot.client.cancelled, bot.client.cancelled)
+    check("a resting buy far from current price is left alone, not cancelled",
+          fake.orders[0]["status"] == "open", fake.orders[0])
+    check("no cancel request was ever sent for it", 77 not in bot.client.cancelled, bot.client.cancelled)
 
 
 async def t_maintain_window_entries_blocked_still_maintains_existing_sells():
@@ -669,6 +685,7 @@ async def t_tick_refetches_state_after_balance_check():
     # caller's local `state` object being updated.
     bot, fake = make_bot(base_state(usdc_balance=0.0, levels_down=3, order_size_lit=1.70),
                           assets=[FakeAsset("USDC", balance=0, locked_balance=0, margin_balance=500.0)])
+    force_not_cold_start(bot)
     bot.fetch_current_price = lambda: _async_return(3.10)
     await bot.tick()
     buys = [o for o in fake.orders if o["side"] == "buy"]
@@ -814,6 +831,7 @@ async def t_maintain_window_stops_immediately_once_the_lock_is_lost_mid_loop():
     # The heartbeat is now checked BEFORE each action (fifth-pass fix), so losing the lock on the
     # SECOND call should let exactly one buy through, then stop -- never finishing the window.
     bot, fake = make_bot(base_state(levels_down=3, order_size_lit=1.70, usdc_balance=500.0))
+    force_not_cold_start(bot)
     orig_touch = bot._touch_lock_heartbeat
     calls = {"n": 0}
 
@@ -989,6 +1007,137 @@ async def t_tick_persists_the_cash_correction_so_it_survives_the_next_tick():
     await bot.tick()
     check("the corrected cash figure is written back to the database, not just held in memory",
           abs(float(fake.state["usdc_balance"]) - (10.0 - 1.70 * 3.10)) < 1e-6, fake.state["usdc_balance"])
+
+
+# ── Eighth-pass changes (direct request + seventh independent audit) ───────────────────────────
+
+async def t_maintain_window_cold_start_fills_via_real_market_buys():
+    bot, fake = make_bot(base_state(levels_down=3, order_size_lit=1.70, usdc_balance=500.0, capital_usd=500))
+    bot.live.best_mid = lambda max_age=core.BOOK_MAX_AGE: 3.10
+    await bot.maintain_window(fake.state, 3.10)
+    buys = [o for o in fake.orders if o["side"] == "buy"]
+    check("a cold start places real buys across the configured depth",
+          len(buys) == 3, buys)
+    check("each cold-start buy is sent via create_market_order, not a resting limit",
+          len(bot.client.placed) == 3 and all("order_type" not in kwargs for kwargs in bot.client.placed),
+          bot.client.placed)
+
+
+async def t_maintain_window_cold_start_budget_uses_real_price_not_theoretical_level_price():
+    # The deep levels' theoretical grid price is much cheaper than live price -- a cold start's
+    # REAL cost is what the live price actually charges, not each level's own (cheaper)
+    # theoretical price, which would understate real spend and let too many levels buy.
+    bot, fake = make_bot(base_state(levels_down=10, order_size_lit=1.0, usdc_balance=500.0, capital_usd=5.0))
+    bot.live.best_mid = lambda max_age=core.BOOK_MAX_AGE: 3.10
+    await bot.maintain_window(fake.state, 3.10)
+    buys = [o for o in fake.orders if o["side"] == "buy"]
+    check("cold-start budget gating uses the real live price, capping spend correctly",
+          len(buys) == 1, buys)
+
+
+async def t_maintain_window_reverts_to_resting_limit_ladder_after_the_first_ever_fill():
+    already_bought = {"id": 1, "level": 900, "side": "buy", "status": "filled",
+                       "filled_qty": 1.70, "filled_price": 3.00, "size": 1.70}
+    sold = {"id": 2, "level": 901, "side": "sell", "closes_level": 900, "status": "filled",
+            "filled_qty": 1.70, "filled_price": 3.10}
+    bot, fake = make_bot(base_state(levels_down=2, order_size_lit=1.70, usdc_balance=500.0),
+                          orders=[already_bought, sold])
+    await bot.maintain_window(fake.state, 3.10)
+    buys = [o for o in fake.orders if o["side"] == "buy" and o["id"] not in (1, 2)]
+    check("once any buy has ever filled, new buys go back to the ordinary resting-limit ladder",
+          len(buys) > 0, buys)
+    check("they're sent via create_order (limit), never create_market_order",
+          all("order_type" in kwargs for kwargs in bot.client.placed), bot.client.placed)
+
+
+async def t_maintain_window_accumulates_resting_buys_as_price_drifts_without_cancelling_old_ones():
+    # Direct request (eighth pass): window-chasing removed. A resting buy placed on an earlier
+    # tick must still be there after a later tick moves the window far away from it.
+    already_bought = {"id": 1, "level": 1000, "side": "buy", "status": "filled",
+                       "filled_qty": 1.70, "filled_price": 5.0, "size": 1.70}
+    sold = {"id": 2, "level": 1001, "side": "sell", "closes_level": 1000, "status": "filled",
+            "filled_qty": 1.70, "filled_price": 5.1}
+    bot, fake = make_bot(base_state(levels_down=1, order_size_lit=1.0, usdc_balance=5000.0, capital_usd=5000),
+                          orders=[already_bought, sold])
+    step = math.log(1 + 0.125 / 100)
+    price_high = math.exp(1000 * step)
+    await bot.maintain_window(fake.state, price_high)
+    first_buys = {o["level"] for o in fake.orders if o["side"] == "buy" and o["id"] not in (1, 2)}
+    price_low = math.exp(990 * step)
+    await bot.maintain_window(fake.state, price_low)
+    second_buys = {o["level"] for o in fake.orders if o["side"] == "buy" and o["id"] not in (1, 2)}
+    check("the earlier tick's resting buy is still there, not cancelled by the window moving away",
+          first_buys.issubset(second_buys), (first_buys, second_buys))
+
+
+async def t_reconcile_row_write_failure_forces_a_fresh_balance_check_next_tick():
+    # External audit finding (seventh independent audit): a row-write exception might mean the
+    # write actually committed and only the HTTP response was lost -- not proof nothing happened.
+    buy_a = {"id": 1, "level": 900, "side": "buy", "client_order_index": 111,
+             "status": "pending", "limit_price": 3.00, "size": 1.70}
+    filled_a = FakeOrder(111, order_index=55, status="filled",
+                          filled_base_amount=1.70, filled_quote_amount=1.70 * 3.00, remaining_base_amount=0.0)
+    bot, fake = make_bot(base_state(), orders=[buy_a], orders_by_co={111: filled_a})
+    bot._last_balance_check = time.time()
+    orig_sb = bot.sb
+
+    async def failing_on_row_1(method, path, body=None):
+        if method == "PATCH" and path.startswith(core.TABLE_ORDERS) and "id=eq.1" in path:
+            raise RuntimeError("simulated lost response, write may have actually committed")
+        return await orig_sb(method, path, body)
+    bot.sb = failing_on_row_1
+    await bot.reconcile_pending_orders()
+    check("a row-write failure fails closed, pausing new entries", bot._balance_paused is True, bot._balance_paused)
+    check("it also resets the refresh timer so the next tick forces a real check",
+          bot._last_balance_check == 0.0, bot._last_balance_check)
+
+
+async def t_check_balance_divergence_does_not_advance_timer_if_the_save_fails():
+    # External audit finding (seventh independent audit): advancing the refresh timer BEFORE
+    # the fresh balance was actually saved meant a failed save left the next tick believing a
+    # refresh had just succeeded, skipping a real one and trusting stale cash with no pause.
+    bot, fake = make_bot(base_state(usdc_balance=6.0),
+                          assets=[FakeAsset("USDC", balance=0, locked_balance=0, margin_balance=0.73459)])
+    orig_sb = bot.sb
+
+    async def failing_save(method, path, body=None):
+        if (method == "PATCH" and path.startswith(core.TABLE_STATE)
+                and body and "usdc_balance" in body and "lit_balance" in body):
+            raise RuntimeError("simulated save failure")
+        return await orig_sb(method, path, body)
+    bot.sb = failing_save
+    safe, refreshed = await bot.check_balance_divergence()
+    check("a failed snapshot save fails closed", safe is False, safe)
+    check("the refresh timer is NOT advanced, so the next tick retries a real check immediately",
+          bot._last_balance_check == 0.0, bot._last_balance_check)
+
+
+async def t_funded_from_bucket_usd_is_written_in_the_same_insert_as_the_order():
+    bot, fake = make_bot(base_state(levels_down=1, order_size_lit=1.70, usdc_balance=500.0,
+                                     capital_usd=0, profit_bucket_cover_drop_usd=20.0))
+    force_not_cold_start(bot)
+    await bot.maintain_window(fake.state, 3.10)
+    buys = [o for o in fake.orders if o["side"] == "buy"]
+    check("the order's own row already carries its bucket-funded tag -- no separate PATCH needed",
+          len(buys) == 1 and float(buys[0].get("funded_from_bucket_usd") or 0) > 0, buys)
+
+
+async def t_mixed_funding_does_not_double_charge_the_base_budget():
+    # External audit reproduction (seventh independent audit): a cover_drop-funded position was
+    # ALSO being charged against the base capital_usd budget, on top of correctly reducing
+    # cover_drop's own derived figure -- double-charging the same dollar against both budgets.
+    cover_credit = {"id": 90, "side": "sell", "status": "filled", "realized_profit_usd": 10.0,
+                    "profit_bucket_destination": "profit_bucket_cover_drop_usd"}
+    cover_funded_holding = {"id": 1, "level": 900, "side": "buy", "status": "filled",
+                             "filled_qty": 1.0, "filled_price": 10.0, "size": 1.0,
+                             "funded_from_bucket_usd": 10.0}
+    bot, fake = make_bot(base_state(levels_down=1, order_size_lit=1.0, usdc_balance=500.0, capital_usd=10.0),
+                          orders=[cover_credit, cover_funded_holding])
+    await bot.maintain_window(fake.state, 3.10)
+    new_buys = [o for o in fake.orders if o["side"] == "buy" and o["id"] != 1]
+    check("the base budget is not charged for a position entirely funded by cover_drop -- a new "
+          "buy still gets placed using the full, untouched base budget",
+          len(new_buys) == 1, new_buys)
 
 
 # ── Seventh-pass redesign (sixth independent audit) ─────────────────────────────────────────────
@@ -1196,6 +1345,7 @@ async def t_maintain_window_rejected_buy_is_not_charged_against_any_budget():
     bot, fake = make_bot(base_state(levels_down=1, order_size_lit=1.70, usdc_balance=500.0,
                                      capital_usd=0, profit_bucket_cover_drop_usd=20.0),
                           signer_err="insufficient margin")
+    force_not_cold_start(bot)
     await bot.maintain_window(fake.state, 3.10)
     buys = [o for o in fake.orders if o["side"] == "buy"]
     check("the rejected order is still logged in the ledger", len(buys) == 1, buys)
@@ -1227,6 +1377,7 @@ async def t_maintain_window_compound_bucket_also_extends_the_spending_ceiling():
     # SPENDING ceiling only ever used capital_usd (plus cover_drop) -- the two must agree.
     bot, fake = make_bot(base_state(levels_down=5, order_size_lit=1.70, usdc_balance=5000.0,
                                      capital_usd=0, profit_bucket_compound_usd=500.0))
+    force_not_cold_start(bot)
     await bot.maintain_window(fake.state, 3.10)
     buys = [o for o in fake.orders if o["side"] == "buy"]
     total_cost = sum(o["limit_price"] * o["size"] for o in buys)
@@ -1418,7 +1569,7 @@ async def main():
               t_maintain_window_max_open_buys_is_a_persistent_lifetime_cap,
               t_maintain_window_increments_lifetime_buy_count_persistently,
               t_maintain_window_recomputes_order_size_when_missing,
-              t_maintain_window_cancels_buys_that_drifted_out_of_window,
+              t_maintain_window_never_cancels_a_resting_buy_just_because_price_moved,
               t_maintain_window_entries_blocked_still_maintains_existing_sells,
               t_tick_cancels_everything_on_a_spacing_change,
               t_tick_spacing_change_does_not_advance_if_cancel_fails,
@@ -1449,6 +1600,14 @@ async def main():
               t_reconcile_isolates_a_per_row_write_failure_without_losing_other_rows_deltas,
               t_tick_applies_cash_delta_from_the_spacing_change_reconcile_too,
               t_cancelled_buy_releases_its_reservation_automatically,
+              t_maintain_window_cold_start_fills_via_real_market_buys,
+              t_maintain_window_cold_start_budget_uses_real_price_not_theoretical_level_price,
+              t_maintain_window_reverts_to_resting_limit_ladder_after_the_first_ever_fill,
+              t_maintain_window_accumulates_resting_buys_as_price_drifts_without_cancelling_old_ones,
+              t_reconcile_row_write_failure_forces_a_fresh_balance_check_next_tick,
+              t_check_balance_divergence_does_not_advance_timer_if_the_save_fails,
+              t_funded_from_bucket_usd_is_written_in_the_same_insert_as_the_order,
+              t_mixed_funding_does_not_double_charge_the_base_budget,
               t_tick_persists_cash_delta_even_when_price_is_unavailable,
               t_tick_fails_closed_if_the_cash_delta_persist_write_itself_fails,
               t_tick_persists_a_fresh_derived_bucket_snapshot_before_maintain_window,
