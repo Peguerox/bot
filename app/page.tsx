@@ -1569,7 +1569,12 @@ function LitGridPaperPanel({
             label="Total PNL"
             value={`${totalPnl >= 0 ? "+" : ""}$${totalPnl.toFixed(2)}`}
             sub={`${totalPnlPct >= 0 ? "+" : ""}${totalPnlPct.toFixed(1)}% · incl. unsold LIT`}
-            color={totalPnl >= 0 ? "text-green-400" : "text-red-400"}
+            // Direct correction (2026-10-18): seeding LIT above the current price (normal, by
+            // design -- those are resting sell orders waiting for price to rise to them) marks
+            // as a tiny paper "loss" the instant it's valued at today's single live price, even
+            // though nothing was actually lost. Red is reserved for a real, meaningful drawdown
+            // (>0.1%), not noise-level mark-to-market wiggle from healthy inventory.
+            color={Math.abs(totalPnlPct) < 0.1 ? "text-gray-300" : totalPnl >= 0 ? "text-green-400" : "text-red-400"}
           />
           <Stat
             label="USDC Balance"
