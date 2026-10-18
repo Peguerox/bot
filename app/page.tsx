@@ -1442,18 +1442,20 @@ function LitGridPaperPanel({
   const totalPnlPct = capitalUsd > 0 ? (totalPnl / capitalUsd) * 100 : 0;
   const botProfitPct = capitalUsd > 0 ? (botProfit / capitalUsd) * 100 : 0;
 
-  // Two nearest grid lines around the live price -- the next trigger in each direction, so you
-  // can see at a glance how close the next buy/sell actually is without doing the math yourself.
-  // Computed fresh from live_price itself (not the bot's stored live_level) -- live_level can
-  // lag behind the real price when a candle's fill walk gets cut short by the volume cap or low
-  // cash, which showed "next sell" below the current price (found live 2026-10-18).
+  // Direct correction (2026-10-18): "I want to see the grid level that you bought, that you did
+  // the limit sell order -- not a number you're going to make up." Next Sell now comes from an
+  // actual holdings[level] entry (a real position the bot bought and has a resting sell armed
+  // for, one level above), not a generic floor(live_price) calculation. Next Buy has no
+  // equivalent persisted order in this model (buys are evaluated live against real USDC, not
+  // pre-registered) -- it's the deterministic next line down from live_price, same spacing math
+  // a real resting buy order at that line would use.
   const spacingPctNum = st?.spacing_pct != null ? Number(st.spacing_pct) : null;
-  const displayLevel = spacingPctNum != null && st?.live_price != null
-    ? Math.floor(Math.log(Number(st.live_price)) / Math.log(1 + spacingPctNum / 100)) : null;
-  const nextBuyPrice = spacingPctNum != null && displayLevel != null
-    ? Math.exp(displayLevel * Math.log(1 + spacingPctNum / 100)) : null;
-  const nextSellPrice = spacingPctNum != null && displayLevel != null
-    ? Math.exp((displayLevel + 1) * Math.log(1 + spacingPctNum / 100)) : null;
+  const step = spacingPctNum != null ? Math.log(1 + spacingPctNum / 100) : null;
+  const nextBuyPrice = step != null && st?.live_price != null
+    ? Math.exp(Math.floor(Math.log(Number(st.live_price)) / step) * step) : null;
+  const holdingLevels = Object.keys(st?.open_positions_json?.holdings ?? {}).map(Number);
+  const nextSellLevel = holdingLevels.length ? Math.min(...holdingLevels) + 1 : null;
+  const nextSellPrice = step != null && nextSellLevel != null ? Math.exp(nextSellLevel * step) : null;
 
   const [spacingIn, setSpacingIn] = useState("");
   const [upIn, setUpIn] = useState("");
