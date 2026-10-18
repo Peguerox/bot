@@ -1175,6 +1175,12 @@ class LitGridLive:
                         "row_id": top["id"], "from_line": _line(top["limit_price"]), "to_line": hl})
                     await self.cancel_order_row(top)
 
+        # Limit sells are queued here and placed below together with the buys, nearest to price
+        # first (direct request, 2026-10-18 audit: sells used to go in the order each level was
+        # first ever bought, and always before every buy -- the buy right under price could wait
+        # several seconds behind sells far away). Market sells and conflict cancels stay
+        # immediate.
+        sell_queue = []
         for lvl, h in holdings.items():
             if not self._lock_held:
                 return
@@ -1213,159 +1219,193 @@ class LitGridLive:
             sell_size = clamp_order_size(h["qty"])
             if sell_size is None:
                 continue
-            await self.place_grid_order(level_of(sell_price / anchor, step), "sell", sell_price, sell_size, closes_level=lvl)
-            snap.sell_closes.add(lvl)
+            sell_queue.append((sell_price, lvl, sell_size))
+        sell_queue.sort()
 
-        if entries_allowed and order_size is not None:
-            resting_buy_cost = sum(
-                float(r["limit_price"]) * float(r["size"])
-                for rows in resting.values() for r in rows if r["side"] == "buy"
-            )
-            # The base budget now excludes each holding's/resting buy's own bucket-funded share
-            # (external audit fix, eighth pass): charging the FULL cost of a position that was
-            # actually funded by cover_drop against capital_usd double-counted that same dollar,
-            # since _bucket_balances() already subtracts it from cover_drop's own derived figure.
-            resting_buy_bucket_cost = sum(
-                float(r.get("funded_from_bucket_usd") or 0)
-                for rows in resting.values() for r in rows if r["side"] == "buy"
-            )
-            real_usdc = float(state.get("usdc_balance") or 0)
-            holdings_cost = sum(h["qty"] * h["cost"] for h in holdings.values())
-            holdings_bucket_cost = sum(h.get("bucket_cost_total", 0.0) for h in holdings.values())
-            capital_committed_base_only = (
-                (holdings_cost - holdings_bucket_cost) + (resting_buy_cost - resting_buy_bucket_cost)
-            )
-            # Compound bucket folded into the SPENDING ceiling too, not just the sizing basis
-            # above (external audit fix, sixth pass: a bigger order size from compounding used
-            # to just consume the old, unexpanded budget sooner instead of the compound bucket
-            # actually funding more depth -- the two bases must agree).
-            compound_bucket = float(state.get("profit_bucket_compound_usd") or 0)
-            base_capital_remaining = max(
-                0.0, (float(state["capital_usd"]) + compound_bucket) - capital_committed_base_only)
-            # Cover-drop bucket extends the ceiling ON TOP OF that, never replacing it -- only
-            # reached once the (compound-inclusive) base budget is exhausted (direct request,
-            # profit allocation feature). state["profit_bucket_cover_drop_usd"] is this tick's
-            # freshly-DERIVED figure (tick() computes it via _bucket_balances() before calling
-            # here) -- there is no separate decrement to write at the end of this loop anymore
-            # (external audit fix, seventh pass): available_usdc below is the single running
-            # total that already correctly shrinks by each buy's full cost regardless of which
-            # sub-budget it's attributed to, and the per-buy funded_from_bucket_usd tag (written
-            # atomically with the order itself, external audit fix eighth pass) is the only
-            # durable fact _bucket_balances() needs to derive the post-spend figure correctly on
-            # the very next tick. The real-cash ceiling below always uses the FULL resting cost
-            # regardless of attribution -- real cash doesn't care which sub-budget funded it.
-            cover_drop_bucket = float(state.get("profit_bucket_cover_drop_usd") or 0)
-            available_usdc = min(real_usdc - resting_buy_cost, base_capital_remaining + cover_drop_bucket)
+        async def place_queued_sell(item):
+            sp, lv, sz = item
+            await self.place_grid_order(level_of(sp / anchor, step), "sell", sp, sz, closes_level=lv)
+            snap.sell_closes.add(lv)
 
-            real_total = float(state.get("usdc_balance") or 0) + float(state.get("lit_balance") or 0) * price
-            if is_cold_start and float(state["capital_usd"]) > real_total + 0.005:
-                # The investment can never be more than the money actually in the account
-                # (direct request) -- refuse to start rather than size the grid on money that
-                # isn't there.
-                if not getattr(self, "_investment_error_logged", False):
-                    await self.log_run("investment_exceeds_balance", {
-                        "capital_usd": float(state["capital_usd"]), "real_total": round(real_total, 4)})
-                    self._investment_error_logged = True
-                return
-            self._investment_error_logged = False
-            if is_cold_start:
-                # Cold start (direct request): market-buy the LIT for the levels_up lots now, one
-                # market order per lot, held at grid lines 0..levels_up-1 so their sells land at
-                # anchor +1..+levels_up spacings -- one sell per line, never stacked on one
-                # price (2026-10-18 incident). The buy ladder follows next tick.
-                for lvl in range(0, max(1, int(state.get("levels_up") or 1))):
-                    if not self._lock_held:
-                        return
-                    if max_open_buys is not None and lifetime_buy_count >= max_open_buys:
+        async def flush_sells():
+            for item in sell_queue:
+                if not self._lock_held:
+                    return
+                await place_queued_sell(item)
+            sell_queue.clear()
+
+        if not (entries_allowed and order_size is not None):
+            await flush_sells()
+            return
+        resting_buy_cost = sum(
+            float(r["limit_price"]) * float(r["size"])
+            for rows in resting.values() for r in rows if r["side"] == "buy"
+        )
+        # The base budget now excludes each holding's/resting buy's own bucket-funded share
+        # (external audit fix, eighth pass): charging the FULL cost of a position that was
+        # actually funded by cover_drop against capital_usd double-counted that same dollar,
+        # since _bucket_balances() already subtracts it from cover_drop's own derived figure.
+        resting_buy_bucket_cost = sum(
+            float(r.get("funded_from_bucket_usd") or 0)
+            for rows in resting.values() for r in rows if r["side"] == "buy"
+        )
+        real_usdc = float(state.get("usdc_balance") or 0)
+        holdings_cost = sum(h["qty"] * h["cost"] for h in holdings.values())
+        holdings_bucket_cost = sum(h.get("bucket_cost_total", 0.0) for h in holdings.values())
+        capital_committed_base_only = (
+            (holdings_cost - holdings_bucket_cost) + (resting_buy_cost - resting_buy_bucket_cost)
+        )
+        # Compound bucket folded into the SPENDING ceiling too, not just the sizing basis
+        # above (external audit fix, sixth pass: a bigger order size from compounding used
+        # to just consume the old, unexpanded budget sooner instead of the compound bucket
+        # actually funding more depth -- the two bases must agree).
+        compound_bucket = float(state.get("profit_bucket_compound_usd") or 0)
+        base_capital_remaining = max(
+            0.0, (float(state["capital_usd"]) + compound_bucket) - capital_committed_base_only)
+        # Cover-drop bucket extends the ceiling ON TOP OF that, never replacing it -- only
+        # reached once the (compound-inclusive) base budget is exhausted (direct request,
+        # profit allocation feature). state["profit_bucket_cover_drop_usd"] is this tick's
+        # freshly-DERIVED figure (tick() computes it via _bucket_balances() before calling
+        # here) -- there is no separate decrement to write at the end of this loop anymore
+        # (external audit fix, seventh pass): available_usdc below is the single running
+        # total that already correctly shrinks by each buy's full cost regardless of which
+        # sub-budget it's attributed to, and the per-buy funded_from_bucket_usd tag (written
+        # atomically with the order itself, external audit fix eighth pass) is the only
+        # durable fact _bucket_balances() needs to derive the post-spend figure correctly on
+        # the very next tick. The real-cash ceiling below always uses the FULL resting cost
+        # regardless of attribution -- real cash doesn't care which sub-budget funded it.
+        cover_drop_bucket = float(state.get("profit_bucket_cover_drop_usd") or 0)
+        available_usdc = min(real_usdc - resting_buy_cost, base_capital_remaining + cover_drop_bucket)
+
+        real_total = float(state.get("usdc_balance") or 0) + float(state.get("lit_balance") or 0) * price
+        if is_cold_start and float(state["capital_usd"]) > real_total + 0.005:
+            # The investment can never be more than the money actually in the account
+            # (direct request) -- refuse to start rather than size the grid on money that
+            # isn't there.
+            if not getattr(self, "_investment_error_logged", False):
+                await self.log_run("investment_exceeds_balance", {
+                    "capital_usd": float(state["capital_usd"]), "real_total": round(real_total, 4)})
+                self._investment_error_logged = True
+            await flush_sells()
+            return
+        self._investment_error_logged = False
+        if is_cold_start:
+            await flush_sells()  # nothing is held on a cold start, so normally empty
+            # Cold start (direct request): market-buy the LIT for the levels_up lots now, one
+            # market order per lot, held at grid lines 0..levels_up-1 so their sells land at
+            # anchor +1..+levels_up spacings -- one sell per line, never stacked on one
+            # price (2026-10-18 incident). The buy ladder follows next tick.
+            for lvl in range(0, max(1, int(state.get("levels_up") or 1))):
+                if not self._lock_held:
+                    return
+                if max_open_buys is not None and lifetime_buy_count >= max_open_buys:
+                    break
+                cost = price * order_size
+                if cost > available_usdc:
+                    break
+                if max_open_buys is not None:
+                    reserved = await self._reserve_buy_allowance(lifetime_buy_count)
+                    if reserved is None:
                         break
-                    cost = price * order_size
-                    if cost > available_usdc:
-                        break
-                    if max_open_buys is not None:
-                        reserved = await self._reserve_buy_allowance(lifetime_buy_count)
-                        if reserved is None:
-                            break
-                        lifetime_buy_count = reserved
-                    from_base = min(cost, base_capital_remaining)
-                    row_id = await self.market_buy_level(
-                        lvl, order_size, funded_from_bucket_usd=cost - from_base)
-                    if row_id is None:
-                        continue
-                    available_usdc -= cost
-                    base_capital_remaining -= from_base
+                    lifetime_buy_count = reserved
+                from_base = min(cost, base_capital_remaining)
+                row_id = await self.market_buy_level(
+                    lvl, order_size, funded_from_bucket_usd=cost - from_base)
+                if row_id is None:
+                    continue
+                available_usdc -= cost
+                base_capital_remaining -= from_base
+        else:
+            if anchored:
+                top = buy_top
+                bottom = grid_bottom
             else:
-                trail_placed = 0
-                for lvl in trail_lines:
-                    if not self._lock_held:
-                        return
-                    if max_open_buys is not None and lifetime_buy_count >= max_open_buys:
-                        break
-                    cost = price * order_size
-                    if cost > available_usdc:
-                        break
-                    if max_open_buys is not None:
-                        reserved = await self._reserve_buy_allowance(lifetime_buy_count)
-                        if reserved is None:
-                            break
-                        lifetime_buy_count = reserved
-                    from_base = min(cost, base_capital_remaining)
-                    row_id = await self.market_buy_level(
-                        lvl, order_size, funded_from_bucket_usd=cost - from_base)
-                    if row_id is None:
+                top = cur_lvl - 1
+                bottom = top - levels_down + 1
+            buy_lines = [
+                lvl for lvl in range(top, bottom - 1, -1)
+                if not (lvl in snap.buy_levels or lvl in snap.sell_closes or lvl in holdings
+                        or (anchored and (lvl - 1) in holdings))
+            ]
+            buys_open = True
+            si = bi = 0
+            # Nearest to price first, alternating sides: the next sell (lowest price above
+            # the market) vs the next buy (highest price below it), whichever is closer.
+            while si < len(sell_queue) or (buys_open and bi < len(buy_lines)):
+                if not self._lock_held:
+                    return
+                take_sell = si < len(sell_queue)
+                if take_sell and buys_open and bi < len(buy_lines):
+                    buy_px = anchor * math.exp(buy_lines[bi] * step)
+                    take_sell = (sell_queue[si][0] - price) <= (price - buy_px)
+                if take_sell:
+                    await place_queued_sell(sell_queue[si])
+                    si += 1
+                    continue
+                lvl = buy_lines[bi]
+                bi += 1
+                if max_open_buys is not None and lifetime_buy_count >= max_open_buys:
+                    buys_open = False
+                    continue
+                limit_price = round_price(anchor * math.exp(lvl * step))
+                cost = limit_price * order_size
+                if cost > available_usdc:
+                    if not getattr(self, "_no_funds_logged", False):
+                        # Capital and the cover-drop bucket are both used up (capital is
+                        # spent first, cover-drop only after it): stay quiet, keep what's in
+                        # the grid, wait for sells to free money.
+                        await self.log_run("no_funds_for_buy", {
+                            "line": lvl, "needed": round(cost, 4),
+                            "available": round(available_usdc, 4)})
+                        self._no_funds_logged = True
+                    buys_open = False
+                    continue
+                if max_open_buys is not None:
+                    reserved = await self._reserve_buy_allowance(lifetime_buy_count)
+                    if reserved is None:
+                        buys_open = False  # another instance/tick already consumed the last slot
                         continue
-                    await self.log_run("trailing_up_buy", {"line": lvl, "price": price})
-                    snap.buy_levels.add(lvl)
-                    available_usdc -= cost
-                    base_capital_remaining -= from_base
-                    trail_placed += 1
-                if anchored:
-                    top = buy_top
-                    bottom = grid_bottom
-                else:
-                    top = cur_lvl - 1
-                    bottom = top - levels_down + 1
-                for lvl in range(top, bottom - 1, -1):
-                    if not self._lock_held:
-                        return
-                    if lvl in snap.buy_levels or lvl in snap.sell_closes or lvl in holdings:
-                        continue
-                    if anchored and (lvl - 1) in holdings:
-                        continue  # that holding's sell rests on this line
-                    if max_open_buys is not None and lifetime_buy_count >= max_open_buys:
+                    lifetime_buy_count = reserved
+                from_base = min(cost, base_capital_remaining)
+                from_bucket_amount = cost - from_base
+                row_id = await self.place_grid_order(
+                    lvl, "buy", limit_price, order_size, funded_from_bucket_usd=from_bucket_amount)
+                if row_id is None:
+                    # Confirmed rejection (or the lock was lost -- caught by the loop-top
+                    # check next iteration either way): no money was spent, so no charge
+                    # against either budget (external audit fix, sixth pass -- a rejected
+                    # buy used to be charged exactly like an accepted one). An AMBIGUOUS
+                    # send still returns a real row id here and is still charged below,
+                    # deliberately conservative, same philosophy as the allowance counter.
+                    continue
+                snap.buy_levels.add(lvl)
+                available_usdc -= cost
+                base_capital_remaining -= from_base
+                self._no_funds_logged = False
+
+            # Trailing-up market buys last: their sells only go up next tick anyway.
+            for lvl in trail_lines:
+                if not self._lock_held:
+                    return
+                if max_open_buys is not None and lifetime_buy_count >= max_open_buys:
+                    break
+                cost = price * order_size
+                if cost > available_usdc:
+                    break
+                if max_open_buys is not None:
+                    reserved = await self._reserve_buy_allowance(lifetime_buy_count)
+                    if reserved is None:
                         break
-                    limit_price = round_price(anchor * math.exp(lvl * step))
-                    cost = limit_price * order_size
-                    if cost > available_usdc:
-                        if not getattr(self, "_no_funds_logged", False):
-                            # Capital and the cover-drop bucket are both used up (capital is
-                            # spent first, cover-drop only after it): stay quiet, keep what's in
-                            # the grid, wait for sells to free money.
-                            await self.log_run("no_funds_for_buy", {
-                                "line": lvl, "needed": round(cost, 4),
-                                "available": round(available_usdc, 4)})
-                            self._no_funds_logged = True
-                        break
-                    if max_open_buys is not None:
-                        reserved = await self._reserve_buy_allowance(lifetime_buy_count)
-                        if reserved is None:
-                            break  # another instance/tick already consumed the last slot
-                        lifetime_buy_count = reserved
-                    from_base = min(cost, base_capital_remaining)
-                    from_bucket_amount = cost - from_base
-                    row_id = await self.place_grid_order(
-                        lvl, "buy", limit_price, order_size, funded_from_bucket_usd=from_bucket_amount)
-                    if row_id is None:
-                        # Confirmed rejection (or the lock was lost -- caught by the loop-top
-                        # check next iteration either way): no money was spent, so no charge
-                        # against either budget (external audit fix, sixth pass -- a rejected
-                        # buy used to be charged exactly like an accepted one). An AMBIGUOUS
-                        # send still returns a real row id here and is still charged below,
-                        # deliberately conservative, same philosophy as the allowance counter.
-                        continue
-                    snap.buy_levels.add(lvl)
-                    available_usdc -= cost
-                    base_capital_remaining -= from_base
-                    self._no_funds_logged = False
+                    lifetime_buy_count = reserved
+                from_base = min(cost, base_capital_remaining)
+                row_id = await self.market_buy_level(
+                    lvl, order_size, funded_from_bucket_usd=cost - from_base)
+                if row_id is None:
+                    continue
+                await self.log_run("trailing_up_buy", {"line": lvl, "price": price})
+                snap.buy_levels.add(lvl)
+                available_usdc -= cost
+                base_capital_remaining -= from_base
 
     async def market_sell_level(self, level, qty):
         # Lock validated BEFORE anything else (external audit fix, fifth pass): this function

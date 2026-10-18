@@ -1529,6 +1529,40 @@ async def t_fast_drop_replay_keeps_the_grid_consistent():
           (sorted(held), sells_by_lot))
 
 
+async def t_orders_are_placed_nearest_to_price_first_alternating_sides():
+    # 2026-10-18 audit: sells went in the order each level was first ever bought, and always
+    # before every buy. Now every new order goes in nearest to price first, alternating sides.
+    P = 2.83365
+    rows = _grid_rows(P, held=[3, 1, 4, 0, 2], sells_for=[], buys_at=[])  # bought out of order
+    price = round(P * 1.00125 ** 0.4, 5)
+    bot, fake = make_bot(base_state(levels_up=5, levels_down=5, order_size_lit=2.16,
+                                     usdc_balance=500.0, grid_anchor_price=P), orders=rows)
+    bot.live.best_mid = lambda max_age=core.BOOK_MAX_AGE: price
+    await bot.maintain_window(fake.state, price)
+    placed = [("S" if kw["is_ask"] else "B", kw["price"]) for kw in bot.client.placed if "order_type" in kw]
+    want = []
+    for k in range(1, 6):
+        want.append(("S", core.price_to_int(core.round_price(P * 1.00125 ** k))))
+        want.append(("B", core.price_to_int(core.round_price(P * 1.00125 ** -k))))
+    check("orders go in nearest to price first, alternating sell/buy", placed == want, (placed, want))
+
+
+async def t_sells_are_still_placed_when_new_buys_are_not_allowed():
+    # The sell queue must still be flushed when entries are off (bot disabled or paused).
+    P = 2.83365
+    rows = _grid_rows(P, held=[2, 0, 1], sells_for=[], buys_at=[])
+    price = round(P * 1.00125 ** 0.4, 5)
+    bot, fake = make_bot(base_state(levels_up=5, levels_down=5, order_size_lit=2.16,
+                                     usdc_balance=500.0, grid_anchor_price=P), orders=rows)
+    bot.live.best_mid = lambda max_age=core.BOOK_MAX_AGE: price
+    await bot.maintain_window(fake.state, price, entries_allowed=False)
+    sells = [kw["price"] for kw in bot.client.placed if kw.get("is_ask")]
+    buys = [kw for kw in bot.client.placed if not kw.get("is_ask")]
+    check("with entries off, every held lot still gets its sell, nearest first",
+          sells == [core.price_to_int(core.round_price(P * 1.00125 ** k)) for k in (1, 2, 3)], sells)
+    check("and no buy is placed", buys == [], buys)
+
+
 async def t_trailing_up_never_double_buys_while_a_market_buy_is_in_flight():
     P = 2.87055
     rows = _grid_rows(P, held=range(1, 5), sells_for=range(1, 5), buys_at=range(-14, 1), sold=[0])
@@ -2138,6 +2172,8 @@ async def main():
         t_trailing_up_counts_an_in_flight_buy_even_after_price_passes_its_band,
         t_fast_rise_replay_never_holds_more_than_levels_up,
         t_fast_drop_replay_keeps_the_grid_consistent,
+        t_orders_are_placed_nearest_to_price_first_alternating_sides,
+        t_sells_are_still_placed_when_new_buys_are_not_allowed,
         t_a_partly_filled_open_buy_does_not_trip_the_balance_pause,
         t_gap_in_the_sell_ladder_is_filled_by_moving_the_top_sell_down,
         t_gap_fill_never_moves_a_sell_below_that_lots_cost,
