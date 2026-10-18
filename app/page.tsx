@@ -1408,12 +1408,12 @@ function SolbtcSizeconfPanel({
 }
 
 function LitGridLivePanel({
-  state, orders, loading,
+  state, orders, sells, loading,
   enabled, onToggle, toggling,
   onFlatten, flattening,
   onClearHistory, clearingHistory,
 }: {
-  state: any; orders: any[]; loading: boolean;
+  state: any; orders: any[]; sells: any[]; loading: boolean;
   enabled: boolean; onToggle: () => void; toggling: boolean;
   onFlatten: () => void; flattening: boolean;
   onClearHistory: () => void; clearingHistory: boolean;
@@ -1436,6 +1436,15 @@ function LitGridLivePanel({
   const totalValue = usdcBalance != null && litValueUsd != null ? usdcBalance + litValueUsd : null;
   const totalPnl = totalValue != null ? totalValue - capitalUsd : null;
   const totalPnlPct = totalPnl != null && capitalUsd > 0 ? (totalPnl / capitalUsd) * 100 : null;
+  // Bot profit = realized profit from completed grid round trips (each sell's own recorded
+  // profit). Unrealized = whatever is left of Total PNL (held LIT marked at live price).
+  const botProfit = sells.reduce((sum: number, r: any) => sum + Number(r.realized_profit_usd ?? 0), 0);
+  const botProfitPct = capitalUsd > 0 ? (botProfit / capitalUsd) * 100 : null;
+  const unrealizedPnl = totalPnl != null ? totalPnl - botProfit : null;
+  const unrealizedPct = unrealizedPnl != null && capitalUsd > 0 ? (unrealizedPnl / capitalUsd) * 100 : null;
+  const pnlColor = (v: number | null) => v == null ? "text-gray-500" : Math.abs(v) < 0.005 ? "text-gray-300" : v >= 0 ? "text-green-400" : "text-red-400";
+  const fmtUsd = (v: number | null) => v == null ? "—" : `${v >= 0 ? "+" : "-"}$${Math.abs(v).toFixed(2)}`;
+  const fmtPct = (v: number | null, d = 2) => v == null ? "" : `${v >= 0 ? "+" : ""}${v.toFixed(d)}%`;
 
   const openOrders = orders.filter((o: any) => o.status === "pending" || o.status === "open");
   const filledOrders = orders.filter((o: any) => o.status === "filled");
@@ -1559,13 +1568,15 @@ function LitGridLivePanel({
         </div>
       ) : (
         <div className="grid grid-cols-3 gap-2">
-          <Stat label="Investment" value={`$${capitalUsd.toFixed(2)}`} sub="set via Settings" color="text-gray-300" />
+          <Stat label="Total PNL" value={fmtUsd(totalPnl)} sub={fmtPct(totalPnlPct)} color={pnlColor(totalPnl)} />
           <Stat
-            label="Total PNL"
-            value={totalPnl != null ? `${totalPnl >= 0 ? "+" : ""}$${totalPnl.toFixed(2)}` : "—"}
-            sub={totalPnlPct != null ? `${totalPnlPct >= 0 ? "+" : ""}${totalPnlPct.toFixed(1)}%` : ""}
-            color={totalPnl == null ? "text-gray-500" : Math.abs(totalPnlPct ?? 0) < 0.1 ? "text-gray-300" : totalPnl >= 0 ? "text-green-400" : "text-red-400"}
+            label="Bot Profit"
+            value={`${botProfit >= 0 ? "+" : "-"}$${Math.abs(botProfit).toFixed(4)}`}
+            sub={`${fmtPct(botProfitPct, 3)} · ${sells.length} trades`}
+            color={pnlColor(botProfit)}
           />
+          <Stat label="Unrealized PNL" value={fmtUsd(unrealizedPnl)} sub={fmtPct(unrealizedPct)} color={pnlColor(unrealizedPnl)} />
+          <Stat label="Investment" value={`$${capitalUsd.toFixed(2)}`} sub="set via Settings" color="text-gray-300" />
           <Stat
             label="Live Price"
             value={livePrice != null ? `$${Number(livePrice).toFixed(4)}` : "—"}
@@ -1697,9 +1708,52 @@ function LitGridLivePanel({
       </div>
 
       <div>
-        <p className="text-gray-500 text-xs uppercase tracking-wide mb-2">
+        <p className="text-gray-500 text-xs uppercase tracking-wide mb-2">Completed Trades ({sells.length})</p>
+        {sells.length === 0 ? (
+          <p className="text-gray-600 text-sm">No completed trades yet</p>
+        ) : (
+          <div className="overflow-auto max-h-64">
+            <table className="w-full text-xs font-mono">
+              <thead>
+                <tr className="text-gray-500 border-b border-gray-800 sticky top-0 bg-gray-900">
+                  <th className="text-left pb-1">Time</th>
+                  <th className="text-right pb-1">Bought</th>
+                  <th className="text-right pb-1">Sold</th>
+                  <th className="text-right pb-1">Qty</th>
+                  <th className="text-right pb-1">Profit</th>
+                </tr>
+              </thead>
+              <tbody className="divide-y divide-gray-800/50">
+                {sells.slice(0, 50).map((r: any) => {
+                  const qty = Number(r.filled_qty ?? 0);
+                  const profit = Number(r.realized_profit_usd ?? 0);
+                  const quote = r.filled_quote != null ? Number(r.filled_quote) : qty * Number(r.filled_price ?? 0);
+                  const bought = qty > 0 ? (quote - profit) / qty : null;
+                  const time = r.filled_at
+                    ? new Date(r.filled_at).toLocaleTimeString([], { hour: "2-digit", minute: "2-digit", hour12: false })
+                    : "";
+                  return (
+                    <tr key={r.id} className="hover:bg-gray-800/30">
+                      <td className="py-1.5 text-gray-600">{time}</td>
+                      <td className="py-1.5 text-right text-gray-300">{bought != null ? bought.toFixed(4) : "—"}</td>
+                      <td className="py-1.5 text-right text-gray-300">{Number(r.filled_price ?? 0).toFixed(4)}</td>
+                      <td className="py-1.5 text-right text-gray-500">{qty.toFixed(2)}</td>
+                      <td className={`py-1.5 text-right font-bold ${pnlColor(profit)}`}>
+                        {`${profit >= 0 ? "+" : "-"}$${Math.abs(profit).toFixed(4)}`}
+                      </td>
+                    </tr>
+                  );
+                })}
+              </tbody>
+            </table>
+          </div>
+        )}
+      </div>
+
+      <details>
+        <summary className="text-gray-500 text-xs uppercase tracking-wide mb-2 cursor-pointer">
           Order Ledger ({filledOrders.length} filled, {openOrders.length} open/pending)
-        </p>
+        </summary>
         {orders.length === 0 ? (
           <p className="text-gray-600 text-sm">No orders yet</p>
         ) : (
@@ -1739,7 +1793,7 @@ function LitGridLivePanel({
             </table>
           </div>
         )}
-      </div>
+      </details>
     </div>
   );
 }
@@ -6196,6 +6250,7 @@ export default function Dashboard() {
   // Render service/sub-account (see server/lit_grid_live.py).
   const [litGridLiveState,     setLitGridLiveState]     = useState<any>(null);
   const [litGridLiveOrders,    setLitGridLiveOrders]    = useState<any[]>([]);
+  const [litGridLiveSells,     setLitGridLiveSells]     = useState<any[]>([]);
   const [litGridLiveToggling,  setLitGridLiveToggling]  = useState(false);
   const [litGridLiveFlattening, setLitGridLiveFlattening] = useState(false);
   const [litGridLiveClearing, setLitGridLiveClearing] = useState(false);
@@ -6246,6 +6301,7 @@ export default function Dashboard() {
       { data: scheduleSt },
       { data: litGridLiveSt },
       { data: litGridLiveOr },
+      { data: litGridLiveSells },
     ] = await Promise.all([
       getSupabase().from("surfer_state").select("*").eq("id", 1).single(),
       getSupabase().from("surfer_trades").select("*").order("exit_time", { ascending: false }).limit(5000),
@@ -6291,6 +6347,7 @@ export default function Dashboard() {
       getSupabase().from("bot_schedule_rules").select("*").eq("id", 1).single(),
       getSupabase().from("lighter_lit_grid_live_state").select("*").eq("id", 1).single(),
       getSupabase().from("lighter_lit_grid_live_orders").select("*").order("id", { ascending: false }).limit(50),
+      getSupabase().from("lighter_lit_grid_live_orders").select("id,filled_at,filled_qty,filled_price,filled_quote,realized_profit_usd").eq("side", "sell").not("realized_profit_usd", "is", null).order("id", { ascending: false }).limit(1000),
     ]);
     setSurferState(surferSt ?? null);
     setSurferTrades(surferTr ?? []);
@@ -6320,6 +6377,7 @@ export default function Dashboard() {
     setScheduleState(scheduleSt ?? null);
     setLitGridLiveState(litGridLiveSt ?? null);
     setLitGridLiveOrders(litGridLiveOr ?? []);
+    setLitGridLiveSells(litGridLiveSells ?? []);
     setDcaBtcStats({ total: dcaBtcTotal ?? 0, wins: dcaBtcWins ?? 0 });
     setInitialBtcStats({ total: initialBtcTotal ?? 0, wins: initialBtcWins ?? 0 });
     setOptimalBtcStats({ total: optimalBtcTotal ?? 0, wins: optimalBtcWins ?? 0 });
@@ -6622,6 +6680,7 @@ export default function Dashboard() {
           <LitGridLivePanel
             state={litGridLiveState}
             orders={litGridLiveOrders}
+            sells={litGridLiveSells}
             loading={loading}
             enabled={litGridLiveState?.enabled ?? false}
             onToggle={handleLitGridLiveToggle}
