@@ -228,8 +228,8 @@ seventh independent audit:
     later sells back to empty -- goes through the normal resting-limit ladder again, unaffected,
     governed by levels_down as always. The budget check for a cold-start buy uses the real LIVE
     price (what will actually be paid), not each level's theoretical grid price, which would
-    have understated the real cost for the deeper levels. See NINTH-PASS CHANGES below for how
-    the `levels_up` lots are actually combined into a single order.
+    have understated the real cost for the deeper levels. See NINTH-PASS FIX below for how the
+    cold-start lots and the ladder are placed on an anchored grid.
   - [P1] A reconcile row-write failure could mean the write actually committed and only the
     HTTP response was lost -- not that nothing happened. Treating that as "definitely not
     persisted" (previous pass's assumption) left the bot's cash/holdings view silently wrong
@@ -263,13 +263,17 @@ collapsed onto the SAME real price tick. The bot then tried to rest five separat
 on that one tick: the exchange's own POST_ONLY handling cancelled several of them outright, one
 filled for a few cents of dust, and the rest only separated once real price had drifted far
 enough -- visible live as a burst of cancel/replace noise and a ladder gap of ~0.8% instead of
-0.125% between the cold-start holdings and the first resting buy below them. Fix: cold start now
-places exactly ONE market order sized at `levels_up` lots combined, recorded as a single
-holding with a single real cost and a single sell target -- same total USDC spent and same
-total LIT bought as five separate buys would have, just no artificial "levels" for a market
-order to mislabel. The ordinary resting ladder (the `else` branch, `levels_down` deep) is
-unchanged and was never the source of this bug -- its own prices, checked directly against the
-live incident's ledger, were correctly spaced 0.125% apart from each other throughout.
+0.125% between the cold-start holdings and the first resting buy below them.
+A first fix (one combined market order) removed the collision but still left a hole: grid lines
+were fixed to a global scale (anchored at $1.00) unrelated to the start price, and the first
+buy sat one extra line down -- live, price 2.8790 had its first buy at 2.8701 (-0.31%) and its
+sell at 2.8844 (+0.19%). Final fix (direct request: "5 up, 15 down, each 0.125%"): the grid is
+anchored at the price the bot starts at (state.grid_anchor_price, written on cold start), so
+every line is anchor * (1+spacing)^n. Cold start market-buys levels_up lots, one order each,
+held at lines 0..levels_up-1; each lot held at line L sells at line L+1 (never below cost),
+giving sells at exactly +1..+levels_up spacings. The buy ladder starts at the highest free line
+at or below price, giving buys at exactly -1..-levels_down spacings. A run with no anchor keeps
+the old behavior.
 
 Nothing in this codebase has placed a real LIMIT order before this (stoch_bot_core.py's
 place_order only ever sends MARKET orders; native SL/TP are the only conditional orders that
@@ -991,10 +995,6 @@ class LitGridLive:
         spacing_pct = float(state["spacing_pct"])
         step = math.log(1 + spacing_pct / 100.0)
         levels_down = max(1, int(state["levels_down"]))
-        # Guard-banded window center (external audit fix P2-11): pure boundary noise no longer
-        # shifts the active window and cancels a resting buy before it ever had a chance to fill.
-        cur_lvl = level_of(price, step, reference=self._window_center)
-        self._window_center = cur_lvl
         max_open_buys = state.get("max_open_buys")
         max_open_buys = int(max_open_buys) if max_open_buys is not None else None
         lifetime_buy_count = int(state.get("lifetime_buy_count") or 0)
@@ -1019,7 +1019,23 @@ class LitGridLive:
         # Cold-start detector (direct request, eighth pass) -- computed once per call, before
         # anything below can change holdings/has-ever-bought, so the whole buy-placement section
         # treats this tick consistently as either a cold start or not, never a mix.
-        is_cold_start = not holdings and not await self._has_ever_bought()
+        is_cold_start = (not holdings and not snap.buy_levels
+                         and not await self._has_ever_bought())
+
+        # Grid anchored at the starting price (direct request): every line is
+        # anchor * (1 + spacing)^n, so on a fresh start the first sell sits exactly one spacing
+        # above price and the first buy exactly one spacing below. A run with no anchor keeps
+        # the old behavior (global grid, sells at cost + spacing).
+        if is_cold_start and entries_allowed:
+            await self.update_state({"grid_anchor_price": price})
+            state["grid_anchor_price"] = price
+            self._window_center = None
+        anchored = state.get("grid_anchor_price") is not None
+        anchor = float(state["grid_anchor_price"]) if anchored else 1.0
+        # Guard-banded window center (external audit fix P2-11): pure boundary noise no longer
+        # shifts the active window and cancels a resting buy before it ever had a chance to fill.
+        cur_lvl = level_of(price / anchor, step, reference=self._window_center)
+        self._window_center = cur_lvl
 
         # Window-chasing removed entirely (direct request, eighth pass): a resting buy used to
         # get cancelled the moment its own level fell outside the window's current top edge,
@@ -1038,7 +1054,12 @@ class LitGridLive:
                 return
             if lvl in snap.sell_closes:
                 continue
-            sell_price = round_price(h["cost"] * (1 + spacing_pct / 100.0))
+            if anchored:
+                # One sell per grid line: lot held at line L sells at line L+1, never below cost.
+                sell_price = max(round_price(anchor * math.exp((lvl + 1) * step)),
+                                 round_price(h["cost"]))
+            else:
+                sell_price = round_price(h["cost"] * (1 + spacing_pct / 100.0))
             sell_price_int = price_to_int(sell_price)
             conflicting_buys = [
                 r for rows in snap.rows_by_level.values() for r in rows
@@ -1051,7 +1072,7 @@ class LitGridLive:
             sell_size = clamp_order_size(h["qty"])
             if sell_size is None:
                 continue
-            await self.place_grid_order(level_of(sell_price, step), "sell", sell_price, sell_size, closes_level=lvl)
+            await self.place_grid_order(level_of(sell_price / anchor, step), "sell", sell_price, sell_size, closes_level=lvl)
             snap.sell_closes.add(lvl)
 
         if entries_allowed and order_size is not None:
@@ -1096,49 +1117,48 @@ class LitGridLive:
             available_usdc = min(real_usdc - resting_buy_cost, base_capital_remaining + cover_drop_bucket)
 
             if is_cold_start:
-                # ONE combined market order for the whole cold-start seed, not levels_up
-                # separate ones (direct fix after a real-money incident, 2026-10-18): placing
-                # levels_up separate market buys always executes them within pennies of each
-                # other -- a market order ignores the "level" price entirely. Their computed
-                # sell targets (cost * (1+spacing%)) then collapse onto the SAME real price
-                # tick, and the bot tried to rest levels_up separate sell orders on that one
-                # tick: several got cancelled by the exchange, one filled for a few cents of
-                # dust, before price drifted enough to actually separate them. A single
-                # combined lot has exactly one real cost and one real sell target, so there is
-                # nothing left to collide -- same total USDC spent and same total LIT bought as
-                # levels_up separate buys would have, just one honest ledger row instead of
-                # several fictitious "levels" a market order never actually priced at.
-                cold_start_count = max(1, int(state.get("levels_up") or 1))
-                affordable = int(available_usdc // (price * order_size)) if price * order_size > 0 else 0
-                cold_start_count = min(cold_start_count, affordable)
-                if cold_start_count > 0 and self._lock_held and (
-                        max_open_buys is None or lifetime_buy_count < max_open_buys):
-                    combined_size = clamp_order_size(order_size * cold_start_count)
-                    if combined_size is not None:
-                        cost = price * combined_size
-                        proceed = True
-                        if max_open_buys is not None:
-                            reserved = await self._reserve_buy_allowance(lifetime_buy_count)
-                            proceed = reserved is not None
-                            if proceed:
-                                lifetime_buy_count = reserved
-                        if proceed:
-                            from_base = min(cost, base_capital_remaining)
-                            from_bucket_amount = cost - from_base
-                            row_id = await self.market_buy_level(
-                                cur_lvl - 1, combined_size, funded_from_bucket_usd=from_bucket_amount)
-                            if row_id is not None:
-                                available_usdc -= cost
-                                base_capital_remaining -= from_base
+                # Cold start (direct request): market-buy the LIT for the levels_up lots now, one
+                # market order per lot, held at grid lines 0..levels_up-1 so their sells land at
+                # anchor +1..+levels_up spacings -- one sell per line, never stacked on one
+                # price (2026-10-18 incident). The buy ladder follows next tick.
+                for lvl in range(0, max(1, int(state.get("levels_up") or 1))):
+                    if not self._lock_held:
+                        return
+                    if max_open_buys is not None and lifetime_buy_count >= max_open_buys:
+                        break
+                    cost = price * order_size
+                    if cost > available_usdc:
+                        break
+                    if max_open_buys is not None:
+                        reserved = await self._reserve_buy_allowance(lifetime_buy_count)
+                        if reserved is None:
+                            break
+                        lifetime_buy_count = reserved
+                    from_base = min(cost, base_capital_remaining)
+                    row_id = await self.market_buy_level(
+                        lvl, order_size, funded_from_bucket_usd=cost - from_base)
+                    if row_id is None:
+                        continue
+                    available_usdc -= cost
+                    base_capital_remaining -= from_base
             else:
-                for lvl in range(cur_lvl - 1, cur_lvl - 1 - levels_down, -1):
+                if anchored:
+                    # Highest free line at or below price, then levels_down lines from there.
+                    top = cur_lvl
+                    while top in holdings:
+                        top -= 1
+                else:
+                    top = cur_lvl - 1
+                for lvl in range(top, top - levels_down, -1):
                     if not self._lock_held:
                         return
                     if lvl in snap.buy_levels or lvl in snap.sell_closes or lvl in holdings:
                         continue
+                    if anchored and (lvl - 1) in holdings:
+                        continue  # that holding's sell rests on this line
                     if max_open_buys is not None and lifetime_buy_count >= max_open_buys:
                         break
-                    limit_price = round_price(math.exp(lvl * step))
+                    limit_price = round_price(anchor * math.exp(lvl * step))
                     cost = limit_price * order_size
                     if cost > available_usdc:
                         break

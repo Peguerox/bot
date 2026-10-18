@@ -1012,34 +1012,54 @@ async def t_tick_persists_the_cash_correction_so_it_survives_the_next_tick():
 # ── Eighth-pass changes (direct request + seventh independent audit) ───────────────────────────
 
 async def t_maintain_window_cold_start_fills_via_real_market_buys():
-    # levels_up (not levels_down) governs the cold-start buy SIZE specifically (direct
-    # request): e.g. levels_up=3 buys 3 lots worth of size immediately, combined into ONE real
-    # market order (ninth-pass fix -- separate orders at cold start collapsed onto the same
-    # real price and collided), even while levels_down keeps a separate, independent depth for
-    # the ongoing resting ladder.
+    # Cold start: levels_up market buys, one per lot, held at grid lines 0..levels_up-1.
     bot, fake = make_bot(base_state(levels_up=3, levels_down=15, order_size_lit=1.70,
                                      usdc_balance=500.0, capital_usd=500))
     bot.live.best_mid = lambda max_age=core.BOOK_MAX_AGE: 3.10
     await bot.maintain_window(fake.state, 3.10)
     buys = [o for o in fake.orders if o["side"] == "buy"]
-    check("a cold start places exactly ONE combined buy sized at the configured levels_up count",
-          len(buys) == 1 and abs(buys[0]["size"] - 3 * 1.70) < 1e-9, buys)
-    check("the cold-start buy is sent via create_market_order, not a resting limit",
-          len(bot.client.placed) == 1 and all("order_type" not in kwargs for kwargs in bot.client.placed),
+    check("a cold start market-buys exactly levels_up lots, one order each",
+          len(buys) == 3 and sorted(o["level"] for o in buys) == [0, 1, 2]
+          and all(abs(o["size"] - 1.70) < 1e-9 for o in buys), buys)
+    check("the cold-start buys are sent via create_market_order, not a resting limit",
+          len(bot.client.placed) == 3 and all("order_type" not in kwargs for kwargs in bot.client.placed),
           bot.client.placed)
+    check("the grid is anchored at the starting price",
+          fake.state.get("grid_anchor_price") == 3.10, fake.state.get("grid_anchor_price"))
 
 
 async def t_levels_up_and_levels_down_are_independent():
-    # Direct request: levels_up is ONLY the cold-start size multiplier; levels_down is ONLY
-    # the ongoing ladder depth. Setting them to different numbers must not cross-contaminate
-    # either one.
     bot, fake = make_bot(base_state(levels_up=4, levels_down=15, order_size_lit=1.0,
                                      usdc_balance=5000.0, capital_usd=5000))
     bot.live.best_mid = lambda max_age=core.BOOK_MAX_AGE: 3.10
     await bot.maintain_window(fake.state, 3.10)
     cold_start_buys = [o for o in fake.orders if o["side"] == "buy"]
-    check("the cold start buys exactly levels_up lots worth of size, ignoring levels_down, in one order",
-          len(cold_start_buys) == 1 and abs(cold_start_buys[0]["size"] - 4 * 1.0) < 1e-9, cold_start_buys)
+    check("the cold start buys exactly levels_up lots, ignoring levels_down",
+          len(cold_start_buys) == 4, cold_start_buys)
+
+
+async def t_grid_after_cold_start_is_exactly_spacing_from_start_price():
+    # Direct request: 5 up / 15 down at 0.125% -- sells at P*1.00125^k (k=1..5), buys at
+    # P/1.00125^k (k=1..15), measured from the price the bot started at. No gap at the top.
+    P = 2.8790
+    bot, fake = make_bot(base_state(levels_up=5, levels_down=15, order_size_lit=2.16,
+                                     usdc_balance=500.0, capital_usd=500))
+    bot.live.best_mid = lambda max_age=core.BOOK_MAX_AGE: P
+    await bot.maintain_window(fake.state, P)
+    for o in fake.orders:
+        o["status"] = "filled"; o["filled_qty"] = o["size"]; o["filled_price"] = 2.8801
+        o["filled_quote"] = o["size"] * 2.8801
+    fake.state["usdc_balance"] = 500.0 - 5 * 2.16 * 2.8801
+    await bot.maintain_window(fake.state, P)
+    sells = sorted(float(o["limit_price"]) for o in fake.orders if o["side"] == "sell")
+    buys = sorted((float(o["limit_price"]) for o in fake.orders
+                   if o["side"] == "buy" and o["status"] != "filled"), reverse=True)
+    want_sells = [core.round_price(P * 1.00125 ** k) for k in range(1, 6)]
+    want_buys = [core.round_price(P * 1.00125 ** -k) for k in range(1, 16)]
+    check("5 sells at exactly +0.125%, +0.25% ... +0.625% from the start price",
+          sells == want_sells, (sells, want_sells))
+    check("15 buys at exactly -0.125%, -0.25% ... -1.875% from the start price",
+          buys == want_buys, (buys, want_buys))
 
 
 async def t_maintain_window_cold_start_budget_uses_real_price_not_theoretical_level_price():
@@ -1622,6 +1642,7 @@ async def main():
               t_cancelled_buy_releases_its_reservation_automatically,
               t_maintain_window_cold_start_fills_via_real_market_buys,
               t_levels_up_and_levels_down_are_independent,
+        t_grid_after_cold_start_is_exactly_spacing_from_start_price,
               t_maintain_window_cold_start_budget_uses_real_price_not_theoretical_level_price,
               t_maintain_window_reverts_to_resting_limit_ladder_after_the_first_ever_fill,
               t_maintain_window_accumulates_resting_buys_as_price_drifts_without_cancelling_old_ones,
