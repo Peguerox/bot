@@ -223,18 +223,22 @@ class LitGridPaper:
 
     # ── One grid tick: process every new closed candle since the last tick ─────────────────────
     async def process_candle(self, candle, state):
-        """Real balance accounting (2026-10-18 rework, direct request after a Bitsgap screenshot
-        comparison): Bitsgap tracks three separate numbers -- Investment (fixed), Bot profit
-        (realized round-trip gains only), and Total PNL (investment vs. current real account
-        value, including whatever's sitting unsold in the base asset). The previous version only
-        tracked the first kind and let buys/sells happen regardless of actual balance -- order
-        size was recomputed from the FULL original capital every tick, so the sim could spend far
-        more than the configured capital once enough buys stacked up, and sells could open with
-        no LIT actually held (a free virtual short). Fixed here: real usdc_balance/lit_balance
-        are the source of truth, every fill is constrained by what's actually held, and a sell
-        with no held inventory simply does not execute (no naked shorts -- this is a Long spot
-        grid, same as Bitsgap's default: start 100% cash, buy first, only ever sell what was
-        actually bought)."""
+        """Real Bitsgap-style grid mechanic (2026-10-18, confirmed against Bitsgap's own
+        documentation -- see arm_grid's docstring for the funding side of this).
+
+        Each buy fill at level L ties to a SPECIFIC sell order one level above, at L+1 -- not a
+        generic "whatever's most recently open" match. `holdings` is keyed by the level a LIT
+        quantity was bought at: holdings[L] = qty means "bought at L, resting sell armed at
+        L+1". Reaching L+1 sells exactly that qty, for exactly one spacing's profit, no matter
+        what path price took to get there -- including repeated chop between the same two
+        adjacent lines in a flat market, which is the actual point of a grid bot (an earlier
+        attempt to use a single LIFO stack made a pure round-trip net zero instead of profiting
+        on every touch, which is wrong -- reverted). No held LIT at L -> reaching L+1 just does
+        nothing there (a Long grid only ever sells inventory it actually bought, no naked shorts).
+
+        Real usdc_balance/lit_balance are the source of truth for every fill -- a buy that can't
+        be afforded from real usdc_balance does not happen (deferred, like a real unfilled
+        resting order), not re-derived from the full original capital every tick."""
         spacing_pct = float(state["spacing_pct"])
         step = math.log(1 + spacing_pct / 100.0)
         order_type = state["order_type"]
@@ -242,12 +246,16 @@ class LitGridPaper:
         lit_balance = float(state["lit_balance"])
         bot_profit_usd = float(state["bot_profit_usd"])
         total_value = usdc_balance + lit_balance * candle["c"]
-        capital = total_value if state["compounding_enabled"] else float(state["capital_usd"])
-        sizing_levels = levels_for_drawdown(spacing_pct, float(state.get("drawdown_pct") or 30.0))
-        order_size = compute_order_size_lit(capital, candle["c"], spacing_pct, sizing_levels)
+        if state["compounding_enabled"]:
+            sizing_levels = levels_for_drawdown(spacing_pct, float(state.get("drawdown_pct") or 30.0))
+            order_size = compute_order_size_lit(total_value, candle["c"], spacing_pct, sizing_levels)
+        else:
+            # Fixed at whatever arm_grid computed from the full original capital -- not
+            # recomputed every candle, since compounding is off.
+            order_size = float(state.get("order_size_lit") or 0.0)
 
-        positions = state.get("open_positions_json") or {"buys": [], "sells": []}
-        open_buys = positions.get("buys", [])
+        positions = state.get("open_positions_json") or {"holdings": {}}
+        holdings = {int(k): v for k, v in (positions.get("holdings") or {}).items()}
 
         path = candle_path(candle)
         if self._last_level is None:
@@ -255,13 +263,9 @@ class LitGridPaper:
         lvl = self._last_level
 
         # Fill budget for this candle (limit only -- market fills are unlimited, taker always
-        # gets filled). Correctness-critical: when the budget OR the real balance runs out
-        # mid-candle, `lvl` must stop exactly where fills stopped, NOT jump ahead to match the
-        # real close price. Every completed pair in this design is supposed to be exactly one
-        # adjacent level apart (the LIFO stack is built from a continuous level walk) -- letting
-        # `lvl` outrun the fills actually taken broke that invariant and produced non-adjacent,
-        # sometimes-negative pairs (found live 2026-10-18). The unfilled remainder is simply
-        # deferred to a later tick, like a real resting order still waiting to fill.
+        # gets filled). When the budget OR the real balance runs out mid-candle, `lvl` must stop
+        # exactly where fills stopped, NOT jump ahead to match the real close price -- a real
+        # resting order that didn't fill is still sitting there, waiting, not teleported.
         fill_budget = None
         if order_type == "limit":
             fill_budget = int((PARTICIPATION * (candle.get("v") or 0)) / order_size) if order_size > 0 else 0
@@ -278,51 +282,36 @@ class LitGridPaper:
                 break
             target_lvl = level_of(path[i], step)
             while lvl != target_lvl and budget_left():
-                # Fill price is always exp(new_lvl*step) -- the line just reached, in either
-                # direction. This is what gives the design's core property: a buy and the sell
-                # that eventually closes it are always exactly one spacing apart in price, so
-                # every completed pair is a win of exactly one spacing's worth, by construction
-                # -- including repeated chop between two adjacent lines in a flat market, which
-                # is the whole point of a grid bot (an earlier attempt to "symmetrize" this so a
-                # round trip nets zero was reverted: it broke that property for no real gain --
-                # the actual bug only ever needed the level_of threshold fix above).
                 if target_lvl > lvl:
                     lvl += 1
-                    side = "sell"
-                else:
-                    lvl -= 1
-                    side = "buy"
-                price = math.exp(lvl * step)
-
-                if side == "sell":
-                    if open_buys:
-                        entry = open_buys.pop()
-                        qty = entry["qty"]
+                    price = math.exp(lvl * step)
+                    buy_level = lvl - 1
+                    qty = holdings.get(buy_level, 0.0)
+                    if qty > 0:
                         proceeds = price * qty
-                        pnl = (price - entry["price"]) * qty
+                        buy_price = math.exp(buy_level * step)
+                        pnl = (price - buy_price) * qty
                         if order_type == "market":
-                            cost = (MARKET_ROUNDTRIP_COST_PCT / 100.0) * ((price + entry["price"]) / 2) * qty
+                            cost = (MARKET_ROUNDTRIP_COST_PCT / 100.0) * ((price + buy_price) / 2) * qty
                             proceeds -= cost
                             pnl -= cost
                         lit_balance -= qty
                         usdc_balance += proceeds
                         bot_profit_usd += pnl
                         fills_used += 1
-                        await self.log_trade("buy_then_sell", entry["opened_at"], closed_at,
-                                              entry["price"], price, qty, pnl, order_type)
-                    # No held LIT to sell -- there is simply no resting order at this level (a
-                    # Long grid never pre-arms a sell it can't back with real inventory). Not a
-                    # capital constraint, so `lvl` still advances; only the fill is skipped.
+                        del holdings[buy_level]
+                        await self.log_trade("buy_then_sell", closed_at, closed_at, buy_price, price, qty, pnl, order_type)
+                    # No holding at buy_level -- no resting sell order armed at this level, do nothing.
                 else:
+                    lvl -= 1
+                    price = math.exp(lvl * step)
                     cost = price * order_size
                     if usdc_balance >= cost:
                         usdc_balance -= cost
                         lit_balance += order_size
-                        open_buys.append({"price": price, "qty": order_size, "opened_at": closed_at})
+                        holdings[lvl] = holdings.get(lvl, 0.0) + order_size
                         fills_used += 1
                     else:
-                        # Out of real USDC -- genuinely can't fill, must stop here (like running
-                        # out of the volume budget), not skip-and-continue.
                         blocked = True
                         break
 
@@ -334,11 +323,11 @@ class LitGridPaper:
             "usdc_balance": usdc_balance,
             "lit_balance": lit_balance,
             "bot_profit_usd": bot_profit_usd,
-            "open_positions_json": {"buys": open_buys, "sells": []},
+            "open_positions_json": {"holdings": {str(k): v for k, v in holdings.items() if v > 0}},
             "updated_at": datetime.now(timezone.utc).isoformat(),
         })
 
-    async def arm_grid(self, state, center_price, center_lvl, note):
+    async def arm_grid(self, state, center_price, center_lvl, note, seed_initial_position=False):
         """(Re)establish the level tracker at a fresh reference point and persist it, so a
         restart can resume from here instead of silently re-arming from scratch while stale
         open_positions_json from before the restart sits at the OLD levels (Opus audit,
@@ -346,19 +335,61 @@ class LitGridPaper:
         every Render redeploy resets in-memory state, but the position stack survives in the
         DB). Also re-arms whenever spacing_pct changes mid-run, since a level INDEX computed
         under the old spacing means something different under a new one (reproduced live:
-        a spacing change made the walk "discover" hundreds of phantom levels in one candle)."""
+        a spacing change made the walk "discover" hundreds of phantom levels in one candle).
+
+        seed_initial_position (2026-10-18, confirmed directly against Bitsgap's own
+        documentation): a real grid bot funds BOTH sides from the start -- every level above
+        current price starts with a resting sell order, every level below starts with a resting
+        buy order, and Bitsgap buys whatever base currency is missing at market price to arm the
+        sell side. The split is proportional to the configured window, not a blind 50/50: buy
+        only enough LIT to cover `levels_up` sell orders (direct example given: 3 up / 15 down
+        means buy 3 orders' worth of LIT, keep the rest as cash for the 15 down levels). Each of
+        those `levels_up` orders is its own separate holdings[level] entry (see process_candle)
+        so each one sells independently and correctly when its own specific level is reached --
+        not one lump sum. Only applies on a genuine first-ever start (never on a spacing-change
+        re-arm, which must not touch an already-established position)."""
         self._last_level = center_lvl
         spacing_pct = float(state["spacing_pct"])
         usdc_balance = float(state["usdc_balance"])
         lit_balance = float(state["lit_balance"])
-        capital = (usdc_balance + lit_balance * center_price) if state["compounding_enabled"] else float(state["capital_usd"])
-        sizing_levels = levels_for_drawdown(spacing_pct, float(state.get("drawdown_pct") or 30.0))
-        order_size = compute_order_size_lit(capital, center_price, spacing_pct, sizing_levels)
+
+        patch = {}
+        if seed_initial_position:
+            capital_usd = float(state["capital_usd"])
+            down_sizing_levels = levels_for_drawdown(spacing_pct, float(state.get("drawdown_pct") or 30.0))
+            # Base order size off the FULL capital against the down-side depth -- this is the
+            # per-level LIT quantity used both to seed the up side and for every ongoing fill.
+            base_order_size = compute_order_size_lit(capital_usd, center_price, spacing_pct, down_sizing_levels)
+            levels_up = max(1, int(state["levels_up"]))
+            lit_value_usd = base_order_size * levels_up * center_price
+            # Safety clamp: never let the up-side allocation eat so much of the capital that
+            # the down side (the much deeper, more important reserve) is starved.
+            lit_value_usd = min(lit_value_usd, capital_usd * 0.9)
+            actual_order_size = lit_value_usd / levels_up / center_price if levels_up > 0 else 0.0
+            usdc_balance = capital_usd - lit_value_usd
+            lit_balance = actual_order_size * levels_up
+            # One holding per level, exactly like Bitsgap pre-arming a separate sell order at
+            # each level above price -- NOT one lump entry. holdings[center_lvl + k] represents
+            # "bought at this level, sells when price reaches one level above it".
+            patch["open_positions_json"] = {
+                "holdings": {str(center_lvl + k): actual_order_size for k in range(levels_up)}
+            }
+            patch["usdc_balance"] = usdc_balance
+            patch["lit_balance"] = lit_balance
+            patch["order_size_lit"] = base_order_size
+            order_size = base_order_size
+        else:
+            # Spacing-change re-arm on an already-running position: keep using whatever
+            # order_size is already in effect (recomputed fresh every candle in process_candle
+            # when compounding is on; otherwise it stays fixed from the original arm).
+            order_size = float(state.get("order_size_lit") or 0.0)
+
         await self.log_run(note, {
             "center_price": center_price, "center_level": center_lvl, "spacing_pct": spacing_pct,
             "levels_up": state["levels_up"], "levels_down": state["levels_down"],
+            "seeded_initial_lit": lit_balance if seed_initial_position else None,
         })
-        await self.update_state({
+        patch.update({
             "live_price": center_price,
             "live_level": center_lvl,
             "order_size_lit": order_size,
@@ -366,6 +397,7 @@ class LitGridPaper:
             "internal_spacing_pct": spacing_pct,
             "updated_at": datetime.now(timezone.utc).isoformat(),
         })
+        await self.update_state(patch)
 
     async def tick(self):
         state = await self.get_state()
@@ -401,8 +433,10 @@ class LitGridPaper:
                 return
             center_price = candles[-1]["c"]
             center_lvl = level_of(candle_path(candles[-1])[0], step)
+            is_genuinely_fresh = persisted_level is None
             await self.arm_grid(state, center_price, center_lvl,
-                                 "grid_rearmed_spacing_changed" if spacing_changed else "grid_armed")
+                                 "grid_rearmed_spacing_changed" if spacing_changed else "grid_armed",
+                                 seed_initial_position=is_genuinely_fresh)
             return
 
         if spacing_changed:

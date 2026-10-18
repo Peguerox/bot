@@ -62,16 +62,24 @@ def candle(t, o, h, l, c, v):
 
 
 def base_state(**over):
+    # drawdown_pct chosen so levels_for_drawdown(spacing, drawdown_pct) == 15, matching the
+    # order-size magnitudes every other test in this file was calibrated against before the
+    # drawdown_pct/levels split -- see t_levels_for_drawdown_matches_known_values for the
+    # function's own correctness check at realistic depths (e.g. 30% -> 286 levels).
+    spacing_pct, drawdown_pct, capital_usd = 0.125, 1.858682, 10000
+    # order_size_lit defaults to what arm_grid would have computed for this capital/spacing/
+    # drawdown at p0=10.0 (the price every direct process_candle test in this file uses) --
+    # process_candle now REUSES this stored value when compounding is off (fixed at arm time,
+    # not recomputed every candle), so a test calling process_candle directly (skipping
+    # arm_grid) needs a realistic starting value here, not None/0.
+    default_order_size = compute_order_size_lit(capital_usd, 10.0, spacing_pct,
+                                                  levels_for_drawdown(spacing_pct, drawdown_pct))
     st = {
-        # drawdown_pct chosen so levels_for_drawdown(spacing, drawdown_pct) == 15, matching the
-        # order-size magnitudes every other test in this file was calibrated against before the
-        # drawdown_pct/levels split -- see t_levels_for_drawdown_matches_known_values for the
-        # function's own correctness check at realistic depths (e.g. 30% -> 286 levels).
-        "spacing_pct": 0.125, "levels_up": 15, "levels_down": 15, "drawdown_pct": 1.858682,
-        "capital_usd": 10000, "usdc_balance": 10000, "lit_balance": 0, "bot_profit_usd": 0,
+        "spacing_pct": spacing_pct, "levels_up": 15, "levels_down": 15, "drawdown_pct": drawdown_pct,
+        "capital_usd": capital_usd, "usdc_balance": capital_usd, "lit_balance": 0, "bot_profit_usd": 0,
         "compounding_enabled": False, "order_type": "limit",
-        "order_size_lit": None, "live_price": None, "live_level": None,
-        "open_positions_json": {"buys": [], "sells": []}, "enabled": True,
+        "order_size_lit": default_order_size, "live_price": None, "live_level": None,
+        "open_positions_json": {"holdings": {}}, "enabled": True,
     }
     st.update(over)
     return st
@@ -132,6 +140,53 @@ async def t_paired_cycle_buy_then_sell():
           state["usdc_balance"] > start_usdc, (start_usdc, state["usdc_balance"]))
 
 
+async def t_initial_seed_is_proportional_to_levels_up():
+    # Confirmed directly against Bitsgap's own docs (2026-10-18): the up-front split is NOT a
+    # blind 50/50 -- it's proportional to the configured window. 3 up / 15 down should buy much
+    # less LIT than 15 up / 15 down, for the same capital.
+    bot_narrow, fake_narrow = make_bot(base_state(order_type="market", levels_up=3, usdc_balance=10000, lit_balance=0))
+    bot_wide, fake_wide = make_bot(base_state(order_type="market", levels_up=15, usdc_balance=10000, lit_balance=0))
+    c = candle(1000, 10.0, 10.0, 10.0, 10.0, 1000)
+    for bot, fake in ((bot_narrow, fake_narrow), (bot_wide, fake_wide)):
+        bot.fetch_latest_candles = lambda count=5, c=c: _async_return([c])
+        await bot.tick()
+    narrow_state = (await bot_narrow.sb("GET", f"{core.TABLE_STATE}?id=eq.1"))[0]
+    wide_state = (await bot_wide.sb("GET", f"{core.TABLE_STATE}?id=eq.1"))[0]
+    check("3 up seeds much less LIT than 15 up, same capital",
+          narrow_state["lit_balance"] < wide_state["lit_balance"] / 3,
+          (narrow_state["lit_balance"], wide_state["lit_balance"]))
+    check("3 up keeps much more USDC in reserve than 15 up",
+          narrow_state["usdc_balance"] > wide_state["usdc_balance"],
+          (narrow_state["usdc_balance"], wide_state["usdc_balance"]))
+    check("3 separate holdings entries seeded (one per level), not one lump sum",
+          len(narrow_state["open_positions_json"]["holdings"]) == 3,
+          narrow_state["open_positions_json"]["holdings"])
+
+
+async def t_repeated_chop_profits_on_every_touch():
+    # The actual point of a grid bot, confirmed against Bitsgap's docs (2026-10-18): a filled
+    # buy immediately arms a specific sell one level above; when THAT fills, it immediately
+    # re-arms a buy back at the original level. So pure back-and-forth chop between two
+    # adjacent lines profits on EVERY touch, not just once, and not zero (an earlier attempt to
+    # make a round trip net zero was wrong and was reverted).
+    bot, fake = make_bot(base_state(order_type="market", usdc_balance=10000, lit_balance=0))
+    step = math.log(1 + 0.125 / 100)
+    p_hi = 10.0
+    p_lo = p_hi * math.exp(-1 * step)  # exactly one level down
+    t = 1000
+    for _ in range(2):  # each iteration is one full down-then-up round trip between the two lines
+        c = candle(t, p_hi, p_hi, p_lo, p_lo, 1000)
+        await bot.process_candle(c, fake.state)
+        t += 1000
+        c = candle(t, p_lo, p_hi, p_lo, p_hi, 1000)
+        await bot.process_candle(c, fake.state)
+        t += 1000
+    check("chopping between two adjacent lines twice produces two profitable trades, not zero or one",
+          len(fake.trades) == 2, fake.trades)
+    check("each chop trade profits (buy low, sell high, same two prices every time)",
+          all(t["pnl_usd"] > 0 for t in fake.trades), fake.trades)
+
+
 async def t_sell_skipped_without_inventory_no_naked_short():
     # Direct correction (2026-10-18, after a Bitsgap screenshot comparison): this is a Long spot
     # grid. A sell event with no LIT actually held must not execute at all -- no free virtual
@@ -190,6 +245,33 @@ async def t_compounding_recomputes_order_size_from_real_total_value():
     order_size_flat = fake_f.state["order_size_lit"]
     check("compounding grows order size after a profitable pair vs. the flat-capital baseline",
           order_size_compounding > order_size_flat, (order_size_compounding, order_size_flat))
+
+
+async def t_compounding_never_resizes_an_already_resting_position():
+    # Direct correction (2026-10-18): "the old orders that you already have created, they can't
+    # compound... it's better to just compound with the new orders." An already-filled holding
+    # must keep whatever qty it was bought with forever -- only a BRAND NEW fill, placed after
+    # profit has grown the account, should ever use a bigger (compounded) size.
+    bot, fake = make_bot(base_state(order_type="market", compounding_enabled=True))
+    step = math.log(1 + 0.125 / 100)
+    p0 = 10.0
+    c1 = candle(1000, p0, p0, p0 * math.exp(-1 * step), p0 * math.exp(-1 * step), 1000)
+    await bot.process_candle(c1, fake.state)
+    s1 = (await bot.sb("GET", f"{core.TABLE_STATE}?id=eq.1"))[0]
+    first_qty = list(s1["open_positions_json"]["holdings"].values())[0]
+
+    c2 = candle(2000, p0 * math.exp(-1 * step), p0, p0 * math.exp(-1 * step), p0, 1000)
+    await bot.process_candle(c2, s1)  # sells the first holding for a small profit
+    s2 = (await bot.sb("GET", f"{core.TABLE_STATE}?id=eq.1"))[0]
+    check("the sold holding is gone (not lingering to be resized later)",
+          len(s2["open_positions_json"]["holdings"]) == 0, s2["open_positions_json"]["holdings"])
+
+    c3 = candle(3000, p0, p0, p0 * math.exp(-1 * step), p0 * math.exp(-1 * step), 1000)
+    await bot.process_candle(c3, s2)  # a brand new buy, placed after profit accrued
+    s3 = (await bot.sb("GET", f"{core.TABLE_STATE}?id=eq.1"))[0]
+    second_qty = list(s3["open_positions_json"]["holdings"].values())[0]
+    check("a brand new fill after profit accrued uses a bigger (compounded) size",
+          second_qty > first_qty, (first_qty, second_qty))
 
 
 async def t_tick_error_never_propagates():
@@ -397,10 +479,13 @@ async def main():
     t_levels_for_drawdown_matches_known_values()
     t_order_size_scales_with_capital()
     for t in (t_paired_cycle_buy_then_sell,
+              t_initial_seed_is_proportional_to_levels_up,
+              t_repeated_chop_profits_on_every_touch,
               t_sell_skipped_without_inventory_no_naked_short,
               t_buy_blocked_when_usdc_runs_out,
               t_limit_fills_respect_participation_cap,
               t_compounding_recomputes_order_size_from_real_total_value,
+              t_compounding_never_resizes_an_already_resting_position,
               t_sub_spacing_noise_never_trades,
               t_restart_resumes_from_persisted_level_not_a_fresh_rearm,
               t_spacing_change_triggers_rearm,

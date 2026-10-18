@@ -20,7 +20,7 @@ const LIMITS = {
 
 export async function POST(req: NextRequest) {
   const body = await req.json();
-  const out: Record<string, number | string | boolean | { buys: never[]; sells: never[] }> = {};
+  const out: Record<string, number | string | boolean | null | { holdings: Record<string, never> }> = {};
 
   for (const [key, col] of [
     ["spacingPct", "spacing_pct"],
@@ -60,14 +60,18 @@ export async function POST(req: NextRequest) {
   }
 
   // Changing the capital while holding a position doesn't have a clean meaning (what would the
-  // held LIT's cost basis even become?) -- resetting to a fresh 100% cash start at the new
-  // capital is the only sane behavior, same idea as every other bot's reset-on-settings-change
-  // guards. Matches clear-history's reset.
+  // held LIT's cost basis even become?) -- resetting to a fresh start at the new capital is the
+  // only sane behavior, same idea as every other bot's reset-on-settings-change guards. Matches
+  // clear-history's reset. Clearing internal_last_level marks the next enable as a genuine
+  // fresh start, so it re-splits capital proportionally (USDC + an immediate LIT buy sized to
+  // levels_up) instead of resuming as if it were the same still-running position.
   if (out["capital_usd"] !== undefined) {
     out["usdc_balance"] = out["capital_usd"];
     out["lit_balance"] = 0;
     out["bot_profit_usd"] = 0;
-    out["open_positions_json"] = { buys: [], sells: [] };
+    out["open_positions_json"] = { holdings: {} };
+    out["internal_last_level"] = null;
+    out["internal_spacing_pct"] = null;
   }
 
   if (Object.keys(out).length === 0) {
