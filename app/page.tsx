@@ -1485,15 +1485,15 @@ function LitGridLivePanel({
   return (
     <div className="bg-gray-900 rounded-xl p-5 space-y-5 flex flex-col border border-red-900/40">
       <div className="space-y-1.5">
-        <div className="flex items-center justify-between gap-2">
-          <div className="flex items-center gap-2">
+        <div className="flex flex-wrap items-center justify-between gap-2">
+          <div className="flex flex-wrap items-center gap-2">
             <h2 className="text-white font-bold text-lg">LIT/USDC Grid Bot</h2>
             <span className="text-xs font-bold px-2 py-0.5 rounded-full bg-red-500/20 text-red-400">LIVE — REAL MONEY</span>
             <span className={`text-xs font-bold px-2 py-0.5 rounded-full ${workerAlive ? "bg-green-500/20 text-green-400" : "bg-gray-700/40 text-gray-500"}`}>
               {workerAlive ? "worker alive" : "worker offline"}
             </span>
           </div>
-          <div className="flex items-center gap-1.5 shrink-0">
+          <div className="flex flex-wrap items-center gap-1.5 shrink-0">
             <button
               onClick={onFlatten}
               disabled={flattening}
