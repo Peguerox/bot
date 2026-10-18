@@ -1,13 +1,20 @@
 import { NextRequest, NextResponse } from "next/server";
 import { getSupabaseAdmin } from "@/lib/supabase-admin";
 
-// Every knob from the 2026-10-17/18 research: spacing, asymmetric up/down levels (the
-// "5 up / 15 down to save money" case the user asked about), capital, order type, compounding.
+// Every knob from the 2026-10-17/18 research: spacing, asymmetric up/down active window (the
+// "5 up / 15 down to save money" case the user asked about), drawdown depth (sizes the order
+// only -- see drawdown_pct below), capital, order type, compounding.
 // Bounds are sanity rails, not opinions -- same convention as lighter-hedge-settings.
 const LIMITS = {
   spacingPct: { min: 0.01, max: 5, label: "grid spacing" },
   levelsUp: { min: 1, max: 500, label: "levels up" },
   levelsDown: { min: 1, max: 500, label: "levels down" },
+  // Direct correction (2026-10-18): this used to be the levelsDown count, which crammed all the
+  // capital into a shallow depth (15 levels = ~1.9% at 0.125% spacing) since levelsDown also
+  // doubled as the small active-tracking window. drawdownPct is now its own field: it sizes the
+  // order so the capital would last through that whole decline, without the bot ever actually
+  // building/tracking that many levels -- it just keeps recreating the next line as price moves.
+  drawdownPct: { min: 0.1, max: 95, label: "drawdown coverage" },
   capitalUsd: { min: 1, max: 10_000_000, label: "capital" },
 };
 
@@ -19,6 +26,7 @@ export async function POST(req: NextRequest) {
     ["spacingPct", "spacing_pct"],
     ["levelsUp", "levels_up"],
     ["levelsDown", "levels_down"],
+    ["drawdownPct", "drawdown_pct"],
     ["capitalUsd", "capital_usd"],
   ] as const) {
     const raw = body[key];

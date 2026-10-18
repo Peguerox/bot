@@ -24,9 +24,12 @@ Grid math is a direct, line-for-line port of the already-validated research scri
     this session); MARKET fills pay a fixed ~0.103% assumed round-trip spread cost instead.
   - a sell closes the most-recently-opened unpaired buy (LIFO) -- the correct accounting method
     identified this session, not the naive "crossings / 2" approximation from earlier research.
-  - order_size_lit is capital / (sum of price at each configured down-level) -- the same "full
-    worst-case reserve against levels_down" sizing used throughout this session's manual
-    calculations, so the panel's capital number means what it meant in chat.
+  - order_size_lit is capital / (sum of price across the levels implied by drawdown_pct) -- the
+    same "full worst-case reserve against a depth" sizing used throughout this session's manual
+    calculations. drawdown_pct (2026-10-18, direct correction) sizes the order only -- the bot
+    never actually builds/tracks that many levels; it just keeps recreating the next line
+    dynamically as price moves. levels_up/levels_down are a separate, small, active-tracking
+    window (how many levels are currently "armed"), unrelated to the sizing depth.
 
 Real balance accounting (2026-10-18 rework, after a direct Bitsgap screenshot comparison): this
 is a Long spot grid -- starts 100% cash (usdc_balance = capital_usd, lit_balance = 0), buys first,
@@ -82,6 +85,18 @@ def compute_order_size_lit(capital_usd: float, current_price: float, spacing_pct
     if price_sum <= 0:
         return 0.0
     return capital_usd / price_sum
+
+
+def levels_for_drawdown(spacing_pct: float, drawdown_pct: float) -> int:
+    """How many grid levels a given % price decline spans, at this spacing -- used only to size
+    the order (2026-10-18, direct correction: drawdown_pct sizes the order so the capital would
+    last through that whole decline WITHOUT the bot ever actually building/tracking that many
+    levels -- it just keeps recreating the next line as price moves, same dynamic window as
+    always. levels_up/levels_down are a separate, small, active-tracking window, not a depth."""
+    drawdown_pct = min(max(drawdown_pct, 0.01), 99.0)
+    ratio = 1.0 - drawdown_pct / 100.0
+    step = math.log(1 + spacing_pct / 100.0)
+    return max(1, math.ceil(math.log(1 / ratio) / step))
 
 
 class LitGridPaper:
@@ -214,7 +229,8 @@ class LitGridPaper:
         bot_profit_usd = float(state["bot_profit_usd"])
         total_value = usdc_balance + lit_balance * candle["c"]
         capital = total_value if state["compounding_enabled"] else float(state["capital_usd"])
-        order_size = compute_order_size_lit(capital, candle["c"], spacing_pct, int(state["levels_down"]))
+        sizing_levels = levels_for_drawdown(spacing_pct, float(state.get("drawdown_pct") or 30.0))
+        order_size = compute_order_size_lit(capital, candle["c"], spacing_pct, sizing_levels)
 
         positions = state.get("open_positions_json") or {"buys": [], "sells": []}
         open_buys = positions.get("buys", [])

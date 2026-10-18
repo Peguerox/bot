@@ -1445,6 +1445,7 @@ function LitGridPaperPanel({
   const [spacingIn, setSpacingIn] = useState("");
   const [upIn, setUpIn] = useState("");
   const [downIn, setDownIn] = useState("");
+  const [drawdownIn, setDrawdownIn] = useState("");
   const [capitalIn, setCapitalIn] = useState("");
   const [saving, setSaving] = useState(false);
   const [saveError, setSaveError] = useState<string | null>(null);
@@ -1454,6 +1455,7 @@ function LitGridPaperPanel({
     if (spacingIn.trim()) body.spacingPct = Number(spacingIn);
     if (upIn.trim()) body.levelsUp = Number(upIn);
     if (downIn.trim()) body.levelsDown = Number(downIn);
+    if (drawdownIn.trim()) body.drawdownPct = Number(drawdownIn);
     if (capitalIn.trim()) body.capitalUsd = Number(capitalIn);
     if (Object.keys(body).length === 0) return;
     setSaving(true);
@@ -1467,7 +1469,7 @@ function LitGridPaperPanel({
       const data = await res.json().catch(() => ({}));
       setSaveError(data.error ?? "Failed to save.");
     } else {
-      setSpacingIn(""); setUpIn(""); setDownIn(""); setCapitalIn("");
+      setSpacingIn(""); setUpIn(""); setDownIn(""); setDrawdownIn(""); setCapitalIn("");
     }
     setSaving(false);
   }
@@ -1577,13 +1579,13 @@ function LitGridPaperPanel({
           <Stat
             label="Order Size"
             value={st?.order_size_lit != null ? `${Number(st.order_size_lit).toFixed(2)} LIT` : "—"}
-            sub={st?.order_size_lit != null && st?.live_price != null ? `~$${(Number(st.order_size_lit) * Number(st.live_price)).toFixed(2)}` : ""}
+            sub={st?.order_size_lit != null && st?.live_price != null ? `~$${(Number(st.order_size_lit) * Number(st.live_price)).toFixed(2)} · sized for -${st?.drawdown_pct ?? "—"}%` : ""}
             color="text-gray-300"
           />
           <Stat
             label="Trades"
             value={String(trades.length)}
-            sub={`spacing ${st?.spacing_pct ?? "—"}% · ${st?.levels_up ?? "—"} up / ${st?.levels_down ?? "—"} down`}
+            sub={`spacing ${st?.spacing_pct ?? "—"}% · ${st?.levels_up ?? "—"} up / ${st?.levels_down ?? "—"} down window`}
             color="text-gray-300"
           />
         </div>
@@ -1650,19 +1652,27 @@ function LitGridPaperPanel({
             inputMode="numeric"
             className="w-full bg-gray-900 border border-gray-700 rounded px-1.5 py-1 text-xs text-white tabular-nums focus:outline-none focus:border-blue-500"
           />
+          <input
+            value={drawdownIn}
+            onChange={(e) => setDrawdownIn(e.target.value)}
+            placeholder={`drawdown % (now ${st?.drawdown_pct ?? "—"})`}
+            inputMode="decimal"
+            className="w-full bg-gray-900 border border-gray-700 rounded px-1.5 py-1 text-xs text-white tabular-nums focus:outline-none focus:border-blue-500"
+          />
         </div>
         <button
           onClick={handleSave}
-          disabled={saving || (!spacingIn.trim() && !upIn.trim() && !downIn.trim() && !capitalIn.trim())}
+          disabled={saving || (!spacingIn.trim() && !upIn.trim() && !downIn.trim() && !drawdownIn.trim() && !capitalIn.trim())}
           className="text-xs font-bold px-2.5 py-1.5 rounded bg-blue-500/20 text-blue-400 hover:bg-blue-500/30 disabled:opacity-30 w-full"
         >
           {saving ? "Saving…" : "Save Settings"}
         </button>
         {saveError && <p className="text-red-400 text-xs">{saveError}</p>}
         <p className="text-gray-600 text-[9px] leading-snug">
-          Capital sizes order size as a full worst-case reserve against "levels down" (so it can
-          keep buying all the way to that depth without running out). Asymmetric levels (e.g. 5
-          up / 15 down) are supported — enter them independently.
+          "Drawdown %" sizes the order so capital would last through that whole decline — it does
+          NOT make the bot build that many levels; it just keeps recreating the next line
+          dynamically as price moves. "Levels up/down" is a separate, small, active-tracking
+          window (asymmetric, e.g. 5 up / 15 down, is supported) — unrelated to the sizing depth.
         </p>
       </div>
 

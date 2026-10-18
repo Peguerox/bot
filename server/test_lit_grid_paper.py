@@ -8,7 +8,9 @@ os.environ.setdefault("SUPABASE_SERVICE_ROLE_KEY", "test")
 sys.path.insert(0, "/Users/julio/trading-bot/server")
 
 import lit_grid_paper as core
-from lit_grid_paper import LitGridPaper, level_of, candle_path, compute_order_size_lit, run_lit_grid_paper
+from lit_grid_paper import (
+    LitGridPaper, level_of, candle_path, compute_order_size_lit, levels_for_drawdown, run_lit_grid_paper,
+)
 
 PASS, FAIL = [], []
 
@@ -61,7 +63,11 @@ def candle(t, o, h, l, c, v):
 
 def base_state(**over):
     st = {
-        "spacing_pct": 0.125, "levels_up": 15, "levels_down": 15,
+        # drawdown_pct chosen so levels_for_drawdown(spacing, drawdown_pct) == 15, matching the
+        # order-size magnitudes every other test in this file was calibrated against before the
+        # drawdown_pct/levels split -- see t_levels_for_drawdown_matches_known_values for the
+        # function's own correctness check at realistic depths (e.g. 30% -> 286 levels).
+        "spacing_pct": 0.125, "levels_up": 15, "levels_down": 15, "drawdown_pct": 1.858682,
         "capital_usd": 10000, "usdc_balance": 10000, "lit_balance": 0, "bot_profit_usd": 0,
         "compounding_enabled": False, "order_type": "limit",
         "order_size_lit": None, "live_price": None, "live_level": None,
@@ -80,6 +86,16 @@ def t_level_math_matches_validated_logic():
     check("candle_path green order", candle_path(green) == [1.0, 0.98, 1.05, 1.03])
     red = candle(0, 1.0, 1.05, 0.98, 0.97, 100)
     check("candle_path red order", candle_path(red) == [1.0, 1.05, 0.98, 0.97])
+
+
+def t_levels_for_drawdown_matches_known_values():
+    # Same numbers manually validated earlier this session (0.125% spacing): -30% needs 286
+    # levels, -10% needs 85 levels -- confirms drawdown_pct sizes the same way the chat math did.
+    check("30% drawdown -> 286 levels at 0.125% spacing", levels_for_drawdown(0.125, 30) == 286,
+          levels_for_drawdown(0.125, 30))
+    check("10% drawdown -> 85 levels at 0.125% spacing", levels_for_drawdown(0.125, 10) == 85,
+          levels_for_drawdown(0.125, 10))
+    check("a bigger drawdown needs more levels", levels_for_drawdown(0.125, 50) > levels_for_drawdown(0.125, 30))
 
 
 def t_order_size_scales_with_capital():
@@ -274,6 +290,7 @@ async def _async_return(value):
 
 async def main():
     t_level_math_matches_validated_logic()
+    t_levels_for_drawdown_matches_known_values()
     t_order_size_scales_with_capital()
     for t in (t_paired_cycle_buy_then_sell,
               t_sell_skipped_without_inventory_no_naked_short,
