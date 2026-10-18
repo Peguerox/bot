@@ -1155,6 +1155,100 @@ async def t_anchored_grid_keeps_exactly_levels_up_plus_levels_down_orders():
           len(open_rows) == 20, len(open_rows))
 
 
+def _grid_rows(P, held, sells_for, buys_at, sold=()):
+    rows, i = [], 1
+    for k in held:
+        rows.append({"id": i, "level": k, "side": "buy", "status": "filled", "filled_qty": 2.16,
+                     "filled_price": round(P * 1.00125 ** k, 4), "size": 2.16}); i += 1
+    for k in sold:
+        rows.append({"id": i, "level": k, "side": "buy", "status": "filled", "filled_qty": 2.16,
+                     "filled_price": round(P * 1.00125 ** k, 4), "size": 2.16}); i += 1
+        rows.append({"id": i, "level": k + 1, "side": "sell", "status": "filled", "closes_level": k,
+                     "filled_qty": 2.16, "filled_price": round(P * 1.00125 ** (k + 1), 4),
+                     "size": 2.16, "client_order_index": 900 + i}); i += 1
+    for k in sells_for:
+        rows.append({"id": i, "level": k + 1, "side": "sell", "status": "open", "closes_level": k,
+                     "client_order_index": 100 + i, "exchange_order_id": 1000 + i, "size": 2.16,
+                     "limit_price": core.round_price(P * 1.00125 ** (k + 1))}); i += 1
+    for k in buys_at:
+        rows.append({"id": i, "level": k, "side": "buy", "status": "open",
+                     "client_order_index": 100 + i, "exchange_order_id": 1000 + i, "size": 2.16,
+                     "limit_price": core.round_price(P * 1.00125 ** k)}); i += 1
+    return rows
+
+
+async def t_a_buy_fill_creates_only_its_sell_never_another_buy():
+    # Direct rule: the moment a buy fills, place its sell one line up -- never a buy after a buy.
+    P = 2.87055
+    rows = _grid_rows(P, held=range(-1, 5), sells_for=range(0, 5), buys_at=range(-15, -1))
+    bot, fake = make_bot(base_state(levels_up=5, levels_down=15, order_size_lit=2.16,
+                                     usdc_balance=500.0, grid_anchor_price=P), orders=rows)
+    before = {o["id"] for o in fake.orders}
+    await bot.maintain_window(fake.state, round(P * 1.00125 ** -1 * 0.99995, 5))
+    new = [o for o in fake.orders if o["id"] not in before]
+    check("a buy fill creates exactly one new order", len(new) == 1, new)
+    check("that order is the sell one line up from the filled buy",
+          new and new[0]["side"] == "sell" and new[0]["closes_level"] == -1
+          and abs(new[0]["limit_price"] - core.round_price(P)) < 1e-9, new)
+    check("no buy is created after a buy fill", not any(o["side"] == "buy" for o in new), new)
+    check("no market buy is sent after a buy fill", bot.client.placed == [] or
+          all("order_type" in kw for kw in bot.client.placed), bot.client.placed)
+
+
+async def t_trailing_up_keeps_levels_up_sells_and_twenty_orders():
+    # Price rose through line 1: the sell at line 1 filled (lot 0 sold). Expect: a limit buy one
+    # line below that sell (line 0), a market buy for a new lot at line 5 (its sell will sit at
+    # line 6, the new top), and the lowest buy (-15) cancelled -- still 20 orders, 5 sells.
+    P = 2.87055
+    rows = _grid_rows(P, held=range(1, 5), sells_for=range(1, 5), buys_at=range(-15, 0), sold=[0])
+    price = round(P * 1.00125 ** 1.3, 5)
+    bot, fake = make_bot(base_state(levels_up=5, levels_down=15, order_size_lit=2.16,
+                                     usdc_balance=500.0, grid_anchor_price=P), orders=rows)
+    bot.live.best_mid = lambda max_age=core.BOOK_MAX_AGE: price
+    before = {o["id"] for o in fake.orders}
+    await bot.maintain_window(fake.state, price)
+    new = [o for o in fake.orders if o["id"] not in before]
+    market = [kw for kw in bot.client.placed if "order_type" not in kw]
+    check("the filled sell gets its buy one line below it (line 0)",
+          [o["level"] for o in new if o["side"] == "buy" and o["limit_price"] < price] == [0], new)
+    check("trailing up market-buys exactly one lot for line 5",
+          len(market) == 1 and [o["level"] for o in new if o["side"] == "buy" and o["limit_price"] > price] == [5],
+          (market, new))
+    check("the lowest buy (-15) is cancelled to keep the grid at 20",
+          next(o for o in fake.orders if o["side"] == "buy" and o["level"] == -15 and o["id"] in before)["status"] == "cancel_requested",
+          [o for o in fake.orders if o["level"] == -15])
+    for o in new:
+        if o["side"] == "buy" and o["limit_price"] > price:
+            o["status"] = "filled"; o["filled_qty"] = 2.16; o["filled_price"] = price
+    for o in fake.orders:
+        if o["status"] == "cancel_requested":
+            o["status"] = "cancelled"
+    await bot.maintain_window(fake.state, price)
+    open_rows = [o for o in fake.orders if o["status"] in ("open", "pending")]
+    sells_open = sorted(o["level"] for o in open_rows if o["side"] == "sell")
+    check("once the lot fills, its sell is placed at the new top (line 6)",
+          any(o["side"] == "sell" and o["closes_level"] == 5
+              and abs(o["limit_price"] - core.round_price(P * 1.00125 ** 6)) < 1e-9 for o in open_rows), open_rows)
+    check("5 sells above price", len(sells_open) == 5, sells_open)
+    check("20 orders in total", len(open_rows) == 20, len(open_rows))
+    check("no second trailing buy while 5 lots are held", len([kw for kw in bot.client.placed if "order_type" not in kw]) == 1,
+          bot.client.placed)
+
+
+async def t_trailing_up_never_double_buys_while_a_market_buy_is_in_flight():
+    P = 2.87055
+    rows = _grid_rows(P, held=range(1, 5), sells_for=range(1, 5), buys_at=range(-14, 1), sold=[0])
+    price = round(P * 1.00125 ** 1.3, 5)
+    rows.append({"id": 500, "level": 5, "side": "buy", "status": "pending", "client_order_index": 5000,
+                 "limit_price": core.round_price(price * 1.005), "size": 2.16})
+    bot, fake = make_bot(base_state(levels_up=5, levels_down=15, order_size_lit=2.16,
+                                     usdc_balance=500.0, grid_anchor_price=P), orders=rows)
+    bot.live.best_mid = lambda max_age=core.BOOK_MAX_AGE: price
+    await bot.maintain_window(fake.state, price)
+    check("an in-flight trailing buy is counted -- no second market buy",
+          not any("order_type" not in kw for kw in bot.client.placed), bot.client.placed)
+
+
 async def t_maintain_window_cold_start_budget_uses_real_price_not_theoretical_level_price():
     # The deep levels' theoretical grid price is much cheaper than live price -- a cold start's
     # REAL cost is what the live price actually charges, not each level's own (cheaper)
@@ -1740,6 +1834,9 @@ async def main():
               t_levels_up_and_levels_down_are_independent,
         t_grid_after_cold_start_is_exactly_spacing_from_start_price,
         t_anchored_grid_keeps_exactly_levels_up_plus_levels_down_orders,
+        t_a_buy_fill_creates_only_its_sell_never_another_buy,
+        t_trailing_up_keeps_levels_up_sells_and_twenty_orders,
+        t_trailing_up_never_double_buys_while_a_market_buy_is_in_flight,
               t_maintain_window_cold_start_budget_uses_real_price_not_theoretical_level_price,
               t_maintain_window_reverts_to_resting_limit_ladder_after_the_first_ever_fill,
               t_maintain_window_accumulates_resting_buys_as_price_drifts_without_cancelling_old_ones,

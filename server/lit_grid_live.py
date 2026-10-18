@@ -274,6 +274,12 @@ held at lines 0..levels_up-1; each lot held at line L sells at line L+1 (never b
 giving sells at exactly +1..+levels_up spacings. The buy ladder starts at the highest free line
 at or below price, giving buys at exactly -1..-levels_down spacings. A run with no anchor keeps
 the old behavior.
+Trailing up (direct request: "5 up + 15 down = 20 orders all the time"): whenever fewer than
+levels_up lots are held (sells filled on a rise), the missing lots are market-bought onto the
+lines just above the highest held one, so their sells land at the new top; the grid bottom
+moves up with the top and the lowest buys are cancelled, keeping levels_up + levels_down
+orders. A buy fill only ever creates its sell -- never another buy. No trailing down: on a drop
+buys fill and their sells appear above them, so spending is capped by the buys in the grid.
 
 Nothing in this codebase has placed a real LIMIT order before this (stoch_bot_core.py's
 place_order only ever sends MARKET orders; native SL/TP are the only conditional orders that
@@ -1068,12 +1074,30 @@ class LitGridLive:
         cur_lvl = level_of(price / anchor, step, reference=self._window_center)
         self._window_center = cur_lvl
 
-        # Fixed grid (direct request: "5 up + 15 down = 20 orders, unless we change it"): on an
-        # anchored grid the lines run from -levels_down to +levels_up around the start price and
-        # never slide. A resting buy below the bottom line (left over from an older rule, or from
-        # lowering levels_down) is cancelled so the order count stays levels_up + levels_down.
-        grid_bottom = -levels_down
-        if anchored:
+        # Always levels_up sells above price and levels_down buys below (direct request: "5 up
+        # + 15 down = 20 orders all the time", trailing up). Each held lot at line L has its
+        # sell at L+1, so levels_up sells means levels_up held lots. When sells fill on a rise
+        # and fewer than levels_up lots are held, trailing up market-buys the missing lots onto
+        # the lines just above the highest held one (their sells land at the new top), and the
+        # grid's bottom moves up with the top so the lowest buys are cancelled -- the order
+        # count stays levels_up + levels_down and the money moves up instead of growing. On a
+        # drop nothing trails: buys fill, their sells appear above them, and spending is capped
+        # by the buys already in the grid. A market buy still in flight is a buy row priced
+        # above the market (market rows carry their slippage band as limit_price).
+        levels_up = max(1, int(state.get("levels_up") or 1))
+        held_lines = set(holdings)
+        pending_up = {int(r["level"]) for rows in resting.values() for r in rows
+                      if r["side"] == "buy" and float(r["limit_price"]) > price}
+        trail_lines = []
+        if anchored and not is_cold_start and entries_allowed:
+            need = levels_up - len(held_lines) - len(pending_up)
+            if need > 0:
+                occupied = held_lines | pending_up
+                start = max(max(occupied) + 1, cur_lvl) if occupied else cur_lvl
+                trail_lines = [ln for ln in range(start, start + need) if ln not in snap.buy_levels]
+        top_lines = held_lines | pending_up | set(trail_lines)
+        grid_bottom = (max(top_lines) + 1 - levels_up - levels_down) if top_lines else (cur_lvl - levels_down)
+        if anchored and entries_allowed:
             for rows in resting.values():
                 for r in rows:
                     if r["side"] == "buy" and int(r["level"]) < grid_bottom:
@@ -1186,6 +1210,28 @@ class LitGridLive:
                     available_usdc -= cost
                     base_capital_remaining -= from_base
             else:
+                for lvl in trail_lines:
+                    if not self._lock_held:
+                        return
+                    if max_open_buys is not None and lifetime_buy_count >= max_open_buys:
+                        break
+                    cost = price * order_size
+                    if cost > available_usdc:
+                        break
+                    if max_open_buys is not None:
+                        reserved = await self._reserve_buy_allowance(lifetime_buy_count)
+                        if reserved is None:
+                            break
+                        lifetime_buy_count = reserved
+                    from_base = min(cost, base_capital_remaining)
+                    row_id = await self.market_buy_level(
+                        lvl, order_size, funded_from_bucket_usd=cost - from_base)
+                    if row_id is None:
+                        continue
+                    await self.log_run("trailing_up_buy", {"line": lvl, "price": price})
+                    snap.buy_levels.add(lvl)
+                    available_usdc -= cost
+                    base_capital_remaining -= from_base
                 if anchored:
                     # One empty line next to price, buys on every line below it down to the fixed
                     # bottom: the empty line is the lowest held lot's line (its sell sits one line
