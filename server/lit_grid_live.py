@@ -220,16 +220,16 @@ seventh independent audit:
   - Cold-start initial fill (direct request): the resting-limit ladder only ever fills if price
     drifts down into it, which might never happen -- a fresh (or freshly reset) bot could sit at
     zero inventory indefinitely. The very first time this bot has never filled a buy and
-    currently holds nothing, `levels_up` lots are bought with a REAL MARKET order each instead
-    of a resting limit, right away, subject to the exact same budget/allowance/bucket-funding
-    checks as an ordinary buy -- `levels_down` plays NO role in a cold start; it still governs
-    only the ongoing resting-ladder depth, exactly as before, so the two are fully independent
-    (e.g. levels_up=4 buys 4 lots immediately even while levels_down=15 keeps a 15-deep ladder
-    for everything after). The instant any buy has ever filled, every subsequent buy --
-    including refilling a level that later sells back to empty -- goes through the normal
-    resting-limit ladder again, unaffected, governed by levels_down as always. The budget check
-    for a cold-start buy uses the real LIVE price (what will actually be paid), not each level's
-    theoretical grid price, which would have understated the real cost for the deeper levels.
+    currently holds nothing, `levels_up` lots worth of size are bought immediately with a REAL
+    MARKET order, subject to the exact same budget/allowance/bucket-funding checks as an
+    ordinary buy -- `levels_down` plays NO role in a cold start; it still governs only the
+    ongoing resting-ladder depth, exactly as before, so the two are fully independent. The
+    instant any buy has ever filled, every subsequent buy -- including refilling a level that
+    later sells back to empty -- goes through the normal resting-limit ladder again, unaffected,
+    governed by levels_down as always. The budget check for a cold-start buy uses the real LIVE
+    price (what will actually be paid), not each level's theoretical grid price, which would
+    have understated the real cost for the deeper levels. See NINTH-PASS CHANGES below for how
+    the `levels_up` lots are actually combined into a single order.
   - [P1] A reconcile row-write failure could mean the write actually committed and only the
     HTTP response was lost -- not that nothing happened. Treating that as "definitely not
     persisted" (previous pass's assumption) left the bot's cash/holdings view silently wrong
@@ -253,6 +253,23 @@ seventh independent audit:
     resting buy's bucket-funded share (tracked via the same funded_from_bucket_usd/
     bucket_cost_total this file already maintains), so a position entirely funded by profit no
     longer eats into the user's own configured capital_usd at all.
+
+NINTH-PASS FIX (2026-10-18), from a real live incident on the very first time the bot was ever
+turned on: `levels_up=5` placed FIVE SEPARATE market buys at cold start, one per nominal level.
+A market order ignores the "level" price entirely -- it just buys at whatever price the book
+offers right now -- so all five filled within a few cents of each other instead of 0.125%
+apart. Their sell targets (cost * (1+spacing%)) are derived from that real cost, so all five
+collapsed onto the SAME real price tick. The bot then tried to rest five separate sell orders
+on that one tick: the exchange's own POST_ONLY handling cancelled several of them outright, one
+filled for a few cents of dust, and the rest only separated once real price had drifted far
+enough -- visible live as a burst of cancel/replace noise and a ladder gap of ~0.8% instead of
+0.125% between the cold-start holdings and the first resting buy below them. Fix: cold start now
+places exactly ONE market order sized at `levels_up` lots combined, recorded as a single
+holding with a single real cost and a single sell target -- same total USDC spent and same
+total LIT bought as five separate buys would have, just no artificial "levels" for a market
+order to mislabel. The ordinary resting ladder (the `else` branch, `levels_down` deep) is
+unchanged and was never the source of this bug -- its own prices, checked directly against the
+live incident's ledger, were correctly spaced 0.125% apart from each other throughout.
 
 Nothing in this codebase has placed a real LIMIT order before this (stoch_bot_core.py's
 place_order only ever sends MARKET orders; native SL/TP are the only conditional orders that
@@ -1078,51 +1095,73 @@ class LitGridLive:
             cover_drop_bucket = float(state.get("profit_bucket_cover_drop_usd") or 0)
             available_usdc = min(real_usdc - resting_buy_cost, base_capital_remaining + cover_drop_bucket)
 
-            # levels_up now controls the COLD-START buy count specifically, independent of
-            # levels_down's ongoing ladder depth (direct request): e.g. levels_up=4 buys 4 lots
-            # immediately at cold start even while levels_down=15 keeps a 15-deep resting ladder
-            # for everything after. Outside a cold start, levels_up plays no role at all -- the
-            # ladder's depth is still governed purely by levels_down, unchanged.
-            placement_depth = max(1, int(state.get("levels_up") or 1)) if is_cold_start else levels_down
-            for lvl in range(cur_lvl - 1, cur_lvl - 1 - placement_depth, -1):
-                if not self._lock_held:
-                    return
-                if lvl in snap.buy_levels or lvl in snap.sell_closes or lvl in holdings:
-                    continue
-                if max_open_buys is not None and lifetime_buy_count >= max_open_buys:
-                    break
-                limit_price = round_price(math.exp(lvl * step))
-                # A cold-start fill executes as a real market order, so its REAL cost is
-                # whatever the live price actually is right now -- not this level's theoretical
-                # (and, for the deeper levels, much lower) grid price, which would understate
-                # what will actually be paid (external audit consideration, eighth pass).
-                cost = (price * order_size) if is_cold_start else (limit_price * order_size)
-                if cost > available_usdc:
-                    break
-                if max_open_buys is not None:
-                    reserved = await self._reserve_buy_allowance(lifetime_buy_count)
-                    if reserved is None:
-                        break  # another instance/tick already consumed the last slot
-                    lifetime_buy_count = reserved
-                from_base = min(cost, base_capital_remaining)
-                from_bucket_amount = cost - from_base
-                if is_cold_start:
-                    row_id = await self.market_buy_level(
-                        lvl, order_size, funded_from_bucket_usd=from_bucket_amount)
-                else:
+            if is_cold_start:
+                # ONE combined market order for the whole cold-start seed, not levels_up
+                # separate ones (direct fix after a real-money incident, 2026-10-18): placing
+                # levels_up separate market buys always executes them within pennies of each
+                # other -- a market order ignores the "level" price entirely. Their computed
+                # sell targets (cost * (1+spacing%)) then collapse onto the SAME real price
+                # tick, and the bot tried to rest levels_up separate sell orders on that one
+                # tick: several got cancelled by the exchange, one filled for a few cents of
+                # dust, before price drifted enough to actually separate them. A single
+                # combined lot has exactly one real cost and one real sell target, so there is
+                # nothing left to collide -- same total USDC spent and same total LIT bought as
+                # levels_up separate buys would have, just one honest ledger row instead of
+                # several fictitious "levels" a market order never actually priced at.
+                cold_start_count = max(1, int(state.get("levels_up") or 1))
+                affordable = int(available_usdc // (price * order_size)) if price * order_size > 0 else 0
+                cold_start_count = min(cold_start_count, affordable)
+                if cold_start_count > 0 and self._lock_held and (
+                        max_open_buys is None or lifetime_buy_count < max_open_buys):
+                    combined_size = clamp_order_size(order_size * cold_start_count)
+                    if combined_size is not None:
+                        cost = price * combined_size
+                        proceed = True
+                        if max_open_buys is not None:
+                            reserved = await self._reserve_buy_allowance(lifetime_buy_count)
+                            proceed = reserved is not None
+                            if proceed:
+                                lifetime_buy_count = reserved
+                        if proceed:
+                            from_base = min(cost, base_capital_remaining)
+                            from_bucket_amount = cost - from_base
+                            row_id = await self.market_buy_level(
+                                cur_lvl - 1, combined_size, funded_from_bucket_usd=from_bucket_amount)
+                            if row_id is not None:
+                                available_usdc -= cost
+                                base_capital_remaining -= from_base
+            else:
+                for lvl in range(cur_lvl - 1, cur_lvl - 1 - levels_down, -1):
+                    if not self._lock_held:
+                        return
+                    if lvl in snap.buy_levels or lvl in snap.sell_closes or lvl in holdings:
+                        continue
+                    if max_open_buys is not None and lifetime_buy_count >= max_open_buys:
+                        break
+                    limit_price = round_price(math.exp(lvl * step))
+                    cost = limit_price * order_size
+                    if cost > available_usdc:
+                        break
+                    if max_open_buys is not None:
+                        reserved = await self._reserve_buy_allowance(lifetime_buy_count)
+                        if reserved is None:
+                            break  # another instance/tick already consumed the last slot
+                        lifetime_buy_count = reserved
+                    from_base = min(cost, base_capital_remaining)
+                    from_bucket_amount = cost - from_base
                     row_id = await self.place_grid_order(
                         lvl, "buy", limit_price, order_size, funded_from_bucket_usd=from_bucket_amount)
-                if row_id is None:
-                    # Confirmed rejection (or the lock was lost -- caught by the loop-top check
-                    # next iteration either way): no money was spent, so no charge against
-                    # either budget (external audit fix, sixth pass -- a rejected buy used to be
-                    # charged exactly like an accepted one). An AMBIGUOUS send still returns a
-                    # real row id here and is still charged below, deliberately conservative,
-                    # same philosophy as the one-shot allowance counter above.
-                    continue
-                snap.buy_levels.add(lvl)
-                available_usdc -= cost
-                base_capital_remaining -= from_base
+                    if row_id is None:
+                        # Confirmed rejection (or the lock was lost -- caught by the loop-top
+                        # check next iteration either way): no money was spent, so no charge
+                        # against either budget (external audit fix, sixth pass -- a rejected
+                        # buy used to be charged exactly like an accepted one). An AMBIGUOUS
+                        # send still returns a real row id here and is still charged below,
+                        # deliberately conservative, same philosophy as the allowance counter.
+                        continue
+                    snap.buy_levels.add(lvl)
+                    available_usdc -= cost
+                    base_capital_remaining -= from_base
 
     async def market_sell_level(self, level, qty):
         # Lock validated BEFORE anything else (external audit fix, fifth pass): this function
