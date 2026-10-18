@@ -63,6 +63,54 @@ before fixing:
     production mode) -- null/undefined/empty were all treated as "leave unchanged". Submitting
     0 now explicitly means "remove the cap".
 
+FIFTH-PASS FIXES (2026-10-18), from a fourth independent audit, each confirmed against this code
+before fixing, plus a new feature (direct request):
+
+  - P1: flatten_all() never checked the lock mid-flight -- its cancel/sell loops had no
+    _lock_held guard at all, and market_sell_level() never touched the heartbeat. A dethroned
+    worker could keep flattening after a handover, racing the replacement worker over the same
+    inventory. Both loops now bail (and log flatten_aborted_lock_lost) the moment the lock is
+    lost; the new lock-holder picks the same flatten_requested flag up on its own next tick.
+  - P1: the lock heartbeat failed OPEN on a network error (an exception on the PATCH just
+    returned, leaving _lock_held True) -- now fails CLOSED, consistent with every other check in
+    this file. The heartbeat check also moved from AFTER each real order action to BEFORE it:
+    checking after the fact let exactly one action slip through per lock-loss event (e.g. a long
+    current_holdings() scan outlasting the lease before the next heartbeat caught it).
+  - P2: a same-tick cash correction (see fourth-pass P2-7) only ever lived in a local variable --
+    the NEXT tick's get_state() returned the stale pre-fill balance again, since nothing wrote
+    the corrected figure back. It's now persisted immediately so it survives into the next tick.
+  - P2: reconcile_pending_orders()'s own initial query was still a single unpaginated sb() call
+    -- holdings/resting-orders were paginated last round, this exact same query was missed. Now
+    uses sb_paginate() like everything else.
+  - P2: an order missing from the exchange's own lookup past the stale threshold was logged but
+    never gated anything -- new entries kept being placed elsewhere while that uncertainty sat
+    unresolved. reconcile_pending_orders() now reports this back and tick() pauses new entries
+    (never exits) the same way a real balance divergence already does.
+
+PROFIT ALLOCATION (direct request, 2026-10-18): realized profit (computed the same way the paper
+bot already does -- (sell_fill_price - cost_basis_at_time_of_sale) * qty, on every sell fill) is
+credited to exactly one of three durable buckets, selected by `profit_mode` (never the bot's own
+choice -- user-set only, like every other toggle):
+
+  - 'rest' (default): profit just accumulates in profit_bucket_rest_usd. No effect on trading --
+    it's the user's to withdraw from the real exchange account whenever they want.
+  - 'cover_drop': profit accumulates in profit_bucket_cover_drop_usd. maintain_window() spends
+    from it -- on top of the ordinary capital_usd ceiling, never replacing it -- only once a buy's
+    cost would otherwise exceed what's left of the base capital_usd budget, letting the window
+    keep buying further down than the original budget alone would allow. Spent dollars are
+    deducted from the bucket as they're used.
+  - 'compound': profit accumulates in profit_bucket_compound_usd. Folded into the sizing basis
+    (capital_usd + this bucket, mirroring the paper bot's compounding_basis = capital_usd +
+    bot_profit_usd) the next time order_size_lit is recomputed, producing a bigger order size.
+    Unlike cover_drop this is never spent/decremented by that use -- it keeps growing as more
+    profit lands in it, same as the paper bot's bot_profit_usd never shrinking from market swings.
+
+Switching `profit_mode` only changes where NEWLY-realized profit gets credited going forward.
+Money already sitting in a bucket is never moved to a different bucket on a mode switch -- it
+stays earmarked for that bucket's own purpose (cover_drop still gets spent covering a drop,
+compound still inflates sizing) regardless of which mode is currently selected; only crediting
+new profit is mode-gated, spending an existing balance is not.
+
 Nothing in this codebase has placed a real LIMIT order before this (stoch_bot_core.py's
 place_order only ever sends MARKET orders; native SL/TP are the only conditional orders that
 exist). The Lighter SDK (lighter.SignerClient.create_order) supports real ORDER_TYPE_LIMIT with
@@ -128,6 +176,12 @@ PAGE_SIZE = 500
 # account_orders endpoint has a finite history window, so a long enough outage can genuinely
 # lose visibility into an order's real fate).
 UNRESOLVED_ORDER_STALE_AFTER_S = 3600.0
+PROFIT_MODES = ("rest", "cover_drop", "compound")
+PROFIT_BUCKET_COLUMN = {
+    "rest": "profit_bucket_rest_usd",
+    "cover_drop": "profit_bucket_cover_drop_usd",
+    "compound": "profit_bucket_compound_usd",
+}
 
 
 def round_price(price):
@@ -267,6 +321,10 @@ class LitGridLive:
 
     # ── Order ledger ─────────────────────────────────────────────────────────────────────────
     async def place_grid_order(self, level, side, limit_price, size, closes_level=None):
+        # Lock validated BEFORE anything else (external audit fix, fifth pass): checking AFTER
+        # the send let exactly one action slip through per lock-loss event.
+        if not await self._touch_lock_heartbeat():
+            return None
         co_idx = int(time.time() * 1000) % 500_000_000
         row = {
             "level": level, "side": side, "client_order_index": co_idx,
@@ -292,20 +350,19 @@ class LitGridLive:
             if err:
                 await self.sb("PATCH", f"{TABLE_ORDERS}?id=eq.{row_id}",
                                {"status": "rejected", "error": str(err)[:200]})
-                await self._touch_lock_heartbeat()
                 return None
         except Exception as e:
             await self.log_run("order_place_unknown", {"row_id": row_id, "error": str(e)[:200]})
-            await self._touch_lock_heartbeat()
             return row_id
         await self.sb("PATCH", f"{TABLE_ORDERS}?id=eq.{row_id}", {"status": "open"})
-        await self._touch_lock_heartbeat()
         return row_id
 
     async def cancel_order_row(self, row):
         """Returns True only if the cancel REQUEST was sent cleanly -- this is NOT confirmation
         the order is actually gone (external audit fix P1-4). Callers must reconcile and check
         real resting state before treating a cancel as done."""
+        if not await self._touch_lock_heartbeat():
+            return False
         order_index = row.get("exchange_order_id")
         if order_index is None:
             return False
@@ -316,14 +373,11 @@ class LitGridLive:
             )
             if err:
                 await self.log_run("cancel_order_failed", {"row_id": row["id"], "error": str(err)[:200]})
-                await self._touch_lock_heartbeat()
                 return False
         except Exception as e:
             await self.log_run("cancel_order_failed", {"row_id": row["id"], "error": str(e)[:200]})
-            await self._touch_lock_heartbeat()
             return False
         await self.sb("PATCH", f"{TABLE_ORDERS}?id=eq.{row['id']}", {"status": "cancel_requested"})
-        await self._touch_lock_heartbeat()
         return True
 
     async def cancel_all_resting(self):
@@ -337,19 +391,33 @@ class LitGridLive:
                     all_ok = False
         return all_ok
 
-    async def reconcile_pending_orders(self):
+    async def reconcile_pending_orders(self, profit_mode=None):
         """Checks every non-terminal ledger row against the exchange's own account_orders().
-        Returns (all_ok, usdc_delta): all_ok is True only if every batch was successfully read;
-        usdc_delta is the net REAL cash impact (negative for buys, positive for sells) of
-        whatever just newly became terminal-with-a-fill THIS pass, so callers can apply it to an
-        otherwise-stale cached balance immediately (external audit fix P2-7)."""
-        pending = await self.sb(
-            "GET", f"{TABLE_ORDERS}?status=in.({','.join(OPEN_STATUSES)})&select=*&order=id.asc")
+        Returns (all_ok, usdc_delta, has_stale_unresolved): all_ok is True only if every batch
+        was successfully read; usdc_delta is the net REAL cash impact (negative for buys,
+        positive for sells) of whatever just newly became terminal-with-a-fill THIS pass, so
+        callers can apply it to an otherwise-stale cached balance immediately (external audit fix
+        P2-7); has_stale_unresolved is True if any order has been missing from the exchange's own
+        lookup for longer than UNRESOLVED_ORDER_STALE_AFTER_S -- callers use this to pause new
+        entries (never exits) the same way a real balance divergence already does (external audit
+        fix, fifth pass -- a stale-unresolved order used to only be logged, never gated anything).
+
+        Realized profit on a sell fill -- (fill_price - cost_basis_before_this_sell) * filled_qty,
+        same formula the paper bot already uses for bot_profit_usd -- is credited to whichever
+        profit bucket `profit_mode` names (direct request, profit allocation feature). The cost
+        basis is read via current_holdings() ONCE, before this pass's own PATCHes change it."""
+        pending = await self.sb_paginate(
+            f"{TABLE_ORDERS}?status=in.({','.join(OPEN_STATUSES)})&select=*&order=id.asc")
         if not pending:
-            return True, 0.0
+            return True, 0.0, False
+        holdings_before = None
+        if any(r["side"] == "sell" for r in pending):
+            holdings_before = await self.current_holdings()
         auth = self._get_auth_token()
         all_ok = True
         usdc_delta = 0.0
+        has_stale_unresolved = False
+        realized_profit = 0.0
         now = datetime.now(timezone.utc)
         for batch in _chunks(pending, 20):
             co_idxs = ",".join(str(r["client_order_index"]) for r in batch)
@@ -373,6 +441,7 @@ class LitGridLive:
                     if placed_at and (now - placed_at).total_seconds() > UNRESOLVED_ORDER_STALE_AFTER_S:
                         await self.log_run("order_unresolved_stale", {
                             "row_id": r["id"], "age_s": (now - placed_at).total_seconds()})
+                        has_stale_unresolved = True
                     continue
                 filled_qty, filled_price = _order_fill_amounts(o)
                 terminal = _order_is_terminal(o)
@@ -389,6 +458,10 @@ class LitGridLive:
                     if delta_qty > 0:
                         signed = -1.0 if r["side"] == "buy" else 1.0
                         usdc_delta += signed * delta_qty * filled_price
+                        if r["side"] == "sell" and r.get("closes_level") is not None and holdings_before:
+                            basis = holdings_before.get(r["closes_level"])
+                            if basis:
+                                realized_profit += delta_qty * (filled_price - basis["cost"])
                 if terminal:
                     patch["status"] = "filled" if filled_qty > 0 else (
                         "cancelled" if any(p in status_raw for p in TERMINAL_STATUS_SUBSTRINGS) else "rejected")
@@ -401,7 +474,16 @@ class LitGridLive:
                     "row_id": r["id"], "raw_status": status_raw, "terminal": terminal,
                     "computed_filled_qty": filled_qty, "computed_filled_price": filled_price,
                 })
-        return all_ok, usdc_delta
+        if profit_mode and realized_profit:
+            bucket_col = PROFIT_BUCKET_COLUMN.get(profit_mode, "profit_bucket_rest_usd")
+            try:
+                state_now = await self.get_state()
+                new_val = round(float(state_now.get(bucket_col) or 0) + realized_profit, 8)
+                await self.update_state({bucket_col: new_val})
+            except Exception as e:
+                await self.log_run("profit_bucket_credit_failed",
+                                    {"error": str(e)[:200], "amount": realized_profit, "bucket": bucket_col})
+        return all_ok, usdc_delta, has_stale_unresolved
 
     async def real_balances(self):
         auth = self._get_auth_token()
@@ -513,21 +595,27 @@ class LitGridLive:
             pass
 
     async def _touch_lock_heartbeat(self):
-        """Refreshes the heartbeat -- and, critically, checks whether the conditional write
-        actually matched a row. Zero rows means another instance has already taken ownership;
-        this now clears self._lock_held immediately instead of silently ignoring it (external
-        audit fix P1-6: a dethroned instance used to keep believing it still held the lock and
-        kept placing real orders)."""
+        """Refreshes (or verifies) heartbeat ownership and returns whether this instance still
+        holds the lock. Called BEFORE every real exchange action (external audit fix, fifth
+        pass): checking only AFTER the fact let exactly one action slip through per lock-loss
+        event. An unverifiable heartbeat (a network error on the PATCH itself) now fails CLOSED
+        -- treated as lock lost -- instead of silently leaving _lock_held True, consistent with
+        every other safety check in this file (previously it failed open here, the one
+        exception)."""
         if not self._lock_held:
-            return
+            return False
         try:
             rows = await self.sb("PATCH", f"{TABLE_STATE}?id=eq.1&lock_owner=eq.{self._lock_id}",
                                   {"lock_heartbeat": now_iso()})
-        except Exception:
-            return
+        except Exception as e:
+            self._lock_held = False
+            await self.log_run("instance_lock_heartbeat_unverifiable", {"error": str(e)[:200]})
+            return False
         if not rows:
             self._lock_held = False
             await self.log_run("instance_lock_lost_mid_tick", {"lock_id": self._lock_id})
+            return False
+        return True
 
     # ── Live price ───────────────────────────────────────────────────────────────────────────
     async def fetch_current_price(self):
@@ -645,9 +733,14 @@ class LitGridLive:
 
         order_size_lit = state.get("order_size_lit")
         if order_size_lit is None:
+            # Compound bucket folded into the sizing basis (direct request, profit allocation
+            # feature), mirroring the paper bot's compounding_basis = capital_usd + bot_profit_usd
+            # -- never decremented by this use, it keeps growing as more profit lands in it.
+            compound_bucket = float(state.get("profit_bucket_compound_usd") or 0)
+            effective_capital = float(state["capital_usd"]) + compound_bucket
             down_sizing_levels = levels_for_drawdown(spacing_pct, float(state.get("drawdown_pct") or 10.0))
             order_size_lit = compute_order_size_lit(
-                float(state["capital_usd"]), price, spacing_pct, down_sizing_levels)
+                effective_capital, price, spacing_pct, down_sizing_levels)
             await self.update_state({"order_size_lit": order_size_lit})
         order_size = clamp_order_size(float(order_size_lit or 0.0))
 
@@ -696,8 +789,13 @@ class LitGridLive:
             real_usdc = float(state.get("usdc_balance") or 0)
             holdings_cost = sum(h["qty"] * h["cost"] for h in holdings.values())
             capital_committed = holdings_cost + resting_buy_cost
-            capital_remaining = max(0.0, float(state["capital_usd"]) - capital_committed)
-            available_usdc = min(real_usdc - resting_buy_cost, capital_remaining)
+            base_capital_remaining = max(0.0, float(state["capital_usd"]) - capital_committed)
+            # Cover-drop bucket extends the ceiling ON TOP OF capital_usd, never replacing it --
+            # only reached once the base budget is exhausted (direct request, profit allocation
+            # feature). Spent dollars are deducted from the bucket as they're actually used.
+            cover_drop_bucket = float(state.get("profit_bucket_cover_drop_usd") or 0)
+            available_usdc = min(real_usdc - resting_buy_cost, base_capital_remaining + cover_drop_bucket)
+            bucket_spent = 0.0
 
             for lvl in range(cur_lvl - 1, cur_lvl - 1 - levels_down, -1):
                 if not self._lock_held:
@@ -718,8 +816,21 @@ class LitGridLive:
                 await self.place_grid_order(lvl, "buy", limit_price, order_size)
                 snap.buy_levels.add(lvl)
                 available_usdc -= cost
+                from_base = min(cost, base_capital_remaining)
+                base_capital_remaining -= from_base
+                bucket_spent += (cost - from_base)
+
+            if bucket_spent > 0:
+                await self.update_state({
+                    "profit_bucket_cover_drop_usd": round(cover_drop_bucket - bucket_spent, 8),
+                })
 
     async def market_sell_level(self, level, qty):
+        # Lock validated BEFORE anything else (external audit fix, fifth pass): this function
+        # never touched the heartbeat at all before, so a dethroned worker could keep flattening
+        # indefinitely on an all-sell-no-cancel pass.
+        if not await self._touch_lock_heartbeat():
+            return None
         sized = clamp_order_size(qty)
         if sized is None:
             return None
@@ -751,21 +862,34 @@ class LitGridLive:
         await self.sb("PATCH", f"{TABLE_ORDERS}?id=eq.{row_id}", {"status": "open"})
         return row_id
 
-    async def flatten_all(self):
+    async def flatten_all(self, profit_mode=None):
         """Emergency path, retried every tick until VERIFIED complete. Cancels everything
         resting first, reconciles, then sells each held level that has no unresolved resting
         sell already working it (external audit fix P1-2) -- never a duplicate attempt against
         the same inventory. A terminal fill below the sellable minimum is logged distinctly
-        (external audit fix P2-9) rather than looking like an ordinary retry."""
-        await self.reconcile_pending_orders()
+        (external audit fix P2-9) rather than looking like an ordinary retry.
+
+        Both loops below bail the moment the lock is lost (external audit fix, fifth pass -- this
+        function previously had NO lock checks at all, so a dethroned worker could keep
+        flattening after a handover, racing the replacement worker over the same inventory). The
+        new lock-holder picks the same flatten_requested flag up on its own very next tick, so
+        stopping here never leaves the position unprotected."""
+        await self.reconcile_pending_orders(profit_mode=profit_mode)
         resting = await self.resting_orders_by_level()
         any_cancel_failed = False
         for rows in resting.values():
             for r in rows:
+                if not self._lock_held:
+                    await self.log_run("flatten_aborted_lock_lost", {})
+                    return
                 if not await self.cancel_order_row(r):
                     any_cancel_failed = True
         if resting:
-            await self.reconcile_pending_orders()
+            await self.reconcile_pending_orders(profit_mode=profit_mode)
+
+        if not self._lock_held:
+            await self.log_run("flatten_aborted_lock_lost", {})
+            return
 
         resting = await self.resting_orders_by_level()
         unresolved_sell_closes = {
@@ -776,6 +900,9 @@ class LitGridLive:
         holdings = await self.current_holdings()
         sell_failed = False
         for lvl, h in holdings.items():
+            if not self._lock_held:
+                await self.log_run("flatten_aborted_lock_lost", {})
+                return
             if lvl in unresolved_sell_closes:
                 sell_failed = True
                 continue
@@ -788,7 +915,7 @@ class LitGridLive:
             if row_id is None:
                 sell_failed = True
         if holdings:
-            await self.reconcile_pending_orders()
+            await self.reconcile_pending_orders(profit_mode=profit_mode)
 
         try:
             _usdc, real_lit = await self.real_balances()
@@ -809,10 +936,11 @@ class LitGridLive:
 
     async def tick(self):
         state = await self.get_state()
+        profit_mode = state.get("profit_mode")
         if state.get("flatten_requested"):
-            await self.flatten_all()
+            await self.flatten_all(profit_mode=profit_mode)
             return
-        reconciled_ok, usdc_delta = await self.reconcile_pending_orders()
+        reconciled_ok, usdc_delta, has_stale_unresolved = await self.reconcile_pending_orders(profit_mode=profit_mode)
         if not reconciled_ok:
             return
         balance_ok, balance_refreshed = await self.check_balance_divergence()
@@ -823,18 +951,23 @@ class LitGridLive:
             # A fresh real read already reflects whatever reconciliation just confirmed.
             state = await self.get_state()
         elif usdc_delta:
-            # The periodic refresh didn't run this tick, but a fill WAS just confirmed --
-            # apply its real cash impact locally so maintain_window never works from a cash
-            # figure that's stale by up to the full 60s refresh interval (external audit fix P2-7).
+            # The periodic refresh didn't run this tick, but a fill WAS just confirmed -- apply
+            # its real cash impact locally AND persist it immediately (external audit fix, fifth
+            # pass: this used to only live in the local variable, so the very next tick's
+            # get_state() returned the stale pre-fill balance again, since nothing wrote the
+            # corrected figure back).
             state = dict(state)
             state["usdc_balance"] = float(state.get("usdc_balance") or 0) + usdc_delta
-        entries_allowed = bool(state.get("enabled")) and balance_ok
+            await self.update_state({"usdc_balance": state["usdc_balance"]})
+        # A stale-unresolved order pauses new entries, never exits -- same philosophy as a real
+        # balance divergence (external audit fix, fifth pass: this used to only be logged).
+        entries_allowed = bool(state.get("enabled")) and balance_ok and not has_stale_unresolved
 
         spacing_pct = float(state["spacing_pct"])
         persisted_spacing = state.get("internal_spacing_pct")
         if persisted_spacing is not None and float(persisted_spacing) != spacing_pct:
             await self.cancel_all_resting()
-            await self.reconcile_pending_orders()
+            await self.reconcile_pending_orders(profit_mode=profit_mode)
             still_resting = await self.resting_orders_by_level()
             if still_resting:
                 await self.log_run("spacing_change_cancel_incomplete",

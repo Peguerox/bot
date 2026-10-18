@@ -220,6 +220,8 @@ def base_state(**over):
         "live_price": None, "history_reset_at": None, "internal_spacing_pct": 0.125,
         "max_open_buys": None, "lifetime_buy_count": 0,
         "lock_owner": "test", "lock_heartbeat": None,
+        "profit_mode": "rest", "profit_bucket_rest_usd": 0.0,
+        "profit_bucket_cover_drop_usd": 0.0, "profit_bucket_compound_usd": 0.0,
     }
     st.update(over)
     return st
@@ -805,12 +807,17 @@ async def t_touch_lock_heartbeat_detects_lock_loss_mid_tick():
 
 
 async def t_maintain_window_stops_immediately_once_the_lock_is_lost_mid_loop():
+    # The heartbeat is now checked BEFORE each action (fifth-pass fix), so losing the lock on the
+    # SECOND call should let exactly one buy through, then stop -- never finishing the window.
     bot, fake = make_bot(base_state(levels_down=3, order_size_lit=1.70, usdc_balance=500.0))
     orig_touch = bot._touch_lock_heartbeat
+    calls = {"n": 0}
 
     async def losing_touch():
-        bot._lock_held = False
-        await orig_touch()
+        calls["n"] += 1
+        if calls["n"] >= 2:
+            bot._lock_held = False
+        return await orig_touch()
     bot._touch_lock_heartbeat = losing_touch
     await bot.maintain_window(fake.state, 3.10)
     buys = [o for o in fake.orders if o["side"] == "buy"]
@@ -850,9 +857,196 @@ async def t_reconcile_logs_a_warning_for_a_long_unresolved_order():
                    "status": "pending", "limit_price": 3.10, "size": 1.70,
                    "placed_at": "2020-01-01T00:00:00+00:00"}
     bot, fake = make_bot(base_state(), orders=[old_pending])
-    await bot.reconcile_pending_orders()
+    _all_ok, _usdc_delta, has_stale_unresolved = await bot.reconcile_pending_orders()
     check("an order missing from the exchange for far longer than the stale threshold is logged",
           any(r["action"] == "order_unresolved_stale" for r in fake.runs), fake.runs)
+    check("reconcile reports the stale-unresolved condition back to the caller",
+          has_stale_unresolved is True, has_stale_unresolved)
+
+
+async def t_tick_blocks_new_entries_while_an_order_is_stale_unresolved():
+    # External audit finding (P2-10/P2-6, fifth pass): a stale-unresolved order used to only be
+    # logged -- new entries kept being placed elsewhere while that uncertainty sat unresolved.
+    old_pending = {"id": 1, "level": 950, "side": "buy", "client_order_index": 999,
+                   "status": "pending", "limit_price": 5.00, "size": 1.70,
+                   "placed_at": "2020-01-01T00:00:00+00:00"}
+    bot, fake = make_bot(base_state(levels_down=3, order_size_lit=1.70, usdc_balance=500.0),
+                          orders=[old_pending])
+    bot.fetch_current_price = lambda: _async_return(3.10)
+    await bot.tick()
+    new_buys = [o for o in fake.orders if o["side"] == "buy" and o["id"] != 1]
+    check("no new buys are placed elsewhere while an order sits stale-unresolved",
+          len(new_buys) == 0, new_buys)
+
+
+# ── Lock-aware flatten (never acts after a confirmed handover) ──────────────────────────────────
+
+async def t_flatten_aborts_if_the_lock_is_lost_during_the_cancel_loop():
+    # External audit finding (P1, fourth independent audit): flatten_all() had NO lock checks at
+    # all -- a dethroned worker could keep flattening after a handover, racing the replacement
+    # worker over the same inventory.
+    resting_a = {"id": 1, "level": 900, "side": "buy", "status": "open", "client_order_index": 1,
+                 "exchange_order_id": 50, "limit_price": 3.00, "size": 1.70}
+    resting_b = {"id": 2, "level": 901, "side": "buy", "status": "open", "client_order_index": 2,
+                 "exchange_order_id": 51, "limit_price": 3.01, "size": 1.70}
+    held = {"id": 3, "level": 902, "side": "buy", "status": "filled", "filled_qty": 1.70, "filled_price": 3.02}
+    bot, fake = make_bot(base_state(flatten_requested=True), orders=[resting_a, resting_b, held],
+                          assets=[FakeAsset("LIT", 1.70, 0.0)])
+    bot.live.best_mid = lambda max_age=core.BOOK_MAX_AGE: 3.10
+    orig_cancel = bot.cancel_order_row
+
+    async def losing_cancel(row):
+        ok = await orig_cancel(row)
+        if row["id"] == 1:
+            bot._lock_held = False
+        return ok
+    bot.cancel_order_row = losing_cancel
+    await bot.flatten_all()
+    check("only the first cancel went out before the lock loss was noticed",
+          sorted(bot.client.cancelled) == [50], bot.client.cancelled)
+    check("no market sell was attempted after the lock was lost",
+          not any(o["side"] == "sell" for o in fake.orders), fake.orders)
+    check("the abort is logged distinctly", any(r["action"] == "flatten_aborted_lock_lost" for r in fake.runs), fake.runs)
+
+
+async def t_flatten_aborts_if_the_lock_is_lost_during_the_sell_loop():
+    held_a = {"id": 1, "level": 900, "side": "buy", "status": "filled", "filled_qty": 1.70, "filled_price": 3.00}
+    held_b = {"id": 2, "level": 910, "side": "buy", "status": "filled", "filled_qty": 1.70, "filled_price": 3.15}
+    bot, fake = make_bot(base_state(flatten_requested=True), orders=[held_a, held_b],
+                          assets=[FakeAsset("LIT", 3.40, 0.0)])
+    bot.live.best_mid = lambda max_age=core.BOOK_MAX_AGE: 3.10
+    orig_sell = bot.market_sell_level
+
+    async def losing_sell(level, qty):
+        row_id = await orig_sell(level, qty)
+        bot._lock_held = False
+        return row_id
+    bot.market_sell_level = losing_sell
+    await bot.flatten_all()
+    sells = [o for o in fake.orders if o["side"] == "sell"]
+    check("only one market sell went out before the lock loss stopped the loop",
+          len(sells) == 1, sells)
+    check("the abort is logged distinctly", any(r["action"] == "flatten_aborted_lock_lost" for r in fake.runs), fake.runs)
+
+
+async def t_market_sell_level_refuses_without_the_lock():
+    bot, fake = make_bot(base_state())
+    bot._lock_held = False
+    bot.live.best_mid = lambda max_age=core.BOOK_MAX_AGE: 3.10
+    row_id = await bot.market_sell_level(900, 1.70)
+    check("market_sell_level refuses to act once the lock is already lost",
+          row_id is None, row_id)
+    check("no order row was written", fake.orders == [], fake.orders)
+
+
+# ── Heartbeat fails CLOSED on an unverifiable write ─────────────────────────────────────────────
+
+async def t_heartbeat_fails_closed_on_an_unverifiable_write():
+    # External audit finding (P1, fourth independent audit): a network error on the heartbeat
+    # PATCH used to just `return`, leaving _lock_held True (fail OPEN) -- the one inconsistency
+    # with every other safety check in this file.
+    bot, fake = make_bot(base_state())
+
+    async def failing_sb(method, path, body=None):
+        if method == "PATCH" and path.startswith(core.TABLE_STATE) and "lock_heartbeat" in (body or {}):
+            raise RuntimeError("simulated network timeout")
+        return await fake.sb(method, path, body)
+    bot.sb = failing_sb
+    ok = await bot._touch_lock_heartbeat()
+    check("an unverifiable heartbeat write fails CLOSED, not open", ok is False, ok)
+    check("_lock_held is cleared", bot._lock_held is False, bot._lock_held)
+    check("the failure is logged distinctly",
+          any(r["action"] == "instance_lock_heartbeat_unverifiable" for r in fake.runs), fake.runs)
+
+
+async def t_place_grid_order_refuses_without_a_verified_lock():
+    bot, fake = make_bot(base_state(lock_owner="someone-else"))
+    row_id = await bot.place_grid_order(900, "buy", 3.10, 1.70)
+    check("place_grid_order refuses to send when the lock can't be verified as still owned",
+          row_id is None, row_id)
+    check("no ledger row was written", fake.orders == [], fake.orders)
+    check("no real order was sent", bot.client.placed == [], bot.client.placed)
+
+
+# ── Cash correction persists across ticks ───────────────────────────────────────────────────────
+
+async def t_tick_persists_the_cash_correction_so_it_survives_the_next_tick():
+    # External audit finding (P2, fourth independent audit): a same-tick cash correction used to
+    # only live in a local variable -- the next tick's get_state() returned the stale pre-fill
+    # balance again, since nothing wrote the corrected figure back.
+    pending_buy = {"id": 1, "level": 900, "side": "buy", "client_order_index": 777,
+                   "status": "pending", "limit_price": 3.10, "size": 1.70}
+    filled = FakeOrder(777, order_index=55, status="filled",
+                        filled_base_amount=1.70, filled_quote_amount=1.70 * 3.10, remaining_base_amount=0.0)
+    bot, fake = make_bot(base_state(usdc_balance=10.0, levels_down=0, order_size_lit=None, capital_usd=500),
+                          orders=[pending_buy], orders_by_co={777: filled})
+    bot._last_balance_check = time.time()
+    bot.fetch_current_price = lambda: _async_return(3.10)
+    await bot.tick()
+    check("the corrected cash figure is written back to the database, not just held in memory",
+          abs(float(fake.state["usdc_balance"]) - (10.0 - 1.70 * 3.10)) < 1e-6, fake.state["usdc_balance"])
+
+
+# ── Profit allocation (direct request) ──────────────────────────────────────────────────────────
+
+async def t_reconcile_credits_realized_profit_to_the_active_bucket():
+    buy = {"id": 1, "level": 900, "side": "buy", "status": "filled", "filled_qty": 1.70, "filled_price": 3.00}
+    sell_row = {"id": 2, "level": 901, "side": "sell", "closes_level": 900, "client_order_index": 555,
+                "status": "pending", "limit_price": 3.10, "size": 1.70}
+    filled_sell = FakeOrder(555, order_index=77, status="filled",
+                             filled_base_amount=1.70, filled_quote_amount=1.70 * 3.10, remaining_base_amount=0.0)
+    bot, fake = make_bot(base_state(profit_mode="rest"), orders=[buy, sell_row], orders_by_co={555: filled_sell})
+    await bot.reconcile_pending_orders(profit_mode="rest")
+    expected_profit = 1.70 * (3.10 - 3.00)
+    check("realized profit on a sell fill is credited to the active bucket",
+          abs(float(fake.state["profit_bucket_rest_usd"]) - expected_profit) < 1e-6,
+          fake.state["profit_bucket_rest_usd"])
+
+
+async def t_profit_bucket_balance_untouched_by_a_mode_switch():
+    # Direct request: switching profit_mode only changes where NEW profit goes -- money already
+    # earmarked for a different bucket's purpose must never move.
+    buy = {"id": 1, "level": 900, "side": "buy", "status": "filled", "filled_qty": 1.0, "filled_price": 3.00}
+    sell_row = {"id": 2, "level": 901, "side": "sell", "closes_level": 900, "client_order_index": 555,
+                "status": "pending", "limit_price": 3.10, "size": 1.0}
+    filled_sell = FakeOrder(555, order_index=77, status="filled",
+                            filled_base_amount=1.0, filled_quote_amount=1.0 * 3.10, remaining_base_amount=0.0)
+    bot, fake = make_bot(base_state(profit_mode="compound", profit_bucket_cover_drop_usd=20.0),
+                          orders=[buy, sell_row], orders_by_co={555: filled_sell})
+    await bot.reconcile_pending_orders(profit_mode="compound")
+    check("new profit goes to the currently active bucket (compound), not an old one",
+          float(fake.state["profit_bucket_compound_usd"]) > 0, fake.state["profit_bucket_compound_usd"])
+    check("a previously-selected bucket's balance is untouched by the mode switch",
+          float(fake.state["profit_bucket_cover_drop_usd"]) == 20.0, fake.state["profit_bucket_cover_drop_usd"])
+
+
+async def t_maintain_window_cover_drop_bucket_extends_buying_past_capital_usd():
+    # Direct request: cover_drop spends ON TOP OF capital_usd, never replacing it, only once the
+    # base budget is exhausted -- and is decremented by exactly what gets spent from it.
+    bot, fake = make_bot(base_state(levels_down=3, order_size_lit=1.70, usdc_balance=500.0,
+                                     capital_usd=0, profit_bucket_cover_drop_usd=20.0))
+    await bot.maintain_window(fake.state, 3.10)
+    buys = [o for o in fake.orders if o["side"] == "buy"]
+    check("buys are placed using the cover-drop bucket even though capital_usd alone is exhausted",
+          len(buys) > 0, buys)
+    total_cost = sum(o["limit_price"] * o["size"] for o in buys)
+    check("the cover-drop bucket is decremented by exactly what was spent from it",
+          abs(float(fake.state["profit_bucket_cover_drop_usd"]) - (20.0 - total_cost)) < 1e-6,
+          fake.state["profit_bucket_cover_drop_usd"])
+
+
+async def t_maintain_window_compound_bucket_increases_order_size():
+    bot_flat, fake_flat = make_bot(base_state(levels_down=1, order_size_lit=None, capital_usd=500,
+                                               drawdown_pct=10, profit_bucket_compound_usd=0.0))
+    await bot_flat.maintain_window(fake_flat.state, 3.10)
+    flat_size = fake_flat.state["order_size_lit"]
+
+    bot_comp, fake_comp = make_bot(base_state(levels_down=1, order_size_lit=None, capital_usd=500,
+                                               drawdown_pct=10, profit_bucket_compound_usd=500.0))
+    await bot_comp.maintain_window(fake_comp.state, 3.10)
+    compound_size = fake_comp.state["order_size_lit"]
+    check("a nonzero compound bucket increases the recomputed order size",
+          compound_size > flat_size, (compound_size, flat_size))
 
 
 # ── Window hysteresis ────────────────────────────────────────────────────────────────────────────
@@ -978,6 +1172,17 @@ async def main():
               t_maintain_window_stops_immediately_once_the_lock_is_lost_mid_loop,
               t_tick_applies_fresh_fill_cash_delta_when_balance_refresh_is_skipped,
               t_reconcile_logs_a_warning_for_a_long_unresolved_order,
+              t_tick_blocks_new_entries_while_an_order_is_stale_unresolved,
+              t_flatten_aborts_if_the_lock_is_lost_during_the_cancel_loop,
+              t_flatten_aborts_if_the_lock_is_lost_during_the_sell_loop,
+              t_market_sell_level_refuses_without_the_lock,
+              t_heartbeat_fails_closed_on_an_unverifiable_write,
+              t_place_grid_order_refuses_without_a_verified_lock,
+              t_tick_persists_the_cash_correction_so_it_survives_the_next_tick,
+              t_reconcile_credits_realized_profit_to_the_active_bucket,
+              t_profit_bucket_balance_untouched_by_a_mode_switch,
+              t_maintain_window_cover_drop_bucket_extends_buying_past_capital_usd,
+              t_maintain_window_compound_bucket_increases_order_size,
               t_maintain_window_uses_hysteresis_guard_for_the_window_center,
               t_lock_heartbeat_touched_after_each_order_placement,
               t_rate_limited_errors_back_off_before_retrying):

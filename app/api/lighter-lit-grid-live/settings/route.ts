@@ -18,17 +18,32 @@ const LIMITS = {
   maxOpenBuys: { min: 1, max: 50, label: "max open buys" },
 };
 
+// Profit allocation feature (2026-10-18, direct request): selects which bucket NEW realized
+// profit is credited to going forward. Switching modes never moves money already sitting in a
+// bucket -- see lit_grid_live.py's module docstring for the full design.
+const PROFIT_MODES = ["rest", "cover_drop", "compound"] as const;
+
 export async function POST(req: NextRequest) {
   const authError = checkLitGridLiveAuth(req);
   if (authError) return authError;
   const body = await req.json();
-  const out: Record<string, number | null> = {};
+  const out: Record<string, number | string | null> = {};
 
   // maxOpenBuys: 0 explicitly means "no cap" (continuous production mode) -- previously there
   // was no way to CLEAR the cap back to null once set, since undefined/null/"" were all treated
   // as "leave unchanged" (2026-10-18 audit finding).
   if (body.maxOpenBuys === 0 || body.maxOpenBuys === "0") {
     out["max_open_buys"] = null;
+  }
+
+  if (body.profitMode !== undefined && body.profitMode !== null && body.profitMode !== "") {
+    if (!PROFIT_MODES.includes(body.profitMode)) {
+      return NextResponse.json(
+        { error: `profitMode must be one of: ${PROFIT_MODES.join(", ")}.` },
+        { status: 400 }
+      );
+    }
+    out["profit_mode"] = body.profitMode;
   }
 
   for (const [key, col] of [

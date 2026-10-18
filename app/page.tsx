@@ -1448,6 +1448,27 @@ function LitGridLivePanel({
   const [maxBuysIn, setMaxBuysIn] = useState("");
   const [saving, setSaving] = useState(false);
   const [saveError, setSaveError] = useState<string | null>(null);
+  const [profitModeSaving, setProfitModeSaving] = useState(false);
+
+  async function handleSetProfitMode(mode: "rest" | "cover_drop" | "compound") {
+    if (mode === st?.profit_mode || profitModeSaving) return;
+    const labels: Record<string, string> = { rest: "Rest", cover_drop: "Cover Drop", compound: "Compound" };
+    if (!confirm(`Switch profit allocation to "${labels[mode]}"? Money already in another bucket stays there for its own purpose.`)) return;
+    const secret = litGridLiveAdminSecret();
+    if (!secret) return;
+    setProfitModeSaving(true);
+    const res = await fetch("/api/lighter-lit-grid-live/settings", {
+      method: "POST",
+      headers: { "Content-Type": "application/json", "x-admin-secret": secret },
+      body: JSON.stringify({ profitMode: mode }),
+    });
+    if (!res.ok) {
+      const data = await res.json().catch(() => ({}));
+      alert(data.error ?? "Failed to switch profit mode.");
+      if (res.status === 401) { try { localStorage.removeItem("litGridLiveAdminSecret"); } catch {} }
+    }
+    setProfitModeSaving(false);
+  }
 
   async function handleSave() {
     const body: Record<string, unknown> = {};
@@ -1564,6 +1585,24 @@ function LitGridLivePanel({
             sub={`spacing ${st?.spacing_pct ?? "—"}% · ${st?.levels_up ?? "—"} up / ${st?.levels_down ?? "—"} down window`}
             color="text-gray-300"
           />
+          <Stat
+            label="Rest Bucket"
+            value={`$${Number(st?.profit_bucket_rest_usd ?? 0).toFixed(2)}`}
+            sub="yours to withdraw"
+            color="text-gray-300"
+          />
+          <Stat
+            label="Cover-Drop Bucket"
+            value={`$${Number(st?.profit_bucket_cover_drop_usd ?? 0).toFixed(2)}`}
+            sub="extends buying past capital_usd"
+            color="text-gray-300"
+          />
+          <Stat
+            label="Compound Bucket"
+            value={`$${Number(st?.profit_bucket_compound_usd ?? 0).toFixed(2)}`}
+            sub="folded into next order size"
+            color="text-gray-300"
+          />
         </div>
       )}
 
@@ -1624,6 +1663,36 @@ function LitGridLivePanel({
         <p className="text-gray-600 text-[9px] leading-snug">
           "Max open buys" is a code-enforced cap on new buy placement (defaults to 1 for the first
           real test) -- raise it once that's verified before enabling the full ladder.
+        </p>
+      </div>
+
+      <div className="space-y-2">
+        <p className="text-gray-500 text-[9px] uppercase tracking-wide">
+          Profit Allocation (currently: {st?.profit_mode ?? "rest"})
+        </p>
+        <div className="grid grid-cols-3 gap-1.5">
+          {([
+            ["rest", "Rest"],
+            ["cover_drop", "Cover Drop"],
+            ["compound", "Compound"],
+          ] as const).map(([mode, label]) => (
+            <button
+              key={mode}
+              onClick={() => handleSetProfitMode(mode)}
+              disabled={profitModeSaving}
+              className={`text-xs font-semibold px-2 py-1.5 rounded-md transition-all disabled:opacity-40 ${
+                (st?.profit_mode ?? "rest") === mode
+                  ? "bg-red-500/20 text-red-400"
+                  : "bg-gray-800 text-gray-400 hover:bg-gray-700 hover:text-gray-200"
+              }`}
+            >
+              {label}
+            </button>
+          ))}
+        </div>
+        <p className="text-gray-600 text-[9px] leading-snug">
+          Only one mode active at a time. Switching only changes where NEW realized profit goes
+          going forward -- money already in a bucket stays earmarked for that bucket's own purpose.
         </p>
       </div>
 
