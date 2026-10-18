@@ -62,11 +62,25 @@ PARTICIPATION = 0.25          # validated assumption: at most 25% of a candle's 
 MARKET_ROUNDTRIP_COST_PCT = 0.103  # validated live-spread snapshot, applied once per completed pair
 TICK_EVERY = 60.0             # matches the 1-minute candle resolution everything was validated on
 LOCK_REFRESH_EVERY = 5.0
-LOCK_STALE_AFTER = 20.0
+# Must stay comfortably above TICK_EVERY: acquire_lock() is only called once per tick (unlike the
+# real-money bots, whose outer loop runs sub-second so a 20s staleness window is fine). An Opus
+# audit (2026-10-18) found this at 20s meant the lock looked stale for ~40 of every 60 seconds,
+# so a second instance during a Render deploy overlap could steal it mid-cycle and both instances
+# would process the same candles with independent in-memory state -- duplicate fills, clobbered
+# balances. 150s gives a comfortable multiple of TICK_EVERY.
+LOCK_STALE_AFTER = 150.0
 
 
 def level_of(price: float, step: float) -> int:
-    return round(math.log(price) / step)
+    # floor(), not round() (2026-10-18, Opus audit -- confirmed by reproducing it directly).
+    # round() made a crossing trigger at the MIDPOINT between two grid lines (half a spacing
+    # step away), while the fill price recorded a FULL step's move -- so price noise smaller
+    # than the configured spacing could still flip the detected level and book a full-size
+    # "profitable" fill that never happened: real price moved ~0.00002 in the reproduction, but
+    # the bot recorded a full-level profitable round trip anyway. floor() makes the trigger
+    # threshold a real grid line (a full spacing step away), matching the fill price distance,
+    # so sub-spacing noise can no longer move the detected level at all.
+    return math.floor(math.log(price) / step)
 
 
 def candle_path(candle: dict) -> list:
@@ -264,12 +278,21 @@ class LitGridPaper:
                 break
             target_lvl = level_of(path[i], step)
             while lvl != target_lvl and budget_left():
+                # Fill price is always exp(new_lvl*step) -- the line just reached, in either
+                # direction. This is what gives the design's core property: a buy and the sell
+                # that eventually closes it are always exactly one spacing apart in price, so
+                # every completed pair is a win of exactly one spacing's worth, by construction
+                # -- including repeated chop between two adjacent lines in a flat market, which
+                # is the whole point of a grid bot (an earlier attempt to "symmetrize" this so a
+                # round trip nets zero was reverted: it broke that property for no real gain --
+                # the actual bug only ever needed the level_of threshold fix above).
                 if target_lvl > lvl:
                     lvl += 1
-                    side, price = "sell", math.exp(lvl * step)
+                    side = "sell"
                 else:
                     lvl -= 1
-                    side, price = "buy", math.exp(lvl * step)
+                    side = "buy"
+                price = math.exp(lvl * step)
 
                 if side == "sell":
                     if open_buys:
@@ -315,49 +338,85 @@ class LitGridPaper:
             "updated_at": datetime.now(timezone.utc).isoformat(),
         })
 
+    async def arm_grid(self, state, center_price, center_lvl, note):
+        """(Re)establish the level tracker at a fresh reference point and persist it, so a
+        restart can resume from here instead of silently re-arming from scratch while stale
+        open_positions_json from before the restart sits at the OLD levels (Opus audit,
+        2026-10-18: this reintroduced the non-adjacent-pair bug through a different path --
+        every Render redeploy resets in-memory state, but the position stack survives in the
+        DB). Also re-arms whenever spacing_pct changes mid-run, since a level INDEX computed
+        under the old spacing means something different under a new one (reproduced live:
+        a spacing change made the walk "discover" hundreds of phantom levels in one candle)."""
+        self._last_level = center_lvl
+        spacing_pct = float(state["spacing_pct"])
+        usdc_balance = float(state["usdc_balance"])
+        lit_balance = float(state["lit_balance"])
+        capital = (usdc_balance + lit_balance * center_price) if state["compounding_enabled"] else float(state["capital_usd"])
+        sizing_levels = levels_for_drawdown(spacing_pct, float(state.get("drawdown_pct") or 30.0))
+        order_size = compute_order_size_lit(capital, center_price, spacing_pct, sizing_levels)
+        await self.log_run(note, {
+            "center_price": center_price, "center_level": center_lvl, "spacing_pct": spacing_pct,
+            "levels_up": state["levels_up"], "levels_down": state["levels_down"],
+        })
+        await self.update_state({
+            "live_price": center_price,
+            "live_level": center_lvl,
+            "order_size_lit": order_size,
+            "internal_last_level": center_lvl,
+            "internal_spacing_pct": spacing_pct,
+            "updated_at": datetime.now(timezone.utc).isoformat(),
+        })
+
     async def tick(self):
         state = await self.get_state()
         if not state.get("enabled"):
+            # Reset in-memory tracking while paused so re-enabling re-arms fresh instead of
+            # replaying the whole OFF period as a backlog next tick (same class of bug as the
+            # cold-start backlog replay, through the toggle instead of a restart).
+            self._last_candle_t = None
+            self._last_level = None
             return
         candles = await self.fetch_latest_candles(count=5)
+        # Only fully-closed 1-minute candles -- the API's newest entry can be the still-forming
+        # current minute (confirmed live 2026-10-18: returned a candle 17.6s old with volume
+        # ~2, versus ~130 for a finished minute). Processing it as final threw away the rest of
+        # that minute's real range/volume once its timestamp was superseded on the next tick.
+        now_ms = int(time.time() * 1000)
+        candles = [c for c in candles if c["t"] + 60_000 <= now_ms]
         if not candles:
             return
+
+        spacing_pct = float(state["spacing_pct"])
+        step = math.log(1 + spacing_pct / 100.0)
+        persisted_level = state.get("internal_last_level")
+        persisted_spacing = state.get("internal_spacing_pct")
+        spacing_changed = persisted_spacing is not None and float(persisted_spacing) != spacing_pct
+
         if self._last_candle_t is None:
-            # Cold start (first tick ever, or after a restart). Lighter's candles API does not
-            # honor count_back on this market -- a request for 5 candles can return hundreds,
-            # confirmed live 2026-10-18 (requested 5, got 500, spanning back ~8 hours). Without
-            # this guard the very first tick after enabling replayed that whole backlog as if it
-            # had just happened, logging a burst of trades with historical timestamps instead of
-            # starting clean from "now". Bootstrap to the latest candle only; nothing before it
-            # is processed.
             self._last_candle_t = candles[-1]["t"]
+            if persisted_level is not None and not spacing_changed:
+                # Resume from where a previous process instance left off, so the LIFO stack
+                # (which survived in the DB) stays level-consistent with the tracker.
+                self._last_level = int(persisted_level)
+                return
             center_price = candles[-1]["c"]
-            self._last_level = level_of(candle_path(candles[-1])[0], math.log(1 + float(state["spacing_pct"]) / 100.0))
-            usdc_balance = float(state["usdc_balance"])
-            lit_balance = float(state["lit_balance"])
-            capital = (usdc_balance + lit_balance * center_price) if state["compounding_enabled"] else float(state["capital_usd"])
-            sizing_levels = levels_for_drawdown(float(state["spacing_pct"]), float(state.get("drawdown_pct") or 30.0))
-            order_size = compute_order_size_lit(capital, center_price, float(state["spacing_pct"]), sizing_levels)
-            await self.log_run("grid_armed", {
-                "center_price": center_price, "center_level": self._last_level,
-                "spacing_pct": state["spacing_pct"],
-                "levels_up": state["levels_up"], "levels_down": state["levels_down"],
-            })
-            # Reflect the armed grid on the state row immediately -- without this the panel kept
-            # showing stale live_price/live_level from before the bot was enabled, even though it
-            # had correctly armed internally (found live 2026-10-18: user saw "nothing happened").
-            await self.update_state({
-                "live_price": center_price,
-                "live_level": self._last_level,
-                "order_size_lit": order_size,
-                "updated_at": datetime.now(timezone.utc).isoformat(),
-            })
+            center_lvl = level_of(candle_path(candles[-1])[0], step)
+            await self.arm_grid(state, center_price, center_lvl,
+                                 "grid_rearmed_spacing_changed" if spacing_changed else "grid_armed")
             return
+
+        if spacing_changed:
+            center_price = candles[-1]["c"]
+            center_lvl = level_of(candle_path(candles[-1])[0], step)
+            await self.arm_grid(state, center_price, center_lvl, "grid_rearmed_spacing_changed")
+            return
+
         for c in candles:
             if c["t"] <= self._last_candle_t:
                 continue
             await self.process_candle(c, state)
             self._last_candle_t = c["t"]
+            await self.update_state({"internal_last_level": self._last_level, "internal_spacing_pct": spacing_pct})
             state = await self.get_state()  # re-read so a multi-candle catch-up compounds correctly
 
 

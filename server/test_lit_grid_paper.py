@@ -80,7 +80,8 @@ def base_state(**over):
 def t_level_math_matches_validated_logic():
     step = math.log(1 + 0.125 / 100)
     # same geometric formula validated in research/grid-bot-2026-10-17/grid_paired_cycle_sim.mjs
-    check("level_of is the geometric log formula", level_of(3.1151, step) == round(math.log(3.1151) / step))
+    check("level_of is the geometric log floor (full-step boundary, not a round() midpoint)",
+          level_of(3.1151, step) == math.floor(math.log(3.1151) / step))
     # candle_path: green candle (c>=o) -> open, low, high, close
     green = candle(0, 1.0, 1.05, 0.98, 1.03, 100)
     check("candle_path green order", candle_path(green) == [1.0, 0.98, 1.05, 1.03])
@@ -109,20 +110,24 @@ async def t_paired_cycle_buy_then_sell():
     bot, fake = make_bot(base_state(order_type="market"))  # market: no participation cap, simpler to assert on
     state = fake.state
     start_usdc = state["usdc_balance"]
-    # one down-move then one up-move -- should open a buy, then pair it with a sell for a win
-    c1 = candle(1000, 10.0, 10.0, 9.9, 9.9, 1000)   # price drops one level -> opens a buy
-    c2 = candle(2000, 9.9, 10.0, 9.9, 10.0, 1000)   # price rises back -> should pair with the buy
+    # Down several levels, then UP PAST the original starting price -- not just back to it. A
+    # pure retrace (down one level then back to exactly where it started) nets zero by design
+    # after the 2026-10-18 phantom-profit fix (Opus audit): both directions now price a fill at
+    # the SAME shared level boundary, so undoing the last step you just took is correctly a wash,
+    # not free profit. Genuine profit only shows once price moves past where it already was.
+    c1 = candle(1000, 10.0, 10.0, 9.9, 9.9, 1000)
+    c2 = candle(2000, 9.9, 10.1, 9.9, 10.1, 1000)
     await bot.process_candle(c1, state)
     state = (await bot.sb("GET", f"{core.TABLE_STATE}?id=eq.1"))[0]
     check("a buy fill spends real USDC", state["usdc_balance"] < start_usdc, state["usdc_balance"])
     check("a buy fill credits real LIT", state["lit_balance"] > 0, state["lit_balance"])
     await bot.process_candle(c2, state)
     state = (await bot.sb("GET", f"{core.TABLE_STATE}?id=eq.1"))[0]
-    check("a drop then a recovery produces at least one completed pair", len(fake.trades) >= 1, fake.trades)
-    if fake.trades:
-        check("completed pair is profitable (bought low, sold high)", fake.trades[0]["pnl_usd"] > 0, fake.trades[0])
-    check("the matching sell returns lit_balance back to zero", abs(state["lit_balance"]) < 1e-9, state["lit_balance"])
-    check("bot_profit_usd reflects the realized gain", state["bot_profit_usd"] > 0, state["bot_profit_usd"])
+    check("a drop then a bigger recovery produces at least one completed pair", len(fake.trades) >= 1, fake.trades)
+    check("no individual pair is ever negative (every pair is exactly one level, always a win or a wash)",
+          all(t["pnl_usd"] >= -1e-9 for t in fake.trades), fake.trades)
+    check("net profit across the whole round trip is positive", state["bot_profit_usd"] > 0, state["bot_profit_usd"])
+    check("the matching sells return lit_balance back to zero", abs(state["lit_balance"]) < 1e-9, state["lit_balance"])
     check("usdc_balance ends above where it started (net profit, back in cash)",
           state["usdc_balance"] > start_usdc, (start_usdc, state["usdc_balance"]))
 
@@ -224,6 +229,31 @@ async def t_tick_error_never_propagates():
         core.TICK_EVERY = orig_tick_every
 
 
+async def t_sub_spacing_noise_never_trades():
+    # Regression test for the real Opus-audit finding (2026-10-18): round() made the crossing
+    # threshold a MIDPOINT half a spacing step away, while the fill price recorded a full step's
+    # move -- so price noise far smaller than the configured spacing could flip the detected
+    # level and book a "profitable" round trip that never happened. Reproduced: 10 candles
+    # wobbling in a 0.025% range (a tenth of the 0.125% spacing) booked $1.38 of fake profit.
+    # floor() fixes it: noise that never reaches a real grid line can't move the level at all.
+    bot, fake = make_bot(base_state(order_type="market"))
+    step = math.log(1 + 0.125 / 100)
+    L = 1000
+    mid_price = math.exp((L + 0.5) * step)  # the old round()-midpoint, well within one real level
+    t = 1000
+    for _ in range(10):
+        hi = mid_price * 1.00001
+        lo = mid_price * 0.99999
+        c = candle(t, mid_price, hi, lo, mid_price, 1000)
+        await bot.process_candle(c, fake.state)
+        t += 1000
+    check("sub-spacing noise around an old round()-midpoint never produces a single trade",
+          len(fake.trades) == 0, fake.trades)
+    state = (await bot.sb("GET", f"{core.TABLE_STATE}?id=eq.1"))[0]
+    check("bot_profit_usd stays exactly zero (no phantom profit from pure noise)",
+          state["bot_profit_usd"] == 0, state["bot_profit_usd"])
+
+
 async def t_participation_cap_never_produces_a_nonadjacent_pair():
     # Regression test for the real 2026-10-18 incident: a pair whose entry/exit were 6 levels
     # apart (0.75%) and negative, when every completed pair in this design must be exactly one
@@ -258,6 +288,68 @@ async def t_participation_cap_never_produces_a_nonadjacent_pair():
                   abs(levels_apart - 1) < 0.01, levels_apart)
             check(f"trade id={len(fake.trades)} is profitable (adjacent-level pairs always are)",
                   t["pnl_usd"] > 0, t["pnl_usd"])
+
+
+async def t_restart_resumes_from_persisted_level_not_a_fresh_rearm():
+    # Regression test (Opus audit finding #4): a restart used to reset _last_level from scratch
+    # while open_positions_json (the actual stack) survived in the DB -- reintroducing the
+    # non-adjacent-pair bug through a different path than the one already fixed in-process.
+    bot1, fake = make_bot(base_state(order_type="market"))
+    c1 = candle(1000, 10.0, 10.0, 9.9, 9.9, 1000)
+    bot1.fetch_latest_candles = lambda count=5: _async_return([c1])
+    await bot1.tick()  # cold start: arms fresh (no persisted level yet), logs grid_armed
+    state_after_arm = (await bot1.sb("GET", f"{core.TABLE_STATE}?id=eq.1"))[0]
+    check("arming persists internal_last_level", state_after_arm["internal_last_level"] is not None,
+          state_after_arm.get("internal_last_level"))
+    runs_before = len(fake.runs)
+
+    # Simulate a restart: a brand-new bot instance, same underlying DB state.
+    bot2 = LitGridPaper.__new__(LitGridPaper)
+    bot2._lock_id, bot2._lock_held, bot2._lock_checked_at, bot2._lock_blocked_logged = "t2", True, 0.0, False
+    bot2._last_candle_t, bot2._last_level = None, None
+    bot2.sb = fake.sb
+    c2 = candle(2000, 9.9, 9.9, 9.8, 9.8, 1000)
+    bot2.fetch_latest_candles = lambda count=5: _async_return([c1, c2])
+    await bot2.tick()
+    check("restart resumes the persisted level instead of re-arming from scratch",
+          bot2._last_level == state_after_arm["internal_last_level"], bot2._last_level)
+    check("restart does not log another grid_armed event", len(fake.runs) == runs_before, fake.runs)
+
+
+async def t_spacing_change_triggers_rearm():
+    # Regression test (Opus audit finding #5): changing spacing_pct mid-run used to reinterpret
+    # the old level INDEX under the new spacing, discovering a huge fake multi-level jump in one
+    # candle. Reproduced live: a 0.125% -> 0.25% change spent $7,538 at a wrong price in one tick.
+    bot, fake = make_bot(base_state(order_type="market", spacing_pct=0.125))
+    c1 = candle(1000, 10.0, 10.0, 9.9, 9.9, 1000)
+    bot.fetch_latest_candles = lambda count=5: _async_return([c1])
+    await bot.tick()
+    runs_before = len(fake.runs)
+
+    fake.state["spacing_pct"] = 0.25  # changed mid-run, same as the dashboard settings route allows
+    c2 = candle(2000, 9.9, 9.9, 9.8, 9.8, 1000)
+    bot.fetch_latest_candles = lambda count=5: _async_return([c1, c2])
+    await bot.tick()
+    check("a spacing change re-arms instead of walking the old level under the new spacing",
+          any(r["action"] == "grid_rearmed_spacing_changed" for r in fake.runs[runs_before:]), fake.runs)
+    check("no fills happen on the re-arming tick itself (it only resets the reference point)",
+          len(fake.trades) == 0, fake.trades)
+
+
+async def t_disabling_resets_in_memory_tracking():
+    # Regression test (Opus audit finding #6): toggling off then back on used to replay the
+    # whole OFF period as a backlog next tick, through a different path than the original
+    # cold-start backlog bug.
+    bot, fake = make_bot(base_state(order_type="market", enabled=True))
+    c1 = candle(1000, 10.0, 10.0, 9.9, 9.9, 1000)
+    bot.fetch_latest_candles = lambda count=5: _async_return([c1])
+    await bot.tick()
+    check("level tracking is set after an active tick", bot._last_level is not None, bot._last_level)
+
+    fake.state["enabled"] = False
+    await bot.tick()
+    check("disabling resets _last_candle_t", bot._last_candle_t is None, bot._last_candle_t)
+    check("disabling resets _last_level", bot._last_level is None, bot._last_level)
 
 
 async def t_cold_start_does_not_replay_backlog():
@@ -309,6 +401,10 @@ async def main():
               t_buy_blocked_when_usdc_runs_out,
               t_limit_fills_respect_participation_cap,
               t_compounding_recomputes_order_size_from_real_total_value,
+              t_sub_spacing_noise_never_trades,
+              t_restart_resumes_from_persisted_level_not_a_fresh_rearm,
+              t_spacing_change_triggers_rearm,
+              t_disabling_resets_in_memory_tracking,
               t_cold_start_does_not_replay_backlog,
               t_participation_cap_never_produces_a_nonadjacent_pair,
               t_tick_error_never_propagates):
