@@ -1444,11 +1444,16 @@ function LitGridPaperPanel({
 
   // Two nearest grid lines around the live price -- the next trigger in each direction, so you
   // can see at a glance how close the next buy/sell actually is without doing the math yourself.
+  // Computed fresh from live_price itself (not the bot's stored live_level) -- live_level can
+  // lag behind the real price when a candle's fill walk gets cut short by the volume cap or low
+  // cash, which showed "next sell" below the current price (found live 2026-10-18).
   const spacingPctNum = st?.spacing_pct != null ? Number(st.spacing_pct) : null;
-  const nextBuyPrice = spacingPctNum != null && st?.live_level != null
-    ? Math.exp(st.live_level * Math.log(1 + spacingPctNum / 100)) : null;
-  const nextSellPrice = spacingPctNum != null && st?.live_level != null
-    ? Math.exp((st.live_level + 1) * Math.log(1 + spacingPctNum / 100)) : null;
+  const displayLevel = spacingPctNum != null && st?.live_price != null
+    ? Math.floor(Math.log(Number(st.live_price)) / Math.log(1 + spacingPctNum / 100)) : null;
+  const nextBuyPrice = spacingPctNum != null && displayLevel != null
+    ? Math.exp(displayLevel * Math.log(1 + spacingPctNum / 100)) : null;
+  const nextSellPrice = spacingPctNum != null && displayLevel != null
+    ? Math.exp((displayLevel + 1) * Math.log(1 + spacingPctNum / 100)) : null;
 
   const [spacingIn, setSpacingIn] = useState("");
   const [upIn, setUpIn] = useState("");
