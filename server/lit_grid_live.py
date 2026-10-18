@@ -220,12 +220,15 @@ seventh independent audit:
   - Cold-start initial fill (direct request): the resting-limit ladder only ever fills if price
     drifts down into it, which might never happen -- a fresh (or freshly reset) bot could sit at
     zero inventory indefinitely. The very first time this bot has never filled a buy and
-    currently holds nothing, every level across the configured levels_down depth is bought with
-    a REAL MARKET order instead of a resting limit, right away, subject to the exact same
-    budget/allowance/bucket-funding checks as an ordinary buy. The instant any buy has ever
-    filled, every subsequent buy -- including refilling a level that later sells back to empty
-    -- goes through the normal resting-limit ladder again, unaffected. The budget check for a
-    cold-start buy uses the real LIVE price (what will actually be paid), not each level's
+    currently holds nothing, `levels_up` lots are bought with a REAL MARKET order each instead
+    of a resting limit, right away, subject to the exact same budget/allowance/bucket-funding
+    checks as an ordinary buy -- `levels_down` plays NO role in a cold start; it still governs
+    only the ongoing resting-ladder depth, exactly as before, so the two are fully independent
+    (e.g. levels_up=4 buys 4 lots immediately even while levels_down=15 keeps a 15-deep ladder
+    for everything after). The instant any buy has ever filled, every subsequent buy --
+    including refilling a level that later sells back to empty -- goes through the normal
+    resting-limit ladder again, unaffected, governed by levels_down as always. The budget check
+    for a cold-start buy uses the real LIVE price (what will actually be paid), not each level's
     theoretical grid price, which would have understated the real cost for the deeper levels.
   - [P1] A reconcile row-write failure could mean the write actually committed and only the
     HTTP response was lost -- not that nothing happened. Treating that as "definitely not
@@ -1075,7 +1078,13 @@ class LitGridLive:
             cover_drop_bucket = float(state.get("profit_bucket_cover_drop_usd") or 0)
             available_usdc = min(real_usdc - resting_buy_cost, base_capital_remaining + cover_drop_bucket)
 
-            for lvl in range(cur_lvl - 1, cur_lvl - 1 - levels_down, -1):
+            # levels_up now controls the COLD-START buy count specifically, independent of
+            # levels_down's ongoing ladder depth (direct request): e.g. levels_up=4 buys 4 lots
+            # immediately at cold start even while levels_down=15 keeps a 15-deep resting ladder
+            # for everything after. Outside a cold start, levels_up plays no role at all -- the
+            # ladder's depth is still governed purely by levels_down, unchanged.
+            placement_depth = max(1, int(state.get("levels_up") or 1)) if is_cold_start else levels_down
+            for lvl in range(cur_lvl - 1, cur_lvl - 1 - placement_depth, -1):
                 if not self._lock_held:
                     return
                 if lvl in snap.buy_levels or lvl in snap.sell_closes or lvl in holdings:

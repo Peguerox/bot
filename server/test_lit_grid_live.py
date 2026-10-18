@@ -1012,15 +1012,31 @@ async def t_tick_persists_the_cash_correction_so_it_survives_the_next_tick():
 # ── Eighth-pass changes (direct request + seventh independent audit) ───────────────────────────
 
 async def t_maintain_window_cold_start_fills_via_real_market_buys():
-    bot, fake = make_bot(base_state(levels_down=3, order_size_lit=1.70, usdc_balance=500.0, capital_usd=500))
+    # levels_up (not levels_down) governs the cold-start buy count specifically (direct
+    # request): e.g. levels_up=3 buys 3 lots immediately even while levels_down keeps a
+    # separate, independent depth for the ongoing resting ladder.
+    bot, fake = make_bot(base_state(levels_up=3, levels_down=15, order_size_lit=1.70,
+                                     usdc_balance=500.0, capital_usd=500))
     bot.live.best_mid = lambda max_age=core.BOOK_MAX_AGE: 3.10
     await bot.maintain_window(fake.state, 3.10)
     buys = [o for o in fake.orders if o["side"] == "buy"]
-    check("a cold start places real buys across the configured depth",
+    check("a cold start places real buys across the configured levels_up count, not levels_down",
           len(buys) == 3, buys)
     check("each cold-start buy is sent via create_market_order, not a resting limit",
           len(bot.client.placed) == 3 and all("order_type" not in kwargs for kwargs in bot.client.placed),
           bot.client.placed)
+
+
+async def t_levels_up_and_levels_down_are_independent():
+    # Direct request: levels_up is ONLY the cold-start count; levels_down is ONLY the ongoing
+    # ladder depth. Setting them to different numbers must not cross-contaminate either one.
+    bot, fake = make_bot(base_state(levels_up=4, levels_down=15, order_size_lit=1.0,
+                                     usdc_balance=5000.0, capital_usd=5000))
+    bot.live.best_mid = lambda max_age=core.BOOK_MAX_AGE: 3.10
+    await bot.maintain_window(fake.state, 3.10)
+    cold_start_buys = [o for o in fake.orders if o["side"] == "buy"]
+    check("the cold start buys exactly levels_up lots, ignoring the much larger levels_down",
+          len(cold_start_buys) == 4, cold_start_buys)
 
 
 async def t_maintain_window_cold_start_budget_uses_real_price_not_theoretical_level_price():
@@ -1601,6 +1617,7 @@ async def main():
               t_tick_applies_cash_delta_from_the_spacing_change_reconcile_too,
               t_cancelled_buy_releases_its_reservation_automatically,
               t_maintain_window_cold_start_fills_via_real_market_buys,
+              t_levels_up_and_levels_down_are_independent,
               t_maintain_window_cold_start_budget_uses_real_price_not_theoretical_level_price,
               t_maintain_window_reverts_to_resting_limit_ladder_after_the_first_ever_fill,
               t_maintain_window_accumulates_resting_buys_as_price_drifts_without_cancelling_old_ones,
