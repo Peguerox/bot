@@ -1092,12 +1092,23 @@ class LitGridLive:
         # grid's bottom moves up with the top so the lowest buys are cancelled -- the order
         # count stays levels_up + levels_down and the money moves up instead of growing. On a
         # drop nothing trails: buys fill, their sells appear above them, and spending is capped
-        # by the buys already in the grid. A market buy still in flight is a buy row priced
-        # above the market (market rows carry their slippage band as limit_price).
+        # by the buys already in the grid.
         levels_up = max(1, int(state.get("levels_up") or 1))
         held_lines = set(holdings)
+        # Buys always sit on the levels_down lines directly below the empty line next to price
+        # (trailing down, direct request): the empty line is the lowest held lot's line, or with
+        # nothing held, the line at price. As buys fill on a drop the window moves down and a
+        # new buy is added at the bottom; as sells fill on a rise it moves up and the lowest buy
+        # is cancelled. A held line never gets a second buy.
+        buy_top = min(min(held_lines) - 1, cur_lvl) if held_lines else cur_lvl - 1
+        # A trailing-up buy still in flight is any open buy row marked order_kind='market'.
+        # Anything derived from price goes stale in a fast rise: "priced above the market"
+        # (the row's 0.5% band) and "on a line above the buy ladder" both stopped matching
+        # once price ran past them before the fill was confirmed, so the in-flight buy stopped
+        # counting and another was bought for the same slot -- live 2026-10-18 the bot held 9
+        # lots against levels_up=5. The mark is set when the order is placed and never moves.
         pending_up = {int(r["level"]) for rows in resting.values() for r in rows
-                      if r["side"] == "buy" and float(r["limit_price"]) > price}
+                      if r["side"] == "buy" and r.get("order_kind") == "market"}
         trail_lines = []
         if anchored and not is_cold_start and entries_allowed:
             need = levels_up - len(held_lines) - len(pending_up)
@@ -1105,12 +1116,6 @@ class LitGridLive:
                 occupied = held_lines | pending_up
                 start = max(max(occupied) + 1, cur_lvl) if occupied else cur_lvl
                 trail_lines = [ln for ln in range(start, start + need) if ln not in snap.buy_levels]
-        # Buys always sit on the levels_down lines directly below the empty line next to price
-        # (trailing down, direct request): the empty line is the lowest held lot's line, or with
-        # nothing held, the line at price. As buys fill on a drop the window moves down and a
-        # new buy is added at the bottom; as sells fill on a rise it moves up and the lowest buy
-        # is cancelled. A held line never gets a second buy.
-        buy_top = min(min(held_lines) - 1, cur_lvl) if held_lines else cur_lvl - 1
         grid_bottom = buy_top - levels_down + 1
         if anchored and entries_allowed:
             for rows in resting.values():
@@ -1417,7 +1422,7 @@ class LitGridLive:
         co_idx = int(time.time() * 1000) % 500_000_000
         row = {"level": level, "side": "buy", "client_order_index": co_idx,
                "status": "pending", "limit_price": band_price, "size": sized, "placed_at": now_iso(),
-               "funded_from_bucket_usd": round(funded_from_bucket_usd, 8)}
+               "funded_from_bucket_usd": round(funded_from_bucket_usd, 8), "order_kind": "market"}
         inserted = await self.sb("POST", TABLE_ORDERS, row)
         row_id = inserted[0]["id"]
         try:

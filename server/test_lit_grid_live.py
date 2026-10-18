@@ -1399,12 +1399,142 @@ async def t_gap_fill_never_moves_a_cold_start_sell_down_to_breakeven():
           [r for r in fake.orders if r["status"] == "cancel_requested"])
 
 
+async def t_trailing_up_counts_an_in_flight_buy_even_after_price_passes_its_band():
+    # Live 2026-10-18 22:50-23:00: a trailing market buy was still unconfirmed when price had
+    # already risen past its 0.5% band; the old check ("buy priced above the market") stopped
+    # counting it and bought again -- 9 lots held against levels_up=5.
+    P = 2.83365
+    rows = _grid_rows(P, held=range(1, 5), sells_for=range(1, 5), buys_at=range(-4, 1), sold=[0])
+    p0 = round(P * 1.00125 ** 1.3, 5)
+    rows.append({"id": 500, "level": 5, "side": "buy", "status": "open", "client_order_index": 5000,
+                 "exchange_order_id": 50000, "limit_price": core.round_price(p0 * 1.005), "size": 2.16, "order_kind": "market"})
+    price = round(p0 * 1.008, 5)  # price now ABOVE that buy's band
+    bot, fake = make_bot(base_state(levels_up=5, levels_down=5, order_size_lit=2.16,
+                                     usdc_balance=500.0, grid_anchor_price=P), orders=rows)
+    bot.live.best_mid = lambda max_age=core.BOOK_MAX_AGE: price
+    await bot.maintain_window(fake.state, price)
+    check("an in-flight trailing buy is still counted after price passes its band -- no second buy",
+          not any("order_type" not in kw and not kw.get("is_ask") for kw in bot.client.placed),
+          bot.client.placed)
+
+
+async def t_fast_rise_replay_never_holds_more_than_levels_up():
+    # Replays a very fast rise tick by tick: price climbs 0.2% per tick (1.6 grid lines), limit
+    # orders fill when price reaches them, and every MARKET order is only confirmed TWO ticks
+    # after it was sent. Held lots + in-flight market buys must never exceed levels_up, and once
+    # price settles the grid must hold exactly levels_up lots with levels_up sells.
+    P = 2.83365
+    levels_up, levels_down = 5, 5
+    rows = _grid_rows(P, held=range(0, 5), sells_for=range(0, 5), buys_at=range(-5, 0))
+    bot, fake = make_bot(base_state(levels_up=levels_up, levels_down=levels_down, order_size_lit=2.16,
+                                     usdc_balance=2000.0, capital_usd=2000, grid_anchor_price=P),
+                          orders=rows)
+    born, kind = {}, {}
+    worst = 0
+    price = P * 1.0003
+    for tick in range(45):
+        price = round(price * 1.002, 5) if tick < 30 else price
+        bot.live.best_mid = lambda max_age=core.BOOK_MAX_AGE, px=price: px
+        for o in fake.orders:
+            born.setdefault(o["id"], tick)
+            if o["status"] == "cancel_requested":
+                o["status"] = "cancelled"
+            elif o["status"] in ("open", "pending"):
+                fill_at = None
+                if kind.get(o["id"]) == "market":
+                    if tick - born[o["id"]] >= 2:
+                        fill_at = price
+                elif o["side"] == "sell" and o["limit_price"] <= price:
+                    fill_at = o["limit_price"]
+                elif o["side"] == "buy" and o["limit_price"] >= price:
+                    fill_at = o["limit_price"]
+                if fill_at is not None:
+                    o["status"] = "filled"; o["filled_qty"] = o["size"]; o["filled_price"] = fill_at
+                    o["filled_quote"] = o["size"] * fill_at
+        ids_before = {o["id"] for o in fake.orders}
+        n_calls = len(bot.client.placed)
+        await bot.maintain_window(fake.state, price)
+        new_rows = [o for o in fake.orders if o["id"] not in ids_before]
+        for r, kw in zip(new_rows, bot.client.placed[n_calls:]):
+            kind[r["id"]] = "market" if "order_type" not in kw else "limit"
+        held = await bot.current_holdings()
+        in_flight = [o for o in fake.orders if o["side"] == "buy" and o["status"] in ("open", "pending")
+                     and kind.get(o["id"]) == "market"]
+        worst = max(worst, len(held) + len(in_flight))
+    held = await bot.current_holdings()
+    open_sells = [o for o in fake.orders if o["side"] == "sell" and o["status"] in ("open", "pending")]
+    check("through a very fast rise, held lots + in-flight market buys never exceed levels_up",
+          worst <= levels_up, worst)
+    check("after it settles, exactly levels_up lots are held", len(held) == levels_up, sorted(held))
+    check("and exactly levels_up sells are resting", len(open_sells) == levels_up,
+          sorted(o["limit_price"] for o in open_sells))
+
+
+async def t_fast_drop_replay_keeps_the_grid_consistent():
+    # Same replay, price FALLING 0.2% per tick: buys fill as price passes them. At every tick:
+    # never more than levels_down open buys, never two open buys on one line, never a buy on a
+    # held line, and every held lot ends up with exactly one sell.
+    P = 2.83365
+    levels_up, levels_down = 5, 5
+    rows = _grid_rows(P, held=range(0, 5), sells_for=range(0, 5), buys_at=range(-5, 0))
+    bot, fake = make_bot(base_state(levels_up=levels_up, levels_down=levels_down, order_size_lit=2.16,
+                                     usdc_balance=5000.0, capital_usd=5000, grid_anchor_price=P),
+                          orders=rows)
+    born, kind = {}, {}
+    problems = []
+    price = P * 0.9997
+    for tick in range(45):
+        price = round(price * 0.998, 5) if tick < 30 else price
+        bot.live.best_mid = lambda max_age=core.BOOK_MAX_AGE, px=price: px
+        for o in fake.orders:
+            born.setdefault(o["id"], tick)
+            if o["status"] == "cancel_requested":
+                o["status"] = "cancelled"
+            elif o["status"] in ("open", "pending"):
+                fill_at = None
+                if kind.get(o["id"]) == "market":
+                    if tick - born[o["id"]] >= 2:
+                        fill_at = price
+                elif o["side"] == "sell" and o["limit_price"] <= price:
+                    fill_at = o["limit_price"]
+                elif o["side"] == "buy" and o["limit_price"] >= price:
+                    fill_at = o["limit_price"]
+                if fill_at is not None:
+                    o["status"] = "filled"; o["filled_qty"] = o["size"]; o["filled_price"] = fill_at
+                    o["filled_quote"] = o["size"] * fill_at
+        ids_before = {o["id"] for o in fake.orders}
+        n_calls = len(bot.client.placed)
+        await bot.maintain_window(fake.state, price)
+        for r, kw in zip([o for o in fake.orders if o["id"] not in ids_before], bot.client.placed[n_calls:]):
+            kind[r["id"]] = "market" if "order_type" not in kw else "limit"
+        held = await bot.current_holdings()
+        open_buys = [o["level"] for o in fake.orders if o["side"] == "buy" and o["status"] in ("open", "pending")]
+        if len(open_buys) > levels_down:
+            problems.append((tick, "too many buys", sorted(open_buys)))
+        if len(open_buys) != len(set(open_buys)):
+            problems.append((tick, "two buys on one line", sorted(open_buys)))
+        if set(open_buys) & set(held):
+            problems.append((tick, "buy on a held line", sorted(set(open_buys) & set(held))))
+        if any(kind.get(o["id"]) == "market" and o["side"] == "buy" for o in fake.orders if born.get(o["id"], -1) == tick):
+            problems.append((tick, "market buy during a drop", None))
+    held = await bot.current_holdings()
+    sells_by_lot = {}
+    for o in fake.orders:
+        if o["side"] == "sell" and o["status"] in ("open", "pending"):
+            sells_by_lot[o["closes_level"]] = sells_by_lot.get(o["closes_level"], 0) + 1
+    check("through a very fast drop the grid stays consistent (buy count, no doubles, no held-line buys)",
+          problems == [], problems[:5])
+    check("every held lot has exactly one sell after a fast drop",
+          sorted(held) == sorted(sells_by_lot) and set(sells_by_lot.values()) <= {1},
+          (sorted(held), sells_by_lot))
+
+
 async def t_trailing_up_never_double_buys_while_a_market_buy_is_in_flight():
     P = 2.87055
     rows = _grid_rows(P, held=range(1, 5), sells_for=range(1, 5), buys_at=range(-14, 1), sold=[0])
     price = round(P * 1.00125 ** 1.3, 5)
     rows.append({"id": 500, "level": 5, "side": "buy", "status": "pending", "client_order_index": 5000,
-                 "limit_price": core.round_price(price * 1.005), "size": 2.16})
+                 "limit_price": core.round_price(price * 1.005), "size": 2.16, "order_kind": "market"})
     bot, fake = make_bot(base_state(levels_up=5, levels_down=15, order_size_lit=2.16,
                                      usdc_balance=500.0, grid_anchor_price=P), orders=rows)
     bot.live.best_mid = lambda max_age=core.BOOK_MAX_AGE: price
@@ -2005,6 +2135,9 @@ async def main():
         t_no_funds_logs_once_and_stays_quiet,
         t_trailing_up_keeps_levels_up_sells_and_twenty_orders,
         t_trailing_up_never_double_buys_while_a_market_buy_is_in_flight,
+        t_trailing_up_counts_an_in_flight_buy_even_after_price_passes_its_band,
+        t_fast_rise_replay_never_holds_more_than_levels_up,
+        t_fast_drop_replay_keeps_the_grid_consistent,
         t_a_partly_filled_open_buy_does_not_trip_the_balance_pause,
         t_gap_in_the_sell_ladder_is_filled_by_moving_the_top_sell_down,
         t_gap_fill_never_moves_a_sell_below_that_lots_cost,
