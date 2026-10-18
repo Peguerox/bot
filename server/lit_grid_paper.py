@@ -2,22 +2,34 @@
 Paper-only LIT/USDC grid bot (2026-10-18, direct request).
 
 NOT a real-money bot: no exchange credentials anywhere in this file, no order placement -- it
-only reads Lighter's public LIT/USDC live trade price (market_id 2049, no auth needed) and
-simulates fills against the configured grid, logging each individual buy and sell fill as its
-own row to lighter_lit_grid_trades the instant it happens for the dashboard panel to show.
+only reads Lighter's public LIT/USDC order book (market_id 2049, no auth needed) and simulates
+fills against the configured grid, logging each individual buy and sell fill as its own row to
+lighter_lit_grid_trades the instant it happens for the dashboard panel to show.
+
+Push-based price feed, not REST polling (2026-10-18, live incident: polling recentTrades every
+TICK_EVERY=3s, on top of Worker 1/2's own request volume from the same Render IP, tripped
+Lighter's rate limit -- 429 "Too Many Requests"). fetch_current_price now reads the live mid-price
+from an order-book WEBSOCKET subscription (self.live, a LiveBook fed by run_book_ws_forever) that
+stays open and pushes updates, instead of making a fresh REST call every tick -- the same
+push-based, zero-REST pattern Worker 1/2's own StochBot already uses for its order book and
+market_stats channel (see stoch_bot_core.py's run_ws_forever/run_premium_forever). This removes
+the rate-limit exposure at the root, rather than just backing off from it after the fact (the
+RATE_LIMIT_BACKOFF_* constants below are kept as defense-in-depth for Supabase calls, which are a
+separate, unrelated quota).
 
 Runs as a second, fully isolated asyncio task inside Worker 4's existing Render process
 (see the bottom of lighter_stoch_dca_btc_worker4.py) rather than its own service, to avoid the
 cost of a dedicated Render service for something still being tested. Every tick is wrapped so
 nothing here can ever raise out to the caller and cancel Worker 4's real trading task.
 
-Live price polling, not 1-minute candles (2026-10-18, direct correction -- "use the price so we
-can buy and sell fast"): the original version polled closed 1-minute candles once a minute, so a
-real crossing could sit unacted-on for up to ~2 minutes (one minute for the candle to close, up
-to another minute for the next tick). Polls the public recentTrades endpoint for the latest trade
-price every TICK_EVERY seconds instead -- a real price feed, not an approximation -- and walks
-directly from the last seen price to the new one, same level-crossing logic, just driven off real
-consecutive price samples instead of an OHLC approximation of a whole closed minute.
+Live price, not 1-minute candles (2026-10-18, direct correction -- "use the price so we can buy
+and sell fast"): the original version polled closed 1-minute candles once a minute, so a real
+crossing could sit unacted-on for up to ~2 minutes (one minute for the candle to close, up to
+another minute for the next tick). Every TICK_EVERY seconds it instead reads the live order-book
+mid-price (see above) and walks directly from the last seen price to the new one, same
+level-crossing logic, just driven off real consecutive price samples instead of an OHLC
+approximation of a whole closed minute. (This briefly polled recentTrades via REST instead of the
+order book -- see the push-based-feed note above for why that was replaced.)
 
 Grid math, mostly unchanged from the research scripts (research/grid-bot-2026-10-17/
 grid_paired_cycle_sim.mjs, grid_compounding_sim.mjs), with corrections found via an Opus audit
@@ -75,6 +87,7 @@ for the full writeup), all confirmed directly against this code before fixing:
     tick's fills might be double-counted."
 """
 import asyncio
+import contextlib
 import math
 import os
 import time
@@ -82,6 +95,7 @@ import json as jsonlib
 from datetime import datetime, timedelta, timezone
 
 import aiohttp
+import lighter
 
 SUPABASE_URL = os.environ["NEXT_PUBLIC_SUPABASE_URL"]
 SUPABASE_KEY = os.environ["SUPABASE_SERVICE_ROLE_KEY"]
@@ -91,10 +105,22 @@ TABLE_STATE = "lighter_lit_grid_state"
 TABLE_TRADES = "lighter_lit_grid_trades"
 TABLE_RUNS = "lighter_lit_grid_runs"
 
+# Same stream already proven live and auth-free by Worker 1/2's own order-book/market_stats
+# subscriptions (stoch_bot_core.py) -- passed as ws_url so lighter.WsClient skips resolving a
+# host from a Configuration we never set up (this file has no SDK client/credentials at all).
+STREAM_URL = "wss://mainnet.zklighter.elliot.ai/stream"
+# How stale the order book can be before fetch_current_price refuses to use it (treated
+# identically to "no price available" -- tick() already skips the tick when this returns None).
+BOOK_MAX_AGE = 15.0
+# Order-book silence that forces a reconnect -- same watchdog idea as stoch_bot_core.py's
+# WS_RECONNECT_AFTER ("async for message in ws never raises if the socket half-dies"), just a
+# bit more generous (LIT/USDC is a quieter pair than the BTC perp that constant was tuned for).
+BOOK_WS_RECONNECT_AFTER = 60.0
+
 MARKET_ROUNDTRIP_COST_PCT = 0.103  # validated live-spread snapshot, applied once per completed pair
-# Live price poll interval (2026-10-18, direct correction -- was 60s candle polling, meaning a
-# real crossing could sit unacted-on for up to ~2 minutes). 3s keeps reaction fast without
-# hammering the public endpoint (a plain recentTrades call, ~0.6s round trip observed live).
+# How often the tick loop re-checks settings and walks the (push-updated) live price. No longer
+# bound by REST rate limits -- fetch_current_price now reads an in-memory websocket feed, not a
+# network call -- so this purely governs reaction latency, not request volume.
 TICK_EVERY = 3.0
 LOCK_REFRESH_EVERY = 5.0
 # Must stay comfortably above the actual heartbeat cadence (LOCK_REFRESH_EVERY, since
@@ -172,6 +198,39 @@ def levels_for_drawdown(spacing_pct: float, drawdown_pct: float) -> int:
     return max(1, math.ceil(math.log(1 / ratio) / step))
 
 
+class LiveBook:
+    """In-memory order book fed by a websocket subscription (2026-10-18) -- same shape/merge
+    semantics as stoch_bot_core.py's LiveState.on_order_book, just standalone (this file has no
+    SDK client of its own). lighter.WsClient already handles the incremental bid/ask diff merge
+    correctly (confirmed by reading its source before relying on it); this class only tracks the
+    resulting state and a staleness check, deliberately not reimplementing that merge logic."""
+    def __init__(self, market_id):
+        self.market_key = str(market_id)
+        self.order_book = {}
+        self.updated_at = 0.0
+
+    def on_order_book_update(self, market_id, state):
+        if str(market_id) == self.market_key:
+            self.order_book = state
+            self.updated_at = time.time()
+
+    def best_mid(self, max_age=BOOK_MAX_AGE):
+        if time.time() - self.updated_at > max_age:
+            return None
+        bids = self.order_book.get("bids") or []
+        asks = self.order_book.get("asks") or []
+        if not bids or not asks:
+            return None
+        try:
+            best_bid = max(float(b["price"]) for b in bids)
+            best_ask = min(float(a["price"]) for a in asks)
+        except (KeyError, ValueError, TypeError):
+            return None
+        if best_bid <= 0 or best_ask <= 0 or best_ask < best_bid:
+            return None
+        return (best_bid + best_ask) / 2.0
+
+
 class LitGridPaper:
     def __init__(self, http: aiohttp.ClientSession):
         self.http = http
@@ -180,6 +239,8 @@ class LitGridPaper:
         self._lock_checked_at = 0.0
         self._lock_blocked_logged = False
         self._last_level = None
+        self.live = LiveBook(MARKET_ID)
+        self._book_ws_connected_at = 0.0
 
     # ── Supabase (same pattern as stoch_bot_core.py's sb/get_state/update_state/log_run) ──────
     async def sb(self, method, path, body=None):
@@ -280,22 +341,50 @@ class LitGridPaper:
         except Exception:
             pass
 
-    # ── Live price (public endpoint, no auth) ───────────────────────────────────────────────────
+    # ── Live price (push-based, no REST, no rate-limit exposure) ────────────────────────────────
     async def fetch_current_price(self):
-        """Latest real trade price -- a lightweight, fast poll (not a full candle fetch), so the
-        bot can react within TICK_EVERY seconds of a real price move instead of waiting for a
-        1-minute candle to close."""
-        url = f"https://mainnet.zklighter.elliot.ai/api/v1/recentTrades?market_id={MARKET_ID}&limit=1"
-        async with self.http.get(url, timeout=aiohttp.ClientTimeout(total=8.0)) as resp:
-            text = await resp.text()
-            content_type = resp.headers.get("Content-Type", "")
-            if resp.status >= 400 or "json" not in content_type:
-                raise RuntimeError(f"fetch_current_price {resp.status} ct={content_type}: {text[:150]}")
-            data = jsonlib.loads(text)
-        trades = data.get("trades") or []
-        if not trades:
-            return None
-        return float(trades[0]["price"])
+        """Live order-book mid-price (2026-10-18, fixed after a live rate-limit incident -- see
+        module docstring). Returns None if the book hasn't received a fresh update within
+        BOOK_MAX_AGE (or hasn't connected yet) -- handled identically to the old "no trades
+        returned" case: tick() already skips the tick when this returns None."""
+        return self.live.best_mid()
+
+    async def _book_ws_session(self):
+        ws = lighter.WsClient(
+            order_book_ids=[MARKET_ID], account_ids=[],
+            on_order_book_update=self.live.on_order_book_update,
+            ws_url=STREAM_URL,
+        )
+        self._book_ws_connected_at = time.time()
+        await ws.run_async()
+
+    async def run_book_ws_forever(self):
+        """Watchdog-supervised order-book subscription (2026-10-18), same pattern as
+        stoch_bot_core.py's run_ws_forever: `async for message in ws` never raises if the socket
+        half-dies, so exception-only reconnect isn't enough -- watch self.live.updated_at itself
+        and force a reconnect on silence. Runs as its own gathered task (return_exceptions=True
+        in run_lit_grid_paper) so a feed hiccup can never take down the tick loop, or vice versa."""
+        while True:
+            task = asyncio.create_task(self._book_ws_session())
+            try:
+                while not task.done():
+                    await asyncio.sleep(2.0)
+                    quiet_since = max(self.live.updated_at, self._book_ws_connected_at)
+                    age = time.time() - quiet_since
+                    if age > BOOK_WS_RECONNECT_AFTER:
+                        await self.log_run("book_ws_watchdog_reconnect", {"ob_age": round(age, 1)})
+                        break
+                if task.done() and not task.cancelled():
+                    exc = task.exception()
+                    if exc is not None:
+                        await self.log_run("book_ws_disconnected", {"error": str(exc)[:300]})
+            except Exception as e:
+                await self.log_run("book_ws_supervisor_error", {"error": str(e)[:300]})
+            finally:
+                task.cancel()
+                with contextlib.suppress(BaseException):
+                    await task
+            await asyncio.sleep(1.0)
 
     # ── One tick: walk from the last seen price to the new one ─────────────────────────────────
     async def process_price(self, price, state):
@@ -597,31 +686,42 @@ class LitGridPaper:
         await self.update_state({"internal_last_level": self._last_level, "internal_spacing_pct": spacing_pct})
 
 
+async def _run_tick_loop(bot):
+    """The settings/fill-processing loop. Never raises -- every tick is caught and logged so a
+    bug here can never cancel the sibling real-money task run_lit_grid_paper is gathered with
+    (nor the order-book task it runs alongside, below)."""
+    backoff = RATE_LIMIT_BACKOFF_START
+    try:
+        while True:
+            sleep_for = TICK_EVERY
+            try:
+                if await bot.acquire_lock():
+                    await bot.tick()
+                backoff = RATE_LIMIT_BACKOFF_START  # any clean pass resets the backoff
+            except Exception as e:
+                msg = str(e)
+                try:
+                    await bot.log_run("tick_error", {"error": msg[:300]})
+                except Exception:
+                    print(f"[lit-grid] tick_error (and log_run also failed): {e}", flush=True)
+                if "429" in msg or "Too Many Requests" in msg:
+                    # Back off instead of hammering the rate limit at the normal cadence --
+                    # doubles each consecutive hit, capped, reset on the next clean pass. Kept
+                    # as defense-in-depth for Supabase calls (a separate quota from Lighter's)
+                    # now that the price feed itself is push-based and makes no REST calls.
+                    sleep_for = backoff
+                    backoff = min(backoff * 2, RATE_LIMIT_BACKOFF_MAX)
+            await asyncio.sleep(sleep_for)
+    finally:
+        await bot.release_lock()
+
+
 async def run_lit_grid_paper():
-    """Entrypoint for the embedded task. Never raises -- every tick is caught and logged so a
-    bug here can never cancel the sibling real-money task it's gathered with."""
+    """Entrypoint for the embedded task. Runs the tick loop and the order-book websocket
+    subscription as two independently-isolated gathered tasks (return_exceptions=True), so
+    neither can take the other down, and neither can escape to cancel Worker 4's real trading
+    task this whole thing is itself gathered with."""
     async with aiohttp.ClientSession() as http:
         bot = LitGridPaper(http)
         await bot.log_run("started", {})
-        backoff = RATE_LIMIT_BACKOFF_START
-        try:
-            while True:
-                sleep_for = TICK_EVERY
-                try:
-                    if await bot.acquire_lock():
-                        await bot.tick()
-                    backoff = RATE_LIMIT_BACKOFF_START  # any clean pass resets the backoff
-                except Exception as e:
-                    msg = str(e)
-                    try:
-                        await bot.log_run("tick_error", {"error": msg[:300]})
-                    except Exception:
-                        print(f"[lit-grid] tick_error (and log_run also failed): {e}", flush=True)
-                    if "429" in msg or "Too Many Requests" in msg:
-                        # Back off instead of hammering the rate limit at the normal cadence --
-                        # doubles each consecutive hit, capped, reset on the next clean pass.
-                        sleep_for = backoff
-                        backoff = min(backoff * 2, RATE_LIMIT_BACKOFF_MAX)
-                await asyncio.sleep(sleep_for)
-        finally:
-            await bot.release_lock()
+        await asyncio.gather(_run_tick_loop(bot), bot.run_book_ws_forever(), return_exceptions=True)

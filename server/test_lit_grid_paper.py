@@ -9,7 +9,8 @@ sys.path.insert(0, "/Users/julio/trading-bot/server")
 
 import lit_grid_paper as core
 from lit_grid_paper import (
-    LitGridPaper, level_of, compute_order_size_lit, levels_for_drawdown, run_lit_grid_paper,
+    LitGridPaper, LiveBook, level_of, compute_order_size_lit, levels_for_drawdown,
+    run_lit_grid_paper,
 )
 
 PASS, FAIL = [], []
@@ -330,6 +331,8 @@ async def t_tick_error_never_propagates():
             pass
         async def release_lock(self):
             pass
+        async def run_book_ws_forever(self):
+            await asyncio.sleep(999)
 
     orig_cls = core.LitGridPaper
     orig_tick_every = core.TICK_EVERY
@@ -368,6 +371,24 @@ async def t_sub_spacing_noise_never_trades():
     state = (await bot.sb("GET", f"{core.TABLE_STATE}?id=eq.1"))[0]
     check("bot_profit_usd stays exactly zero (no phantom profit from pure noise)",
           state["bot_profit_usd"] == 0, state["bot_profit_usd"])
+
+
+def t_live_book_mid_price_and_staleness():
+    # LiveBook backs fetch_current_price now (2026-10-18, replacing a REST poll that tripped
+    # Lighter's rate limit) -- confirms the mid-price math and that a stale/missing book reads
+    # as "no price available" (same contract fetch_current_price always had).
+    book = LiveBook(2049)
+    check("no price before any update has arrived", book.best_mid() is None, book.best_mid())
+    book.on_order_book_update(2049, {"bids": [{"price": "3.10", "size": "5"}],
+                                      "asks": [{"price": "3.12", "size": "5"}]})
+    check("mid price is the average of best bid and best ask",
+          abs(book.best_mid() - 3.11) < 1e-9, book.best_mid())
+    book.on_order_book_update(9999, {"bids": [], "asks": []})  # a different market -- must be ignored
+    check("an update for a different market_id does not overwrite this book",
+          abs(book.best_mid() - 3.11) < 1e-9, book.best_mid())
+    book.updated_at -= 100  # simulate a stale book
+    check("a stale book (older than max_age) reads as no price available",
+          book.best_mid(max_age=15.0) is None, book.best_mid(max_age=15.0))
 
 
 def t_level_guard_prevents_boundary_noise():
@@ -610,6 +631,8 @@ async def t_rate_limited_errors_back_off_before_retrying():
             pass
         async def release_lock(self):
             pass
+        async def run_book_ws_forever(self):
+            await asyncio.sleep(999)
 
     orig_cls = core.LitGridPaper
     orig_tick_every = core.TICK_EVERY
@@ -646,6 +669,7 @@ async def main():
     t_levels_for_drawdown_matches_known_values()
     t_order_size_scales_with_capital()
     t_level_guard_prevents_boundary_noise()
+    t_live_book_mid_price_and_staleness()
     for t in (t_paired_cycle_buy_then_sell,
               t_initial_seed_is_proportional_to_levels_up,
               t_seeded_positions_carry_the_real_arm_price_as_cost,
