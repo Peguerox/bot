@@ -404,7 +404,11 @@ class LitGridLive:
         """Ground truth, straight from the exchange -- never the ledger, never a cached value.
         DetailedAccount.assets is a list of {symbol, balance, locked_balance, ...}; locked_balance
         covers funds committed to open orders, so TOTAL real holding of each is balance+locked.
-        Returns (usdc, lit)."""
+        Returns (usdc, lit).
+
+        TEMPORARY diagnostic logging (2026-10-18): the real account reads back $0/$0 despite the
+        user confirming real funds are present -- logging the raw response shape once so the
+        actual field names/structure can be confirmed instead of guessed again. Remove once fixed."""
         auth = self._get_auth_token()
         resp = await asyncio.wait_for(
             self._account_api.account(by="index", value=str(self.account_index),
@@ -413,14 +417,37 @@ class LitGridLive:
             timeout=REST_TIMEOUT + 2.0,
         )
         acct = resp.accounts[0] if getattr(resp, "accounts", None) else resp
+        assets_raw = getattr(acct, "assets", None) or []
+        await self.log_run("balance_debug", {
+            "has_accounts_attr": hasattr(resp, "accounts"),
+            "accounts_len": len(getattr(resp, "accounts", None) or []),
+            "acct_collateral": str(getattr(acct, "collateral", "MISSING")),
+            "acct_available_balance": str(getattr(acct, "available_balance", "MISSING")),
+            "acct_total_asset_value": str(getattr(acct, "total_asset_value", "MISSING")),
+            "assets_count": len(assets_raw),
+            "assets_sample": [
+                {k: str(v) for k, v in vars(a).items()} if hasattr(a, "__dict__") else str(a)
+                for a in assets_raw[:10]
+            ],
+        })
         usdc, lit = 0.0, 0.0
-        for asset in (getattr(acct, "assets", None) or []):
+        for asset in assets_raw:
             symbol = getattr(asset, "symbol", None)
             total = float(asset.balance or 0) + float(asset.locked_balance or 0)
             if symbol == "LIT":
                 lit = total
             elif symbol == "USDC":
                 usdc = total
+        # Fallback: if no USDC found in assets but the account carries a collateral/margin
+        # balance (common for a cross-margin account where USDC sits as collateral rather than
+        # a listed spot asset), use that instead of silently reporting zero.
+        if usdc == 0.0:
+            collateral = getattr(acct, "collateral", None)
+            if collateral is not None:
+                try:
+                    usdc = float(collateral)
+                except (TypeError, ValueError):
+                    pass
         return usdc, lit
 
     async def check_balance_divergence(self):
