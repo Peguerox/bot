@@ -1173,22 +1173,49 @@ def _grid_rows(P, held, sells_for, buys_at, sold=()):
 
 
 async def t_a_buy_fill_creates_its_sell_and_one_bottom_buy_never_the_same_line():
-    # A buy fill at -1 creates its sell one line up (line 0) and, trailing down, one new buy at
-    # the bottom (-16) -- never another buy on the filled line itself, never a market buy.
+    # A buy fill at -1 creates its sell one line up (line 0). The grid's own 5 + 15 are paid by
+    # capital, so the extra trailing-down buy at the bottom (-16) is paid ONLY from the
+    # cover-drop bucket -- here it has $10, enough for one.
     P = 2.87055
     rows = _grid_rows(P, held=range(-1, 5), sells_for=range(0, 5), buys_at=range(-15, -1))
     bot, fake = make_bot(base_state(levels_up=5, levels_down=15, order_size_lit=2.16,
-                                     usdc_balance=500.0, grid_anchor_price=P), orders=rows)
+                                     usdc_balance=500.0, grid_anchor_price=P,
+                                     profit_bucket_cover_drop_usd=10.0), orders=rows)
     before = {o["id"] for o in fake.orders}
     await bot.maintain_window(fake.state, round(P * 1.00125 ** -1 * 0.99995, 5))
     new = [o for o in fake.orders if o["id"] not in before]
+    bottom = [o for o in new if o["side"] == "buy"]
     check("the filled buy gets its sell one line up",
           any(o["side"] == "sell" and o["closes_level"] == -1
               and abs(o["limit_price"] - core.round_price(P)) < 1e-9 for o in new), new)
     check("trailing down adds exactly one buy, at the bottom (-16)",
-          sorted(o["level"] for o in new if o["side"] == "buy") == [-16], new)
+          [o["level"] for o in bottom] == [-16], new)
+    check("that trailing-down buy is paid entirely from the cover-drop bucket",
+          bottom and abs(bottom[0]["funded_from_bucket_usd"] - bottom[0]["limit_price"] * 2.16) < 1e-6, bottom)
     check("no market buy is sent after a buy fill",
           all("order_type" in kw for kw in bot.client.placed), bot.client.placed)
+
+
+async def t_trailing_down_never_uses_capital():
+    # Same fill, but the cover-drop bucket is empty: capital still has $400+ free, yet no
+    # trailing-down buy is placed -- capital only pays for the grid's own levels.
+    P = 2.87055
+    rows = _grid_rows(P, held=range(-1, 5), sells_for=range(0, 5), buys_at=range(-15, -1))
+    bot, fake = make_bot(base_state(levels_up=5, levels_down=15, order_size_lit=2.16,
+                                     usdc_balance=500.0, capital_usd=500, grid_anchor_price=P,
+                                     profit_bucket_cover_drop_usd=0.0), orders=rows)
+    logged = []
+    orig = bot.log_run
+    async def spy(action, detail):
+        logged.append((action, detail))
+        await orig(action, detail)
+    bot.log_run = spy
+    before = {o["id"] for o in fake.orders}
+    await bot.maintain_window(fake.state, round(P * 1.00125 ** -1 * 0.99995, 5))
+    new_buys = [o for o in fake.orders if o["id"] not in before and o["side"] == "buy"]
+    check("no trailing-down buy without cover-drop money, even with capital free", new_buys == [], new_buys)
+    check("the 'no money' error names the cover-drop bucket",
+          any(a == "no_funds_for_buy" and d.get("source") == "cover_drop" for a, d in logged), logged)
 
 
 async def t_never_buys_the_same_line_twice_while_price_bounces():
@@ -1862,6 +1889,7 @@ async def main():
         t_grid_after_cold_start_is_exactly_spacing_from_start_price,
         t_trailing_down_keeps_levels_down_buys_below_price,
         t_a_buy_fill_creates_its_sell_and_one_bottom_buy_never_the_same_line,
+        t_trailing_down_never_uses_capital,
         t_never_buys_the_same_line_twice_while_price_bounces,
         t_no_funds_logs_once_and_stays_quiet,
         t_trailing_up_keeps_levels_up_sells_and_twenty_orders,

@@ -280,8 +280,9 @@ lines just above the highest held one, so their sells land at the new top; the g
 moves up with the top and the lowest buys are cancelled. Trailing down: buys always sit on
 the levels_down lines directly below the lowest held lot (or below price when nothing is held),
 so as buys fill on a drop one new buy is added at the bottom; each filled buy gets its sell one
-line up. A held line is never bought again until its sell fills. Buys are funded by capital,
-then the cover-drop bucket; when both are used up the bot logs no_funds_for_buy once and waits.
+line up. A held line is never bought again until its sell fills. Capital pays only for the
+grid's own levels_up + levels_down; every trailing-down buy beyond that is paid ONLY from the
+cover-drop bucket -- with it empty the bot logs no_funds_for_buy once and waits.
 
 Nothing in this codebase has placed a real LIMIT order before this (stoch_bot_core.py's
 place_order only ever sends MARKET orders; native SL/TP are the only conditional orders that
@@ -1217,6 +1218,7 @@ class LitGridLive:
                     available_usdc -= cost
                     base_capital_remaining -= from_base
             else:
+                trail_placed = 0
                 for lvl in trail_lines:
                     if not self._lock_held:
                         return
@@ -1239,10 +1241,23 @@ class LitGridLive:
                     snap.buy_levels.add(lvl)
                     available_usdc -= cost
                     base_capital_remaining -= from_base
-                    self._no_funds_logged = False
+                    trail_placed += 1
                 if anchored:
                     top = buy_top
                     bottom = grid_bottom
+                    # Capital pays for the grid itself -- levels_up lots + levels_down buys -- and
+                    # nothing more. Any buy beyond that (trailing down) is paid ONLY from the
+                    # cover-drop bucket (direct request); with the bucket empty the bot logs
+                    # no_funds_for_buy once and waits.
+                    base_slots = levels_up + levels_down
+                    base_used = trail_placed + sum(
+                        1 for h in holdings.values()
+                        if not h.get("bucket_cost_total", 0.0) > 0.5 * h["qty"] * h["cost"])
+                    base_used += sum(
+                        1 for rows in resting.values() for r in rows
+                        if r["side"] == "buy" and int(r["level"]) >= grid_bottom
+                        and float(r.get("funded_from_bucket_usd") or 0) <= 0)
+                    cover_left = cover_drop_bucket
                 else:
                     top = cur_lvl - 1
                     bottom = top - levels_down + 1
@@ -1257,12 +1272,14 @@ class LitGridLive:
                         break
                     limit_price = round_price(anchor * math.exp(lvl * step))
                     cost = limit_price * order_size
-                    if cost > available_usdc:
+                    from_cover_only = anchored and base_used >= base_slots
+                    if cost > available_usdc or (from_cover_only and cost > cover_left):
                         if not getattr(self, "_no_funds_logged", False):
-                            # Capital and the cover-drop bucket are both used up: stay quiet,
-                            # keep what's in the grid, wait for sells to free money.
+                            # Stay quiet, keep what's in the grid, wait for sells to free money.
                             await self.log_run("no_funds_for_buy", {
                                 "line": lvl, "needed": round(cost, 4),
+                                "source": "cover_drop" if from_cover_only else "capital",
+                                "cover_drop_left": round(cover_left, 4) if anchored else None,
                                 "available": round(available_usdc, 4)})
                             self._no_funds_logged = True
                         break
@@ -1271,7 +1288,10 @@ class LitGridLive:
                         if reserved is None:
                             break  # another instance/tick already consumed the last slot
                         lifetime_buy_count = reserved
-                    from_base = min(cost, base_capital_remaining)
+                    if from_cover_only:
+                        from_base = 0.0
+                    else:
+                        from_base = min(cost, base_capital_remaining)
                     from_bucket_amount = cost - from_base
                     row_id = await self.place_grid_order(
                         lvl, "buy", limit_price, order_size, funded_from_bucket_usd=from_bucket_amount)
@@ -1286,6 +1306,12 @@ class LitGridLive:
                     snap.buy_levels.add(lvl)
                     available_usdc -= cost
                     base_capital_remaining -= from_base
+                    self._no_funds_logged = False
+                    if anchored:
+                        if from_cover_only:
+                            cover_left -= cost
+                        else:
+                            base_used += 1
 
     async def market_sell_level(self, level, qty):
         # Lock validated BEFORE anything else (external audit fix, fifth pass): this function
