@@ -111,6 +111,57 @@ stays earmarked for that bucket's own purpose (cover_drop still gets spent cover
 compound still inflates sizing) regardless of which mode is currently selected; only crediting
 new profit is mode-gated, spending an existing balance is not.
 
+SIXTH-PASS FIXES (2026-10-18), from a fifth independent audit, each confirmed against this code
+before fixing -- all concentrated in the profit-allocation feature's accounting, plus one
+cash-accounting gap that predates it:
+
+  - A cash-delta correction (fifth-pass P2) was only ever persisted AFTER the price check and
+    the balance-divergence check -- a missing price, or anything else that returned early,
+    silently skipped the write, permanently losing a correction that can never be recomputed
+    once its order has already left the reconcilable (OPEN_STATUSES) set. Now persisted
+    immediately after reconciliation, before anything that could return early, and fails CLOSED
+    (pauses entries) if that persist write itself fails.
+  - tick() selectively patched only usdc_balance onto its local state copy instead of re-reading
+    fresh -- a profit-bucket credit that reconciliation had JUST written moments earlier was
+    invisible to maintain_window()'s spend check later the SAME tick, so a cover_drop-funded buy
+    could overwrite (not just fail to see) a same-tick credit. tick() now always re-reads state
+    fresh after reconciliation, for every field, not just cash.
+  - A rejected buy's cost was charged against cover_drop (and the base budget) exactly the same
+    as an accepted one -- place_grid_order()'s return value was never checked. A confirmed
+    rejection (a clean `None` return) is no longer charged; an ambiguous send (still returns a
+    row id) is still charged, deliberately conservative, same philosophy as the one-shot
+    allowance counter.
+  - Compounding inflated the SIZING basis (capital_usd + profit_bucket_compound_usd) but the
+    SPENDING ceiling only ever used capital_usd (plus cover_drop) -- a bigger order size just
+    consumed the old, unexpanded budget sooner instead of the compound bucket actually funding
+    more depth. The spending ceiling now folds in the same compound bucket the sizing basis uses.
+  - cover_drop money, once spent funding a buy, never came back when that position was later
+    sold -- the bucket just kept draining on every reuse even though the real exchange cash had
+    already returned. Each buy's ledger row now records exactly how much of its own cost was
+    drawn from the bucket (`funded_from_bucket_usd`); current_holdings() tracks a blended
+    bucket-funded cost alongside the ordinary cost basis, and a sell now returns that fill's
+    share of it to profit_bucket_cover_drop_usd -- on top of, and independent of, whatever
+    profit_mode governs the newly-realized profit itself. This makes cover_drop properly
+    revolving across repeated drops instead of a one-shot allowance.
+  - A sell's profit/principal was credited to its bucket in the SAME pass that marked it
+    'filled' -- if that credit write failed, the exception was logged and never retried, since a
+    filled row drops out of every future reconcile scan by definition. The credit amount and its
+    destination bucket are now recorded on the sell's own row ATOMICALLY with its 'filled'
+    status (one PATCH, one SQL statement); a separate, idempotent _flush_uncredited_profit() step
+    -- re-run every single tick regardless of whether anything new reconciled -- scans
+    specifically for filled sells not yet credited and retries until it durably succeeds, so a
+    restart or a transient write failure can no longer lose or duplicate a credit.
+  - A multi-price partial fill (e.g. a market sell sweeping through several book levels) computed
+    its cash/profit delta as new_qty_increment * overall_average_price -- not the real proceeds
+    of just the new increment when per-fill prices differ. Cumulative filled_quote is now
+    persisted alongside filled_qty, and every delta is computed from quote-amount deltas
+    directly (new_quote - prior_quote), never qty-times-average-price.
+  - Crediting the compound bucket now also clears the cached order_size_lit, so new profit
+    actually triggers a resize at the very next tick instead of sitting inert until an unrelated
+    settings change -- "startup" was never actually a recompute trigger (order_size_lit is
+    persisted; a fresh process never clears it), a documentation inaccuracy in the prior
+    writeup, corrected here along with the mechanism itself.
+
 Nothing in this codebase has placed a real LIMIT order before this (stoch_bot_core.py's
 place_order only ever sends MARKET orders; native SL/TP are the only conditional orders that
 exist). The Lighter SDK (lighter.SignerClient.create_order) supports real ORDER_TYPE_LIMIT with
@@ -391,6 +442,51 @@ class LitGridLive:
                     all_ok = False
         return all_ok
 
+    async def _flush_uncredited_profit(self):
+        """Retry-safe profit/principal crediting (external audit fix, sixth pass). A sell's
+        realized_profit_usd / bucket_principal_return_usd / profit_bucket_destination are
+        recorded on ITS OWN row atomically with status='filled' (same PATCH, same SQL statement)
+        -- never in a separate step that could fail independently and get lost, since a filled
+        row drops out of every future OPEN_STATUSES scan by definition. This re-scans
+        specifically for filled sells not yet credited, independent of status, and retries every
+        single call (cheap: usually zero rows) until the credit durably succeeds -- a restart or
+        a transient write failure can no longer lose or duplicate one."""
+        uncredited = await self.sb_paginate(
+            f"{TABLE_ORDERS}?status=eq.filled&side=eq.sell&profit_credited=eq.false"
+            f"&realized_profit_usd=not.is.null"
+            f"&select=id,realized_profit_usd,bucket_principal_return_usd,profit_bucket_destination")
+        if not uncredited:
+            return
+        by_bucket = {}
+        principal_total = 0.0
+        all_ids = []
+        for r in uncredited:
+            dest = r.get("profit_bucket_destination") or "profit_bucket_rest_usd"
+            by_bucket[dest] = by_bucket.get(dest, 0.0) + float(r.get("realized_profit_usd") or 0)
+            principal_total += float(r.get("bucket_principal_return_usd") or 0)
+            all_ids.append(r["id"])
+        try:
+            state_now = await self.get_state()
+            updates = {}
+            for dest, amount in by_bucket.items():
+                updates[dest] = round(float(state_now.get(dest) or 0) + amount, 8)
+                if dest == "profit_bucket_compound_usd":
+                    # New compound profit should actually trigger a resize at the next tick,
+                    # not sit inert until an unrelated settings change (external audit fix,
+                    # sixth pass -- "startup" was never really a recompute trigger either, since
+                    # order_size_lit is persisted and a fresh process never clears it).
+                    updates["order_size_lit"] = None
+            if principal_total > 0:
+                base = updates.get("profit_bucket_cover_drop_usd",
+                                    float(state_now.get("profit_bucket_cover_drop_usd") or 0))
+                updates["profit_bucket_cover_drop_usd"] = round(base + principal_total, 8)
+            await self.update_state(updates)
+        except Exception as e:
+            await self.log_run("profit_bucket_credit_failed", {"error": str(e)[:200]})
+            return
+        for rid in all_ids:
+            await self.sb("PATCH", f"{TABLE_ORDERS}?id=eq.{rid}", {"profit_credited": True})
+
     async def reconcile_pending_orders(self, profit_mode=None):
         """Checks every non-terminal ledger row against the exchange's own account_orders().
         Returns (all_ok, usdc_delta, has_stale_unresolved): all_ok is True only if every batch
@@ -402,10 +498,14 @@ class LitGridLive:
         entries (never exits) the same way a real balance divergence already does (external audit
         fix, fifth pass -- a stale-unresolved order used to only be logged, never gated anything).
 
-        Realized profit on a sell fill -- (fill_price - cost_basis_before_this_sell) * filled_qty,
-        same formula the paper bot already uses for bot_profit_usd -- is credited to whichever
-        profit bucket `profit_mode` names (direct request, profit allocation feature). The cost
-        basis is read via current_holdings() ONCE, before this pass's own PATCHes change it."""
+        Realized profit on a sell fill -- computed from the REAL incremental quote-amount delta
+        (new cumulative filled_quote minus prior), never qty-times-average-price, which can be
+        wrong the moment a multi-partial fill crosses more than one price (external audit fix,
+        sixth pass) -- is recorded directly on that sell's own row, atomically with its status
+        write; _flush_uncredited_profit() (called first, every pass) is what actually applies it
+        to a bucket, retry-safe. The cost basis (and bucket-funded share of it) is read via
+        current_holdings() ONCE per pass, before this pass's own PATCHes change it."""
+        await self._flush_uncredited_profit()
         pending = await self.sb_paginate(
             f"{TABLE_ORDERS}?status=in.({','.join(OPEN_STATUSES)})&select=*&order=id.asc")
         if not pending:
@@ -417,7 +517,6 @@ class LitGridLive:
         all_ok = True
         usdc_delta = 0.0
         has_stale_unresolved = False
-        realized_profit = 0.0
         now = datetime.now(timezone.utc)
         for batch in _chunks(pending, 20):
             co_idxs = ",".join(str(r["client_order_index"]) for r in batch)
@@ -444,24 +543,39 @@ class LitGridLive:
                         has_stale_unresolved = True
                     continue
                 filled_qty, filled_price = _order_fill_amounts(o)
+                filled_quote = float(getattr(o, "filled_quote_amount", 0) or 0)
                 terminal = _order_is_terminal(o)
                 status_raw = str(getattr(o, "status", "") or "").lower()
                 prev_filled_qty = float(r.get("filled_qty") or 0)
+                prev_filled_quote = float(r.get("filled_quote") or 0)
                 patch = {"exchange_order_id": o.order_index}
                 if filled_qty > 0:
                     patch["filled_qty"] = filled_qty
                     patch["filled_price"] = filled_price
+                    patch["filled_quote"] = filled_quote
                     # Only the NEWLY-confirmed portion since the last reconciliation pass counts
                     # toward this call's cash delta -- a row can be reconciled more than once
-                    # while a partial fill is still in progress.
+                    # while a partial fill is still in progress. delta_quote is the REAL dollar
+                    # amount exchanged for just this increment -- never delta_qty * (overall
+                    # average) price, which is wrong the moment per-fill prices differ.
                     delta_qty = max(0.0, filled_qty - prev_filled_qty)
+                    delta_quote = max(0.0, filled_quote - prev_filled_quote)
                     if delta_qty > 0:
                         signed = -1.0 if r["side"] == "buy" else 1.0
-                        usdc_delta += signed * delta_qty * filled_price
+                        usdc_delta += signed * delta_quote
                         if r["side"] == "sell" and r.get("closes_level") is not None and holdings_before:
                             basis = holdings_before.get(r["closes_level"])
-                            if basis:
-                                realized_profit += delta_qty * (filled_price - basis["cost"])
+                            if basis and basis["qty"] > 1e-12:
+                                per_unit_bucket_cost = basis.get("bucket_cost_total", 0.0) / basis["qty"]
+                                profit_delta = delta_quote - delta_qty * basis["cost"]
+                                principal_delta = delta_qty * per_unit_bucket_cost
+                                patch["realized_profit_usd"] = round(
+                                    float(r.get("realized_profit_usd") or 0) + profit_delta, 8)
+                                patch["bucket_principal_return_usd"] = round(
+                                    float(r.get("bucket_principal_return_usd") or 0) + principal_delta, 8)
+                                if not r.get("profit_bucket_destination"):
+                                    patch["profit_bucket_destination"] = PROFIT_BUCKET_COLUMN.get(
+                                        profit_mode, "profit_bucket_rest_usd")
                 if terminal:
                     patch["status"] = "filled" if filled_qty > 0 else (
                         "cancelled" if any(p in status_raw for p in TERMINAL_STATUS_SUBSTRINGS) else "rejected")
@@ -474,15 +588,6 @@ class LitGridLive:
                     "row_id": r["id"], "raw_status": status_raw, "terminal": terminal,
                     "computed_filled_qty": filled_qty, "computed_filled_price": filled_price,
                 })
-        if profit_mode and realized_profit:
-            bucket_col = PROFIT_BUCKET_COLUMN.get(profit_mode, "profit_bucket_rest_usd")
-            try:
-                state_now = await self.get_state()
-                new_val = round(float(state_now.get(bucket_col) or 0) + realized_profit, 8)
-                await self.update_state({bucket_col: new_val})
-            except Exception as e:
-                await self.log_run("profit_bucket_credit_failed",
-                                    {"error": str(e)[:200], "amount": realized_profit, "bucket": bucket_col})
         return all_ok, usdc_delta, has_stale_unresolved
 
     async def real_balances(self):
@@ -662,38 +767,51 @@ class LitGridLive:
         filled_qty, terminal or not (external audit fix P1-2/P1-3): a sell's execution is real
         money gone the instant it's recorded, whether or not the rest of that order is still
         working -- treating it as invisible until terminal is what let flatten try to re-sell
-        inventory a still-open prior sell had already partially or fully sold."""
+        inventory a still-open prior sell had already partially or fully sold.
+
+        Also walks a SECOND blended total alongside the ordinary cost basis: how much of each
+        level's current cost came from the cover_drop bucket (`funded_from_bucket_usd`, recorded
+        on the buy row at placement time), reduced proportionally on a partial sell exactly like
+        the cost basis itself (external audit fix, sixth pass -- cover_drop money spent on a buy
+        never came back when that position was later sold; this is what lets a sell return its
+        share of bucket-funded principal)."""
         buys = await self.sb_paginate(
-            f"{TABLE_ORDERS}?status=eq.filled&side=eq.buy&select=id,level,filled_qty,filled_price&order=id.asc")
+            f"{TABLE_ORDERS}?status=eq.filled&side=eq.buy"
+            f"&select=id,level,filled_qty,filled_price,funded_from_bucket_usd&order=id.asc")
         sells = await self.sb_paginate(
             f"{TABLE_ORDERS}?side=eq.sell&closes_level=not.is.null&filled_qty=not.is.null&select=id,closes_level,filled_qty&order=id.asc")
         events_by_level = {}
         for b in (buys or []):
             events_by_level.setdefault(b["level"], []).append(
-                ("buy", b["id"], float(b["filled_qty"] or 0), float(b["filled_price"] or 0)))
+                ("buy", b["id"], float(b["filled_qty"] or 0), float(b["filled_price"] or 0),
+                 float(b.get("funded_from_bucket_usd") or 0)))
         for s in (sells or []):
             lvl = s.get("closes_level")
             if lvl is None:
                 continue
             events_by_level.setdefault(lvl, []).append(
-                ("sell", s["id"], float(s["filled_qty"] or 0), None))
+                ("sell", s["id"], float(s["filled_qty"] or 0), None, None))
         holdings = {}
         for lvl, events in events_by_level.items():
             events.sort(key=lambda e: e[1])
             qty = 0.0
             cost_total = 0.0
-            for kind, _id, ev_qty, ev_price in events:
+            bucket_cost_total = 0.0
+            for kind, _id, ev_qty, ev_price, ev_bucket_cost in events:
                 if kind == "buy":
                     cost_total += ev_qty * ev_price
+                    bucket_cost_total += ev_bucket_cost
                     qty += ev_qty
                 else:
                     if qty > 1e-12:
                         avg = cost_total / qty
+                        avg_bucket = bucket_cost_total / qty
                         take = min(ev_qty, qty)
                         cost_total -= take * avg
+                        bucket_cost_total -= take * avg_bucket
                         qty -= take
             if qty > 1e-9:
-                holdings[lvl] = {"qty": qty, "cost": cost_total / qty}
+                holdings[lvl] = {"qty": qty, "cost": cost_total / qty, "bucket_cost_total": bucket_cost_total}
         return holdings
 
     async def resting_orders_by_level(self):
@@ -789,10 +907,16 @@ class LitGridLive:
             real_usdc = float(state.get("usdc_balance") or 0)
             holdings_cost = sum(h["qty"] * h["cost"] for h in holdings.values())
             capital_committed = holdings_cost + resting_buy_cost
-            base_capital_remaining = max(0.0, float(state["capital_usd"]) - capital_committed)
-            # Cover-drop bucket extends the ceiling ON TOP OF capital_usd, never replacing it --
-            # only reached once the base budget is exhausted (direct request, profit allocation
-            # feature). Spent dollars are deducted from the bucket as they're actually used.
+            # Compound bucket folded into the SPENDING ceiling too, not just the sizing basis
+            # above (external audit fix, sixth pass: a bigger order size from compounding used
+            # to just consume the old, unexpanded budget sooner instead of the compound bucket
+            # actually funding more depth -- the two bases must agree).
+            compound_bucket = float(state.get("profit_bucket_compound_usd") or 0)
+            base_capital_remaining = max(0.0, (float(state["capital_usd"]) + compound_bucket) - capital_committed)
+            # Cover-drop bucket extends the ceiling ON TOP OF that, never replacing it -- only
+            # reached once the (compound-inclusive) base budget is exhausted (direct request,
+            # profit allocation feature). Spent dollars are deducted from the bucket as they're
+            # actually used, and returned later by a sell via _flush_uncredited_profit().
             cover_drop_bucket = float(state.get("profit_bucket_cover_drop_usd") or 0)
             available_usdc = min(real_usdc - resting_buy_cost, base_capital_remaining + cover_drop_bucket)
             bucket_spent = 0.0
@@ -813,12 +937,24 @@ class LitGridLive:
                     if reserved is None:
                         break  # another instance/tick already consumed the last slot
                     lifetime_buy_count = reserved
-                await self.place_grid_order(lvl, "buy", limit_price, order_size)
+                row_id = await self.place_grid_order(lvl, "buy", limit_price, order_size)
+                if row_id is None:
+                    # Confirmed rejection (or the lock was lost -- caught by the loop-top check
+                    # next iteration either way): no money was spent, so no charge against
+                    # either budget (external audit fix, sixth pass -- a rejected buy used to be
+                    # charged exactly like an accepted one). An AMBIGUOUS send still returns a
+                    # real row id here and is still charged below, deliberately conservative,
+                    # same philosophy as the one-shot allowance counter above.
+                    continue
                 snap.buy_levels.add(lvl)
                 available_usdc -= cost
                 from_base = min(cost, base_capital_remaining)
                 base_capital_remaining -= from_base
-                bucket_spent += (cost - from_base)
+                from_bucket_amount = cost - from_base
+                bucket_spent += from_bucket_amount
+                if from_bucket_amount > 0:
+                    await self.sb("PATCH", f"{TABLE_ORDERS}?id=eq.{row_id}",
+                                  {"funded_from_bucket_usd": round(from_bucket_amount, 8)})
 
             if bucket_spent > 0:
                 await self.update_state({
@@ -941,24 +1077,29 @@ class LitGridLive:
             await self.flatten_all(profit_mode=profit_mode)
             return
         reconciled_ok, usdc_delta, has_stale_unresolved = await self.reconcile_pending_orders(profit_mode=profit_mode)
+        if usdc_delta:
+            # Persisted IMMEDIATELY, before anything else that could return early (external
+            # audit fix, sixth pass: a missing price -- or any other early return -- used to
+            # skip this write entirely, permanently losing a cash correction that can never be
+            # recomputed later, since its order has already left the reconcilable set). Fails
+            # CLOSED (pauses new entries, never exits) if the persist write itself fails, same
+            # philosophy as an unverifiable balance read.
+            try:
+                await self.update_state({"usdc_balance": float(state.get("usdc_balance") or 0) + usdc_delta})
+            except Exception as e:
+                self._balance_paused = True
+                await self.log_run("cash_delta_persist_failed", {"error": str(e)[:200], "delta": usdc_delta})
         if not reconciled_ok:
             return
-        balance_ok, balance_refreshed = await self.check_balance_divergence()
+        balance_ok, _balance_refreshed = await self.check_balance_divergence()
         price = await self.fetch_current_price()
         if price is None:
             return
-        if balance_refreshed:
-            # A fresh real read already reflects whatever reconciliation just confirmed.
-            state = await self.get_state()
-        elif usdc_delta:
-            # The periodic refresh didn't run this tick, but a fill WAS just confirmed -- apply
-            # its real cash impact locally AND persist it immediately (external audit fix, fifth
-            # pass: this used to only live in the local variable, so the very next tick's
-            # get_state() returned the stale pre-fill balance again, since nothing wrote the
-            # corrected figure back).
-            state = dict(state)
-            state["usdc_balance"] = float(state.get("usdc_balance") or 0) + usdc_delta
-            await self.update_state({"usdc_balance": state["usdc_balance"]})
+        # Always re-read state fresh after reconciliation, for every field -- not just cash
+        # (external audit fix, sixth pass: a stale local patch of only usdc_balance left a
+        # same-tick profit-bucket credit invisible to maintain_window()'s spend check later this
+        # same tick, which then wrote old_bucket - spent, silently overwriting the fresh credit).
+        state = await self.get_state()
         # A stale-unresolved order pauses new entries, never exits -- same philosophy as a real
         # balance divergence (external audit fix, fifth pass: this used to only be logged).
         entries_allowed = bool(state.get("enabled")) and balance_ok and not has_stale_unresolved

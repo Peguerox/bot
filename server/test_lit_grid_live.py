@@ -82,6 +82,9 @@ class FakeDb:
                     rows = [r for r in rows if r.get("status") in core.OPEN_STATUSES]
                 elif "status=eq.filled&side=eq.buy" in path:
                     rows = [r for r in rows if r.get("status") == "filled" and r.get("side") == "buy"]
+                elif "status=eq.filled&side=eq.sell&profit_credited=eq.false" in path:
+                    rows = [r for r in rows if r.get("status") == "filled" and r.get("side") == "sell"
+                            and not r.get("profit_credited", False) and r.get("realized_profit_usd") is not None]
                 elif "side=eq.sell&closes_level=not.is.null" in path:
                     rows = [r for r in rows if r.get("side") == "sell"
                             and r.get("closes_level") is not None and r.get("filled_qty") is not None]
@@ -997,6 +1000,12 @@ async def t_reconcile_credits_realized_profit_to_the_active_bucket():
                              filled_base_amount=1.70, filled_quote_amount=1.70 * 3.10, remaining_base_amount=0.0)
     bot, fake = make_bot(base_state(profit_mode="rest"), orders=[buy, sell_row], orders_by_co={555: filled_sell})
     await bot.reconcile_pending_orders(profit_mode="rest")
+    check("the profit is recorded on the sell's own row atomically with its filled status, "
+          "not yet applied to the bucket this same pass",
+          fake.orders[1].get("realized_profit_usd") is not None and fake.state["profit_bucket_rest_usd"] == 0.0,
+          fake.orders[1])
+    # Retry-safe crediting happens on the NEXT reconcile pass (external audit fix, sixth pass).
+    await bot.reconcile_pending_orders(profit_mode="rest")
     expected_profit = 1.70 * (3.10 - 3.00)
     check("realized profit on a sell fill is credited to the active bucket",
           abs(float(fake.state["profit_bucket_rest_usd"]) - expected_profit) < 1e-6,
@@ -1014,6 +1023,7 @@ async def t_profit_bucket_balance_untouched_by_a_mode_switch():
     bot, fake = make_bot(base_state(profit_mode="compound", profit_bucket_cover_drop_usd=20.0),
                           orders=[buy, sell_row], orders_by_co={555: filled_sell})
     await bot.reconcile_pending_orders(profit_mode="compound")
+    await bot.reconcile_pending_orders(profit_mode="compound")  # flush happens on the next pass
     check("new profit goes to the currently active bucket (compound), not an old one",
           float(fake.state["profit_bucket_compound_usd"]) > 0, fake.state["profit_bucket_compound_usd"])
     check("a previously-selected bucket's balance is untouched by the mode switch",
@@ -1047,6 +1057,174 @@ async def t_maintain_window_compound_bucket_increases_order_size():
     compound_size = fake_comp.state["order_size_lit"]
     check("a nonzero compound bucket increases the recomputed order size",
           compound_size > flat_size, (compound_size, flat_size))
+
+
+# ── Sixth-pass fixes (fifth independent audit) ──────────────────────────────────────────────────
+
+async def t_tick_persists_cash_delta_even_when_price_is_unavailable():
+    # External audit finding (sixth pass): a missing price used to make tick() return BEFORE
+    # persisting the cash delta, permanently losing a correction that can never be recomputed
+    # once its order has already left the reconcilable set.
+    pending_buy = {"id": 1, "level": 900, "side": "buy", "client_order_index": 777,
+                   "status": "pending", "limit_price": 3.10, "size": 1.70}
+    filled = FakeOrder(777, order_index=55, status="filled",
+                        filled_base_amount=1.70, filled_quote_amount=1.70 * 3.10, remaining_base_amount=0.0)
+    bot, fake = make_bot(base_state(usdc_balance=10.0), orders=[pending_buy], orders_by_co={777: filled})
+    bot._last_balance_check = time.time()  # skip the periodic real-balance refresh this tick
+    bot.fetch_current_price = lambda: _async_return(None)  # simulated price outage
+    await bot.tick()
+    check("the cash delta is persisted even though tick() returns early for a missing price",
+          abs(float(fake.state["usdc_balance"]) - (10.0 - 1.70 * 3.10)) < 1e-6, fake.state["usdc_balance"])
+
+
+async def t_tick_fails_closed_if_the_cash_delta_persist_write_itself_fails():
+    pending_buy = {"id": 1, "level": 900, "side": "buy", "client_order_index": 777,
+                   "status": "pending", "limit_price": 3.10, "size": 1.70}
+    filled = FakeOrder(777, order_index=55, status="filled",
+                        filled_base_amount=1.70, filled_quote_amount=1.70 * 3.10, remaining_base_amount=0.0)
+    bot, fake = make_bot(base_state(usdc_balance=10.0), orders=[pending_buy], orders_by_co={777: filled})
+    bot._last_balance_check = time.time()  # isolate the cash-delta persist from the (unrelated)
+                                            # periodic real-balance refresh's own usdc_balance write
+    orig_sb = bot.sb
+
+    async def failing_usdc_patch(method, path, body=None):
+        if method == "PATCH" and path.startswith(core.TABLE_STATE) and body and "usdc_balance" in body and "lit_balance" not in body:
+            raise RuntimeError("simulated write failure")
+        return await orig_sb(method, path, body)
+    bot.sb = failing_usdc_patch
+    bot.fetch_current_price = lambda: _async_return(3.10)
+    await bot.tick()
+    check("a failed cash-delta persist fails CLOSED", bot._balance_paused is True, bot._balance_paused)
+    check("the failure is logged", any(r["action"] == "cash_delta_persist_failed" for r in fake.runs), fake.runs)
+
+
+async def t_tick_flushes_pending_credits_and_reflects_them_before_maintain_window():
+    old_sell = {"id": 1, "side": "sell", "status": "filled", "realized_profit_usd": 0.17,
+                "profit_bucket_destination": "profit_bucket_cover_drop_usd", "profit_credited": False}
+    bot, fake = make_bot(base_state(levels_down=1, order_size_lit=None, usdc_balance=500.0, capital_usd=500),
+                          orders=[old_sell])
+    bot.fetch_current_price = lambda: _async_return(3.10)
+    await bot.tick()
+    check("a credit pending from an earlier tick is flushed and reflected in the bucket",
+          abs(float(fake.state["profit_bucket_cover_drop_usd"]) - 0.17) < 1e-6,
+          fake.state["profit_bucket_cover_drop_usd"])
+
+
+async def t_maintain_window_rejected_buy_is_not_charged_against_any_budget():
+    bot, fake = make_bot(base_state(levels_down=1, order_size_lit=1.70, usdc_balance=500.0,
+                                     capital_usd=0, profit_bucket_cover_drop_usd=20.0),
+                          signer_err="insufficient margin")
+    await bot.maintain_window(fake.state, 3.10)
+    buys = [o for o in fake.orders if o["side"] == "buy"]
+    check("the rejected order is still logged in the ledger", len(buys) == 1, buys)
+    check("the rejected order's ledger row is marked rejected", buys[0]["status"] == "rejected", buys[0])
+    check("a confirmed rejection is never charged against the cover-drop bucket",
+          float(fake.state["profit_bucket_cover_drop_usd"]) == 20.0, fake.state["profit_bucket_cover_drop_usd"])
+
+
+async def t_maintain_window_ambiguous_buy_send_is_still_charged_conservatively():
+    bot, fake = make_bot(base_state(levels_down=1, order_size_lit=1.70, usdc_balance=500.0,
+                                     capital_usd=0, profit_bucket_cover_drop_usd=20.0),
+                          signer_fail=True)  # network failure -- ambiguous, not a clean rejection
+    await bot.maintain_window(fake.state, 3.10)
+    buys = [o for o in fake.orders if o["side"] == "buy"]
+    check("an ambiguous send still writes a pending ledger row",
+          len(buys) == 1 and buys[0]["status"] == "pending", buys)
+    check("an ambiguous send is still charged against the bucket, conservatively",
+          float(fake.state["profit_bucket_cover_drop_usd"]) < 20.0, fake.state["profit_bucket_cover_drop_usd"])
+
+
+async def t_maintain_window_compound_bucket_also_extends_the_spending_ceiling():
+    # External audit finding (sixth pass): compounding inflated the SIZING basis but the
+    # SPENDING ceiling only ever used capital_usd (plus cover_drop) -- the two must agree.
+    bot, fake = make_bot(base_state(levels_down=5, order_size_lit=1.70, usdc_balance=5000.0,
+                                     capital_usd=0, profit_bucket_compound_usd=500.0))
+    await bot.maintain_window(fake.state, 3.10)
+    buys = [o for o in fake.orders if o["side"] == "buy"]
+    total_cost = sum(o["limit_price"] * o["size"] for o in buys)
+    check("the compound bucket also extends the spending ceiling, not just the sizing basis",
+          total_cost > 0 and total_cost <= 500.0 + 1e-6, (total_cost, buys))
+
+
+async def t_sell_returns_its_share_of_bucket_funded_principal_to_cover_drop():
+    # External audit finding (sixth pass): cover_drop money spent funding a buy never came back
+    # when that position was later sold -- the bucket just kept draining on every reuse even
+    # though the real exchange cash had already returned.
+    buy = {"id": 1, "level": 900, "side": "buy", "status": "filled", "filled_qty": 1.70,
+           "filled_price": 3.00, "funded_from_bucket_usd": 4.00}
+    sell_row = {"id": 2, "level": 901, "side": "sell", "closes_level": 900, "client_order_index": 555,
+                "status": "pending", "limit_price": 3.10, "size": 1.70}
+    filled_sell = FakeOrder(555, order_index=77, status="filled",
+                             filled_base_amount=1.70, filled_quote_amount=1.70 * 3.10, remaining_base_amount=0.0)
+    bot, fake = make_bot(base_state(profit_mode="rest", profit_bucket_cover_drop_usd=6.00),
+                          orders=[buy, sell_row], orders_by_co={555: filled_sell})
+    await bot.reconcile_pending_orders(profit_mode="rest")
+    check("the sell records its share of bucket-funded principal to return",
+          abs(float(fake.orders[1].get("bucket_principal_return_usd") or 0) - 4.00) < 1e-6, fake.orders[1])
+    await bot.reconcile_pending_orders(profit_mode="rest")  # flush
+    check("the principal is returned to cover_drop on top of its existing balance",
+          abs(float(fake.state["profit_bucket_cover_drop_usd"]) - (6.00 + 4.00)) < 1e-6,
+          fake.state["profit_bucket_cover_drop_usd"])
+    check("the realized profit (separate from principal) goes to the active mode's bucket (rest)",
+          abs(float(fake.state["profit_bucket_rest_usd"]) - 1.70 * (3.10 - 3.00)) < 1e-6,
+          fake.state["profit_bucket_rest_usd"])
+
+
+async def t_flush_uncredited_profit_retries_after_a_failed_write():
+    old_sell = {"id": 1, "side": "sell", "status": "filled", "realized_profit_usd": 0.17,
+                "profit_bucket_destination": "profit_bucket_rest_usd", "profit_credited": False}
+    bot, fake = make_bot(base_state())
+    fake.orders.append(old_sell)
+    orig_sb = bot.sb
+    calls = {"n": 0}
+
+    async def flaky_sb(method, path, body=None):
+        if method == "PATCH" and path.startswith(core.TABLE_STATE) and body and "profit_bucket_rest_usd" in body:
+            calls["n"] += 1
+            if calls["n"] == 1:
+                raise RuntimeError("simulated transient failure")
+        return await orig_sb(method, path, body)
+    bot.sb = flaky_sb
+    await bot._flush_uncredited_profit()
+    check("a failed credit write is logged and the row stays uncredited for a retry",
+          fake.orders[0]["profit_credited"] is False, fake.orders[0])
+    await bot._flush_uncredited_profit()
+    check("the retry succeeds and the bucket is credited",
+          abs(float(fake.state["profit_bucket_rest_usd"]) - 0.17) < 1e-6, fake.state["profit_bucket_rest_usd"])
+    check("the row is now marked credited", fake.orders[0]["profit_credited"] is True, fake.orders[0])
+
+
+async def t_reconcile_uses_real_quote_delta_across_multiple_partial_fill_passes():
+    # External audit finding (sixth pass): the old code multiplied the NEW quantity by the
+    # latest CUMULATIVE AVERAGE price -- wrong the moment per-fill prices differ across passes.
+    buy = {"id": 1, "level": 900, "side": "buy", "status": "filled", "filled_qty": 1.0, "filled_price": 3.00}
+    sell_row = {"id": 2, "level": 901, "side": "sell", "closes_level": 900, "client_order_index": 555,
+                "status": "pending", "limit_price": 3.10, "size": 1.0}
+    bot, fake = make_bot(base_state(profit_mode="rest"), orders=[buy, sell_row])
+    bot._order_api.orders_by_co = {555: FakeOrder(555, order_index=77, status="open",
+                                                   filled_base_amount=0.50, filled_quote_amount=0.50 * 3.10,
+                                                   remaining_base_amount=0.50)}
+    await bot.reconcile_pending_orders(profit_mode="rest")
+    bot._order_api.orders_by_co = {555: FakeOrder(555, order_index=77, status="filled",
+                                                   filled_base_amount=1.00,
+                                                   filled_quote_amount=0.50 * 3.10 + 0.50 * 3.20,
+                                                   remaining_base_amount=0.0)}
+    await bot.reconcile_pending_orders(profit_mode="rest")
+    await bot.reconcile_pending_orders(profit_mode="rest")  # flush
+    expected_profit = (0.50 * 3.10 + 0.50 * 3.20) - 1.0 * 3.00
+    check("profit across a multi-price partial fill uses real per-increment proceeds, not qty*average",
+          abs(float(fake.state["profit_bucket_rest_usd"]) - expected_profit) < 1e-6,
+          fake.state["profit_bucket_rest_usd"])
+
+
+async def t_flush_crediting_compound_clears_cached_order_size_so_it_resizes_next_tick():
+    old_sell = {"id": 1, "side": "sell", "status": "filled", "realized_profit_usd": 100.0,
+                "profit_bucket_destination": "profit_bucket_compound_usd", "profit_credited": False}
+    bot, fake = make_bot(base_state(order_size_lit=1.70))
+    fake.orders.append(old_sell)
+    await bot._flush_uncredited_profit()
+    check("crediting the compound bucket clears the cached order size so it resizes next tick",
+          fake.state["order_size_lit"] is None, fake.state["order_size_lit"])
 
 
 # ── Window hysteresis ────────────────────────────────────────────────────────────────────────────
@@ -1183,6 +1361,16 @@ async def main():
               t_profit_bucket_balance_untouched_by_a_mode_switch,
               t_maintain_window_cover_drop_bucket_extends_buying_past_capital_usd,
               t_maintain_window_compound_bucket_increases_order_size,
+              t_tick_persists_cash_delta_even_when_price_is_unavailable,
+              t_tick_fails_closed_if_the_cash_delta_persist_write_itself_fails,
+              t_tick_flushes_pending_credits_and_reflects_them_before_maintain_window,
+              t_maintain_window_rejected_buy_is_not_charged_against_any_budget,
+              t_maintain_window_ambiguous_buy_send_is_still_charged_conservatively,
+              t_maintain_window_compound_bucket_also_extends_the_spending_ceiling,
+              t_sell_returns_its_share_of_bucket_funded_principal_to_cover_drop,
+              t_flush_uncredited_profit_retries_after_a_failed_write,
+              t_reconcile_uses_real_quote_delta_across_multiple_partial_fill_passes,
+              t_flush_crediting_compound_clears_cached_order_size_so_it_resizes_next_tick,
               t_maintain_window_uses_hysteresis_guard_for_the_window_center,
               t_lock_heartbeat_touched_after_each_order_placement,
               t_rate_limited_errors_back_off_before_retrying):
