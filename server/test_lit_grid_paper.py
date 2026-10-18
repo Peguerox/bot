@@ -165,12 +165,41 @@ async def t_tick_error_never_propagates():
         core.TICK_EVERY = orig_tick_every
 
 
+async def t_cold_start_does_not_replay_backlog():
+    # Regression test for the real 2026-10-18 incident: Lighter's candles API does not honor
+    # count_back (confirmed live: asked for 5, got 500, spanning ~8 hours back). The first tick
+    # after enabling must not process that whole backlog as if it just happened.
+    bot, fake = make_bot(base_state(order_type="market"))
+    backlog = [
+        candle(1000, 10.0, 10.0, 9.0, 9.0, 1000),   # big historical move -- would open several buys
+        candle(2000, 9.0, 10.0, 9.0, 10.0, 1000),   # and this would close them for a big "instant" profit
+        candle(3000, 10.0, 10.1, 10.0, 10.1, 1000),
+    ]
+    bot.fetch_latest_candles = lambda count=5: _async_return(backlog)
+    await bot.tick()
+    check("cold start logs zero trades even though the backlog has real moves", len(fake.trades) == 0, fake.trades)
+    check("cold start bootstraps _last_candle_t to the latest candle, not the first",
+          bot._last_candle_t == backlog[-1]["t"], bot._last_candle_t)
+
+    # Next tick: only a genuinely new candle after the bootstrap point should be processed.
+    new_candle = candle(4000, 10.1, 10.1, 10.0, 10.0, 1000)
+    bot.fetch_latest_candles = lambda count=5: _async_return(backlog + [new_candle])
+    await bot.tick()
+    check("the tick after cold start only processes candles newer than the bootstrap point",
+          bot._last_candle_t == new_candle["t"], bot._last_candle_t)
+
+
+async def _async_return(value):
+    return value
+
+
 async def main():
     t_level_math_matches_validated_logic()
     t_order_size_scales_with_capital()
     for t in (t_paired_cycle_buy_then_sell,
               t_limit_fills_respect_participation_cap,
               t_compounding_updates_current_capital,
+              t_cold_start_does_not_replay_backlog,
               t_tick_error_never_propagates):
         try:
             await t()

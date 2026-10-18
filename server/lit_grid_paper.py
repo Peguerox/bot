@@ -257,8 +257,21 @@ class LitGridPaper:
         if not state.get("enabled"):
             return
         candles = await self.fetch_latest_candles(count=5)
+        if not candles:
+            return
+        if self._last_candle_t is None:
+            # Cold start (first tick ever, or after a restart). Lighter's candles API does not
+            # honor count_back on this market -- a request for 5 candles can return hundreds,
+            # confirmed live 2026-10-18 (requested 5, got 500, spanning back ~8 hours). Without
+            # this guard the very first tick after enabling replayed that whole backlog as if it
+            # had just happened, logging a burst of trades with historical timestamps instead of
+            # starting clean from "now". Bootstrap to the latest candle only; nothing before it
+            # is processed.
+            self._last_candle_t = candles[-1]["t"]
+            self._last_level = level_of(candle_path(candles[-1])[0], math.log(1 + float(state["spacing_pct"]) / 100.0))
+            return
         for c in candles:
-            if self._last_candle_t is not None and c["t"] <= self._last_candle_t:
+            if c["t"] <= self._last_candle_t:
                 continue
             await self.process_candle(c, state)
             self._last_candle_t = c["t"]
