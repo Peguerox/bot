@@ -6520,23 +6520,21 @@ export default function Dashboard() {
           />
           {/* Worker 4's old BTC stochastic-clone panel removed 2026-10-18 -- that Render service
               (labeled "Worker 3" in Render's own dashboard) was repurposed to run the real-money
-              LIT grid bot instead (see LitGridLivePanel below); this panel's data would otherwise
-              sit frozen forever since nothing writes to lighter_btc_worker4_state anymore.
-              worker4State/worker4Trades and the Master Schedule's "worker4" rule slot are left
-              wired (harmless, inert) rather than torn out under time pressure -- full removal
-              per CLAUDE.md's retiring-a-bot steps is a separate, more careful follow-up. */}
+              LIT grid bot instead, taking this same row slot. worker4State/worker4Trades and the
+              Master Schedule's "worker4" rule slot are left wired (harmless, inert) rather than
+              torn out under time pressure -- full removal per CLAUDE.md's retiring-a-bot steps is
+              a separate, more careful follow-up. */}
+          <LitGridLivePanel
+            state={litGridLiveState}
+            orders={litGridLiveOrders}
+            loading={loading}
+            enabled={litGridLiveState?.enabled ?? false}
+            onToggle={handleLitGridLiveToggle}
+            toggling={litGridLiveToggling}
+            onFlatten={handleLitGridLiveFlatten}
+            flattening={litGridLiveFlattening}
+          />
         </div>
-
-        <LitGridLivePanel
-          state={litGridLiveState}
-          orders={litGridLiveOrders}
-          loading={loading}
-          enabled={litGridLiveState?.enabled ?? false}
-          onToggle={handleLitGridLiveToggle}
-          toggling={litGridLiveToggling}
-          onFlatten={handleLitGridLiveFlatten}
-          flattening={litGridLiveFlattening}
-        />
 
       </div>
     </main>
