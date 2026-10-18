@@ -321,7 +321,7 @@ PRICE_DECIMALS = 4
 SIZE_DECIMALS = 2
 MIN_BASE_AMOUNT = 1.00
 
-TICK_EVERY = 3.0
+TICK_EVERY = 2.0
 REST_TIMEOUT = 8.0
 ORDER_TIMEOUT = 12.0
 AUTH_TOKEN_LIFETIME_S = 10 * 60
@@ -434,6 +434,8 @@ class LitGridLive:
         self._auth_token_expiry_at = 0.0
         self._last_balance_check = 0.0
         self._balance_paused = False
+        self._holdings_cache = None
+        self._holdings_cache_on = False
 
     # ── Supabase ─────────────────────────────────────────────────────────────────────────────
     async def sb(self, method, path, body=None):
@@ -642,6 +644,7 @@ class LitGridLive:
             f"{TABLE_ORDERS}?status=in.({','.join(OPEN_STATUSES)})&select=*&order=id.asc")
         if not pending:
             return True, 0.0, False
+        self._holdings_cache = None
         holdings_before = None
         if any(r["side"] == "sell" for r in pending):
             holdings_before = await self.current_holdings()
@@ -712,6 +715,20 @@ class LitGridLive:
                         patch["filled_at"] = now_iso()
                 else:
                     patch["status"] = "open"
+                # Skip the write (and its log line) when nothing about this order changed since
+                # the last pass -- rewriting every resting row every tick made a tick take ~11s
+                # with ~20 open orders, delaying fill detection. An unchanged row can't carry a
+                # cash delta (that needs filled_qty to have moved), so nothing is lost.
+                changed = (
+                    patch["status"] != r.get("status")
+                    or str(r.get("exchange_order_id")) != str(patch["exchange_order_id"])
+                    or ("filled_qty" in patch
+                        and abs(float(r.get("filled_qty") or 0) - patch["filled_qty"]) > 1e-12)
+                    or ("filled_quote" in patch
+                        and abs(float(r.get("filled_quote") or 0) - patch["filled_quote"]) > 1e-9)
+                )
+                if not changed:
+                    continue
                 try:
                     await self.sb("PATCH", f"{TABLE_ORDERS}?id=eq.{r['id']}", patch)
                 except Exception as e:
@@ -730,6 +747,7 @@ class LitGridLive:
                     "row_id": r["id"], "raw_status": status_raw, "terminal": terminal,
                     "computed_filled_qty": filled_qty, "computed_filled_price": filled_price,
                 })
+        self._holdings_cache = None
         return all_ok, usdc_delta, has_stale_unresolved
 
     async def real_balances(self):
@@ -909,6 +927,18 @@ class LitGridLive:
 
     # ── Holdings ─────────────────────────────────────────────────────────────────────────────
     async def current_holdings(self):
+        # Within one tick the holdings are computed once and reused (they were rebuilt from
+        # the full ledger 3-4 times per tick). Only a reconcile pass can change them -- it's
+        # the only writer of fills -- and it drops the cache before and after its writes.
+        if getattr(self, "_holdings_cache_on", False) and self._holdings_cache is not None:
+            return dict(self._holdings_cache)
+        holdings = await self._compute_holdings()
+        if getattr(self, "_holdings_cache_on", False):
+            self._holdings_cache = holdings
+            return dict(holdings)
+        return holdings
+
+    async def _compute_holdings(self):
         """Running, quantity-aware balance per level, paginated (external audit fix P1-5).
 
         Buys only count once status='filled' (a deliberate, documented choice: a still-resting
@@ -1359,6 +1389,15 @@ class LitGridLive:
             await self.log_run("cash_delta_persist_failed", {"error": str(e)[:200], "delta": usdc_delta})
 
     async def tick(self):
+        self._holdings_cache = None
+        self._holdings_cache_on = True
+        try:
+            await self._tick()
+        finally:
+            self._holdings_cache_on = False
+            self._holdings_cache = None
+
+    async def _tick(self):
         state = await self.get_state()
         profit_mode = state.get("profit_mode")
         if state.get("flatten_requested"):

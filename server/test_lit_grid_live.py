@@ -687,6 +687,54 @@ async def t_tick_spacing_change_does_not_advance_if_cancel_fails():
           fake.orders[0])
 
 
+async def t_tick_does_not_rewrite_an_unchanged_resting_order():
+    # Speed fix: an order the exchange still reports as open, with nothing filled, must not be
+    # re-written (or logged) every tick.
+    resting = {"id": 1, "level": -2, "side": "buy", "status": "open", "client_order_index": 1,
+               "exchange_order_id": 77, "limit_price": 3.0923, "size": 1.70}
+    bot, fake = make_bot(base_state(order_size_lit=1.70, usdc_balance=500.0, grid_anchor_price=3.10),
+                          orders=[resting], orders_by_co={1: FakeOrder(1, order_index=77, status="open")})
+    bot.fetch_current_price = lambda: _async_return(3.10)
+    writes, logs = [], []
+    orig_sb = bot.sb
+    async def spying_sb(method, path, body=None):
+        if method == "PATCH" and path.startswith(core.TABLE_ORDERS) and "id=eq.1" in path:
+            writes.append(body)
+        if method == "POST" and path.startswith(core.TABLE_RUNS) and body and body.get("action") == "reconciled_order":
+            logs.append(body)
+        return await orig_sb(method, path, body)
+    bot.sb = spying_sb
+    await bot.tick()
+    check("an unchanged resting order is not rewritten", writes == [], writes)
+    check("an unchanged resting order is not logged", logs == [], logs)
+    check("it is still open in the ledger", fake.orders[0]["status"] == "open", fake.orders[0])
+
+
+async def t_tick_fill_is_recorded_and_its_sell_placed_in_the_same_tick():
+    # Speed fix must not hide a fill: a buy the exchange reports filled is recorded, its cash
+    # applied, and its sell (one line up) placed within that same tick -- the per-tick
+    # holdings cache must see the fill reconciliation just wrote.
+    lp = round(3.10 / 1.00125, 4)
+    resting = {"id": 1, "level": -1, "side": "buy", "status": "open", "client_order_index": 1,
+               "exchange_order_id": 77, "limit_price": lp, "size": 1.70}
+    filled = FakeOrder(1, order_index=77, status="filled", filled_base_amount=1.70,
+                       filled_quote_amount=round(1.70 * lp, 6), remaining_base_amount=0.0)
+    bot, fake = make_bot(base_state(order_size_lit=1.70, usdc_balance=500.0, grid_anchor_price=3.10,
+                                     levels_down=3),
+                          orders=[resting], orders_by_co={1: filled})
+    force_not_cold_start(bot)
+    bot._last_balance_check = time.time()  # isolate the reconcile cash path from the periodic refresh
+    bot.fetch_current_price = lambda: _async_return(3.0995)
+    await bot.tick()
+    sells = [o for o in fake.orders if o["side"] == "sell"]
+    check("the fill is recorded", fake.orders[0]["status"] == "filled", fake.orders[0])
+    check("its cash is applied", abs(fake.state["usdc_balance"] - (500.0 - 1.70 * lp)) < 1e-6,
+          fake.state["usdc_balance"])
+    check("its sell is placed one line up in the same tick",
+          len(sells) == 1 and sells[0]["closes_level"] == -1 and abs(sells[0]["limit_price"] - 3.10) < 1e-9,
+          sells)
+
+
 async def t_tick_skips_new_decisions_when_reconciliation_fails():
     pending = {"id": 1, "level": 900, "side": "buy", "client_order_index": 555,
                "status": "pending", "limit_price": 3.10, "size": 1.70}
@@ -1632,7 +1680,9 @@ async def main():
               t_maintain_window_entries_blocked_still_maintains_existing_sells,
               t_tick_cancels_everything_on_a_spacing_change,
               t_tick_spacing_change_does_not_advance_if_cancel_fails,
-              t_tick_skips_new_decisions_when_reconciliation_fails,
+              t_tick_does_not_rewrite_an_unchanged_resting_order,
+        t_tick_fill_is_recorded_and_its_sell_placed_in_the_same_tick,
+        t_tick_skips_new_decisions_when_reconciliation_fails,
               t_tick_refetches_state_after_balance_check,
               t_flatten_sells_each_held_level_separately_with_correct_closes_level,
               t_flatten_does_not_report_completion_if_a_sell_failed,
