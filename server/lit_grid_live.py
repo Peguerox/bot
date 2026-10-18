@@ -1407,6 +1407,27 @@ class LitGridLive:
                 available_usdc -= cost
                 base_capital_remaining -= from_base
 
+            # Drawdown coverage (direct request, shown on the Cover-Drop box): how far price can
+            # fall while the bot can still keep buying -- the buys already on the book, plus as
+            # many more lines below them as the money left can pay for (capital first, then the
+            # cover-drop bucket, capped by real USDC: the same available_usdc every buy uses).
+            if anchored and price > 0:
+                ladder = [lv for lv in snap.buy_levels if grid_bottom <= lv <= buy_top]
+                deepest = min(ladder) if ladder else buy_top + 1
+                money = max(0.0, available_usdc)
+                lv = deepest
+                while deepest - lv < 5000:
+                    nxt = order_size * anchor * math.exp((lv - 1) * step)
+                    if nxt > money:
+                        break
+                    money -= nxt
+                    lv -= 1
+                coverage = round(max(0.0, (1 - anchor * math.exp(lv * step) / price) * 100.0), 2)
+                if coverage != getattr(self, "_last_coverage", None):
+                    await self.update_state({"drawdown_coverage_pct": coverage})
+                    state["drawdown_coverage_pct"] = coverage
+                    self._last_coverage = coverage
+
     async def market_sell_level(self, level, qty):
         # Lock validated BEFORE anything else (external audit fix, fifth pass): this function
         # never touched the heartbeat at all before, so a dethroned worker could keep flattening

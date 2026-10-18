@@ -1563,6 +1563,31 @@ async def t_sells_are_still_placed_when_new_buys_are_not_allowed():
     check("and no buy is placed", buys == [], buys)
 
 
+async def t_drawdown_coverage_counts_book_buys_plus_what_free_money_can_still_buy():
+    # 5 lots held, 5 buys on the book (-1..-5), and free money for exactly 3 more lines (-6..-8):
+    # coverage = how far below price line -8 is.
+    P = 2.83365
+    rows = _grid_rows(P, held=range(0, 5), sells_for=range(0, 5), buys_at=range(-5, 0))
+    lp = lambda k: core.round_price(P * 1.00125 ** k)
+    held_cost = sum(P * 1.00125 ** k * 2.16 for k in range(0, 5))
+    resting_cost = sum(lp(k) * 2.16 for k in range(-5, 0))
+    extra = sum(2.16 * P * 1.00125 ** k for k in (-6, -7, -8)) + 0.01
+    price = round(P * 1.00125 ** 0.3, 5)
+    bot, fake = make_bot(base_state(levels_up=5, levels_down=5, order_size_lit=2.16,
+                                     usdc_balance=1000.0, capital_usd=held_cost + resting_cost + extra,
+                                     grid_anchor_price=P), orders=rows)
+    bot.live.best_mid = lambda max_age=core.BOOK_MAX_AGE: price
+    await bot.maintain_window(fake.state, price)
+    want = round((1 - P * 1.00125 ** -8 / price) * 100, 2)
+    check("coverage = distance to the deepest line the book + free money can pay for",
+          fake.state.get("drawdown_coverage_pct") == want, (fake.state.get("drawdown_coverage_pct"), want))
+    fake.state["profit_bucket_cover_drop_usd"] = 2.16 * P * 1.00125 ** -9 + 0.01
+    await bot.maintain_window(fake.state, price)
+    want9 = round((1 - P * 1.00125 ** -9 / price) * 100, 2)
+    check("money in the cover-drop bucket extends the coverage by the lines it pays for",
+          fake.state.get("drawdown_coverage_pct") == want9, (fake.state.get("drawdown_coverage_pct"), want9))
+
+
 async def t_trailing_up_never_double_buys_while_a_market_buy_is_in_flight():
     P = 2.87055
     rows = _grid_rows(P, held=range(1, 5), sells_for=range(1, 5), buys_at=range(-14, 1), sold=[0])
@@ -2174,6 +2199,7 @@ async def main():
         t_fast_drop_replay_keeps_the_grid_consistent,
         t_orders_are_placed_nearest_to_price_first_alternating_sides,
         t_sells_are_still_placed_when_new_buys_are_not_allowed,
+        t_drawdown_coverage_counts_book_buys_plus_what_free_money_can_still_buy,
         t_a_partly_filled_open_buy_does_not_trip_the_balance_pause,
         t_gap_in_the_sell_ladder_is_filled_by_moving_the_top_sell_down,
         t_gap_fill_never_moves_a_sell_below_that_lots_cost,

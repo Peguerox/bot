@@ -1611,7 +1611,9 @@ function LitGridLivePanel({
           <Stat
             label="Cover-Drop Bucket"
             value={`$${Number(st?.profit_bucket_cover_drop_usd ?? 0).toFixed(2)}`}
-            sub="extends buying past capital_usd"
+            sub={st?.drawdown_coverage_pct != null
+              ? `now covering a ${Number(st.drawdown_coverage_pct).toFixed(1)}% drop`
+              : "extends buying past capital_usd"}
             color="text-gray-300"
           />
           <Stat
