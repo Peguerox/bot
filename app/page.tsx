@@ -1603,12 +1603,12 @@ function LitGridPaperPanel({
       {!loading && nextBuyPrice != null && nextSellPrice != null && (
         <div className="grid grid-cols-2 gap-2">
           <div className="bg-gray-950/50 rounded-lg p-2.5">
-            <p className="text-green-400 text-[10px] uppercase font-bold">Next Buy (below)</p>
-            <p className="text-green-300 text-sm font-mono">${nextBuyPrice.toFixed(4)}</p>
+            <p className="text-yellow-400 text-[10px] uppercase font-bold">Next Buy (below)</p>
+            <p className="text-yellow-300 text-sm font-mono">${nextBuyPrice.toFixed(4)}</p>
           </div>
           <div className="bg-gray-950/50 rounded-lg p-2.5">
-            <p className="text-amber-400 text-[10px] uppercase font-bold">Next Sell (above)</p>
-            <p className="text-amber-300 text-sm font-mono">${nextSellPrice.toFixed(4)}</p>
+            <p className="text-green-400 text-[10px] uppercase font-bold">Next Sell (above)</p>
+            <p className="text-green-300 text-sm font-mono">${nextSellPrice.toFixed(4)}</p>
           </div>
         </div>
       )}
@@ -1784,6 +1784,248 @@ function LitGridPaperPanel({
             );
           })}
         </div>
+      </div>
+    </div>
+  );
+}
+
+function LitGridLivePanel({
+  state, orders, loading,
+  enabled, onToggle, toggling,
+  onFlatten, flattening,
+}: {
+  state: any; orders: any[]; loading: boolean;
+  enabled: boolean; onToggle: () => void; toggling: boolean;
+  onFlatten: () => void; flattening: boolean;
+}) {
+  const st = state;
+
+  const [nowTick, setNowTick] = useState(Date.now());
+  useEffect(() => {
+    const id = setInterval(() => setNowTick(Date.now()), 5_000);
+    return () => clearInterval(id);
+  }, []);
+  const lockAge = st?.lock_heartbeat ? nowTick - new Date(st.lock_heartbeat).getTime() : null;
+  const workerAlive = lockAge != null && lockAge < 30_000; // ticks every 3s, generous margin
+
+  const capitalUsd = st?.capital_usd ?? 500;
+  const usdcBalance = st?.usdc_balance ?? null;
+  const litBalance = st?.lit_balance ?? null;
+  const livePrice = st?.live_price ?? null;
+  const litValueUsd = litBalance != null && livePrice != null ? litBalance * livePrice : null;
+  const totalValue = usdcBalance != null && litValueUsd != null ? usdcBalance + litValueUsd : null;
+  const totalPnl = totalValue != null ? totalValue - capitalUsd : null;
+  const totalPnlPct = totalPnl != null && capitalUsd > 0 ? (totalPnl / capitalUsd) * 100 : null;
+
+  const openOrders = orders.filter((o: any) => o.status === "pending" || o.status === "open");
+  const filledOrders = orders.filter((o: any) => o.status === "filled");
+
+  const [spacingIn, setSpacingIn] = useState("");
+  const [upIn, setUpIn] = useState("");
+  const [downIn, setDownIn] = useState("");
+  const [drawdownIn, setDrawdownIn] = useState("");
+  const [capitalIn, setCapitalIn] = useState("");
+  const [saving, setSaving] = useState(false);
+  const [saveError, setSaveError] = useState<string | null>(null);
+
+  async function handleSave() {
+    const body: Record<string, unknown> = {};
+    if (spacingIn.trim()) body.spacingPct = Number(spacingIn);
+    if (upIn.trim()) body.levelsUp = Number(upIn);
+    if (downIn.trim()) body.levelsDown = Number(downIn);
+    if (drawdownIn.trim()) body.drawdownPct = Number(drawdownIn);
+    if (capitalIn.trim()) body.capitalUsd = Number(capitalIn);
+    if (Object.keys(body).length === 0) return;
+    if (!confirm("Apply these REAL-MONEY grid settings now?")) return;
+    setSaving(true);
+    setSaveError(null);
+    const res = await fetch("/api/lighter-lit-grid-live/settings", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(body),
+    });
+    if (!res.ok) {
+      const data = await res.json().catch(() => ({}));
+      setSaveError(data.error ?? "Failed to save.");
+    } else {
+      setSpacingIn(""); setUpIn(""); setDownIn(""); setDrawdownIn(""); setCapitalIn("");
+    }
+    setSaving(false);
+  }
+
+  const statusColor = (status: string) =>
+    status === "filled" ? "text-green-400"
+    : status === "rejected" ? "text-red-400"
+    : status === "cancelled" ? "text-gray-500"
+    : "text-yellow-400"; // pending / open
+
+  return (
+    <div className="bg-gray-900 rounded-xl p-5 space-y-5 flex flex-col border border-red-900/40">
+      <div className="space-y-1.5">
+        <div className="flex items-center justify-between gap-2">
+          <div className="flex items-center gap-2">
+            <h2 className="text-white font-bold text-lg">LIT/USDC Grid Bot</h2>
+            <span className="text-xs font-bold px-2 py-0.5 rounded-full bg-red-500/20 text-red-400">LIVE — REAL MONEY</span>
+            <span className={`text-xs font-bold px-2 py-0.5 rounded-full ${workerAlive ? "bg-green-500/20 text-green-400" : "bg-gray-700/40 text-gray-500"}`}>
+              {workerAlive ? "worker alive" : "worker offline"}
+            </span>
+          </div>
+          <div className="flex items-center gap-1.5 shrink-0">
+            <button
+              onClick={onFlatten}
+              disabled={flattening}
+              className="text-xs font-bold px-2.5 py-1.5 rounded-md bg-red-500/20 text-red-400 hover:bg-red-500/30 transition-all disabled:opacity-30"
+              title="Cancel every resting order and market-sell all held LIT back to USDC, then disable"
+            >
+              {flattening ? "Flattening…" : "Flatten All"}
+            </button>
+            <button
+              onClick={onToggle}
+              disabled={toggling}
+              className={`flex items-center gap-2 text-xs font-semibold px-3 py-1.5 rounded-md transition-all disabled:opacity-50 disabled:cursor-not-allowed ${
+                enabled ? "bg-green-500/20 text-green-400 hover:bg-green-500/30" : "bg-gray-800 text-gray-400 hover:bg-gray-700 hover:text-gray-200"
+              }`}
+            >
+              <span className={`w-1.5 h-1.5 rounded-full ${enabled ? "bg-green-400" : "bg-gray-600"}`} />
+              {toggling ? "…" : enabled ? "Running" : "Paused"}
+            </button>
+          </div>
+        </div>
+        <p className="text-gray-500 text-xs">
+          Real resting LIMIT/POST_ONLY orders on Lighter, same sub-account Worker 4 used · durable
+          order ledger survives restarts (every order's real fill price comes from the exchange,
+          never assumed) · balance-divergence check pauses new orders if the ledger ever disagrees
+          with the real exchange balance
+        </p>
+      </div>
+
+      {loading ? (
+        <div className="grid grid-cols-2 gap-2 animate-pulse">
+          {[...Array(6)].map((_, i) => <div key={i} className="h-16 bg-gray-800 rounded-lg" />)}
+        </div>
+      ) : (
+        <div className="grid grid-cols-3 gap-2">
+          <Stat label="Investment" value={`$${capitalUsd.toFixed(2)}`} sub="set via Settings" color="text-gray-300" />
+          <Stat
+            label="Total PNL"
+            value={totalPnl != null ? `${totalPnl >= 0 ? "+" : ""}$${totalPnl.toFixed(2)}` : "—"}
+            sub={totalPnlPct != null ? `${totalPnlPct >= 0 ? "+" : ""}${totalPnlPct.toFixed(1)}%` : ""}
+            color={totalPnl == null ? "text-gray-500" : Math.abs(totalPnlPct ?? 0) < 0.1 ? "text-gray-300" : totalPnl >= 0 ? "text-green-400" : "text-red-400"}
+          />
+          <Stat
+            label="Live Price"
+            value={livePrice != null ? `$${Number(livePrice).toFixed(4)}` : "—"}
+            sub={st?.order_size_lit != null ? `${Number(st.order_size_lit).toFixed(2)} LIT/order` : ""}
+            color="text-gray-300"
+          />
+          <Stat label="USDC Balance" value={usdcBalance != null ? `$${usdcBalance.toFixed(2)}` : "—"} sub="real, from the exchange" color="text-gray-300" />
+          <Stat
+            label="LIT Balance"
+            value={litBalance != null ? `${litBalance.toFixed(2)} LIT` : "—"}
+            sub={litValueUsd != null ? `~$${litValueUsd.toFixed(2)}` : ""}
+            color="text-gray-300"
+          />
+          <Stat
+            label="Open Orders"
+            value={String(openOrders.length)}
+            sub={`spacing ${st?.spacing_pct ?? "—"}% · ${st?.levels_up ?? "—"} up / ${st?.levels_down ?? "—"} down window`}
+            color="text-gray-300"
+          />
+        </div>
+      )}
+
+      <div className="space-y-2">
+        <p className="text-gray-500 text-[9px] uppercase tracking-wide">Settings</p>
+        <div className="grid grid-cols-2 gap-2">
+          <input
+            value={spacingIn}
+            onChange={(e) => setSpacingIn(e.target.value)}
+            placeholder={`spacing % (now ${st?.spacing_pct ?? "—"})`}
+            inputMode="decimal"
+            className="w-full bg-gray-900 border border-gray-700 rounded px-1.5 py-1 text-xs text-white tabular-nums focus:outline-none focus:border-red-500"
+          />
+          <input
+            value={capitalIn}
+            onChange={(e) => setCapitalIn(e.target.value)}
+            placeholder={`capital $ (now ${st?.capital_usd ?? "—"})`}
+            inputMode="decimal"
+            className="w-full bg-gray-900 border border-gray-700 rounded px-1.5 py-1 text-xs text-white tabular-nums focus:outline-none focus:border-red-500"
+          />
+          <input
+            value={upIn}
+            onChange={(e) => setUpIn(e.target.value)}
+            placeholder={`levels up (now ${st?.levels_up ?? "—"})`}
+            inputMode="numeric"
+            className="w-full bg-gray-900 border border-gray-700 rounded px-1.5 py-1 text-xs text-white tabular-nums focus:outline-none focus:border-red-500"
+          />
+          <input
+            value={downIn}
+            onChange={(e) => setDownIn(e.target.value)}
+            placeholder={`levels down (now ${st?.levels_down ?? "—"})`}
+            inputMode="numeric"
+            className="w-full bg-gray-900 border border-gray-700 rounded px-1.5 py-1 text-xs text-white tabular-nums focus:outline-none focus:border-red-500"
+          />
+          <input
+            value={drawdownIn}
+            onChange={(e) => setDrawdownIn(e.target.value)}
+            placeholder={`drawdown % (now ${st?.drawdown_pct ?? "—"})`}
+            inputMode="decimal"
+            className="w-full bg-gray-900 border border-gray-700 rounded px-1.5 py-1 text-xs text-white tabular-nums focus:outline-none focus:border-red-500"
+          />
+        </div>
+        <button
+          onClick={handleSave}
+          disabled={saving || (!spacingIn.trim() && !upIn.trim() && !downIn.trim() && !drawdownIn.trim() && !capitalIn.trim())}
+          className="text-xs font-bold px-2.5 py-1.5 rounded bg-red-500/20 text-red-400 hover:bg-red-500/30 disabled:opacity-30 w-full"
+        >
+          {saving ? "Saving…" : "Save Settings"}
+        </button>
+        {saveError && <p className="text-red-400 text-xs">{saveError}</p>}
+      </div>
+
+      <div>
+        <p className="text-gray-500 text-xs uppercase tracking-wide mb-2">
+          Order Ledger ({filledOrders.length} filled, {openOrders.length} open/pending)
+        </p>
+        {orders.length === 0 ? (
+          <p className="text-gray-600 text-sm">No orders yet</p>
+        ) : (
+          <div className="overflow-auto max-h-64">
+            <table className="w-full text-xs font-mono">
+              <thead>
+                <tr className="text-gray-500 border-b border-gray-800 sticky top-0 bg-gray-900">
+                  <th className="text-left pb-1">Time</th>
+                  <th className="text-left pb-1">Side</th>
+                  <th className="text-left pb-1">Status</th>
+                  <th className="text-right pb-1">Limit</th>
+                  <th className="text-right pb-1">Filled</th>
+                  <th className="text-right pb-1">Qty</th>
+                </tr>
+              </thead>
+              <tbody className="divide-y divide-gray-800/50">
+                {orders.slice(0, 30).map((o: any) => {
+                  const time = o.placed_at
+                    ? new Date(o.placed_at).toLocaleTimeString([], { hour: "2-digit", minute: "2-digit", second: "2-digit", hour12: false })
+                    : "";
+                  return (
+                    <tr key={o.id} className="hover:bg-gray-800/30">
+                      <td className="py-1.5 text-gray-600">{time}</td>
+                      <td className={`py-1.5 font-bold ${o.side === "buy" ? "text-yellow-400" : "text-green-400"}`}>
+                        {o.side?.toUpperCase()}
+                      </td>
+                      <td className={`py-1.5 font-bold ${statusColor(o.status)}`}>{o.status}</td>
+                      <td className="py-1.5 text-right text-gray-300">{Number(o.limit_price).toFixed(4)}</td>
+                      <td className="py-1.5 text-right text-gray-300">
+                        {o.filled_price != null ? Number(o.filled_price).toFixed(4) : "—"}
+                      </td>
+                      <td className="py-1.5 text-right text-gray-500">{Number(o.size).toFixed(2)}</td>
+                    </tr>
+                  );
+                })}
+              </tbody>
+            </table>
+          </div>
+        )}
       </div>
     </div>
   );
@@ -6228,6 +6470,12 @@ export default function Dashboard() {
   const [litGridRuns,     setLitGridRuns]     = useState<any[]>([]);
   const [litGridToggling, setLitGridToggling] = useState(false);
   const [litGridClearing, setLitGridClearing] = useState(false);
+  // LIT/USDC LIVE grid bot (2026-10-18) -- REAL MONEY, replaces Worker 4's BTC clone on the same
+  // Render service/sub-account (see server/lit_grid_live.py).
+  const [litGridLiveState,     setLitGridLiveState]     = useState<any>(null);
+  const [litGridLiveOrders,    setLitGridLiveOrders]    = useState<any[]>([]);
+  const [litGridLiveToggling,  setLitGridLiveToggling]  = useState(false);
+  const [litGridLiveFlattening, setLitGridLiveFlattening] = useState(false);
   // True lifetime trade/win counts -- the trades arrays above are capped at 200 rows for
   // display purposes, which silently froze the win-rate % and trade count once any worker
   // passed 200 real trades (Worker 2 hit this first, at 606 real trades and counting).
@@ -6276,6 +6524,8 @@ export default function Dashboard() {
       { data: litGridSt },
       { data: litGridTr },
       { data: litGridRs },
+      { data: litGridLiveSt },
+      { data: litGridLiveOr },
     ] = await Promise.all([
       getSupabase().from("surfer_state").select("*").eq("id", 1).single(),
       getSupabase().from("surfer_trades").select("*").order("exit_time", { ascending: false }).limit(5000),
@@ -6322,6 +6572,8 @@ export default function Dashboard() {
       getSupabase().from("lighter_lit_grid_state").select("*").eq("id", 1).single(),
       getSupabase().from("lighter_lit_grid_trades").select("*").order("closed_at", { ascending: false }).limit(200),
       getSupabase().from("lighter_lit_grid_runs").select("*").order("ran_at", { ascending: false }).limit(30),
+      getSupabase().from("lighter_lit_grid_live_state").select("*").eq("id", 1).single(),
+      getSupabase().from("lighter_lit_grid_live_orders").select("*").order("id", { ascending: false }).limit(50),
     ]);
     setSurferState(surferSt ?? null);
     setSurferTrades(surferTr ?? []);
@@ -6349,6 +6601,8 @@ export default function Dashboard() {
     setOptimalBtcRuns(optimalBtcRs ?? []);
     setHedgeEnvironmentRun(hedgeEnvironmentRows?.[0] ?? null);
     setScheduleState(scheduleSt ?? null);
+    setLitGridLiveState(litGridLiveSt ?? null);
+    setLitGridLiveOrders(litGridLiveOr ?? []);
     setLitGridState(litGridSt ?? null);
     setLitGridTrades(litGridTr ?? []);
     setLitGridRuns(litGridRs ?? []);
@@ -6489,6 +6743,27 @@ export default function Dashboard() {
     setLitGridClearing(false);
   }
 
+  async function handleLitGridLiveToggle() {
+    const turningOn = !litGridLiveState?.enabled;
+    if (turningOn && !confirm("Turn ON the LIVE LIT grid bot? This places REAL orders with REAL money.")) return;
+    setLitGridLiveToggling(true);
+    await fetch("/api/lighter-lit-grid-live/toggle", { method: "POST" });
+    await load();
+    setLitGridLiveToggling(false);
+  }
+
+  async function handleLitGridLiveFlatten() {
+    if (!confirm("EMERGENCY FLATTEN: cancel every resting order and market-sell all held LIT back to USDC, then disable. Continue?")) return;
+    setLitGridLiveFlattening(true);
+    const res = await fetch("/api/lighter-lit-grid-live/flatten", { method: "POST" });
+    if (!res.ok) {
+      const body = await res.json().catch(() => ({}));
+      alert(body.error ?? "Failed to request flatten.");
+    }
+    await load();
+    setLitGridLiveFlattening(false);
+  }
+
   const [healthTick, setHealthTick] = useState(Date.now());
   useEffect(() => {
     const id = setInterval(() => setHealthTick(Date.now()), 15_000);
@@ -6550,6 +6825,10 @@ export default function Dashboard() {
       .on("postgres_changes", { event: "*", schema: "public", table: "lighter_lit_grid_trades" }, debouncedLoad)
       .on("postgres_changes", { event: "INSERT", schema: "public", table: "lighter_lit_grid_runs" }, debouncedLoad)
       .subscribe();
+    const ch8 = sb.channel("lighter-lit-grid-live")
+      .on("postgres_changes", { event: "*", schema: "public", table: "lighter_lit_grid_live_state" }, debouncedLoad)
+      .on("postgres_changes", { event: "*", schema: "public", table: "lighter_lit_grid_live_orders" }, debouncedLoad)
+      .subscribe();
     // The three live Lighter state tables aren't on realtime at all (every tick would fire a
     // reload -- too chatty), so a plain metrics write (live_schedule_*, live_wiggle, etc.) with
     // no accompanying trade/settings change never triggers a reload. That let the Master
@@ -6561,7 +6840,7 @@ export default function Dashboard() {
       if (debounceTimer) clearTimeout(debounceTimer);
       clearInterval(pollId);
       sb.removeChannel(ch1); sb.removeChannel(ch2); sb.removeChannel(ch3); sb.removeChannel(ch4); sb.removeChannel(ch5);
-      sb.removeChannel(ch6); sb.removeChannel(ch7);
+      sb.removeChannel(ch6); sb.removeChannel(ch7); sb.removeChannel(ch8);
     };
   }, []);
 
@@ -6643,6 +6922,17 @@ export default function Dashboard() {
           toggling={litGridToggling}
           onClearHistory={handleLitGridClearHistory}
           clearingHistory={litGridClearing}
+        />
+
+        <LitGridLivePanel
+          state={litGridLiveState}
+          orders={litGridLiveOrders}
+          loading={loading}
+          enabled={litGridLiveState?.enabled ?? false}
+          onToggle={handleLitGridLiveToggle}
+          toggling={litGridLiveToggling}
+          onFlatten={handleLitGridLiveFlatten}
+          flattening={litGridLiveFlattening}
         />
 
       </div>
