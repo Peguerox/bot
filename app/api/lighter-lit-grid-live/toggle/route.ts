@@ -1,6 +1,7 @@
 import { NextRequest, NextResponse } from "next/server";
 import { getSupabaseAdmin } from "@/lib/supabase-admin";
 import { checkLitGridLiveAuth } from "@/lib/lit-grid-live-auth";
+import { investmentShortfallError } from "@/lib/lit-grid-live-balance";
 
 // REAL MONEY. Flips enabled on lighter_lit_grid_live_state -- the running Python worker
 // (server/lit_grid_live.py) reads this every tick; turning it on only lets NEW order placement
@@ -12,13 +13,17 @@ export async function POST(req: NextRequest) {
   const sb = getSupabaseAdmin();
   const { data: current, error: readError } = await sb
     .from("lighter_lit_grid_live_state")
-    .select("enabled")
+    .select("enabled,capital_usd")
     .eq("id", 1)
     .single();
   if (readError) {
     return NextResponse.json({ error: readError.message }, { status: 500 });
   }
   const next = !current?.enabled;
+  if (next) {
+    const shortfall = await investmentShortfallError(sb, Number(current?.capital_usd ?? 0));
+    if (shortfall) return NextResponse.json({ error: shortfall }, { status: 400 });
+  }
   const { data: updated, error: writeError } = await sb
     .from("lighter_lit_grid_live_state")
     .update({ enabled: next })

@@ -1192,6 +1192,17 @@ class LitGridLive:
             cover_drop_bucket = float(state.get("profit_bucket_cover_drop_usd") or 0)
             available_usdc = min(real_usdc - resting_buy_cost, base_capital_remaining + cover_drop_bucket)
 
+            real_total = float(state.get("usdc_balance") or 0) + float(state.get("lit_balance") or 0) * price
+            if is_cold_start and float(state["capital_usd"]) > real_total + 0.005:
+                # The investment can never be more than the money actually in the account
+                # (direct request) -- refuse to start rather than size the grid on money that
+                # isn't there.
+                if not getattr(self, "_investment_error_logged", False):
+                    await self.log_run("investment_exceeds_balance", {
+                        "capital_usd": float(state["capital_usd"]), "real_total": round(real_total, 4)})
+                    self._investment_error_logged = True
+                return
+            self._investment_error_logged = False
             if is_cold_start:
                 # Cold start (direct request): market-buy the LIT for the levels_up lots now, one
                 # market order per lot, held at grid lines 0..levels_up-1 so their sells land at

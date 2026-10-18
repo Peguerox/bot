@@ -1,5 +1,6 @@
 import { NextRequest, NextResponse } from "next/server";
 import { getSupabaseAdmin } from "@/lib/supabase-admin";
+import { investmentShortfallError } from "@/lib/lit-grid-live-balance";
 import { checkLitGridLiveAuth } from "@/lib/lit-grid-live-auth";
 
 // REAL MONEY. Same bounds-checking convention as lighter-lit-grid/settings (the paper version)
@@ -80,6 +81,11 @@ export async function POST(req: NextRequest) {
   // "needs recompute" so the worker never trades on a stale size after a settings change.
   if (out["spacing_pct"] !== undefined || out["capital_usd"] !== undefined || out["drawdown_pct"] !== undefined) {
     out["order_size_lit"] = null;
+  }
+
+  if (out["capital_usd"] !== undefined) {
+    const shortfall = await investmentShortfallError(getSupabaseAdmin(), Number(out["capital_usd"]));
+    if (shortfall) return NextResponse.json({ error: shortfall }, { status: 400 });
   }
 
   const { error } = await getSupabaseAdmin().from("lighter_lit_grid_live_state").update(out).eq("id", 1);

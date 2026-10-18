@@ -1094,6 +1094,23 @@ async def t_maintain_window_cold_start_fills_via_real_market_buys():
           fake.state.get("grid_anchor_price") == 3.10, fake.state.get("grid_anchor_price"))
 
 
+async def t_cold_start_refuses_an_investment_bigger_than_the_real_balance():
+    # Direct request: $500 investment with only $499.89 in the account must not start.
+    bot, fake = make_bot(base_state(levels_up=5, levels_down=5, order_size_lit=2.16,
+                                     usdc_balance=499.89, lit_balance=0.0, capital_usd=500))
+    bot.live.best_mid = lambda max_age=core.BOOK_MAX_AGE: 2.86
+    logged = []
+    orig = bot.log_run
+    async def spy(action, detail):
+        logged.append(action)
+        await orig(action, detail)
+    bot.log_run = spy
+    await bot.maintain_window(fake.state, 2.86)
+    check("no order is placed when the investment is more than the real balance",
+          fake.orders == [] and bot.client.placed == [], fake.orders)
+    check("the refusal is logged", "investment_exceeds_balance" in logged, logged)
+
+
 async def t_levels_up_and_levels_down_are_independent():
     bot, fake = make_bot(base_state(levels_up=4, levels_down=15, order_size_lit=1.0,
                                      usdc_balance=5000.0, capital_usd=5000))
@@ -1889,6 +1906,7 @@ async def main():
               t_cancelled_buy_releases_its_reservation_automatically,
               t_maintain_window_cold_start_fills_via_real_market_buys,
               t_levels_up_and_levels_down_are_independent,
+        t_cold_start_refuses_an_investment_bigger_than_the_real_balance,
         t_grid_after_cold_start_is_exactly_spacing_from_start_price,
         t_trailing_down_keeps_levels_down_buys_below_price,
         t_a_buy_fill_creates_its_sell_and_one_bottom_buy_never_the_same_line,
