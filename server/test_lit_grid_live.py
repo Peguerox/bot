@@ -1329,6 +1329,76 @@ async def t_a_lot_whose_sell_level_price_already_passed_is_sold_at_market():
           bot.client.placed)
 
 
+async def t_a_partly_filled_open_buy_does_not_trip_the_balance_pause():
+    # Live 20:30: buy at 2.8836 filled 0.54 of 2.19 and stayed open; holdings only count full
+    # fills, so the 0.54 real LIT read as a divergence and paused all new buys.
+    held = {"id": 1, "level": 0, "side": "buy", "status": "filled", "filled_qty": 2.16,
+            "filled_price": 3.0, "size": 2.16}
+    partial = {"id": 2, "level": -1, "side": "buy", "status": "open", "filled_qty": 0.54,
+               "filled_price": 2.99, "size": 2.19, "client_order_index": 2, "limit_price": 2.99}
+    bot, fake = make_bot(base_state(), orders=[held, partial],
+                          assets=[FakeAsset("LIT", 2.70, 0.0), FakeAsset("USDC", 0, 0, margin_balance=490.0)])
+    safe, refreshed = await bot.check_balance_divergence()
+    check("a partly filled open buy counts as held LIT -- no pause", safe is True and refreshed, (safe, refreshed))
+
+
+async def t_gap_in_the_sell_ladder_is_filled_by_moving_the_top_sell_down():
+    # Live 20:31: lot 20 was sold at market in a spike, leaving no sell on line 21 while sells
+    # sat on 18,19,20,22..26. The top sell (line 26) is cancelled, then re-placed on line 21.
+    P = 2.83365
+    lots = [17, 18, 19, 21, 22, 23, 24, 25]
+    rows = _grid_rows(P, held=lots, sells_for=lots, buys_at=range(12, 17))
+    for r in rows:
+        if r["side"] == "buy" and r["status"] == "filled" and r["level"] == 25:
+            r["filled_price"] = round(P * 1.00125 ** 19.9, 4)  # trailing lot bought near line 19.9
+    price = round(P * 1.00125 ** 17.6, 5)
+    bot, fake = make_bot(base_state(levels_up=5, levels_down=5, order_size_lit=2.16,
+                                     usdc_balance=500.0, grid_anchor_price=P), orders=rows)
+    bot.live.best_mid = lambda max_age=core.BOOK_MAX_AGE: price
+    await bot.maintain_window(fake.state, price)
+    top = next(r for r in fake.orders if r["side"] == "sell" and r.get("closes_level") == 25 and r["id"] < 100)
+    check("the top sell (line 26) is cancelled to fill the gap", top["status"] == "cancel_requested", top)
+    top["status"] = "cancelled"
+    await bot.maintain_window(fake.state, price)
+    moved = [r for r in fake.orders if r["side"] == "sell" and r.get("closes_level") == 25
+             and r["status"] in ("open", "pending")]
+    check("that lot's sell is re-placed on the gap line (21)",
+          len(moved) == 1 and abs(moved[0]["limit_price"] - core.round_price(P * 1.00125 ** 21)) < 1e-9, moved)
+    lines = sorted(round(math.log(r["limit_price"] / P) / math.log(1.00125)) for r in fake.orders
+                   if r["side"] == "sell" and r["status"] in ("open", "pending"))
+    check("the sell ladder is now contiguous (18..25)", lines == list(range(18, 26)), lines)
+
+
+async def t_gap_fill_never_moves_a_sell_below_that_lots_cost():
+    P = 2.83365
+    lots = [17, 18, 19, 21, 22, 23, 24, 25]
+    rows = _grid_rows(P, held=lots, sells_for=lots, buys_at=range(12, 17))  # lot 25 cost = line 25
+    price = round(P * 1.00125 ** 17.6, 5)
+    bot, fake = make_bot(base_state(levels_up=5, levels_down=5, order_size_lit=2.16,
+                                     usdc_balance=500.0, grid_anchor_price=P), orders=rows)
+    bot.live.best_mid = lambda max_age=core.BOOK_MAX_AGE: price
+    await bot.maintain_window(fake.state, price)
+    check("a lot that cost more than the gap price keeps its sell",
+          not any(r["status"] == "cancel_requested" for r in fake.orders), [r for r in fake.orders if r["status"] == "cancel_requested"])
+
+
+async def t_gap_fill_never_moves_a_cold_start_sell_down_to_breakeven():
+    # Cold-start lots 0..4 all cost about the start price. Price dipping just under line 0
+    # leaves line 0 empty -- moving the top sell there would sell at cost. Must not happen.
+    P = 2.87055
+    rows = _grid_rows(P, held=range(0, 5), sells_for=range(0, 5), buys_at=range(-5, 0))
+    for r in rows:
+        if r["side"] == "buy" and r["status"] == "filled":
+            r["filled_price"] = P
+    price = round(P * 1.00125 ** -0.3, 5)
+    bot, fake = make_bot(base_state(levels_up=5, levels_down=5, order_size_lit=2.16,
+                                     usdc_balance=500.0, grid_anchor_price=P), orders=rows)
+    bot.live.best_mid = lambda max_age=core.BOOK_MAX_AGE: price
+    await bot.maintain_window(fake.state, price)
+    check("no sell is moved down to breakeven", not any(r["status"] == "cancel_requested" for r in fake.orders),
+          [r for r in fake.orders if r["status"] == "cancel_requested"])
+
+
 async def t_trailing_up_never_double_buys_while_a_market_buy_is_in_flight():
     P = 2.87055
     rows = _grid_rows(P, held=range(1, 5), sells_for=range(1, 5), buys_at=range(-14, 1), sold=[0])
@@ -1935,6 +2005,10 @@ async def main():
         t_no_funds_logs_once_and_stays_quiet,
         t_trailing_up_keeps_levels_up_sells_and_twenty_orders,
         t_trailing_up_never_double_buys_while_a_market_buy_is_in_flight,
+        t_a_partly_filled_open_buy_does_not_trip_the_balance_pause,
+        t_gap_in_the_sell_ladder_is_filled_by_moving_the_top_sell_down,
+        t_gap_fill_never_moves_a_sell_below_that_lots_cost,
+        t_gap_fill_never_moves_a_cold_start_sell_down_to_breakeven,
         t_a_lot_whose_sell_level_price_already_passed_is_sold_at_market,
               t_maintain_window_cold_start_budget_uses_real_price_not_theoretical_level_price,
               t_maintain_window_reverts_to_resting_limit_ladder_after_the_first_ever_fill,

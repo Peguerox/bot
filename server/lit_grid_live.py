@@ -802,6 +802,12 @@ class LitGridLive:
             return not self._balance_paused, False
         try:
             holdings = await self.current_holdings()
+            # A resting buy that has PARTLY filled already put real LIT in the account, but
+            # holdings only count a buy once it's fully filled -- count those partial fills
+            # here too, or one partial fill pauses the whole grid (live, 2026-10-18 20:30).
+            open_buy_fills = await self.sb_paginate(
+                f"{TABLE_ORDERS}?side=eq.buy&status=in.({','.join(OPEN_STATUSES)})"
+                f"&filled_qty=not.is.null&select=filled_qty")
             real_usdc, real_lit = await self.real_balances()
             await self.update_state({"usdc_balance": real_usdc, "lit_balance": real_lit})
         except Exception as e:
@@ -809,7 +815,8 @@ class LitGridLive:
             self._balance_paused = True
             return False, False
         self._last_balance_check = now
-        ledger_lit = sum(h["qty"] for h in holdings.values())
+        ledger_lit = (sum(h["qty"] for h in holdings.values())
+                      + sum(float(r.get("filled_qty") or 0) for r in (open_buy_fills or [])))
         diverged = abs(ledger_lit - real_lit) > BALANCE_DIVERGENCE_TOLERANCE_LIT
         if diverged and not self._balance_paused:
             await self.log_run("balance_divergence_paused",
@@ -1125,14 +1132,54 @@ class LitGridLive:
         # recomputed display level (external audit fix P2-8). If a conflicting buy is found, it
         # is cancelled but the sell is DEFERRED to next tick -- never placed in the same breath
         # as an unconfirmed cancel (external audit fix P1-4).
+        # Fill gaps in the sell ladder (direct request): a fast move can sell a lot from the
+        # middle (e.g. at market) and leave an empty line between sells. A lot without a resting
+        # sell takes the lowest such gap below its own line; if every lot already has a sell,
+        # the TOP sell is cancelled so that lot can move down into the gap next tick. Only when
+        # the gap is above the market and still at least one spacing above that lot's cost.
+        hole_target = {}
+        if anchored and holdings:
+            def _line(p):
+                return int(round(math.log(float(p) / anchor) / step))
+            sell_rows = [r for rows in resting.values() for r in rows
+                         if r["side"] == "sell" and r.get("closes_level") is not None]
+            free_lots = sorted(lv for lv in holdings if lv not in snap.sell_closes)
+            all_lines = {_line(r["limit_price"]) for r in sell_rows} | {lv + 1 for lv in free_lots}
+            # Empty lines from just above price up to the top sell.
+            holes = [x for x in range(cur_lvl + 1, max(all_lines))
+                     if x not in all_lines] if all_lines else []
+
+            def _best_hole(below_line, cost):
+                # A moved sell must still earn at least one full spacing over the lot's cost.
+                fits = [x for x in holes if x < below_line
+                        and anchor * math.exp(x * step) >= cost * (1 + spacing_pct / 100.0) - 1e-9]
+                return min(fits) if fits else None
+
+            for lv in sorted(free_lots, reverse=True):
+                hl = _best_hole(lv + 1, holdings[lv]["cost"])
+                if hl is not None:
+                    hole_target[lv] = hl
+                    holes.remove(hl)
+            if (holes and not free_lots and sell_rows
+                    and not any(r.get("status") == "cancel_requested" for r in sell_rows)):
+                top = max(sell_rows, key=lambda r: float(r["limit_price"]))
+                top_lot = top["closes_level"]
+                hl = _best_hole(_line(top["limit_price"]), holdings[top_lot]["cost"]) if top_lot in holdings else None
+                if hl is not None:
+                    await self.log_run("gap_fill_move_top_sell", {
+                        "row_id": top["id"], "from_line": _line(top["limit_price"]), "to_line": hl})
+                    await self.cancel_order_row(top)
+
         for lvl, h in holdings.items():
             if not self._lock_held:
                 return
             if lvl in snap.sell_closes:
                 continue
             if anchored:
-                # One sell per grid line: lot held at line L sells at line L+1, never below cost.
-                sell_price = max(round_price(anchor * math.exp((lvl + 1) * step)),
+                # One sell per grid line: lot held at line L sells at line L+1 (or at a gap line
+                # below that, see above), never below cost.
+                target_line = hole_target.get(lvl, lvl + 1)
+                sell_price = max(round_price(anchor * math.exp(target_line * step)),
                                  round_price(h["cost"]))
             else:
                 sell_price = round_price(h["cost"] * (1 + spacing_pct / 100.0))
