@@ -276,6 +276,18 @@ async def t_cold_start_does_not_replay_backlog():
     check("cold start bootstraps _last_candle_t to the latest candle, not the first",
           bot._last_candle_t == backlog[-1]["t"], bot._last_candle_t)
 
+    # Regression: the panel kept showing stale live_price/live_level after enabling (found live
+    # 2026-10-18, "turned it on and nothing happened") because cold start only logged to runs
+    # and never wrote the armed grid to the state row.
+    armed_state = (await bot.sb("GET", f"{core.TABLE_STATE}?id=eq.1"))[0]
+    check("cold start writes live_price to the state row immediately",
+          armed_state["live_price"] == backlog[-1]["c"], armed_state["live_price"])
+    check("cold start writes live_level to the state row immediately",
+          armed_state["live_level"] is not None, armed_state["live_level"])
+    check("cold start computes and writes an initial order_size_lit",
+          armed_state["order_size_lit"] is not None and armed_state["order_size_lit"] > 0,
+          armed_state.get("order_size_lit"))
+
     # Next tick: only a genuinely new candle after the bootstrap point should be processed.
     new_candle = candle(4000, 10.1, 10.1, 10.0, 10.0, 1000)
     bot.fetch_latest_candles = lambda count=5: _async_return(backlog + [new_candle])

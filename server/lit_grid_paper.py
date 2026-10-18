@@ -333,10 +333,24 @@ class LitGridPaper:
             self._last_candle_t = candles[-1]["t"]
             center_price = candles[-1]["c"]
             self._last_level = level_of(candle_path(candles[-1])[0], math.log(1 + float(state["spacing_pct"]) / 100.0))
+            usdc_balance = float(state["usdc_balance"])
+            lit_balance = float(state["lit_balance"])
+            capital = (usdc_balance + lit_balance * center_price) if state["compounding_enabled"] else float(state["capital_usd"])
+            sizing_levels = levels_for_drawdown(float(state["spacing_pct"]), float(state.get("drawdown_pct") or 30.0))
+            order_size = compute_order_size_lit(capital, center_price, float(state["spacing_pct"]), sizing_levels)
             await self.log_run("grid_armed", {
                 "center_price": center_price, "center_level": self._last_level,
                 "spacing_pct": state["spacing_pct"],
                 "levels_up": state["levels_up"], "levels_down": state["levels_down"],
+            })
+            # Reflect the armed grid on the state row immediately -- without this the panel kept
+            # showing stale live_price/live_level from before the bot was enabled, even though it
+            # had correctly armed internally (found live 2026-10-18: user saw "nothing happened").
+            await self.update_state({
+                "live_price": center_price,
+                "live_level": self._last_level,
+                "order_size_lit": order_size,
+                "updated_at": datetime.now(timezone.utc).isoformat(),
             })
             return
         for c in candles:
