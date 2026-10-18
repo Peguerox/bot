@@ -45,6 +45,34 @@ separately, matching Bitsgap's own panel: Investment (capital_usd, fixed), Bot p
 (bot_profit_usd, realized round-trips only), and Total PNL (current real account value --
 usdc_balance + lit_balance at the live price -- minus Investment, which also captures whatever is
 sitting unsold in LIT).
+
+Three fixes from an independent external audit (2026-10-18, see LIT_GRID_BOT_AUDIT_2026-10-18.md
+for the full writeup), all confirmed directly against this code before fixing:
+  - level_of now takes an optional `reference` (the currently held level) and refuses to accept a
+    new level unless the boundary is cleared by GUARD_FRAC of a full step -- a price confined to a
+    band straddling one exact grid line could otherwise flip the detected level on pure noise and
+    book a fill at a line real price never meaningfully cleared (demonstrated live: ~$3.87 of
+    fictitious profit from a price band ~0.003% wide). Only engages right at a boundary; a
+    genuine multi-level move clears it by far more than the guard and is unaffected.
+  - arm_grid's initial seed now sizes the down-side reserve and the up-side buy with ONE unified
+    formula (capital / (price_sum_over_down_levels + levels_up * price)) instead of sizing the
+    down side off the FULL capital and then separately spending some of that same capital on the
+    up-side seed -- the old version's real down-side reserve (capital minus the up-side spend) was
+    always less than what the down-side math assumed, exhausting it before the configured
+    drawdown depth (demonstrated live: 265 levels of reserve instead of the intended 286).
+  - a spacing-change re-arm now remaps every existing holding to the level implied by its REAL
+    cost under the NEW step, instead of leaving old level-index keys in place to be reinterpreted
+    under a different step -- the old version let a position bought to sell at ~$3.10 silently
+    retarget to an unrelated price (demonstrated live: $3.1012 -> $2.4733) purely from a spacing
+    change, with no real price move at all.
+  - process_price now persists state (balances/holdings/level) immediately after EACH individual
+    fill, writing it BEFORE logging that fill's trade row, instead of accumulating a whole tick's
+    fills in memory and writing once at the end -- a crash partway through a multi-level walk used
+    to leave fills already logged to lighter_lit_grid_trades while the position/level that
+    governs the NEXT tick was still the pre-walk value, so a restart would replay and re-log the
+    same fills a second time. Narrows the remaining failure window to "this one fill's trade-log
+    row might be missing" (harmless, already fault-tolerant in log_fill) instead of "this whole
+    tick's fills might be double-counted."
 """
 import asyncio
 import math
@@ -74,9 +102,16 @@ LOCK_REFRESH_EVERY = 5.0
 # frequently). 30s is a 6x margin -- generous enough that a genuinely alive instance never looks
 # stale, short enough that a truly dead one is reclaimed quickly given how fast ticks are now.
 LOCK_STALE_AFTER = 30.0
+# Guard band for level_of's hysteresis (2026-10-18, external audit finding -- see module
+# docstring). Expressed as a fraction of ONE grid step so it automatically scales with whatever
+# spacing_pct is configured, rather than a fixed price amount that would be too loose at wide
+# spacing and too tight at narrow spacing. 2% of a step is comfortably larger than any float
+# round-trip noise through log()/exp() (~1e-12 relative) while leaving genuine small moves (which
+# clear a boundary by a much larger margin) completely unaffected.
+LEVEL_GUARD_FRAC = 0.02
 
 
-def level_of(price: float, step: float) -> int:
+def level_of(price: float, step: float, reference: int = None) -> int:
     # floor(), not round() (2026-10-18, Opus audit -- confirmed by reproducing it directly).
     # round() made a crossing trigger at the MIDPOINT between two grid lines (half a spacing
     # step away), while the fill price recorded a FULL step's move -- so price noise smaller
@@ -85,17 +120,34 @@ def level_of(price: float, step: float) -> int:
     # the bot recorded a full-level profitable round trip anyway. floor() makes the trigger
     # threshold a real grid line (a full spacing step away), matching the fill price distance,
     # so sub-spacing noise can no longer move the detected level at all.
-    return math.floor(math.log(price) / step)
+    raw = math.log(price) / step
+    lvl = math.floor(raw)
+    if reference is not None and lvl != reference:
+        # Residual case floor() alone doesn't cover (2026-10-18, external audit, confirmed):
+        # price sitting almost exactly ON a boundary can still flip floor()'s result on pure
+        # noise. Require the move to clear the boundary (the first line between `reference` and
+        # `lvl`, whichever direction) by more than a small guard margin before accepting it --
+        # a genuine multi-level move clears this by far more than the guard and is unaffected.
+        boundary = (reference + 1) if lvl > reference else reference
+        if abs(raw - boundary) < LEVEL_GUARD_FRAC:
+            return reference
+    return lvl
 
 
-def compute_order_size_lit(capital_usd: float, current_price: float, spacing_pct: float, levels_down: int) -> float:
-    """capital_usd / sum(price at each down-level) -- full reserve against the configured depth."""
+def _price_sum_for_levels(current_price: float, spacing_pct: float, levels_down: int) -> float:
+    """Sum of price at each of levels_down descending geometric steps below current_price."""
     r = 1.0 / (1.0 + spacing_pct / 100.0)
     price_sum = 0.0
     p = current_price
     for _ in range(max(1, levels_down)):
         p *= r
         price_sum += p
+    return price_sum
+
+
+def compute_order_size_lit(capital_usd: float, current_price: float, spacing_pct: float, levels_down: int) -> float:
+    """capital_usd / sum(price at each down-level) -- full reserve against the configured depth."""
+    price_sum = _price_sum_for_levels(current_price, spacing_pct, levels_down)
     if price_sum <= 0:
         return 0.0
     return capital_usd / price_sum
@@ -161,7 +213,13 @@ class LitGridPaper:
         combined round-trip row. side is literally 'buy' or 'sell'. Reuses the existing
         entry_price/exit_price columns (both set to the single fill price) rather than adding a
         migration -- a buy row's pnl_usd is 0 (nothing realized yet), a sell row's is the real
-        profit from closing whatever it paired against."""
+        profit from closing whatever it paired against.
+
+        Called AFTER the matching update_state in process_price (2026-10-18, external audit fix)
+        -- a failure here is already fault-tolerant (caught below, logged, never raised), and
+        this ordering means the position/balance state that governs the NEXT tick is never left
+        pointing at a fill that failed to get logged, only (at worst) a logged fill missing its
+        own audit row."""
         row = {
             "side": side, "opened_at": at, "closed_at": at,
             "entry_price": price, "exit_price": price,
@@ -260,7 +318,12 @@ class LitGridPaper:
         Walks level-by-level between the last seen price and this new one (2026-10-18: now a
         real consecutive live-price pair, not an OHLC approximation of a whole closed minute) --
         every line crossed in between is its own fill event, so a fast multi-level move still
-        fills every line it actually passed through, not just the endpoint."""
+        fills every line it actually passed through, not just the endpoint.
+
+        State is persisted after EACH individual fill, not once at the end of the walk (2026-10-18,
+        external audit fix -- see module docstring): a crash mid-walk must never leave fills
+        already logged while the position/level that governs the next tick is still pre-walk,
+        which used to cause the next tick to replay and duplicate them."""
         spacing_pct = float(state["spacing_pct"])
         step = math.log(1 + spacing_pct / 100.0)
         order_type = state["order_type"]
@@ -299,9 +362,8 @@ class LitGridPaper:
         if self._last_level is None:
             self._last_level = level_of(price, step)
         lvl = self._last_level
-        target_lvl = level_of(price, step)
+        target_lvl = level_of(price, step, reference=lvl)
 
-        now_iso = datetime.now(timezone.utc).isoformat()
         blocked = False  # ran out of real USDC -- stop advancing entirely, defer the rest
         # A fresh timestamp per individual fill (not once per tick) -- a fast multi-level move
         # can fill several lines in one tick, and each fill needs its own correctly-ordered time
@@ -327,8 +389,19 @@ class LitGridPaper:
                     usdc_balance += proceeds
                     bot_profit_usd += pnl
                     del holdings[buy_level]
-                    await self.log_fill("sell", fill_price, qty, pnl, order_type, fill_now())
-                # No holding at buy_level -- no resting sell order armed at this level, do nothing.
+                    self._last_level = lvl
+                    fill_at = fill_now()
+                    await self.update_state({
+                        "live_price": price, "live_level": lvl, "order_size_lit": order_size,
+                        "usdc_balance": usdc_balance, "lit_balance": lit_balance, "bot_profit_usd": bot_profit_usd,
+                        "open_positions_json": {"holdings": {str(k): v for k, v in holdings.items() if v["qty"] > 0}},
+                        "internal_last_level": lvl, "internal_spacing_pct": spacing_pct,
+                        "updated_at": fill_at,
+                    })
+                    await self.log_fill("sell", fill_price, qty, pnl, order_type, fill_at)
+                else:
+                    # No holding at buy_level -- no resting sell order armed here, do nothing.
+                    self._last_level = lvl
             else:
                 lvl -= 1
                 fill_price = math.exp(lvl * step)
@@ -345,20 +418,25 @@ class LitGridPaper:
                         holdings[lvl] = {"qty": total_qty, "cost": avg_cost}
                     else:
                         holdings[lvl] = {"qty": order_size, "cost": fill_price}
-                    await self.log_fill("buy", fill_price, order_size, 0, order_type, fill_now())
+                    self._last_level = lvl
+                    fill_at = fill_now()
+                    await self.update_state({
+                        "live_price": price, "live_level": lvl, "order_size_lit": order_size,
+                        "usdc_balance": usdc_balance, "lit_balance": lit_balance, "bot_profit_usd": bot_profit_usd,
+                        "open_positions_json": {"holdings": {str(k): v for k, v in holdings.items() if v["qty"] > 0}},
+                        "internal_last_level": lvl, "internal_spacing_pct": spacing_pct,
+                        "updated_at": fill_at,
+                    })
+                    await self.log_fill("buy", fill_price, order_size, 0, order_type, fill_at)
                 else:
                     blocked = True
 
         self._last_level = lvl
+        # Display-only refresh -- always runs, even when this tick produced zero fills (the
+        # common case), so the panel's live price keeps moving. Never touches balances/holdings.
         await self.update_state({
-            "live_price": price,
-            "live_level": lvl,
-            "order_size_lit": order_size,
-            "usdc_balance": usdc_balance,
-            "lit_balance": lit_balance,
-            "bot_profit_usd": bot_profit_usd,
-            "open_positions_json": {"holdings": {str(k): v for k, v in holdings.items() if v["qty"] > 0}},
-            "updated_at": now_iso,
+            "live_price": price, "live_level": lvl, "order_size_lit": order_size,
+            "updated_at": datetime.now(timezone.utc).isoformat(),
         })
 
     async def arm_grid(self, state, center_price, center_lvl, note, seed_initial_position=False):
@@ -376,12 +454,24 @@ class LitGridPaper:
         current price starts with a resting sell order, every level below starts with a resting
         buy order, and Bitsgap buys whatever base currency is missing at market price to arm the
         sell side. The split is proportional to the configured window, not a blind 50/50: buy
-        only enough LIT to cover `levels_up` sell orders (direct example given: 3 up / 15 down
-        means buy 3 orders' worth of LIT, keep the rest as cash for the 15 down levels). Each of
-        those `levels_up` orders is its own separate holdings[level] entry (see process_price)
-        so each one sells independently and correctly when its own specific level is reached --
-        not one lump sum. Only applies on a genuine first-ever start (never on a spacing-change
-        re-arm, which must not touch an already-established position)."""
+        only enough LIT to cover `levels_up` sell orders. Each of those `levels_up` orders is
+        its own separate holdings[level] entry (see process_price) so each one sells
+        independently and correctly when its own specific level is reached -- not one lump sum.
+        Only applies on a genuine first-ever start (never on a spacing-change re-arm, which must
+        remap the existing position instead -- see below).
+
+        Sizing (2026-10-18, external audit fix -- see module docstring): order_size is now ONE
+        unified value solved from capital_usd = order_size * (price_sum_over_down_levels +
+        levels_up * center_price), so the up-side seed buy and the down-side reserve are sized
+        against the SAME total capital instead of the down side being sized off the full
+        capital_usd while the up-side seed quietly spends some of that same capital -- which
+        used to exhaust the real reserve before the configured drawdown depth.
+
+        Spacing-change remap (2026-10-18, external audit fix -- see module docstring): when this
+        is NOT a fresh seed, any existing holdings are remapped from their old level-index key to
+        level_of(their real cost, NEW step) -- so a position bought to sell one level above its
+        real cost keeps meaning that under the new spacing, instead of its old integer key being
+        silently reinterpreted as a different price."""
         self._last_level = center_lvl
         spacing_pct = float(state["spacing_pct"])
         usdc_balance = float(state["usdc_balance"])
@@ -391,13 +481,14 @@ class LitGridPaper:
         if seed_initial_position:
             capital_usd = float(state["capital_usd"])
             down_sizing_levels = levels_for_drawdown(spacing_pct, float(state.get("drawdown_pct") or 30.0))
-            # Base order size off the FULL capital against the down-side depth -- this is the
-            # per-level LIT quantity used both to seed the up side and for every ongoing fill.
-            base_order_size = compute_order_size_lit(capital_usd, center_price, spacing_pct, down_sizing_levels)
             levels_up = max(1, int(state["levels_up"]))
-            lit_value_usd = base_order_size * levels_up * center_price
+            price_sum = _price_sum_for_levels(center_price, spacing_pct, down_sizing_levels)
+            denom = price_sum + levels_up * center_price
+            order_size = capital_usd / denom if denom > 0 else 0.0
+            lit_value_usd = order_size * levels_up * center_price
             # Safety clamp: never let the up-side allocation eat so much of the capital that
-            # the down side (the much deeper, more important reserve) is starved.
+            # the down side (the much deeper, more important reserve) is starved. Rarely binds
+            # now that the unified formula above already budgets both sides within capital_usd.
             lit_value_usd = min(lit_value_usd, capital_usd * 0.9)
             actual_order_size = lit_value_usd / levels_up / center_price if levels_up > 0 else 0.0
             usdc_balance = capital_usd - lit_value_usd
@@ -407,22 +498,43 @@ class LitGridPaper:
             # "sells when price reaches one level above it". Cost basis for every one of these
             # is the SAME real price (center_price) -- this is one real market buy for the whole
             # up-side quantity at today's price, distributed across several future sell targets,
-            # not several buys at each target's own (higher) price. Recording it as the target's
-            # own price would understate real future profit on this inventory (found live
-            # 2026-10-18, direct question: "why is Total PNL negative").
+            # not several buys at each target's own (higher) price.
             patch["open_positions_json"] = {
                 "holdings": {str(center_lvl + k): {"qty": actual_order_size, "cost": center_price}
                              for k in range(levels_up)}
             }
             patch["usdc_balance"] = usdc_balance
             patch["lit_balance"] = lit_balance
-            patch["order_size_lit"] = base_order_size
-            order_size = base_order_size
+            patch["order_size_lit"] = order_size
         else:
             # Spacing-change re-arm on an already-running position: keep using whatever
             # order_size is already in effect (recomputed fresh every tick in process_price
             # when compounding is on; otherwise it stays fixed from the original arm).
             order_size = float(state.get("order_size_lit") or 0.0)
+
+            old_spacing_pct = state.get("internal_spacing_pct")
+            new_step = math.log(1 + spacing_pct / 100.0)
+            old_step = math.log(1 + float(old_spacing_pct) / 100.0) if old_spacing_pct is not None else new_step
+            old_holdings = (state.get("open_positions_json") or {}).get("holdings") or {}
+            remapped = {}
+            for k, v in old_holdings.items():
+                if isinstance(v, dict):
+                    qty, cost = float(v["qty"]), float(v["cost"])
+                else:
+                    # Legacy bare-number holding, no recorded cost -- recover its real cost
+                    # from the OLD step (its key WAS its level under the spacing then in effect).
+                    qty, cost = float(v), math.exp(int(k) * old_step)
+                if qty <= 0:
+                    continue
+                new_lvl = level_of(cost, new_step)
+                existing = remapped.get(new_lvl)
+                if existing:
+                    total_qty = existing["qty"] + qty
+                    avg_cost = (existing["qty"] * existing["cost"] + qty * cost) / total_qty
+                    remapped[new_lvl] = {"qty": total_qty, "cost": avg_cost}
+                else:
+                    remapped[new_lvl] = {"qty": qty, "cost": cost}
+            patch["open_positions_json"] = {"holdings": {str(k): v for k, v in remapped.items()}}
 
         await self.log_run(note, {
             "center_price": center_price, "center_level": center_lvl, "spacing_pct": spacing_pct,

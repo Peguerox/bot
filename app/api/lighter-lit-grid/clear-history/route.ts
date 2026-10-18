@@ -22,8 +22,8 @@ export async function POST() {
     live_level: null,
     order_size_lit: null,
     // Clearing internal_last_level marks the next enable as a genuine fresh start, so it
-    // re-splits capital 50/50 (usdc + an immediate LIT buy) instead of resuming as if it were
-    // the same still-running position.
+    // re-splits capital proportionally to levels_up/levels_down (usdc + an immediate LIT buy)
+    // instead of resuming as if it were the same still-running position.
     internal_last_level: null,
     internal_spacing_pct: null,
     history_reset_at: new Date().toISOString(),

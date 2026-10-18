@@ -159,9 +159,15 @@ async def t_seeded_positions_carry_the_real_arm_price_as_cost():
 async def t_initial_seed_is_proportional_to_levels_up():
     # Confirmed directly against Bitsgap's own docs (2026-10-18): the up-front split is NOT a
     # blind 50/50 -- it's proportional to the configured window. 3 up / 15 down should buy much
-    # less LIT than 15 up / 15 down, for the same capital.
-    bot_narrow, fake_narrow = make_bot(base_state(order_type="market", levels_up=3, usdc_balance=10000, lit_balance=0))
-    bot_wide, fake_wide = make_bot(base_state(order_type="market", levels_up=15, usdc_balance=10000, lit_balance=0))
+    # less LIT than 15 up / 15 down, for the same capital. Uses a realistic drawdown_pct (30,
+    # like production) rather than base_state's default tiny 15-level depth -- at a shallow
+    # depth comparable to levels_up itself, the unified sizing fix (2026-10-18) makes the up-side
+    # term a significant fraction of the denominator and the proportionality margin gets thin;
+    # at a realistic depth the down-side term dominates and proportionality holds clearly.
+    bot_narrow, fake_narrow = make_bot(base_state(order_type="market", levels_up=3, drawdown_pct=30,
+                                                   usdc_balance=10000, lit_balance=0))
+    bot_wide, fake_wide = make_bot(base_state(order_type="market", levels_up=15, drawdown_pct=30,
+                                               usdc_balance=10000, lit_balance=0))
     for bot in (bot_narrow, bot_wide):
         bot.fetch_current_price = lambda: _async_return(10.0)
         await bot.tick()
@@ -364,6 +370,128 @@ async def t_sub_spacing_noise_never_trades():
           state["bot_profit_usd"] == 0, state["bot_profit_usd"])
 
 
+def t_level_guard_prevents_boundary_noise():
+    # External audit finding (2026-10-18): a price confined to a narrow band straddling one
+    # exact grid line could flip floor()'s result on pure noise and register a fill at a line
+    # real price never meaningfully cleared (reproduced live: ~$3.87 of fictitious profit from a
+    # price band ~0.003% wide). level_of's optional `reference` + LEVEL_GUARD_FRAC fixes this.
+    step = math.log(1 + 0.125 / 100)
+    L = 1000
+    boundary = L + 1  # the boundary between level L and L+1, in dimensionless level units
+    just_past = math.exp((boundary + core.LEVEL_GUARD_FRAC * 0.3) * step)  # well inside the guard band
+    check("a price just barely past a boundary, within the guard band, is NOT accepted as a new level",
+          level_of(just_past, step, reference=L) == L,
+          level_of(just_past, step, reference=L))
+    clearly_past = math.exp((boundary + core.LEVEL_GUARD_FRAC * 3) * step)
+    check("a price that genuinely clears the boundary (3x the guard margin) registers the new level immediately",
+          level_of(clearly_past, step, reference=L) == L + 1,
+          level_of(clearly_past, step, reference=L))
+    check("with no reference (e.g. a fresh arm), the guard never applies -- plain floor() behavior",
+          level_of(just_past, step) == L + 1,
+          level_of(just_past, step))
+
+
+async def t_reserve_lasts_the_full_configured_drawdown_depth():
+    # External audit finding (2026-10-18): with $10,000 and 15 up-side levels, the real USDC
+    # reserve used to run out at 265 levels instead of the intended 286 (drawdown_pct=30% at
+    # 0.125% spacing) -- the down-side math was sized off the FULL capital_usd while the
+    # up-side seed quietly spent some of that same capital first. Unified sizing (order_size
+    # solved from capital = order_size * (down_price_sum + levels_up*price)) fixes this.
+    bot, fake = make_bot(base_state(order_type="market", drawdown_pct=30, levels_up=15,
+                                     usdc_balance=10000, lit_balance=0))
+    bot.fetch_current_price = lambda: _async_return(10.0)
+    await bot.tick()  # seeds the position
+    state = (await bot.sb("GET", f"{core.TABLE_STATE}?id=eq.1"))[0]
+    step = math.log(1 + 0.125 / 100)
+    down_levels = levels_for_drawdown(0.125, 30)  # 286
+    price = 10.0
+    for _ in range(down_levels + 10):
+        price *= math.exp(-1 * step)
+        await bot.process_price(price, state)
+        state = (await bot.sb("GET", f"{core.TABLE_STATE}?id=eq.1"))[0]
+    total_buys = len([t for t in fake.trades if t["side"] == "buy"])
+    check(f"reserve lasts close to the full configured depth ({down_levels} levels) -- "
+          f"external audit found only 265/286 (92.7%) before this fix",
+          total_buys >= down_levels * 0.98, (total_buys, down_levels))
+    check("usdc_balance never goes negative even at full depth", state["usdc_balance"] >= -1e-6,
+          state["usdc_balance"])
+
+
+async def t_spacing_change_remaps_holdings_to_real_cost():
+    # External audit finding (2026-10-18): changing spacing used to leave an existing holding's
+    # level-INDEX key in place while every future price<->level conversion switched to the new
+    # step, silently retargeting its sell price to something unrelated to its real cost
+    # (reproduced live: a $3.10 purchase cost's sell target moved from $3.1012 to $2.4733 on a
+    # spacing change alone, no price move). Fix: remap every holding to level_of(its real cost,
+    # the NEW step), so it keeps meaning "sell one level above where I really bought."
+    old_spacing, new_spacing = 0.125, 0.10
+    old_step = math.log(1 + old_spacing / 100)
+    real_cost = 3.10  # an organic buy's real price
+    buy_level_old = level_of(real_cost, old_step)
+    bot, fake = make_bot(base_state(
+        order_type="market", spacing_pct=old_spacing,
+        open_positions_json={"holdings": {str(buy_level_old): {"qty": 10.0, "cost": real_cost}}},
+        internal_last_level=buy_level_old, internal_spacing_pct=old_spacing,
+    ))
+    fake.state["spacing_pct"] = new_spacing  # changed mid-run, same as the dashboard settings route allows
+    bot.fetch_current_price = lambda: _async_return(real_cost)
+    await bot.tick()
+    state_after = (await bot.sb("GET", f"{core.TABLE_STATE}?id=eq.1"))[0]
+    new_step = math.log(1 + new_spacing / 100)
+    expected_new_level = level_of(real_cost, new_step)
+    new_holdings = state_after["open_positions_json"]["holdings"]
+    check("exactly one holding survives the remap", len(new_holdings) == 1, new_holdings)
+    entry = next(iter(new_holdings.values()))
+    check("the holding's real cost is preserved exactly across the spacing change",
+          abs(entry["cost"] - real_cost) < 1e-9, entry["cost"])
+    check("the holding is remapped to the level implied by its real cost under the NEW spacing, "
+          "not its old key reinterpreted under the new step",
+          str(expected_new_level) in new_holdings, (expected_new_level, new_holdings))
+
+
+async def t_crash_mid_walk_does_not_duplicate_fills_on_resume():
+    # External audit finding (2026-10-18): a crash partway through a multi-level walk used to
+    # leave fills already logged while internal_last_level stayed at the pre-walk value, so the
+    # NEXT tick would replay and re-log the same fills ("20 LIT became 40 LIT without another
+    # price move"). State is now persisted after EACH fill, before logging it, so a crash only
+    # ever risks a missing log row for the fill in progress, never a duplicate.
+    bot, fake = make_bot(base_state(order_type="market", usdc_balance=10000, lit_balance=0))
+    step = math.log(1 + 0.125 / 100)
+    p0 = 10.0
+    await bot.process_price(p0, fake.state)  # baseline, establishes _last_level
+    state = (await bot.sb("GET", f"{core.TABLE_STATE}?id=eq.1"))[0]
+
+    original_update_state = bot.update_state
+    calls = {"n": 0}
+    async def flaky_update_state(patch):
+        calls["n"] += 1
+        if calls["n"] == 2:  # crash on the SECOND fill's state write of a 3-level drop
+            raise RuntimeError("simulated crash mid-walk")
+        await original_update_state(patch)
+    bot.update_state = flaky_update_state
+
+    crashed = False
+    try:
+        await bot.process_price(p0 * math.exp(-3 * step), state)
+    except RuntimeError:
+        crashed = True
+    check("the simulated crash actually happened mid-walk", crashed, crashed)
+
+    bot.update_state = original_update_state
+    buys_after_crash = len([t for t in fake.trades if t["side"] == "buy"])
+    check("exactly one fill succeeded and was persisted before the simulated crash",
+          buys_after_crash == 1, buys_after_crash)
+    state_after_crash = (await bot.sb("GET", f"{core.TABLE_STATE}?id=eq.1"))[0]
+
+    # Resume "after restart": fresh in-memory tracker, same persisted DB state, same target.
+    bot._last_level = int(state_after_crash["internal_last_level"])
+    await bot.process_price(p0 * math.exp(-3 * step), state_after_crash)
+    total_buys = len([t for t in fake.trades if t["side"] == "buy"])
+    check("resuming from the persisted level completes the remaining fills without duplicating "
+          "the one that already succeeded before the crash",
+          total_buys == 3, (buys_after_crash, total_buys))
+
+
 async def t_multi_level_move_fills_every_line_crossed():
     # A fast, big move between two ticks (now a real possibility with live polling instead of
     # candle-by-candle walks) must still fill every line it passed through, not just jump to the
@@ -470,6 +598,7 @@ async def main():
     t_level_math_matches_validated_logic()
     t_levels_for_drawdown_matches_known_values()
     t_order_size_scales_with_capital()
+    t_level_guard_prevents_boundary_noise()
     for t in (t_paired_cycle_buy_then_sell,
               t_initial_seed_is_proportional_to_levels_up,
               t_seeded_positions_carry_the_real_arm_price_as_cost,
@@ -480,6 +609,9 @@ async def main():
               t_compounding_never_underperforms_flat_during_unrealized_drawdown,
               t_compounding_never_resizes_an_already_resting_position,
               t_sub_spacing_noise_never_trades,
+              t_reserve_lasts_the_full_configured_drawdown_depth,
+              t_spacing_change_remaps_holdings_to_real_cost,
+              t_crash_mid_walk_does_not_duplicate_fills_on_resume,
               t_multi_level_move_fills_every_line_crossed,
               t_restart_resumes_from_persisted_level_not_a_fresh_rearm,
               t_spacing_change_triggers_rearm,
