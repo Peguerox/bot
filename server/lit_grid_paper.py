@@ -22,12 +22,21 @@ Grid math is a direct, line-for-line port of the already-validated research scri
     own grid simulation).
   - LIMIT fills are capped at 25% of that candle's real traded volume (same assumption validated
     this session); MARKET fills pay a fixed ~0.103% assumed round-trip spread cost instead.
-  - completed pairs are matched LIFO against the opposite side's open stack (buy pairs with the
-    most recent unpaired sell, and vice versa) -- the correct accounting method identified this
-    session, not the naive "crossings / 2" approximation from earlier in the research.
-  - order_size_lit is capital_usd / (sum of price at each configured down-level) -- the same
-    "full worst-case reserve against levels_down" sizing used throughout this session's manual
+  - a sell closes the most-recently-opened unpaired buy (LIFO) -- the correct accounting method
+    identified this session, not the naive "crossings / 2" approximation from earlier research.
+  - order_size_lit is capital / (sum of price at each configured down-level) -- the same "full
+    worst-case reserve against levels_down" sizing used throughout this session's manual
     calculations, so the panel's capital number means what it meant in chat.
+
+Real balance accounting (2026-10-18 rework, after a direct Bitsgap screenshot comparison): this
+is a Long spot grid -- starts 100% cash (usdc_balance = capital_usd, lit_balance = 0), buys first,
+and only ever sells LIT it actually holds (no naked shorts). Every fill is constrained by the real
+balance, not re-derived from the full original capital every tick. Three numbers are tracked
+separately, matching Bitsgap's own panel: Investment (capital_usd, fixed), Bot profit
+(bot_profit_usd, realized round-trips only), and Total PNL (current real account value --
+usdc_balance + lit_balance at the live price -- minus Investment, which also captures whatever is
+sitting unsold in LIT). These can diverge a lot and that divergence is the whole point: Bot profit
+can look fine while Total PNL is deeply negative if the bot is holding LIT bought higher than now.
 """
 import asyncio
 import math
@@ -185,15 +194,30 @@ class LitGridPaper:
 
     # ── One grid tick: process every new closed candle since the last tick ─────────────────────
     async def process_candle(self, candle, state):
+        """Real balance accounting (2026-10-18 rework, direct request after a Bitsgap screenshot
+        comparison): Bitsgap tracks three separate numbers -- Investment (fixed), Bot profit
+        (realized round-trip gains only), and Total PNL (investment vs. current real account
+        value, including whatever's sitting unsold in the base asset). The previous version only
+        tracked the first kind and let buys/sells happen regardless of actual balance -- order
+        size was recomputed from the FULL original capital every tick, so the sim could spend far
+        more than the configured capital once enough buys stacked up, and sells could open with
+        no LIT actually held (a free virtual short). Fixed here: real usdc_balance/lit_balance
+        are the source of truth, every fill is constrained by what's actually held, and a sell
+        with no held inventory simply does not execute (no naked shorts -- this is a Long spot
+        grid, same as Bitsgap's default: start 100% cash, buy first, only ever sell what was
+        actually bought)."""
         spacing_pct = float(state["spacing_pct"])
         step = math.log(1 + spacing_pct / 100.0)
         order_type = state["order_type"]
-        capital = float(state["current_capital_usd"] if state["compounding_enabled"] else state["capital_usd"])
+        usdc_balance = float(state["usdc_balance"])
+        lit_balance = float(state["lit_balance"])
+        bot_profit_usd = float(state["bot_profit_usd"])
+        total_value = usdc_balance + lit_balance * candle["c"]
+        capital = total_value if state["compounding_enabled"] else float(state["capital_usd"])
         order_size = compute_order_size_lit(capital, candle["c"], spacing_pct, int(state["levels_down"]))
 
         positions = state.get("open_positions_json") or {"buys": [], "sells": []}
         open_buys = positions.get("buys", [])
-        open_sells = positions.get("sells", [])
 
         path = candle_path(candle)
         if self._last_level is None:
@@ -201,24 +225,23 @@ class LitGridPaper:
         lvl = self._last_level
 
         # Fill budget for this candle (limit only -- market fills are unlimited, taker always
-        # gets filled). Correctness-critical: when the budget runs out mid-candle, `lvl` must
-        # stop exactly where fills stopped, NOT jump ahead to match the real close price. Every
-        # completed pair in this design is supposed to be exactly one adjacent level apart (the
-        # LIFO stack is built from a continuous level walk) -- letting `lvl` outrun the fills
-        # actually taken broke that invariant and produced the non-adjacent, sometimes-negative
-        # pairs found live 2026-10-18 (trade entry/exit six levels apart instead of one). The
-        # unfilled remainder is simply deferred to a later tick, like a real resting order still
-        # waiting for enough volume to fill against.
+        # gets filled). Correctness-critical: when the budget OR the real balance runs out
+        # mid-candle, `lvl` must stop exactly where fills stopped, NOT jump ahead to match the
+        # real close price. Every completed pair in this design is supposed to be exactly one
+        # adjacent level apart (the LIFO stack is built from a continuous level walk) -- letting
+        # `lvl` outrun the fills actually taken broke that invariant and produced non-adjacent,
+        # sometimes-negative pairs (found live 2026-10-18). The unfilled remainder is simply
+        # deferred to a later tick, like a real resting order still waiting to fill.
         fill_budget = None
         if order_type == "limit":
             fill_budget = int((PARTICIPATION * (candle.get("v") or 0)) / order_size) if order_size > 0 else 0
         fills_used = 0
+        blocked = False  # ran out of volume budget or real USDC -- stop advancing entirely
 
-        realized_pnl = 0.0
         closed_at = datetime.fromtimestamp(candle["t"] / 1000, tz=timezone.utc).isoformat()
 
         def budget_left():
-            return fill_budget is None or fills_used < fill_budget
+            return not blocked and (fill_budget is None or fills_used < fill_budget)
 
         for i in range(1, len(path)):
             if not budget_left():
@@ -231,38 +254,48 @@ class LitGridPaper:
                 else:
                     lvl -= 1
                     side, price = "buy", math.exp(lvl * step)
-                fills_used += 1
+
                 if side == "sell":
                     if open_buys:
                         entry = open_buys.pop()
-                        pnl = (price - entry["price"]) * entry["qty"]
+                        qty = entry["qty"]
+                        proceeds = price * qty
+                        pnl = (price - entry["price"]) * qty
                         if order_type == "market":
-                            pnl -= (MARKET_ROUNDTRIP_COST_PCT / 100.0) * ((price + entry["price"]) / 2) * entry["qty"]
-                        realized_pnl += pnl
+                            cost = (MARKET_ROUNDTRIP_COST_PCT / 100.0) * ((price + entry["price"]) / 2) * qty
+                            proceeds -= cost
+                            pnl -= cost
+                        lit_balance -= qty
+                        usdc_balance += proceeds
+                        bot_profit_usd += pnl
+                        fills_used += 1
                         await self.log_trade("buy_then_sell", entry["opened_at"], closed_at,
-                                              entry["price"], price, entry["qty"], pnl, order_type)
-                    else:
-                        open_sells.append({"price": price, "qty": order_size, "opened_at": closed_at})
+                                              entry["price"], price, qty, pnl, order_type)
+                    # No held LIT to sell -- there is simply no resting order at this level (a
+                    # Long grid never pre-arms a sell it can't back with real inventory). Not a
+                    # capital constraint, so `lvl` still advances; only the fill is skipped.
                 else:
-                    if open_sells:
-                        entry = open_sells.pop()
-                        pnl = (entry["price"] - price) * entry["qty"]
-                        if order_type == "market":
-                            pnl -= (MARKET_ROUNDTRIP_COST_PCT / 100.0) * ((price + entry["price"]) / 2) * entry["qty"]
-                        realized_pnl += pnl
-                        await self.log_trade("sell_then_buy", entry["opened_at"], closed_at,
-                                              entry["price"], price, entry["qty"], pnl, order_type)
-                    else:
+                    cost = price * order_size
+                    if usdc_balance >= cost:
+                        usdc_balance -= cost
+                        lit_balance += order_size
                         open_buys.append({"price": price, "qty": order_size, "opened_at": closed_at})
+                        fills_used += 1
+                    else:
+                        # Out of real USDC -- genuinely can't fill, must stop here (like running
+                        # out of the volume budget), not skip-and-continue.
+                        blocked = True
+                        break
 
         self._last_level = lvl
-        new_capital = float(state["current_capital_usd"]) + realized_pnl if state["compounding_enabled"] else float(state["current_capital_usd"])
         await self.update_state({
             "live_price": candle["c"],
             "live_level": lvl,
             "order_size_lit": order_size,
-            "current_capital_usd": new_capital,
-            "open_positions_json": {"buys": open_buys, "sells": open_sells},
+            "usdc_balance": usdc_balance,
+            "lit_balance": lit_balance,
+            "bot_profit_usd": bot_profit_usd,
+            "open_positions_json": {"buys": open_buys, "sells": []},
             "updated_at": datetime.now(timezone.utc).isoformat(),
         })
 

@@ -15,7 +15,9 @@ export async function POST() {
   await sb.from("lighter_lit_grid_trades").delete().gt("id", 0);
   await sb.from("lighter_lit_grid_runs").delete().gt("id", 0);
   await sb.from("lighter_lit_grid_state").update({
-    current_capital_usd: state?.capital_usd ?? 10000,
+    usdc_balance: state?.capital_usd ?? 10000,
+    lit_balance: 0,
+    bot_profit_usd: 0,
     open_positions_json: { buys: [], sells: [] },
     live_level: null,
     order_size_lit: null,

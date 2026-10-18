@@ -62,7 +62,7 @@ def candle(t, o, h, l, c, v):
 def base_state(**over):
     st = {
         "spacing_pct": 0.125, "levels_up": 15, "levels_down": 15,
-        "capital_usd": 10000, "current_capital_usd": 10000,
+        "capital_usd": 10000, "usdc_balance": 10000, "lit_balance": 0, "bot_profit_usd": 0,
         "compounding_enabled": False, "order_type": "limit",
         "order_size_lit": None, "live_price": None, "live_level": None,
         "open_positions_json": {"buys": [], "sells": []}, "enabled": True,
@@ -92,17 +92,54 @@ def t_order_size_scales_with_capital():
 async def t_paired_cycle_buy_then_sell():
     bot, fake = make_bot(base_state(order_type="market"))  # market: no participation cap, simpler to assert on
     state = fake.state
+    start_usdc = state["usdc_balance"]
     # one down-move then one up-move -- should open a buy, then pair it with a sell for a win
     c1 = candle(1000, 10.0, 10.0, 9.9, 9.9, 1000)   # price drops one level -> opens a buy
     c2 = candle(2000, 9.9, 10.0, 9.9, 10.0, 1000)   # price rises back -> should pair with the buy
     await bot.process_candle(c1, state)
-    state = await bot.sb("GET", f"{core.TABLE_STATE}?id=eq.1")
-    state = state[0]
-    opens_after_drop = len(state["open_positions_json"]["buys"]) + len(state["open_positions_json"]["sells"])
+    state = (await bot.sb("GET", f"{core.TABLE_STATE}?id=eq.1"))[0]
+    check("a buy fill spends real USDC", state["usdc_balance"] < start_usdc, state["usdc_balance"])
+    check("a buy fill credits real LIT", state["lit_balance"] > 0, state["lit_balance"])
     await bot.process_candle(c2, state)
+    state = (await bot.sb("GET", f"{core.TABLE_STATE}?id=eq.1"))[0]
     check("a drop then a recovery produces at least one completed pair", len(fake.trades) >= 1, fake.trades)
     if fake.trades:
         check("completed pair is profitable (bought low, sold high)", fake.trades[0]["pnl_usd"] > 0, fake.trades[0])
+    check("the matching sell returns lit_balance back to zero", abs(state["lit_balance"]) < 1e-9, state["lit_balance"])
+    check("bot_profit_usd reflects the realized gain", state["bot_profit_usd"] > 0, state["bot_profit_usd"])
+    check("usdc_balance ends above where it started (net profit, back in cash)",
+          state["usdc_balance"] > start_usdc, (start_usdc, state["usdc_balance"]))
+
+
+async def t_sell_skipped_without_inventory_no_naked_short():
+    # Direct correction (2026-10-18, after a Bitsgap screenshot comparison): this is a Long spot
+    # grid. A sell event with no LIT actually held must not execute at all -- no free virtual
+    # shorts. lvl should still advance past it (there's genuinely no resting order there, unlike
+    # running out of USDC which defers).
+    bot, fake = make_bot(base_state(order_type="market", lit_balance=0))
+    state = fake.state
+    # price rises with nothing bought yet -- every "sell" event here should just be skipped
+    c = candle(1000, 10.0, 10.1, 10.0, 10.1, 1000)
+    await bot.process_candle(c, state)
+    check("no trade is logged when there is no LIT to sell", len(fake.trades) == 0, fake.trades)
+    state = (await bot.sb("GET", f"{core.TABLE_STATE}?id=eq.1"))[0]
+    check("usdc_balance is untouched (no phantom proceeds)", state["usdc_balance"] == 10000, state["usdc_balance"])
+    check("lit_balance stays at zero (no phantom short position)", state["lit_balance"] == 0, state["lit_balance"])
+
+
+async def t_buy_blocked_when_usdc_runs_out():
+    # The original bug this whole rework fixes: order size was recomputed from the FULL capital
+    # every tick regardless of how much had already been spent, so the sim could spend far more
+    # than the configured investment. Now every buy fill must be affordable from real usdc_balance.
+    tiny_usdc = 50.0  # enough for roughly one fill at this price/order-size, not a big multi-level drop
+    bot, fake = make_bot(base_state(order_type="market", usdc_balance=tiny_usdc))
+    state = fake.state
+    c = candle(1000, 10.0, 10.0, 9.0, 9.0, 1_000_000)  # a 10-level drop, big enough to exhaust $50 fast
+    await bot.process_candle(c, state)
+    state = (await bot.sb("GET", f"{core.TABLE_STATE}?id=eq.1"))[0]
+    check("usdc_balance never goes negative", state["usdc_balance"] >= 0, state["usdc_balance"])
+    check("the bot's level tracker stopped short of the full drop (deferred, not spent beyond capital)",
+          bot._last_level > level_of(9.0, math.log(1 + 0.125 / 100)), bot._last_level)
 
 
 async def t_limit_fills_respect_participation_cap():
@@ -115,17 +152,23 @@ async def t_limit_fills_respect_participation_cap():
     check("participation cap blocks fills when volume is tiny relative to order size", len(fake.trades) == 0, fake.trades)
 
 
-async def t_compounding_updates_current_capital():
-    bot, fake = make_bot(base_state(order_type="market", compounding_enabled=True))
-    state = fake.state
+async def t_compounding_recomputes_order_size_from_real_total_value():
+    # Compounding now reads directly off real balances (usdc_balance + lit_balance*live_price)
+    # instead of a separate abstract running total -- so order size should grow as the real
+    # account value grows from realized profit, and stay flat (capital_usd) when compounding is off.
+    bot_c, fake_c = make_bot(base_state(order_type="market", compounding_enabled=True))
+    bot_f, fake_f = make_bot(base_state(order_type="market", compounding_enabled=False))
     c1 = candle(1000, 10.0, 10.0, 9.9, 9.9, 1000)
     c2 = candle(2000, 9.9, 10.0, 9.9, 10.0, 1000)
-    await bot.process_candle(c1, state)
-    state = (await bot.sb("GET", f"{core.TABLE_STATE}?id=eq.1"))[0]
-    await bot.process_candle(c2, state)
-    state = (await bot.sb("GET", f"{core.TABLE_STATE}?id=eq.1"))[0]
-    check("compounding moves current_capital_usd away from the seed after a profitable pair",
-          state["current_capital_usd"] != 10000, state["current_capital_usd"])
+    for bot, fake in ((bot_c, fake_c), (bot_f, fake_f)):
+        await bot.process_candle(c1, fake.state)
+        state = (await bot.sb("GET", f"{core.TABLE_STATE}?id=eq.1"))[0]
+        await bot.process_candle(c2, state)
+
+    order_size_compounding = fake_c.state["order_size_lit"]
+    order_size_flat = fake_f.state["order_size_lit"]
+    check("compounding grows order size after a profitable pair vs. the flat-capital baseline",
+          order_size_compounding > order_size_flat, (order_size_compounding, order_size_flat))
 
 
 async def t_tick_error_never_propagates():
@@ -233,8 +276,10 @@ async def main():
     t_level_math_matches_validated_logic()
     t_order_size_scales_with_capital()
     for t in (t_paired_cycle_buy_then_sell,
+              t_sell_skipped_without_inventory_no_naked_short,
+              t_buy_blocked_when_usdc_runs_out,
               t_limit_fills_respect_participation_cap,
-              t_compounding_updates_current_capital,
+              t_compounding_recomputes_order_size_from_real_total_value,
               t_cold_start_does_not_replay_backlog,
               t_participation_cap_never_produces_a_nonadjacent_pair,
               t_tick_error_never_propagates):

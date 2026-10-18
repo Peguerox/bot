@@ -1426,10 +1426,21 @@ function LitGridPaperPanel({
   const lockAge = st?.lock_heartbeat ? nowTick - new Date(st.lock_heartbeat).getTime() : null;
   const workerAlive = lockAge != null && lockAge < 90_000; // ticks every 60s, generous margin
 
+  // Three separate numbers, same breakdown Bitsgap shows (confirmed via screenshot 2026-10-18):
+  // Investment (fixed), Bot profit (realized round-trips only), Total PNL (investment vs. real
+  // current account value -- USDC held + LIT held at the live price, including whatever hasn't
+  // been sold back yet). These can diverge a lot: Bot profit can look fine while Total PNL is
+  // deeply negative if the bot is sitting on LIT bought at higher prices than now.
   const capitalUsd = st?.capital_usd ?? 10000;
-  const currentCapital = st?.current_capital_usd ?? capitalUsd;
-  const totalPnl = currentCapital - capitalUsd;
+  const usdcBalance = st?.usdc_balance ?? capitalUsd;
+  const litBalance = st?.lit_balance ?? 0;
+  const livePrice = st?.live_price ?? 0;
+  const litValueUsd = litBalance * livePrice;
+  const totalValue = usdcBalance + litValueUsd;
+  const botProfit = st?.bot_profit_usd ?? 0;
+  const totalPnl = totalValue - capitalUsd;
   const totalPnlPct = capitalUsd > 0 ? (totalPnl / capitalUsd) * 100 : 0;
+  const botProfitPct = capitalUsd > 0 ? (botProfit / capitalUsd) * 100 : 0;
 
   const [spacingIn, setSpacingIn] = useState("");
   const [upIn, setUpIn] = useState("");
@@ -1522,12 +1533,36 @@ function LitGridPaperPanel({
           {[...Array(6)].map((_, i) => <div key={i} className="h-16 bg-gray-800 rounded-lg" />)}
         </div>
       ) : (
-        <div className="grid grid-cols-2 gap-2">
+        <div className="grid grid-cols-3 gap-2">
           <Stat
-            label="Capital"
-            value={`$${currentCapital.toFixed(2)}`}
-            sub={`${totalPnl >= 0 ? "+" : ""}$${totalPnl.toFixed(2)} (${totalPnlPct >= 0 ? "+" : ""}${totalPnlPct.toFixed(1)}%)`}
+            label="Investment"
+            value={`$${capitalUsd.toFixed(2)}`}
+            sub="fixed, set via Settings"
+            color="text-gray-300"
+          />
+          <Stat
+            label="Bot Profit (realized)"
+            value={`${botProfit >= 0 ? "+" : ""}$${botProfit.toFixed(2)}`}
+            sub={`${botProfitPct >= 0 ? "+" : ""}${botProfitPct.toFixed(2)}% · completed cycles only`}
+            color={botProfit >= 0 ? "text-green-400" : "text-red-400"}
+          />
+          <Stat
+            label="Total PNL"
+            value={`${totalPnl >= 0 ? "+" : ""}$${totalPnl.toFixed(2)}`}
+            sub={`${totalPnlPct >= 0 ? "+" : ""}${totalPnlPct.toFixed(1)}% · incl. unsold LIT`}
             color={totalPnl >= 0 ? "text-green-400" : "text-red-400"}
+          />
+          <Stat
+            label="USDC Balance"
+            value={`$${usdcBalance.toFixed(2)}`}
+            sub="cash available to buy"
+            color="text-gray-300"
+          />
+          <Stat
+            label="LIT Balance"
+            value={`${litBalance.toFixed(2)} LIT`}
+            sub={`~$${litValueUsd.toFixed(2)} at live price`}
+            color="text-gray-300"
           />
           <Stat
             label="Live Price"
@@ -1535,6 +1570,10 @@ function LitGridPaperPanel({
             sub={st?.live_level != null ? `level ${st.live_level}` : "—"}
             color="text-gray-300"
           />
+        </div>
+      )}
+      {!loading && (
+        <div className="grid grid-cols-2 gap-2">
           <Stat
             label="Order Size"
             value={st?.order_size_lit != null ? `${Number(st.order_size_lit).toFixed(2)} LIT` : "—"}

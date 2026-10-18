@@ -13,7 +13,7 @@ const LIMITS = {
 
 export async function POST(req: NextRequest) {
   const body = await req.json();
-  const out: Record<string, number | string | boolean> = {};
+  const out: Record<string, number | string | boolean | { buys: never[]; sells: never[] }> = {};
 
   for (const [key, col] of [
     ["spacingPct", "spacing_pct"],
@@ -51,11 +51,15 @@ export async function POST(req: NextRequest) {
     out["compounding_enabled"] = body.compoundingEnabled;
   }
 
-  // Changing the capital seed while compounding is on would silently overwrite accumulated
-  // profit -- resetting current_capital_usd to match is the only sane behavior, same idea as
-  // every other bot's reset-on-settings-change guards.
+  // Changing the capital while holding a position doesn't have a clean meaning (what would the
+  // held LIT's cost basis even become?) -- resetting to a fresh 100% cash start at the new
+  // capital is the only sane behavior, same idea as every other bot's reset-on-settings-change
+  // guards. Matches clear-history's reset.
   if (out["capital_usd"] !== undefined) {
-    out["current_capital_usd"] = out["capital_usd"];
+    out["usdc_balance"] = out["capital_usd"];
+    out["lit_balance"] = 0;
+    out["bot_profit_usd"] = 0;
+    out["open_positions_json"] = { buys: [], sells: [] };
   }
 
   if (Object.keys(out).length === 0) {
