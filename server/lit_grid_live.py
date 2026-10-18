@@ -277,9 +277,11 @@ the old behavior.
 Trailing up (direct request: "5 up + 15 down = 20 orders all the time"): whenever fewer than
 levels_up lots are held (sells filled on a rise), the missing lots are market-bought onto the
 lines just above the highest held one, so their sells land at the new top; the grid bottom
-moves up with the top and the lowest buys are cancelled, keeping levels_up + levels_down
-orders. A buy fill only ever creates its sell -- never another buy. No trailing down: on a drop
-buys fill and their sells appear above them, so spending is capped by the buys in the grid.
+moves up with the top and the lowest buys are cancelled. Trailing down: buys always sit on
+the levels_down lines directly below the lowest held lot (or below price when nothing is held),
+so as buys fill on a drop one new buy is added at the bottom; each filled buy gets its sell one
+line up. A held line is never bought again until its sell fills. Buys are funded by capital,
+then the cover-drop bucket; when both are used up the bot logs no_funds_for_buy once and waits.
 
 Nothing in this codebase has placed a real LIMIT order before this (stoch_bot_core.py's
 place_order only ever sends MARKET orders; native SL/TP are the only conditional orders that
@@ -1095,8 +1097,13 @@ class LitGridLive:
                 occupied = held_lines | pending_up
                 start = max(max(occupied) + 1, cur_lvl) if occupied else cur_lvl
                 trail_lines = [ln for ln in range(start, start + need) if ln not in snap.buy_levels]
-        top_lines = held_lines | pending_up | set(trail_lines)
-        grid_bottom = (max(top_lines) + 1 - levels_up - levels_down) if top_lines else (cur_lvl - levels_down)
+        # Buys always sit on the levels_down lines directly below the empty line next to price
+        # (trailing down, direct request): the empty line is the lowest held lot's line, or with
+        # nothing held, the line at price. As buys fill on a drop the window moves down and a
+        # new buy is added at the bottom; as sells fill on a rise it moves up and the lowest buy
+        # is cancelled. A held line never gets a second buy.
+        buy_top = min(min(held_lines) - 1, cur_lvl) if held_lines else cur_lvl - 1
+        grid_bottom = buy_top - levels_down + 1
         if anchored and entries_allowed:
             for rows in resting.values():
                 for r in rows:
@@ -1232,11 +1239,9 @@ class LitGridLive:
                     snap.buy_levels.add(lvl)
                     available_usdc -= cost
                     base_capital_remaining -= from_base
+                    self._no_funds_logged = False
                 if anchored:
-                    # One empty line next to price, buys on every line below it down to the fixed
-                    # bottom: the empty line is the lowest held lot's line (its sell sits one line
-                    # up), or with nothing held, the line at price.
-                    top = min(min(holdings) - 1, cur_lvl) if holdings else cur_lvl - 1
+                    top = buy_top
                     bottom = grid_bottom
                 else:
                     top = cur_lvl - 1
@@ -1253,6 +1258,13 @@ class LitGridLive:
                     limit_price = round_price(anchor * math.exp(lvl * step))
                     cost = limit_price * order_size
                     if cost > available_usdc:
+                        if not getattr(self, "_no_funds_logged", False):
+                            # Capital and the cover-drop bucket are both used up: stay quiet,
+                            # keep what's in the grid, wait for sells to free money.
+                            await self.log_run("no_funds_for_buy", {
+                                "line": lvl, "needed": round(cost, 4),
+                                "available": round(available_usdc, 4)})
+                            self._no_funds_logged = True
                         break
                     if max_open_buys is not None:
                         reserved = await self._reserve_buy_allowance(lifetime_buy_count)

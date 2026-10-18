@@ -1128,9 +1128,10 @@ async def t_grid_after_cold_start_is_exactly_spacing_from_start_price():
           buys == want_buys, (buys, want_buys))
 
 
-async def t_anchored_grid_keeps_exactly_levels_up_plus_levels_down_orders():
-    # Direct request: 5 up + 15 down = 20 orders. Live bug: after the buy at line -1 filled, the
-    # ladder slid to -2..-16 and the old -16 buy stayed -- 21 orders.
+async def t_trailing_down_keeps_levels_down_buys_below_price():
+    # Direct request (trailing down): after the buy at line -1 fills, the 15 buys move down one
+    # line (-2..-16) so there are always levels_down buys below price; -1 itself is held and
+    # never bought again.
     P = 2.87055
     held = [{"id": 10 + k, "level": k, "side": "buy", "status": "filled", "filled_qty": 2.16,
              "filled_price": 2.8706, "size": 2.16} for k in range(-1, 5)]
@@ -1144,15 +1145,9 @@ async def t_anchored_grid_keeps_exactly_levels_up_plus_levels_down_orders():
                                      usdc_balance=500.0, grid_anchor_price=P),
                           orders=held + sells + buys)
     await bot.maintain_window(fake.state, round(P / 1.00125, 5))
-    open_rows = [o for o in fake.orders if o["status"] in ("open", "pending")]
-    check("the stray buy below the bottom line (-16) is cancelled",
-          next(o for o in fake.orders if o["side"] == "buy" and o["level"] == -16)["status"] == "cancel_requested",
-          [o for o in fake.orders if o["level"] == -16])
-    check("no new buy is placed below -15 or on the held line",
-          not any(o["side"] == "buy" and o["status"] in ("open", "pending") and (o["level"] < -15 or o["level"] == -1)
-                  for o in fake.orders), open_rows)
-    check("exactly 20 orders remain (6 sells + 14 buys while one lot is held at -1)",
-          len(open_rows) == 20, len(open_rows))
+    open_buys = sorted(o["level"] for o in fake.orders if o["side"] == "buy" and o["status"] in ("open", "pending"))
+    check("15 buys stay below price, on lines -2..-16", open_buys == list(range(-16, -1)), open_buys)
+    check("no buy on the held line -1", -1 not in open_buys, open_buys)
 
 
 def _grid_rows(P, held, sells_for, buys_at, sold=()):
@@ -1177,8 +1172,9 @@ def _grid_rows(P, held, sells_for, buys_at, sold=()):
     return rows
 
 
-async def t_a_buy_fill_creates_only_its_sell_never_another_buy():
-    # Direct rule: the moment a buy fills, place its sell one line up -- never a buy after a buy.
+async def t_a_buy_fill_creates_its_sell_and_one_bottom_buy_never_the_same_line():
+    # A buy fill at -1 creates its sell one line up (line 0) and, trailing down, one new buy at
+    # the bottom (-16) -- never another buy on the filled line itself, never a market buy.
     P = 2.87055
     rows = _grid_rows(P, held=range(-1, 5), sells_for=range(0, 5), buys_at=range(-15, -1))
     bot, fake = make_bot(base_state(levels_up=5, levels_down=15, order_size_lit=2.16,
@@ -1186,13 +1182,44 @@ async def t_a_buy_fill_creates_only_its_sell_never_another_buy():
     before = {o["id"] for o in fake.orders}
     await bot.maintain_window(fake.state, round(P * 1.00125 ** -1 * 0.99995, 5))
     new = [o for o in fake.orders if o["id"] not in before]
-    check("a buy fill creates exactly one new order", len(new) == 1, new)
-    check("that order is the sell one line up from the filled buy",
-          new and new[0]["side"] == "sell" and new[0]["closes_level"] == -1
-          and abs(new[0]["limit_price"] - core.round_price(P)) < 1e-9, new)
-    check("no buy is created after a buy fill", not any(o["side"] == "buy" for o in new), new)
-    check("no market buy is sent after a buy fill", bot.client.placed == [] or
+    check("the filled buy gets its sell one line up",
+          any(o["side"] == "sell" and o["closes_level"] == -1
+              and abs(o["limit_price"] - core.round_price(P)) < 1e-9 for o in new), new)
+    check("trailing down adds exactly one buy, at the bottom (-16)",
+          sorted(o["level"] for o in new if o["side"] == "buy") == [-16], new)
+    check("no market buy is sent after a buy fill",
           all("order_type" in kw for kw in bot.client.placed), bot.client.placed)
+
+
+async def t_never_buys_the_same_line_twice_while_price_bounces():
+    # Direct concern: buy at -1 fills, price bounces up a bit (not enough to sell) and comes back
+    # down -- the bot must not buy -1 again until that lot's sell fills.
+    P = 2.87055
+    rows = _grid_rows(P, held=range(-1, 5), sells_for=range(-1, 5), buys_at=range(-16, -1))
+    bot, fake = make_bot(base_state(levels_up=5, levels_down=15, order_size_lit=2.16,
+                                     usdc_balance=500.0, grid_anchor_price=P), orders=rows)
+    for px in (P * 1.00125 ** -0.5, P * 1.00125 ** -1.2, P * 1.00125 ** -0.3, P * 1.00125 ** -1.05):
+        await bot.maintain_window(fake.state, round(px, 5))
+    buys_on_minus1 = [o for o in fake.orders if o["side"] == "buy" and o["level"] == -1]
+    check("line -1 is bought exactly once through the bounce", len(buys_on_minus1) == 1, buys_on_minus1)
+
+
+async def t_no_funds_logs_once_and_stays_quiet():
+    P = 2.87055
+    rows = _grid_rows(P, held=range(-1, 5), sells_for=range(-1, 5), buys_at=range(-15, -1))
+    bot, fake = make_bot(base_state(levels_up=5, levels_down=15, order_size_lit=2.16,
+                                     usdc_balance=2.0, capital_usd=500, grid_anchor_price=P), orders=rows)
+    logged = []
+    orig = bot.log_run
+    async def spy(action, detail):
+        logged.append(action)
+        await orig(action, detail)
+    bot.log_run = spy
+    before = len(fake.orders)
+    await bot.maintain_window(fake.state, round(P / 1.00125 ** 1.05, 5))
+    await bot.maintain_window(fake.state, round(P / 1.00125 ** 1.05, 5))
+    check("no buy is placed without money", len(fake.orders) == before, fake.orders[before:])
+    check("'no money' is logged once, not every tick", logged.count("no_funds_for_buy") == 1, logged)
 
 
 async def t_trailing_up_keeps_levels_up_sells_and_twenty_orders():
@@ -1833,8 +1860,10 @@ async def main():
               t_maintain_window_cold_start_fills_via_real_market_buys,
               t_levels_up_and_levels_down_are_independent,
         t_grid_after_cold_start_is_exactly_spacing_from_start_price,
-        t_anchored_grid_keeps_exactly_levels_up_plus_levels_down_orders,
-        t_a_buy_fill_creates_only_its_sell_never_another_buy,
+        t_trailing_down_keeps_levels_down_buys_below_price,
+        t_a_buy_fill_creates_its_sell_and_one_bottom_buy_never_the_same_line,
+        t_never_buys_the_same_line_twice_while_price_bounces,
+        t_no_funds_logs_once_and_stays_quiet,
         t_trailing_up_keeps_levels_up_sells_and_twenty_orders,
         t_trailing_up_never_double_buys_while_a_market_buy_is_in_flight,
               t_maintain_window_cold_start_budget_uses_real_price_not_theoretical_level_price,
