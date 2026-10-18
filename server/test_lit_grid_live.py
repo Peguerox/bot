@@ -121,10 +121,11 @@ class FakeOrderApi:
 
 
 class FakeAsset:
-    def __init__(self, symbol, balance, locked_balance=0):
+    def __init__(self, symbol, balance, locked_balance=0, margin_balance=None):
         self.symbol = symbol
         self.balance = balance
         self.locked_balance = locked_balance
+        self.margin_balance = margin_balance
 
 
 class FakeAccount:
@@ -449,6 +450,27 @@ async def t_balance_check_fails_closed_on_the_very_first_call():
     check("an unverifiable balance on the very first check fails CLOSED, not open", safe is False, safe)
 
 
+async def t_real_balances_prefers_margin_balance_over_plain_balance():
+    # Live incident, 2026-10-18: this account has margin_mode="enabled" -- its real $544.55 sat
+    # entirely in margin_balance while the plain `balance` field read "0.000000". The bot must
+    # read margin_balance as the authoritative figure, not a zero-fallback guess.
+    bot, fake = make_bot(base_state(), assets=[
+        FakeAsset("USDC", balance=0.0, locked_balance=0.0, margin_balance=544.549261262078),
+    ])
+    usdc, lit = await bot.real_balances()
+    check("margin_balance is read as the real USDC total when present, not the empty plain balance",
+          abs(usdc - 544.549261262078) < 1e-6, usdc)
+
+
+async def t_real_balances_falls_back_to_plain_balance_without_margin():
+    bot, fake = make_bot(base_state(), assets=[
+        FakeAsset("LIT", balance=1.70, locked_balance=0.30),  # no margin_balance -- plain spot asset
+    ])
+    usdc, lit = await bot.real_balances()
+    check("an asset with no margin_balance falls back to balance+locked, as before",
+          abs(lit - 2.00) < 1e-9, lit)
+
+
 # ── Window maintenance ───────────────────────────────────────────────────────────────────────────
 
 async def t_maintain_window_places_buys_in_the_active_down_window():
@@ -735,6 +757,8 @@ async def main():
               t_balance_divergence_pauses_new_orders,
               t_balance_matches_allows_new_orders,
               t_balance_check_fails_closed_on_the_very_first_call,
+              t_real_balances_prefers_margin_balance_over_plain_balance,
+              t_real_balances_falls_back_to_plain_balance_without_margin,
               t_maintain_window_places_buys_in_the_active_down_window,
               t_maintain_window_places_sells_for_held_levels,
               t_maintain_window_never_submits_buy_and_sell_at_the_same_level_in_one_tick,
