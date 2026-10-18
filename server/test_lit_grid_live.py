@@ -151,11 +151,12 @@ class FakeOrderApi:
 
 
 class FakeAsset:
-    def __init__(self, symbol, balance, locked_balance=0, margin_balance=None):
+    def __init__(self, symbol, balance, locked_balance=0, margin_balance=None, margin_mode=None):
         self.symbol = symbol
         self.balance = balance
         self.locked_balance = locked_balance
         self.margin_balance = margin_balance
+        self.margin_mode = margin_mode or ("enabled" if margin_balance is not None else "disabled")
 
 
 class FakeAccount:
@@ -462,6 +463,23 @@ async def t_real_balances_prefers_margin_balance_over_plain_balance():
     usdc, lit = await bot.real_balances()
     check("margin_balance is read as the real USDC total when present",
           abs(usdc - 544.549261262078) < 1e-6, usdc)
+
+
+async def t_real_balances_reads_non_margin_lit_from_balance():
+    # Exact shape returned live 2026-10-18 while holding 12.96 LIT, all of it resting in sells.
+    bot, fake = make_bot(base_state(), assets=[
+        FakeAsset("LIT", balance="12.96000000", locked_balance="12.96000000",
+                  margin_balance="0.00000000", margin_mode="disabled"),
+        FakeAsset("USDC", balance="0.000000", locked_balance="85.889808",
+                  margin_balance="462.727611262078", margin_mode="enabled"),
+    ])
+    usdc, lit = await bot.real_balances()
+    check("a non-margin LIT balance is read from balance, not its always-zero margin_balance",
+          abs(lit - 12.96) < 1e-9, lit)
+    check("locked LIT is part of balance, never added on top of it",
+          abs(lit - 12.96) < 1e-9, lit)
+    check("USDC in margin mode is still read from margin_balance",
+          abs(usdc - 462.727611262078) < 1e-9, usdc)
 
 
 # ── Window maintenance ───────────────────────────────────────────────────────────────────────────
@@ -1600,6 +1618,7 @@ async def main():
               t_balance_divergence_pauses_new_orders,
               t_balance_check_fails_closed_on_the_very_first_call,
               t_real_balances_prefers_margin_balance_over_plain_balance,
+              t_real_balances_reads_non_margin_lit_from_balance,
               t_maintain_window_places_buys_in_the_active_down_window,
               t_maintain_window_sell_price_is_exactly_one_step_above_real_cost,
               t_maintain_window_cancels_conflicting_buy_and_defers_the_sell,

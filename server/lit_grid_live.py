@@ -744,14 +744,15 @@ class LitGridLive:
         usdc, lit = 0.0, 0.0
         for asset in (getattr(acct, "assets", None) or []):
             symbol = getattr(asset, "symbol", None)
-            margin = getattr(asset, "margin_balance", None)
-            if margin is not None:
-                try:
-                    total = float(margin)
-                except (TypeError, ValueError):
-                    total = float(asset.balance or 0) + float(asset.locked_balance or 0)
+            # margin_balance is only meaningful when that asset's margin_mode is "enabled"
+            # (USDC here). For a non-margin asset (LIT: margin_mode "disabled") margin_balance
+            # is always 0 and `balance` is the full amount held, locked_balance being the part
+            # of it already resting in sell orders -- confirmed live 2026-10-18 (balance=12.96,
+            # locked_balance=12.96 while holding exactly 12.96 LIT).
+            if getattr(asset, "margin_mode", None) == "enabled":
+                total = float(getattr(asset, "margin_balance", None) or 0)
             else:
-                total = float(asset.balance or 0) + float(asset.locked_balance or 0)
+                total = float(asset.balance or 0)
             if symbol == "LIT":
                 lit = total
             elif symbol == "USDC":
