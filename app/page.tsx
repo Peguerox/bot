@@ -6898,18 +6898,13 @@ export default function Dashboard() {
             loading={loading}
             onToggled={load}
           />
-          <CompactStochBtcPanel
-            title="Worker 4 · A/B Test Bot (same code as Worker 1)"
-            subtitle="2026-10-10: same underlying strategy code as Worker 1, own sub-account ($45 seed), own tables, independently tunable -- full exit-lever/signal-toggle controls below, separate from Worker 1's. Started as an exact-clone control; now used to test different settings live against Worker 1 side by side. Has its own Master Schedule rule slot (worker4), independent from Worker 1's."
-            table="lighter_btc_worker4_state"
-            state={worker4State}
-            trades={worker4Trades.filter((t: any) =>
-              t.closed_at >= (worker4State?.history_reset_at ?? "1970-01-01T00:00:00Z"))}
-            currentPrice={ocoBtcPrice}
-            loading={loading}
-            onToggled={load}
-            combineEquityWinRate
-          />
+          {/* Worker 4's old BTC stochastic-clone panel removed 2026-10-18 -- that Render service
+              (labeled "Worker 3" in Render's own dashboard) was repurposed to run the real-money
+              LIT grid bot instead (see LitGridLivePanel below); this panel's data would otherwise
+              sit frozen forever since nothing writes to lighter_btc_worker4_state anymore.
+              worker4State/worker4Trades and the Master Schedule's "worker4" rule slot are left
+              wired (harmless, inert) rather than torn out under time pressure -- full removal
+              per CLAUDE.md's retiring-a-bot steps is a separate, more careful follow-up. */}
         </div>
 
         <LitGridPaperPanel
