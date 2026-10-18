@@ -231,12 +231,19 @@ class LitGridPaper:
 
         Each buy fill at level L ties to a SPECIFIC sell order one level above, at L+1 -- not a
         generic "whatever's most recently open" match. `holdings` is keyed by the level a LIT
-        quantity was bought at: holdings[L] = qty means "bought at L, resting sell armed at
-        L+1". Reaching L+1 sells exactly that qty, for exactly one spacing's profit, no matter
-        what path price took to get there -- including repeated chop between the same two
-        adjacent lines in a flat market, which is the actual point of a grid bot. No held LIT at
-        L -> reaching L+1 just does nothing there (a Long grid only ever sells inventory it
-        actually bought, no naked shorts).
+        quantity sells AT when reached: holdings[L] = {"qty", "cost"} means "resting sell armed
+        at L+1, for this qty, bought at this real cost". Reaching L+1 sells exactly that qty at
+        a profit of (fill_price - cost), no matter what path price took to get there --
+        including repeated chop between the same two adjacent lines in a flat market, which is
+        the actual point of a grid bot. No held LIT at L -> reaching L+1 just does nothing there
+        (a Long grid only ever sells inventory it actually bought, no naked shorts).
+
+        `cost` is usually exp(L*step) (an organic buy really did fill at that exact line), but
+        NOT always: the initial seed (see arm_grid) buys everything at ONE real market price and
+        distributes it across several target levels, so those entries carry that one shared real
+        cost instead of each level's own price -- recording it as the level's own price would
+        understate real future profit on that inventory (found live 2026-10-18, user noticed
+        Total PNL looked off and asked why).
 
         Real usdc_balance/lit_balance are the source of truth for every fill -- a buy that can't
         be afforded from real usdc_balance does not happen (deferred, like a real unfilled
@@ -262,7 +269,15 @@ class LitGridPaper:
             order_size = float(state.get("order_size_lit") or 0.0)
 
         positions = state.get("open_positions_json") or {"holdings": {}}
-        holdings = {int(k): v for k, v in (positions.get("holdings") or {}).items()}
+        # Back-compat: older rows may still have plain qty numbers instead of {qty, cost}
+        # objects (pre-2026-10-18 cost-basis fix) -- treat a bare number as cost = its own level.
+        holdings = {}
+        for k, v in (positions.get("holdings") or {}).items():
+            lvl_k = int(k)
+            if isinstance(v, dict):
+                holdings[lvl_k] = {"qty": float(v["qty"]), "cost": float(v["cost"])}
+            else:
+                holdings[lvl_k] = {"qty": float(v), "cost": math.exp(lvl_k * step)}
 
         if self._last_level is None:
             self._last_level = level_of(price, step)
@@ -277,10 +292,10 @@ class LitGridPaper:
                 lvl += 1
                 fill_price = math.exp(lvl * step)
                 buy_level = lvl - 1
-                qty = holdings.get(buy_level, 0.0)
-                if qty > 0:
+                entry = holdings.get(buy_level)
+                if entry and entry["qty"] > 0:
+                    qty, buy_price = entry["qty"], entry["cost"]
                     proceeds = fill_price * qty
-                    buy_price = math.exp(buy_level * step)
                     pnl = (fill_price - buy_price) * qty
                     if order_type == "market":
                         cost = (MARKET_ROUNDTRIP_COST_PCT / 100.0) * ((fill_price + buy_price) / 2) * qty
@@ -299,7 +314,15 @@ class LitGridPaper:
                 if usdc_balance >= cost:
                     usdc_balance -= cost
                     lit_balance += order_size
-                    holdings[lvl] = holdings.get(lvl, 0.0) + order_size
+                    existing = holdings.get(lvl)
+                    if existing and existing["qty"] > 0:
+                        # Weighted-average cost if this exact level already holds something
+                        # (rare -- normally cleared by a sell before being revisited).
+                        total_qty = existing["qty"] + order_size
+                        avg_cost = (existing["qty"] * existing["cost"] + order_size * fill_price) / total_qty
+                        holdings[lvl] = {"qty": total_qty, "cost": avg_cost}
+                    else:
+                        holdings[lvl] = {"qty": order_size, "cost": fill_price}
                 else:
                     blocked = True
 
@@ -311,7 +334,7 @@ class LitGridPaper:
             "usdc_balance": usdc_balance,
             "lit_balance": lit_balance,
             "bot_profit_usd": bot_profit_usd,
-            "open_positions_json": {"holdings": {str(k): v for k, v in holdings.items() if v > 0}},
+            "open_positions_json": {"holdings": {str(k): v for k, v in holdings.items() if v["qty"] > 0}},
             "updated_at": now_iso,
         })
 
@@ -358,9 +381,15 @@ class LitGridPaper:
             lit_balance = actual_order_size * levels_up
             # One holding per level, exactly like Bitsgap pre-arming a separate sell order at
             # each level above price -- NOT one lump entry. holdings[center_lvl + k] represents
-            # "bought at this level, sells when price reaches one level above it".
+            # "sells when price reaches one level above it". Cost basis for every one of these
+            # is the SAME real price (center_price) -- this is one real market buy for the whole
+            # up-side quantity at today's price, distributed across several future sell targets,
+            # not several buys at each target's own (higher) price. Recording it as the target's
+            # own price would understate real future profit on this inventory (found live
+            # 2026-10-18, direct question: "why is Total PNL negative").
             patch["open_positions_json"] = {
-                "holdings": {str(center_lvl + k): actual_order_size for k in range(levels_up)}
+                "holdings": {str(center_lvl + k): {"qty": actual_order_size, "cost": center_price}
+                             for k in range(levels_up)}
             }
             patch["usdc_balance"] = usdc_balance
             patch["lit_balance"] = lit_balance

@@ -136,6 +136,22 @@ async def t_paired_cycle_buy_then_sell():
           state["usdc_balance"] > start_usdc, (start_usdc, state["usdc_balance"]))
 
 
+async def t_seeded_positions_carry_the_real_arm_price_as_cost():
+    # Direct correction (2026-10-18, user asked "why is Total PNL negative"): the up-front seed
+    # is ONE real market buy at the arm price, distributed across several future sell targets --
+    # not several buys at each target's own (higher) price. Every seeded holding must carry the
+    # SAME real cost (the arm price), not its own level's price.
+    bot, fake = make_bot(base_state(order_type="market", levels_up=5, usdc_balance=10000, lit_balance=0))
+    bot.fetch_current_price = lambda: _async_return(10.0)
+    await bot.tick()
+    state = (await bot.sb("GET", f"{core.TABLE_STATE}?id=eq.1"))[0]
+    holdings = state["open_positions_json"]["holdings"]
+    check("5 holdings seeded", len(holdings) == 5, holdings)
+    costs = {entry["cost"] for entry in holdings.values()}
+    check("every seeded holding shares the exact same real cost (the arm price), not its own level's price",
+          len(costs) == 1 and abs(next(iter(costs)) - 10.0) < 1e-9, costs)
+
+
 async def t_initial_seed_is_proportional_to_levels_up():
     # Confirmed directly against Bitsgap's own docs (2026-10-18): the up-front split is NOT a
     # blind 50/50 -- it's proportional to the configured window. 3 up / 15 down should buy much
@@ -242,7 +258,7 @@ async def t_compounding_never_resizes_an_already_resting_position():
     s0 = (await bot.sb("GET", f"{core.TABLE_STATE}?id=eq.1"))[0]
     await bot.process_price(p0 * math.exp(-1 * step), s0)
     s1 = (await bot.sb("GET", f"{core.TABLE_STATE}?id=eq.1"))[0]
-    first_qty = list(s1["open_positions_json"]["holdings"].values())[0]
+    first_qty = list(s1["open_positions_json"]["holdings"].values())[0]["qty"]
 
     await bot.process_price(p0, s1)  # sells the first holding for a small profit
     s2 = (await bot.sb("GET", f"{core.TABLE_STATE}?id=eq.1"))[0]
@@ -251,7 +267,7 @@ async def t_compounding_never_resizes_an_already_resting_position():
 
     await bot.process_price(p0 * math.exp(-1 * step), s2)  # a brand new buy, placed after profit accrued
     s3 = (await bot.sb("GET", f"{core.TABLE_STATE}?id=eq.1"))[0]
-    second_qty = list(s3["open_positions_json"]["holdings"].values())[0]
+    second_qty = list(s3["open_positions_json"]["holdings"].values())[0]["qty"]
     check("a brand new fill after profit accrued uses a bigger (compounded) size",
           second_qty > first_qty, (first_qty, second_qty))
 
@@ -420,6 +436,7 @@ async def main():
     t_order_size_scales_with_capital()
     for t in (t_paired_cycle_buy_then_sell,
               t_initial_seed_is_proportional_to_levels_up,
+              t_seeded_positions_carry_the_real_arm_price_as_cost,
               t_repeated_chop_profits_on_every_touch,
               t_sell_skipped_without_inventory_no_naked_short,
               t_buy_blocked_when_usdc_runs_out,
