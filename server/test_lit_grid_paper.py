@@ -233,10 +233,14 @@ async def t_buy_blocked_when_usdc_runs_out():
           bot._last_level > level_of(9.0, step), bot._last_level)
 
 
-async def t_compounding_recomputes_order_size_from_real_total_value():
-    # Compounding reads directly off real balances (usdc_balance + lit_balance*live_price)
-    # instead of a separate abstract running total -- so order size should grow as the real
-    # account value grows from realized profit, and stay flat (capital_usd) when compounding is off.
+async def t_compounding_recomputes_order_size_from_realized_profit():
+    # Direct correction (2026-10-18): "you can get less money with compounding. It is
+    # impossible." Compounding must grow order size from REALIZED profit only (capital_usd +
+    # bot_profit_usd), not total real account value (usdc_balance + lit_balance*price) -- that
+    # basis can shrink purely from unrealized mark-to-market loss on held inventory during a
+    # down-trend, which could make compounding size SMALLER than flat and produce less realized
+    # profit than flat across a backtest -- the exact thing just reported as "impossible", and
+    # confirmed as a real bug (reproduced in research/grid-bot-2026-10-17/backtest_real_mechanic.py).
     bot_c, fake_c = make_bot(base_state(order_type="market", compounding_enabled=True))
     bot_f, fake_f = make_bot(base_state(order_type="market", compounding_enabled=False))
     step = math.log(1 + 0.125 / 100)
@@ -246,12 +250,36 @@ async def t_compounding_recomputes_order_size_from_real_total_value():
         state = (await bot.sb("GET", f"{core.TABLE_STATE}?id=eq.1"))[0]
         await bot.process_price(p0 * math.exp(-1 * step), state)
         state = (await bot.sb("GET", f"{core.TABLE_STATE}?id=eq.1"))[0]
-        await bot.process_price(p0, state)
+        await bot.process_price(p0, state)  # realizes a profit (order_size for THIS call is still pre-profit)
+        state = (await bot.sb("GET", f"{core.TABLE_STATE}?id=eq.1"))[0]
+        await bot.process_price(p0, state)  # a no-op tick AFTER the profit, to observe the new order_size
 
     order_size_compounding = fake_c.state["order_size_lit"]
     order_size_flat = fake_f.state["order_size_lit"]
     check("compounding grows order size after a profitable pair vs. the flat-capital baseline",
           order_size_compounding > order_size_flat, (order_size_compounding, order_size_flat))
+
+
+async def t_compounding_never_underperforms_flat_during_unrealized_drawdown():
+    # The exact scenario that produced the bug: price falls several levels (opening holdings
+    # that are now underwater on paper), realized profit is still positive from completed
+    # pairs, but total REAL account value (usdc_balance + lit_balance*price) is temporarily
+    # below capital_usd purely from unrealized mark-to-market. Compounding's order size must
+    # never shrink below the flat baseline in this situation.
+    bot, fake = make_bot(base_state(order_type="market", compounding_enabled=True))
+    step = math.log(1 + 0.125 / 100)
+    p0 = 10.0
+    flat_order_size = fake.state["order_size_lit"]
+    await bot.process_price(p0, fake.state)  # baseline
+    state = (await bot.sb("GET", f"{core.TABLE_STATE}?id=eq.1"))[0]
+    # Fall 20 levels -- opens many holdings now underwater on paper (price kept falling past them)
+    await bot.process_price(p0 * math.exp(-20 * step), state)
+    state = (await bot.sb("GET", f"{core.TABLE_STATE}?id=eq.1"))[0]
+    total_value = state["usdc_balance"] + state["lit_balance"] * state["live_price"]
+    check("total real account value is genuinely below capital_usd here (unrealized drawdown)",
+          total_value < state["capital_usd"], (total_value, state["capital_usd"]))
+    check("order size never shrinks below the flat baseline despite the unrealized drawdown",
+          state["order_size_lit"] >= flat_order_size - 1e-9, (state["order_size_lit"], flat_order_size))
 
 
 async def t_compounding_never_resizes_an_already_resting_position():
@@ -448,7 +476,8 @@ async def main():
               t_repeated_chop_profits_on_every_touch,
               t_sell_skipped_without_inventory_no_naked_short,
               t_buy_blocked_when_usdc_runs_out,
-              t_compounding_recomputes_order_size_from_real_total_value,
+              t_compounding_recomputes_order_size_from_realized_profit,
+              t_compounding_never_underperforms_flat_during_unrealized_drawdown,
               t_compounding_never_resizes_an_already_resting_position,
               t_sub_spacing_noise_never_trades,
               t_multi_level_move_fills_every_line_crossed,

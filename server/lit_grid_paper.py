@@ -267,10 +267,19 @@ class LitGridPaper:
         usdc_balance = float(state["usdc_balance"])
         lit_balance = float(state["lit_balance"])
         bot_profit_usd = float(state["bot_profit_usd"])
-        total_value = usdc_balance + lit_balance * price
         if state["compounding_enabled"]:
+            # Direct correction (2026-10-18): "you can get less money with compounding. It is
+            # impossible." Was right -- the old basis (usdc_balance + lit_balance*price, the
+            # TOTAL real account value) can genuinely shrink during a down-trend purely from
+            # unrealized LIT mark-to-market loss, which shrank order size below what flat
+            # capital would have used, producing LESS realized profit than flat. Compounding
+            # must grow from REALIZED winnings only (capital_usd + bot_profit_usd), which can
+            # only ever increase or stay flat -- never dragged down by the market's own swings
+            # on inventory still held. This guarantees compounding's order size is always >=
+            # flat's fixed size.
+            compounding_basis = float(state["capital_usd"]) + bot_profit_usd
             sizing_levels = levels_for_drawdown(spacing_pct, float(state.get("drawdown_pct") or 30.0))
-            order_size = compute_order_size_lit(total_value, price, spacing_pct, sizing_levels)
+            order_size = compute_order_size_lit(compounding_basis, price, spacing_pct, sizing_levels)
         else:
             # Fixed at whatever arm_grid computed from the full original capital -- not
             # recomputed every tick, since compounding is off.
