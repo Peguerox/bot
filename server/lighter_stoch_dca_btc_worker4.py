@@ -28,7 +28,10 @@ Worker 1, not just mirror it -- schedule_rules_bot_key is now its own "worker4" 
 map as worker1's, see StochBot._apply_schedule_rules), and the dashboard panel has full exit-
 lever/signal-toggle controls, same as Worker 1's, each writing worker4's own table.
 """
-from stoch_bot_core import BotConfig, run_bot
+import asyncio
+
+from stoch_bot_core import BotConfig, StochBot
+from lit_grid_paper import run_lit_grid_paper
 
 _FULL_WEEKDAY_HOURS = [0, 1, 4, 9, 10, 12, 15, 16, 17, 18, 19, 20, 21]
 _WEEKDAY_SCHEDULE = {
@@ -124,5 +127,14 @@ CONFIG = BotConfig(
     schema_has_premium_readout=True,
 )
 
+async def _main():
+    # 2026-10-18, direct request: a paper-only LIT/USDC grid bot rides along as a second,
+    # isolated task on this same Render service (avoids the cost of a dedicated service while
+    # it's still being tested -- see server/lit_grid_paper.py's docstring). return_exceptions=True
+    # is a second layer of isolation on top of that module's own internal catch-log-continue loop:
+    # even an unexpected crash in the grid task can never cancel Worker 4's real StochBot task.
+    await asyncio.gather(StochBot(CONFIG).run(), run_lit_grid_paper(), return_exceptions=True)
+
+
 if __name__ == "__main__":
-    run_bot(CONFIG)
+    asyncio.run(_main())
