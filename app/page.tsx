@@ -1825,6 +1825,7 @@ function LitGridLivePanel({
   const [downIn, setDownIn] = useState("");
   const [drawdownIn, setDrawdownIn] = useState("");
   const [capitalIn, setCapitalIn] = useState("");
+  const [maxBuysIn, setMaxBuysIn] = useState("");
   const [saving, setSaving] = useState(false);
   const [saveError, setSaveError] = useState<string | null>(null);
 
@@ -1835,20 +1836,24 @@ function LitGridLivePanel({
     if (downIn.trim()) body.levelsDown = Number(downIn);
     if (drawdownIn.trim()) body.drawdownPct = Number(drawdownIn);
     if (capitalIn.trim()) body.capitalUsd = Number(capitalIn);
+    if (maxBuysIn.trim()) body.maxOpenBuys = Number(maxBuysIn);
     if (Object.keys(body).length === 0) return;
     if (!confirm("Apply these REAL-MONEY grid settings now?")) return;
+    const secret = litGridLiveAdminSecret();
+    if (!secret) return;
     setSaving(true);
     setSaveError(null);
     const res = await fetch("/api/lighter-lit-grid-live/settings", {
       method: "POST",
-      headers: { "Content-Type": "application/json" },
+      headers: { "Content-Type": "application/json", "x-admin-secret": secret },
       body: JSON.stringify(body),
     });
     if (!res.ok) {
       const data = await res.json().catch(() => ({}));
       setSaveError(data.error ?? "Failed to save.");
+      if (res.status === 401) { try { localStorage.removeItem("litGridLiveAdminSecret"); } catch {} }
     } else {
-      setSpacingIn(""); setUpIn(""); setDownIn(""); setDrawdownIn(""); setCapitalIn("");
+      setSpacingIn(""); setUpIn(""); setDownIn(""); setDrawdownIn(""); setCapitalIn(""); setMaxBuysIn("");
     }
     setSaving(false);
   }
@@ -1972,15 +1977,26 @@ function LitGridLivePanel({
             inputMode="decimal"
             className="w-full bg-gray-900 border border-gray-700 rounded px-1.5 py-1 text-xs text-white tabular-nums focus:outline-none focus:border-red-500"
           />
+          <input
+            value={maxBuysIn}
+            onChange={(e) => setMaxBuysIn(e.target.value)}
+            placeholder={`max open buys (now ${st?.max_open_buys ?? "—"})`}
+            inputMode="numeric"
+            className="w-full bg-gray-900 border border-gray-700 rounded px-1.5 py-1 text-xs text-white tabular-nums focus:outline-none focus:border-red-500"
+          />
         </div>
         <button
           onClick={handleSave}
-          disabled={saving || (!spacingIn.trim() && !upIn.trim() && !downIn.trim() && !drawdownIn.trim() && !capitalIn.trim())}
+          disabled={saving || (!spacingIn.trim() && !upIn.trim() && !downIn.trim() && !drawdownIn.trim() && !capitalIn.trim() && !maxBuysIn.trim())}
           className="text-xs font-bold px-2.5 py-1.5 rounded bg-red-500/20 text-red-400 hover:bg-red-500/30 disabled:opacity-30 w-full"
         >
           {saving ? "Saving…" : "Save Settings"}
         </button>
         {saveError && <p className="text-red-400 text-xs">{saveError}</p>}
+        <p className="text-gray-600 text-[9px] leading-snug">
+          "Max open buys" is a code-enforced cap on new buy placement (defaults to 1 for the first
+          real test) -- raise it once that's verified before enabling the full ladder.
+        </p>
       </div>
 
       <div>
@@ -2029,6 +2045,22 @@ function LitGridLivePanel({
       </div>
     </div>
   );
+}
+
+// Real-money live grid bot controls need a shared secret (2026-10-18, audit finding -- these
+// routes previously had no auth at all). Stored in localStorage only, never baked into the
+// static JS bundle -- prompts the user once, reuses it after. Returns null if the user cancels.
+function litGridLiveAdminSecret(): string | null {
+  try {
+    const existing = localStorage.getItem("litGridLiveAdminSecret");
+    if (existing) return existing;
+    const entered = prompt("Admin secret for the LIVE grid bot controls:");
+    if (!entered) return null;
+    localStorage.setItem("litGridLiveAdminSecret", entered);
+    return entered;
+  } catch {
+    return prompt("Admin secret for the LIVE grid bot controls:");
+  }
 }
 
 function currentSessionStart(nowUtc: Date): Date {
@@ -6746,19 +6778,29 @@ export default function Dashboard() {
   async function handleLitGridLiveToggle() {
     const turningOn = !litGridLiveState?.enabled;
     if (turningOn && !confirm("Turn ON the LIVE LIT grid bot? This places REAL orders with REAL money.")) return;
+    const secret = litGridLiveAdminSecret();
+    if (!secret) return;
     setLitGridLiveToggling(true);
-    await fetch("/api/lighter-lit-grid-live/toggle", { method: "POST" });
+    const res = await fetch("/api/lighter-lit-grid-live/toggle", { method: "POST", headers: { "x-admin-secret": secret } });
+    if (!res.ok) {
+      const body = await res.json().catch(() => ({}));
+      alert(body.error ?? "Failed to toggle.");
+      if (res.status === 401) localStorage.removeItem("litGridLiveAdminSecret");
+    }
     await load();
     setLitGridLiveToggling(false);
   }
 
   async function handleLitGridLiveFlatten() {
     if (!confirm("EMERGENCY FLATTEN: cancel every resting order and market-sell all held LIT back to USDC, then disable. Continue?")) return;
+    const secret = litGridLiveAdminSecret();
+    if (!secret) return;
     setLitGridLiveFlattening(true);
-    const res = await fetch("/api/lighter-lit-grid-live/flatten", { method: "POST" });
+    const res = await fetch("/api/lighter-lit-grid-live/flatten", { method: "POST", headers: { "x-admin-secret": secret } });
     if (!res.ok) {
       const body = await res.json().catch(() => ({}));
       alert(body.error ?? "Failed to request flatten.");
+      if (res.status === 401) localStorage.removeItem("litGridLiveAdminSecret");
     }
     await load();
     setLitGridLiveFlattening(false);

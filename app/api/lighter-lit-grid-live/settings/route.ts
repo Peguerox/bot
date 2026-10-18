@@ -1,5 +1,6 @@
 import { NextRequest, NextResponse } from "next/server";
 import { getSupabaseAdmin } from "@/lib/supabase-admin";
+import { checkLitGridLiveAuth } from "@/lib/lit-grid-live-auth";
 
 // REAL MONEY. Same bounds-checking convention as lighter-lit-grid/settings (the paper version)
 // and lighter-hedge-settings. A capital change only changes the SIZING going forward -- unlike
@@ -12,9 +13,14 @@ const LIMITS = {
   levelsDown: { min: 1, max: 50, label: "levels down" },
   drawdownPct: { min: 0.1, max: 95, label: "drawdown coverage" },
   capitalUsd: { min: 1, max: 1_000_000, label: "capital" },
+  // Code-enforced cap on new buy placement (2026-10-18, audit finding: there was no actual
+  // code-level limit for the single-order live-fire test, only a manual-settings convention).
+  maxOpenBuys: { min: 1, max: 50, label: "max open buys" },
 };
 
 export async function POST(req: NextRequest) {
+  const authError = checkLitGridLiveAuth(req);
+  if (authError) return authError;
   const body = await req.json();
   const out: Record<string, number> = {};
 
@@ -24,6 +30,7 @@ export async function POST(req: NextRequest) {
     ["levelsDown", "levels_down"],
     ["drawdownPct", "drawdown_pct"],
     ["capitalUsd", "capital_usd"],
+    ["maxOpenBuys", "max_open_buys"],
   ] as const) {
     const raw = body[key];
     if (raw === undefined || raw === null || raw === "") continue;

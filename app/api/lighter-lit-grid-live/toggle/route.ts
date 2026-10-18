@@ -1,11 +1,14 @@
-import { NextResponse } from "next/server";
+import { NextRequest, NextResponse } from "next/server";
 import { getSupabaseAdmin } from "@/lib/supabase-admin";
+import { checkLitGridLiveAuth } from "@/lib/lit-grid-live-auth";
 
 // REAL MONEY. Flips enabled on lighter_lit_grid_live_state -- the running Python worker
 // (server/lit_grid_live.py) reads this every tick; turning it on only lets NEW order placement
 // happen, it never touches whatever is already resting on the exchange. Turning a real bot ON
 // is explicitly the user's call, never automatic.
-export async function POST() {
+export async function POST(req: NextRequest) {
+  const authError = checkLitGridLiveAuth(req);
+  if (authError) return authError;
   const sb = getSupabaseAdmin();
   const { data: current, error: readError } = await sb
     .from("lighter_lit_grid_live_state")
