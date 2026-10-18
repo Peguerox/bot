@@ -1411,10 +1411,12 @@ function LitGridLivePanel({
   state, orders, loading,
   enabled, onToggle, toggling,
   onFlatten, flattening,
+  onClearHistory, clearingHistory,
 }: {
   state: any; orders: any[]; loading: boolean;
   enabled: boolean; onToggle: () => void; toggling: boolean;
   onFlatten: () => void; flattening: boolean;
+  onClearHistory: () => void; clearingHistory: boolean;
 }) {
   const st = state;
 
@@ -1494,6 +1496,14 @@ function LitGridLivePanel({
             </span>
           </div>
           <div className="flex flex-wrap items-center gap-1.5 shrink-0">
+            <button
+              onClick={onClearHistory}
+              disabled={clearingHistory || enabled}
+              className="text-xs font-medium px-2.5 py-1.5 rounded-md bg-gray-800 text-gray-400 hover:bg-gray-700 hover:text-gray-200 transition-all disabled:opacity-30 disabled:cursor-not-allowed"
+              title={enabled ? "Disable the bot before clearing" : "Clear the order ledger and reset the lifetime buy counter (only while disabled and flat)"}
+            >
+              {clearingHistory ? "Clearing…" : "Clear"}
+            </button>
             <button
               onClick={onFlatten}
               disabled={flattening}
@@ -6119,6 +6129,7 @@ export default function Dashboard() {
   const [litGridLiveOrders,    setLitGridLiveOrders]    = useState<any[]>([]);
   const [litGridLiveToggling,  setLitGridLiveToggling]  = useState(false);
   const [litGridLiveFlattening, setLitGridLiveFlattening] = useState(false);
+  const [litGridLiveClearing, setLitGridLiveClearing] = useState(false);
   // True lifetime trade/win counts -- the trades arrays above are capped at 200 rows for
   // display purposes, which silently froze the win-rate % and trade count once any worker
   // passed 200 real trades (Worker 2 hit this first, at 606 real trades and counting).
@@ -6389,6 +6400,21 @@ export default function Dashboard() {
     setLitGridLiveFlattening(false);
   }
 
+  async function handleLitGridLiveClearHistory() {
+    if (!confirm("Clear the LIVE grid bot's order ledger and reset the lifetime buy counter? Only allowed while disabled and flat.")) return;
+    const secret = litGridLiveAdminSecret();
+    if (!secret) return;
+    setLitGridLiveClearing(true);
+    const res = await fetch("/api/lighter-lit-grid-live/clear-history", { method: "POST", headers: { "x-admin-secret": secret } });
+    if (!res.ok) {
+      const body = await res.json().catch(() => ({}));
+      alert(body.error ?? "Failed to clear history.");
+      if (res.status === 401) localStorage.removeItem("litGridLiveAdminSecret");
+    }
+    await load();
+    setLitGridLiveClearing(false);
+  }
+
   const [healthTick, setHealthTick] = useState(Date.now());
   useEffect(() => {
     const id = setInterval(() => setHealthTick(Date.now()), 15_000);
@@ -6533,6 +6559,8 @@ export default function Dashboard() {
             toggling={litGridLiveToggling}
             onFlatten={handleLitGridLiveFlatten}
             flattening={litGridLiveFlattening}
+            onClearHistory={handleLitGridLiveClearHistory}
+            clearingHistory={litGridLiveClearing}
           />
         </div>
 

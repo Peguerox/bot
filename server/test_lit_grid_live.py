@@ -8,7 +8,7 @@ the fix: fill prices sit EXACTLY on a grid-bin boundary by construction, so roun
 exchange's real 4-decimal precision has roughly 50% odds of landing in the wrong bin on any given
 fill. That's why sells are now linked to buys by an explicit `closes_level`, never a level
 recomputed from a (rounded) price."""
-import asyncio, math, os, sys
+import asyncio, math, os, sys, time
 
 os.environ.setdefault("NEXT_PUBLIC_SUPABASE_URL", "http://localhost")
 os.environ.setdefault("SUPABASE_SERVICE_ROLE_KEY", "test")
@@ -30,6 +30,16 @@ def check(name, cond, extra=""):
     print(f"  {'PASS' if cond else 'FAIL'}  {name}{('  -> ' + str(extra)) if extra and not cond else ''}")
 
 
+def _parse_qs(path):
+    qs = path.split("?", 1)[1] if "?" in path else ""
+    out = {}
+    for part in qs.split("&"):
+        if "=" in part:
+            k, v = part.split("=", 1)
+            out[k] = v
+    return out
+
+
 class FakeDb:
     def __init__(self, state, orders=None):
         self.state = dict(state)
@@ -42,6 +52,21 @@ class FakeDb:
             if method == "GET":
                 return [dict(self.state)]
             if method == "PATCH":
+                # Conditional PATCH, same semantics as the real PostgREST query-string guard:
+                # every "<col>=eq.<val>" condition besides id must match the CURRENT state, or
+                # the write touches zero rows (external audit fixes P1-1/P1-6, both built on
+                # this exact optimistic-concurrency pattern).
+                for part in path.split("?", 1)[1].split("&") if "?" in path else []:
+                    if part.startswith("id="):
+                        continue
+                    if "=eq." in part:
+                        col, val = part.split("=eq.", 1)
+                        cur = self.state.get(col)
+                        if cur is None:
+                            if val not in ("null", ""):
+                                return []
+                        elif str(cur) != val:
+                            return []
                 self.state.update(body)
                 return [dict(self.state)]
         if path.startswith(core.TABLE_ORDERS):
@@ -53,14 +78,20 @@ class FakeDb:
                 return [row]
             if method == "GET":
                 rows = self.orders
-                open_set = "'" + "','".join(core.OPEN_STATUSES) + "'"
                 if f"status=in.({','.join(core.OPEN_STATUSES)})" in path:
                     rows = [r for r in rows if r.get("status") in core.OPEN_STATUSES]
                 elif "status=eq.filled&side=eq.buy" in path:
                     rows = [r for r in rows if r.get("status") == "filled" and r.get("side") == "buy"]
-                elif "status=eq.filled&side=eq.sell" in path:
-                    rows = [r for r in rows if r.get("status") == "filled" and r.get("side") == "sell"]
-                return [dict(r) for r in sorted(rows, key=lambda r: r["id"])]
+                elif "side=eq.sell&closes_level=not.is.null" in path:
+                    rows = [r for r in rows if r.get("side") == "sell"
+                            and r.get("closes_level") is not None and r.get("filled_qty") is not None]
+                rows = sorted(rows, key=lambda r: r["id"])
+                qs = _parse_qs(path)
+                if "limit" in qs:
+                    limit = int(qs["limit"])
+                    offset = int(qs.get("offset", 0))
+                    rows = rows[offset:offset + limit]
+                return [dict(r) for r in rows]
             if method == "PATCH":
                 row_id = int(path.split("id=eq.")[1].split("&")[0])
                 for r in self.orders:
@@ -188,7 +219,7 @@ def base_state(**over):
         "usdc_balance": 500.0, "lit_balance": 0.0,
         "live_price": None, "history_reset_at": None, "internal_spacing_pct": 0.125,
         "max_open_buys": None, "lifetime_buy_count": 0,
-        "lock_owner": None, "lock_heartbeat": None,
+        "lock_owner": "test", "lock_heartbeat": None,
     }
     st.update(over)
     return st
@@ -202,6 +233,7 @@ def make_bot(state, orders=None, signer_fail=False, signer_err=None, cancel_err=
     bot._lock_checked_at = 0.0
     bot._lock_blocked_logged = False
     bot._last_level = None
+    bot._window_center = None
     bot.live = core.LiveBook(core.MARKET_ID)
     bot._book_ws_connected_at = 0.0
     bot.account_index = 1
@@ -399,13 +431,13 @@ async def t_balance_divergence_pauses_new_orders():
     orders = [{"id": 1, "level": 900, "side": "buy", "status": "filled",
                "filled_qty": 5.0, "filled_price": 3.10}]
     bot, fake = make_bot(base_state(), orders=orders, assets=[FakeAsset("LIT", 2.0, 0.0)])
-    safe = await bot.check_balance_divergence()
+    safe, _refreshed = await bot.check_balance_divergence()
     check("a real divergence beyond tolerance blocks new order placement", safe is False, safe)
 
 
 async def t_balance_check_fails_closed_on_the_very_first_call():
     bot, fake = make_bot(base_state(), account_api_fail=True)
-    safe = await bot.check_balance_divergence()
+    safe, _refreshed = await bot.check_balance_divergence()
     check("an unverifiable balance on the very first check fails CLOSED", safe is False, safe)
 
 
@@ -447,9 +479,12 @@ async def t_maintain_window_sell_price_is_exactly_one_step_above_real_cost():
           sell_rows[0]["closes_level"] == 900, sell_rows[0])
 
 
-async def t_maintain_window_cancels_conflicting_buy_before_placing_a_sell():
+async def t_maintain_window_cancels_conflicting_buy_and_defers_the_sell():
     # External audit finding: a sell could be placed at a price where a buy is ALREADY resting,
-    # without cancelling it first -- a same-price self-trade risk.
+    # without cancelling it first -- a same-price self-trade risk. FOURTH-PASS FIX (P1-4): a
+    # cancel ack is only a SENT request, not confirmation -- so the sell must be DEFERRED to the
+    # next tick (after reconciliation confirms the conflict is actually gone), never placed in
+    # the same breath as an unconfirmed cancel.
     step = math.log(1 + 0.125 / 100)
     real_cost = math.exp(900 * step)
     sell_price = round_price(real_cost * 1.00125)
@@ -464,7 +499,34 @@ async def t_maintain_window_cancels_conflicting_buy_before_placing_a_sell():
     check("the conflicting resting buy at the sell's price is cancelled",
           99 in bot.client.cancelled, bot.client.cancelled)
     sells = [o for o in fake.orders if o["side"] == "sell"]
-    check("the sell is placed after clearing the conflict", len(sells) == 1, sells)
+    check("the sell is DEFERRED, not placed in the same tick as an unconfirmed cancel",
+          len(sells) == 0, sells)
+    fake.orders[0]["status"] = "cancelled"  # simulate reconciliation confirming the cancel
+    await bot.maintain_window(fake.state, real_cost)
+    sells = [o for o in fake.orders if o["side"] == "sell"]
+    check("once the conflict is confirmed gone, the sell is placed on the following tick",
+          len(sells) == 1, sells)
+
+
+async def t_maintain_window_conflict_check_matches_by_real_price_not_recomputed_level():
+    # External audit finding (P2-8): the old conflict check keyed off a RECOMPUTED display level
+    # (level_of(sell_price, step)), which can legitimately differ from a resting buy's own
+    # stored level -- the same boundary-rounding hazard as the fill-pairing bug. The check must
+    # match on the real price tick, never a recomputed level.
+    step = math.log(1 + 0.125 / 100)
+    real_cost = math.exp(900 * step)
+    sell_price = round_price(real_cost * 1.00125)
+    wrong_level = level_of(sell_price, step) + 1  # deliberately not the recomputed display level
+    conflicting_buy = {"id": 1, "level": wrong_level, "side": "buy", "status": "open",
+                        "client_order_index": 1, "exchange_order_id": 99,
+                        "limit_price": sell_price, "size": 1.70}
+    held = {"id": 2, "level": 900, "side": "buy", "status": "filled",
+            "filled_qty": 1.70, "filled_price": real_cost}
+    bot, fake = make_bot(base_state(levels_down=0, order_size_lit=1.70), orders=[conflicting_buy, held])
+    await bot.maintain_window(fake.state, real_cost)
+    check("the conflicting buy is found and cancelled by its REAL price, even though its stored "
+          "level differs from the sell's recomputed display level",
+          99 in bot.client.cancelled, bot.client.cancelled)
 
 
 async def t_maintain_window_respects_real_usdc_minus_resting_commitments():
@@ -554,12 +616,16 @@ async def t_maintain_window_entries_blocked_still_maintains_existing_sells():
 async def t_tick_cancels_everything_on_a_spacing_change():
     resting = {"id": 1, "level": 900, "side": "buy", "status": "open", "client_order_index": 1,
                "exchange_order_id": 77, "limit_price": 3.10, "size": 1.70}
+    # A real confirmed-cancelled order, so reconciliation can actually clear it this same tick
+    # (fix P1-4 requires the cancel to be CONFIRMED gone, not just requested, before advancing).
+    confirmed_cancelled = FakeOrder(1, order_index=77, status="canceled", remaining_base_amount=0.0)
     bot, fake = make_bot(base_state(spacing_pct=0.25, internal_spacing_pct=0.125,
-                                     order_size_lit=1.70, usdc_balance=500.0), orders=[resting])
+                                     order_size_lit=1.70, usdc_balance=500.0), orders=[resting],
+                          orders_by_co={1: confirmed_cancelled})
     bot.fetch_current_price = lambda: _async_return(3.10)
     await bot.tick()
-    check("a spacing change triggers a cancel request on every resting order",
-          fake.orders[0]["status"] == "cancel_requested", fake.orders[0])
+    check("a spacing change's resting order ends up confirmed cancelled",
+          fake.orders[0]["status"] == "cancelled", fake.orders[0])
     check("internal_spacing_pct is updated once the cancel succeeded",
           fake.state["internal_spacing_pct"] == 0.25, fake.state)
 
@@ -650,6 +716,168 @@ async def t_flatten_does_not_report_completion_if_a_cancel_failed():
           not any(r["action"] == "flatten_completed" for r in fake.runs), fake.runs)
 
 
+async def t_flatten_does_not_duplicate_sell_for_a_level_with_an_unresolved_resting_sell():
+    # External audit finding (P1-2): a level whose previous flatten attempt's sell was still
+    # unresolved (not yet confirmed terminal) could get a SECOND market sell fired against the
+    # same inventory. Flatten must never attempt a level that still has an unresolved resting
+    # sell working it.
+    held = {"id": 1, "level": 900, "side": "buy", "status": "filled",
+            "filled_qty": 1.70, "filled_price": 3.10}
+    unresolved_sell = {"id": 2, "level": 901, "side": "sell", "closes_level": 900, "status": "open",
+                        "client_order_index": 2, "exchange_order_id": 50,
+                        "limit_price": 3.1039, "size": 1.70}
+    bot, fake = make_bot(base_state(flatten_requested=True), orders=[held, unresolved_sell],
+                          assets=[FakeAsset("LIT", 1.70, 0.0)])
+    bot.live.best_mid = lambda max_age=core.BOOK_MAX_AGE: 3.10
+    await bot.flatten_all()
+    new_sells = [o for o in fake.orders if o["side"] == "sell" and o["id"] != 2]
+    check("flatten does not place a duplicate sell for a level an unresolved sell already works",
+          len(new_sells) == 0, new_sells)
+    check("flatten reports incomplete rather than falsely completing",
+          not any(r["action"] == "flatten_completed" for r in fake.runs), fake.runs)
+
+
+async def t_flatten_logs_dust_stuck_distinctly_for_an_unsellable_remainder():
+    # External audit finding (P2-9): a terminal partial fill below the 1.00 LIT minimum has no
+    # exit path -- clamp_order_size refuses it forever. Flatten must log this distinctly rather
+    # than looking like an ordinary unresolved retry.
+    held = {"id": 1, "level": 900, "side": "buy", "status": "filled",
+            "filled_qty": 0.30, "filled_price": 3.10}
+    bot, fake = make_bot(base_state(flatten_requested=True), orders=[held],
+                          assets=[FakeAsset("LIT", 0.30, 0.0)])
+    bot.live.best_mid = lambda max_age=core.BOOK_MAX_AGE: 3.10
+    await bot.flatten_all()
+    check("a terminal remainder below the sellable minimum is logged distinctly",
+          any(r["action"] == "flatten_dust_stuck" for r in fake.runs), fake.runs)
+    check("flatten correctly refuses to report completion while dust remains unsellable",
+          not any(r["action"] == "flatten_completed" for r in fake.runs), fake.runs)
+
+
+# ── Atomic one-shot buy allowance ────────────────────────────────────────────────────────────────
+
+async def t_reserve_buy_allowance_is_an_atomic_conditional_patch():
+    # External audit finding (P1-1): the allowance counter used to be written AFTER the order
+    # was sent, as a separate, non-atomic step -- an ambiguous send (crash/timeout) could leave
+    # the slot unconsumed. It must now be reserved BEFORE the order is ever attempted, atomically.
+    bot, fake = make_bot(base_state(lifetime_buy_count=5))
+    ok = await bot._reserve_buy_allowance(5)
+    check("reservation succeeds when the expected count matches the current real state",
+          ok == 6, ok)
+    stale = await bot._reserve_buy_allowance(5)
+    check("a second reservation against a now-stale expected count fails closed (None), "
+          "never double-spending the same slot",
+          stale is None, stale)
+
+
+# ── Pagination ───────────────────────────────────────────────────────────────────────────────────
+
+async def t_current_holdings_paginates_past_a_single_page():
+    # External audit finding (P1-5): an unpaginated query could silently truncate old inventory
+    # on a long-running bot. Force a tiny page size and confirm every level still surfaces.
+    orig_page_size = core.PAGE_SIZE
+    core.PAGE_SIZE = 2
+    try:
+        orders = [
+            {"id": i, "level": 900 + i, "side": "buy", "status": "filled",
+             "filled_qty": 1.0, "filled_price": 3.0}
+            for i in range(1, 6)
+        ]
+        bot, fake = make_bot(base_state(), orders=orders)
+        holdings = await bot.current_holdings()
+        check("every level surfaces even though the query spans several pages",
+              set(holdings.keys()) == {901, 902, 903, 904, 905}, sorted(holdings.keys()))
+    finally:
+        core.PAGE_SIZE = orig_page_size
+
+
+# ── Single-instance lock: loss mid-tick ─────────────────────────────────────────────────────────
+
+async def t_touch_lock_heartbeat_detects_lock_loss_mid_tick():
+    # External audit finding (P1-6): a dethroned instance used to keep believing it still held
+    # the lock and kept placing real orders. A heartbeat write matching zero rows must clear
+    # _lock_held immediately.
+    bot, fake = make_bot(base_state(lock_owner="some-other-instance"))
+    bot._lock_held = True
+    await bot._touch_lock_heartbeat()
+    check("losing the lock to another instance mid-tick clears _lock_held immediately",
+          bot._lock_held is False, bot._lock_held)
+    check("the loss is logged", any(r["action"] == "instance_lock_lost_mid_tick" for r in fake.runs), fake.runs)
+
+
+async def t_maintain_window_stops_immediately_once_the_lock_is_lost_mid_loop():
+    bot, fake = make_bot(base_state(levels_down=3, order_size_lit=1.70, usdc_balance=500.0))
+    orig_touch = bot._touch_lock_heartbeat
+
+    async def losing_touch():
+        bot._lock_held = False
+        await orig_touch()
+    bot._touch_lock_heartbeat = losing_touch
+    await bot.maintain_window(fake.state, 3.10)
+    buys = [o for o in fake.orders if o["side"] == "buy"]
+    check("placement stops immediately once the lock is detected lost, not after finishing the window",
+          len(buys) == 1, buys)
+
+
+# ── Stale cash between balance refreshes ────────────────────────────────────────────────────────
+
+async def t_tick_applies_fresh_fill_cash_delta_when_balance_refresh_is_skipped():
+    # External audit finding (P2-7): the cash figure used for the spending cap could be stale by
+    # up to the full 60s refresh interval even though a buy was JUST confirmed filled by
+    # reconciliation this same tick. The confirmed fill's real cash impact must be applied to the
+    # in-memory figure immediately when the periodic refresh didn't also run this tick.
+    pending_buy = {"id": 1, "level": 900, "side": "buy", "client_order_index": 777,
+                   "status": "pending", "limit_price": 3.10, "size": 1.70}
+    filled = FakeOrder(777, order_index=55, status="filled",
+                        filled_base_amount=1.70, filled_quote_amount=1.70 * 3.10, remaining_base_amount=0.0)
+    bot, fake = make_bot(base_state(usdc_balance=10.0, levels_down=1, order_size_lit=1.70, capital_usd=500),
+                          orders=[pending_buy], orders_by_co={777: filled})
+    bot._last_balance_check = time.time()  # periodic refresh not due this tick
+    bot.fetch_current_price = lambda: _async_return(3.10)
+    await bot.tick()
+    new_buys = [o for o in fake.orders if o["side"] == "buy" and o["id"] != 1]
+    check("a same-tick fill's real cash cost is applied immediately, so a new buy is not placed "
+          "against stale (pre-fill) cash that's no longer actually available",
+          len(new_buys) == 0, (new_buys, fake.state.get("usdc_balance")))
+
+
+# ── Stale-unresolved-order visibility ───────────────────────────────────────────────────────────
+
+async def t_reconcile_logs_a_warning_for_a_long_unresolved_order():
+    # External audit finding (P2-10): an order absent from the exchange's own lookup used to be
+    # silently skipped forever with no visibility, even once it's clearly beyond Lighter's finite
+    # history window.
+    old_pending = {"id": 1, "level": 900, "side": "buy", "client_order_index": 999,
+                   "status": "pending", "limit_price": 3.10, "size": 1.70,
+                   "placed_at": "2020-01-01T00:00:00+00:00"}
+    bot, fake = make_bot(base_state(), orders=[old_pending])
+    await bot.reconcile_pending_orders()
+    check("an order missing from the exchange for far longer than the stale threshold is logged",
+          any(r["action"] == "order_unresolved_stale" for r in fake.runs), fake.runs)
+
+
+# ── Window hysteresis ────────────────────────────────────────────────────────────────────────────
+
+async def t_maintain_window_uses_hysteresis_guard_for_the_window_center():
+    # External audit finding (P2-11): the active window used to recenter from the live price with
+    # no hysteresis, so a resting buy sitting right at a boundary could be cancelled before ever
+    # getting a chance to fill, wasting a one-shot allowance slot on nothing.
+    step = math.log(1 + 0.125 / 100)
+    lvl = 900
+    boundary_price = math.exp((lvl + 1) * step)
+    noise_price = boundary_price * 1.00001  # just barely over the boundary, within the guard band
+    bot, fake = make_bot(base_state(levels_down=1, order_size_lit=1.70, usdc_balance=500.0))
+    bot._window_center = lvl  # established on a prior tick
+    resting_buy = {"id": 1, "level": lvl - 1, "side": "buy", "status": "open", "client_order_index": 1,
+                   "exchange_order_id": 50, "limit_price": round_price(math.exp((lvl - 1) * step)),
+                   "size": 1.70}
+    fake.orders.append(resting_buy)
+    await bot.maintain_window(fake.state, noise_price)
+    check("boundary noise within the guard band does not shift the window center",
+          bot._window_center == lvl, bot._window_center)
+    check("a resting buy at the edge of the (unshifted) window is not cancelled on pure noise",
+          fake.orders[0]["status"] == "open", fake.orders[0])
+
+
 # ── Lock heartbeat ───────────────────────────────────────────────────────────────────────────────
 
 async def t_lock_heartbeat_touched_after_each_order_placement():
@@ -726,7 +954,8 @@ async def main():
               t_real_balances_prefers_margin_balance_over_plain_balance,
               t_maintain_window_places_buys_in_the_active_down_window,
               t_maintain_window_sell_price_is_exactly_one_step_above_real_cost,
-              t_maintain_window_cancels_conflicting_buy_before_placing_a_sell,
+              t_maintain_window_cancels_conflicting_buy_and_defers_the_sell,
+              t_maintain_window_conflict_check_matches_by_real_price_not_recomputed_level,
               t_maintain_window_respects_real_usdc_minus_resting_commitments,
               t_maintain_window_respects_capital_usd_as_a_ceiling_not_just_cash,
               t_maintain_window_max_open_buys_is_a_persistent_lifetime_cap,
@@ -741,6 +970,15 @@ async def main():
               t_flatten_sells_each_held_level_separately_with_correct_closes_level,
               t_flatten_does_not_report_completion_if_a_sell_failed,
               t_flatten_does_not_report_completion_if_a_cancel_failed,
+              t_flatten_does_not_duplicate_sell_for_a_level_with_an_unresolved_resting_sell,
+              t_flatten_logs_dust_stuck_distinctly_for_an_unsellable_remainder,
+              t_reserve_buy_allowance_is_an_atomic_conditional_patch,
+              t_current_holdings_paginates_past_a_single_page,
+              t_touch_lock_heartbeat_detects_lock_loss_mid_tick,
+              t_maintain_window_stops_immediately_once_the_lock_is_lost_mid_loop,
+              t_tick_applies_fresh_fill_cash_delta_when_balance_refresh_is_skipped,
+              t_reconcile_logs_a_warning_for_a_long_unresolved_order,
+              t_maintain_window_uses_hysteresis_guard_for_the_window_center,
               t_lock_heartbeat_touched_after_each_order_placement,
               t_rate_limited_errors_back_off_before_retrying):
         try:

@@ -22,7 +22,14 @@ export async function POST(req: NextRequest) {
   const authError = checkLitGridLiveAuth(req);
   if (authError) return authError;
   const body = await req.json();
-  const out: Record<string, number> = {};
+  const out: Record<string, number | null> = {};
+
+  // maxOpenBuys: 0 explicitly means "no cap" (continuous production mode) -- previously there
+  // was no way to CLEAR the cap back to null once set, since undefined/null/"" were all treated
+  // as "leave unchanged" (2026-10-18 audit finding).
+  if (body.maxOpenBuys === 0 || body.maxOpenBuys === "0") {
+    out["max_open_buys"] = null;
+  }
 
   for (const [key, col] of [
     ["spacingPct", "spacing_pct"],
@@ -32,6 +39,7 @@ export async function POST(req: NextRequest) {
     ["capitalUsd", "capital_usd"],
     ["maxOpenBuys", "max_open_buys"],
   ] as const) {
+    if (col === "max_open_buys" && out["max_open_buys"] === null) continue;
     const raw = body[key];
     if (raw === undefined || raw === null || raw === "") continue;
     const v = Number(raw);
@@ -56,7 +64,7 @@ export async function POST(req: NextRequest) {
   // math (it needs the live price, which this route doesn't have); clearing it here just marks
   // "needs recompute" so the worker never trades on a stale size after a settings change.
   if (out["spacing_pct"] !== undefined || out["capital_usd"] !== undefined || out["drawdown_pct"] !== undefined) {
-    (out as Record<string, number | null>)["order_size_lit"] = null;
+    out["order_size_lit"] = null;
   }
 
   const { error } = await getSupabaseAdmin().from("lighter_lit_grid_live_state").update(out).eq("id", 1);
