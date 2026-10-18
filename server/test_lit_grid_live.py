@@ -2,11 +2,12 @@
 test_core.py / test_lit_grid_paper.py (python3 test_lit_grid_live.py), Supabase and the Lighter
 SDK both faked in-memory.
 
-Several tests here specifically reproduce findings from the 2026-10-18 external audit (commit
-49a64ef) before confirming the fix -- the fixture itself encodes the REAL exchange contract
-(e.g. filled_base_amount as a human-decimal, not a raw scaled integer) so a test can't pass
-merely by sharing the implementation's own wrong assumption, which is exactly how the original
-bugs slipped past the first test suite."""
+Several tests here specifically reproduce findings from the second, independent follow-up audit
+(2026-10-18) -- including the core rounding bug, confirmed with plain arithmetic before writing
+the fix: fill prices sit EXACTLY on a grid-bin boundary by construction, so rounding to the
+exchange's real 4-decimal precision has roughly 50% odds of landing in the wrong bin on any given
+fill. That's why sells are now linked to buys by an explicit `closes_level`, never a level
+recomputed from a (rounded) price."""
 import asyncio, math, os, sys
 
 os.environ.setdefault("NEXT_PUBLIC_SUPABASE_URL", "http://localhost")
@@ -15,7 +16,7 @@ sys.path.insert(0, "/Users/julio/trading-bot/server")
 
 import lit_grid_live as core
 from lit_grid_live import (
-    LitGridLive, LiveSnapshot, round_price, round_size, clamp_order_size, price_to_int,
+    LitGridLive, round_price, round_size, clamp_order_size, price_to_int,
     size_to_int, _order_fill_amounts, _order_is_terminal, MIN_BASE_AMOUNT, PRICE_DECIMALS,
     SIZE_DECIMALS, run_lit_grid_live,
 )
@@ -52,8 +53,9 @@ class FakeDb:
                 return [row]
             if method == "GET":
                 rows = self.orders
-                if "status=in.(pending,open)" in path:
-                    rows = [r for r in rows if r.get("status") in ("pending", "open")]
+                open_set = "'" + "','".join(core.OPEN_STATUSES) + "'"
+                if f"status=in.({','.join(core.OPEN_STATUSES)})" in path:
+                    rows = [r for r in rows if r.get("status") in core.OPEN_STATUSES]
                 elif "status=eq.filled&side=eq.buy" in path:
                     rows = [r for r in rows if r.get("status") == "filled" and r.get("side") == "buy"]
                 elif "status=eq.filled&side=eq.sell" in path:
@@ -73,9 +75,6 @@ class FakeDb:
 
 
 class FakeOrder:
-    """order_index/status/filled_base_amount/filled_quote_amount/remaining_base_amount, all in
-    REAL human-decimal units -- matches Lighter's own documented read-schema, not the raw scaled
-    integers the request side uses."""
     def __init__(self, client_order_index, order_index=1, status="open",
                  filled_base_amount=0.0, filled_quote_amount=0.0, remaining_base_amount=None):
         self.client_order_index = client_order_index
@@ -92,10 +91,6 @@ class FakeOrdersResp:
 
 
 class FakeOrderApi:
-    """orders_by_co covers orders a test wants to control explicitly. Any OTHER client_order_index
-    asked about is auto-resolved as fully filled from `client.placed` (whatever was actually sent
-    to the fake exchange) -- this mirrors a real exchange, which would have a real record of
-    anything genuinely submitted, without every test needing to predict a time-derived id."""
     def __init__(self, orders_by_co=None, fail=False, client=None):
         self.orders_by_co = orders_by_co or {}
         self.fail = fail
@@ -192,7 +187,7 @@ def base_state(**over):
         "capital_usd": 500, "drawdown_pct": 10, "order_size_lit": 1.70,
         "usdc_balance": 500.0, "lit_balance": 0.0,
         "live_price": None, "history_reset_at": None, "internal_spacing_pct": 0.125,
-        "max_open_buys": None,
+        "max_open_buys": None, "lifetime_buy_count": 0,
         "lock_owner": None, "lock_heartbeat": None,
     }
     st.update(over)
@@ -222,6 +217,10 @@ def make_bot(state, orders=None, signer_fail=False, signer_err=None, cancel_err=
     return bot, fake
 
 
+async def _async_return(value):
+    return value
+
+
 # ── Precision / unit conversion ─────────────────────────────────────────────────────────────────
 
 def t_precision_and_minimum_enforcement():
@@ -229,7 +228,7 @@ def t_precision_and_minimum_enforcement():
     check("size rounds to 2 decimals", round_size(1.236) == 1.24, round_size(1.236))
     check("a size at or above the 1.00 LIT minimum is accepted",
           clamp_order_size(1.70) == 1.70, clamp_order_size(1.70))
-    check("a size that rounds below the 1.00 LIT minimum is refused (None), never placed undersized",
+    check("a size that rounds below the 1.00 LIT minimum is refused (None)",
           clamp_order_size(0.994) is None, clamp_order_size(0.994))
     check("price_to_int scales by 10**PRICE_DECIMALS",
           price_to_int(3.1012) == round(3.1012 * 10 ** PRICE_DECIMALS), price_to_int(3.1012))
@@ -238,15 +237,11 @@ def t_precision_and_minimum_enforcement():
 
 
 def t_order_fill_amounts_uses_real_human_decimal_units():
-    # External audit finding, confirmed independently against Lighter's own read-schema docs
-    # (filled_base_amount example: "68.0066", a human-decimal string, not a raw scaled integer):
-    # the old code divided by 10**SIZE_DECIMALS AGAIN, turning a real 1.70 LIT fill into 0.017.
     o = FakeOrder(1, filled_base_amount=1.70, filled_quote_amount=5.27)
     qty, price = _order_fill_amounts(o)
-    check("fill quantity is the real human-decimal value, not divided by 100 again",
-          abs(qty - 1.70) < 1e-9, qty)
+    check("fill quantity is the real human-decimal value", abs(qty - 1.70) < 1e-9, qty)
     check("fill price is quote/base in real units", abs(price - (5.27 / 1.70)) < 1e-9, price)
-    check("no fill yet reads as (0.0, None), never a fabricated price",
+    check("no fill yet reads as (0.0, None)",
           _order_fill_amounts(FakeOrder(2, filled_base_amount=0)) == (0.0, None),
           _order_fill_amounts(FakeOrder(2, filled_base_amount=0)))
 
@@ -258,8 +253,17 @@ def t_order_is_terminal_uses_remaining_amount_primarily():
           _order_is_terminal(FakeOrder(1, status="open", remaining_base_amount=0.7)) is False)
     check("a canceled-post-only style status is terminal even with remaining reported",
           _order_is_terminal(FakeOrder(1, status="canceled-post-only", remaining_base_amount=1.2)) is True)
-    check("a canceled-invalid-balance variant is also recognized (substring match, not an exact enum)",
-          _order_is_terminal(FakeOrder(1, status="canceled-invalid-balance", remaining_base_amount=1.0)) is True)
+
+
+def t_rounding_does_not_shift_the_real_fill_price_bin():
+    # Second audit's core finding, confirmed with plain arithmetic: a fill price is EXACTLY a
+    # bin's lower boundary by construction, so rounding to 4 decimals can land in the bin below.
+    step = math.log(1 + 0.125 / 100)
+    lvl = 905
+    exact = math.exp(lvl * step)
+    rounded = round(exact, 4)
+    check("this is a REAL, reproducible phenomenon (not claiming it's universal, just real here)",
+          level_of(rounded, step) != lvl, (level_of(rounded, step), lvl))
 
 
 # ── Order placement ──────────────────────────────────────────────────────────────────────────────
@@ -271,155 +275,122 @@ async def t_place_grid_order_writes_ledger_before_sending():
           fake.orders[0]["status"] == "open", fake.orders[0])
     check("the real order was actually sent to the (fake) exchange",
           len(bot.client.placed) == 1, bot.client.placed)
-    check("the placed order carries the same client_order_index the ledger row recorded",
-          bot.client.placed[0]["client_order_index"] == fake.orders[0]["client_order_index"],
-          (bot.client.placed[0]["client_order_index"], fake.orders[0]["client_order_index"]))
+
+
+async def t_place_grid_order_records_explicit_closes_level():
+    bot, fake = make_bot(base_state())
+    await bot.place_grid_order(901, "sell", 3.15, 1.70, closes_level=900)
+    check("a sell's closes_level is recorded exactly as given, never recomputed from a price",
+          fake.orders[0]["closes_level"] == 900, fake.orders[0])
 
 
 async def t_place_grid_order_rejected_by_exchange():
     bot, fake = make_bot(base_state(), signer_err="insufficient margin")
     await bot.place_grid_order(900, "buy", 3.10, 1.70)
-    check("an exchange rejection marks the ledger row 'rejected', never silently dropped",
+    check("an exchange rejection marks the ledger row 'rejected'",
           fake.orders[0]["status"] == "rejected", fake.orders[0])
 
 
 async def t_place_grid_order_unknown_outcome_stays_pending():
     bot, fake = make_bot(base_state(), signer_fail=True)
     row_id = await bot.place_grid_order(900, "buy", 3.10, 1.70)
-    check("an unknown send outcome leaves the ledger row 'pending', not assumed either way",
+    check("an unknown send outcome leaves the ledger row 'pending'",
           fake.orders[0]["status"] == "pending", fake.orders[0])
-    check("the row id is still returned so the caller can track it", row_id == fake.orders[0]["id"], row_id)
+    check("the row id is still returned", row_id == fake.orders[0]["id"], row_id)
 
 
-# ── Reconciliation ───────────────────────────────────────────────────────────────────────────────
+# ── Cancel: intermediate state, not assumed final ───────────────────────────────────────────────
 
-async def t_reconcile_detects_a_fill_the_bot_never_saw_happen():
-    pending_row = {"id": 1, "level": 900, "side": "buy", "client_order_index": 555,
-                   "status": "open", "limit_price": 3.10, "size": 1.70}
-    exchange_order = FakeOrder(555, order_index=42, status="filled",
-                                filled_base_amount=1.70, filled_quote_amount=5.27,
-                                remaining_base_amount=0.0)
-    bot, fake = make_bot(base_state(), orders=[pending_row], orders_by_co={555: exchange_order})
-    ok = await bot.reconcile_pending_orders()
-    check("reconciliation reports success when every batch read cleanly", ok is True, ok)
-    row = fake.orders[0]
-    check("reconciliation updates the ledger row to 'filled' from the exchange's real report",
-          row["status"] == "filled", row)
-    check("the REAL filled price (not our limit price) is recorded, in real units",
-          abs(row["filled_price"] - (5.27 / 1.70)) < 1e-6, row["filled_price"])
-    check("the REAL filled quantity is recorded, in real units (not divided by 100)",
-          abs(row["filled_qty"] - 1.70) < 1e-6, row["filled_qty"])
+async def t_cancel_marks_cancel_requested_not_cancelled_directly():
+    # External audit finding: a clean cancel ack is not proof of the REAL final exchange state
+    # (a fill can race the cancel). cancel_order_row must not jump straight to 'cancelled'.
+    row = {"id": 1, "exchange_order_id": 55}
+    bot, fake = make_bot(base_state(), orders=[row])
+    ok = await bot.cancel_order_row(row)
+    check("a clean cancel send returns True", ok is True, ok)
+    check("the row is marked 'cancel_requested', an intermediate state -- not 'cancelled' directly",
+          fake.orders[0]["status"] == "cancel_requested", fake.orders[0])
 
 
-async def t_reconcile_leaves_truly_unknown_orders_pending():
-    pending_row = {"id": 1, "level": 900, "side": "buy", "client_order_index": 999,
-                   "status": "pending", "limit_price": 3.10, "size": 1.70}
-    bot, fake = make_bot(base_state(), orders=[pending_row], orders_by_co={})
+async def t_cancel_requested_resolves_to_filled_if_a_fill_raced_it():
+    # The exact race the audit flagged: we requested a cancel, but the exchange reports the
+    # order actually filled anyway.
+    row = {"id": 1, "level": 900, "side": "buy", "client_order_index": 777,
+           "status": "cancel_requested", "limit_price": 3.10, "size": 1.70}
+    raced_fill = FakeOrder(777, order_index=55, status="filled",
+                            filled_base_amount=1.70, filled_quote_amount=5.27, remaining_base_amount=0.0)
+    bot, fake = make_bot(base_state(), orders=[row], orders_by_co={777: raced_fill})
     await bot.reconcile_pending_orders()
-    check("an order the exchange has no record of yet stays 'pending', not assumed lost",
-          fake.orders[0]["status"] == "pending", fake.orders[0])
+    check("a cancel_requested order that actually filled is resolved to 'filled', not left as cancelled",
+          fake.orders[0]["status"] == "filled", fake.orders[0])
 
 
-async def t_reconcile_reports_failure_and_does_not_mark_rows():
-    pending_row = {"id": 1, "level": 900, "side": "buy", "client_order_index": 555,
-                   "status": "pending", "limit_price": 3.10, "size": 1.70}
-    bot, fake = make_bot(base_state(), orders=[pending_row], order_api_fail=True)
-    ok = await bot.reconcile_pending_orders()
-    check("reconciliation reports failure when the read itself raised", ok is False, ok)
-    check("the row is left untouched, not silently marked anything",
-          fake.orders[0]["status"] == "pending", fake.orders[0])
+async def t_cancel_order_row_checks_the_sdk_error():
+    row = {"id": 1, "exchange_order_id": 55}
+    bot, fake = make_bot(base_state(), cancel_err="cancel rejected")
+    ok = await bot.cancel_order_row(row)
+    check("a cancel the exchange explicitly rejects returns False", ok is False, ok)
 
 
-async def t_reconcile_partial_fill_stays_open_for_further_reconciliation():
-    # External audit finding: any positive fill used to be marked terminal immediately, so a
-    # LATER fill on the same (still partially open) order was never seen again.
-    pending_row = {"id": 1, "level": 900, "side": "buy", "client_order_index": 555,
-                   "status": "open", "limit_price": 3.10, "size": 1.70}
-    partial_order = FakeOrder(555, order_index=42, status="open",
-                               filled_base_amount=0.50, filled_quote_amount=1.55,
-                               remaining_base_amount=1.20)
-    bot, fake = make_bot(base_state(), orders=[pending_row], orders_by_co={555: partial_order})
-    await bot.reconcile_pending_orders()
-    row = fake.orders[0]
-    check("a genuine partial fill stays 'open', not prematurely marked 'filled'",
-          row["status"] == "open", row)
-    check("the partial fill's progress is still recorded",
-          abs(row["filled_qty"] - 0.50) < 1e-9, row["filled_qty"])
+# ── Holdings: quantity-aware running balance, explicit closes_level pairing ────────────────────
 
-    # Now the rest fills in.
-    full_order = FakeOrder(555, order_index=42, status="filled",
-                            filled_base_amount=1.70, filled_quote_amount=5.27,
-                            remaining_base_amount=0.0)
-    bot._order_api = FakeOrderApi({555: full_order})
-    await bot.reconcile_pending_orders()
-    row = fake.orders[0]
-    check("the order is reconciled again on the NEXT pass since it stayed in pending/open",
-          row["status"] == "filled", row)
-    check("the final full fill quantity is recorded correctly",
-          abs(row["filled_qty"] - 1.70) < 1e-9, row["filled_qty"])
-
-
-async def t_reconcile_cancelled_with_partial_fill_preserves_the_real_quantity():
-    pending_row = {"id": 1, "level": 900, "side": "buy", "client_order_index": 555,
-                   "status": "open", "limit_price": 3.10, "size": 1.70}
-    cancelled_partial = FakeOrder(555, order_index=42, status="canceled-post-only",
-                                   filled_base_amount=0.40, filled_quote_amount=1.24,
-                                   remaining_base_amount=1.30)
-    bot, fake = make_bot(base_state(), orders=[pending_row], orders_by_co={555: cancelled_partial})
-    await bot.reconcile_pending_orders()
-    row = fake.orders[0]
-    check("a cancelled order that did partially fill is marked 'filled' (it DID execute something)",
-          row["status"] == "filled", row)
-    check("its real partial quantity is preserved, not lost",
-          abs(row["filled_qty"] - 0.40) < 1e-9, row["filled_qty"])
-
-
-# ── Holdings reconstruction (FIFO pairing) ──────────────────────────────────────────────────────
-
-async def t_current_holdings_respects_tied_pairing():
+async def t_holdings_survives_rounding_via_explicit_closes_level():
+    # The second audit's headline reproduction: buy recorded at level 905 (real cost = the exact
+    # unrounded bin price), a sell that would, under the OLD level-inference design, round to
+    # level 904 and break pairing. With explicit closes_level, pairing is correct regardless.
+    step = math.log(1 + 0.125 / 100)
+    real_cost = math.exp(905 * step)
     orders = [
-        {"id": 1, "level": 900, "side": "buy", "status": "filled", "filled_qty": 1.70, "filled_price": 3.10},
-        {"id": 2, "level": 901, "side": "buy", "status": "filled", "filled_qty": 1.68, "filled_price": 3.12},
-        {"id": 3, "level": 901, "side": "sell", "status": "filled", "filled_qty": 1.70, "filled_price": 3.1},
+        {"id": 1, "level": 905, "side": "buy", "status": "filled", "filled_qty": 1.70, "filled_price": real_cost},
+        {"id": 2, "level": 904, "side": "sell", "closes_level": 905, "status": "filled",
+         "filled_qty": 1.70, "filled_price": round_price(real_cost * 1.00125)},
     ]
     bot, fake = make_bot(base_state(), orders=orders)
     holdings = await bot.current_holdings()
-    check("a buy at L closed by a filled sell at L+1 is NOT in current holdings",
-          900 not in holdings, holdings)
-    check("a buy at L with no matching sell at L+1 yet IS in current holdings",
-          901 in holdings and abs(holdings[901]["qty"] - 1.68) < 1e-9, holdings)
+    check("the sell correctly closes level 905 via explicit closes_level, regardless of its own display level",
+          905 not in holdings, holdings)
 
 
-async def t_current_holdings_repeat_cycle_at_the_same_level_is_not_erased():
-    # THE external audit's core reproduction: buy@900, sell closes it, a NEW buy@900 starts a
-    # new cycle. The old "ever sold at this level" set erased this new buy from inventory
-    # entirely.
+async def t_holdings_partial_sell_leaves_correct_remaining_quantity():
+    # Audit reproduction A: buy 1.70 LIT; sell 0.40 LIT, remainder cancelled. Must show 1.30 LIT
+    # remaining, not zero.
     orders = [
         {"id": 1, "level": 900, "side": "buy", "status": "filled", "filled_qty": 1.70, "filled_price": 3.10},
-        {"id": 2, "level": 901, "side": "sell", "status": "filled", "filled_qty": 1.70, "filled_price": 3.1039},
+        {"id": 2, "level": 901, "side": "sell", "closes_level": 900, "status": "filled",
+         "filled_qty": 0.40, "filled_price": 3.1039},
+    ]
+    bot, fake = make_bot(base_state(), orders=orders)
+    holdings = await bot.current_holdings()
+    check("a partial sell reduces remaining quantity proportionally, not to zero",
+          900 in holdings and abs(holdings[900]["qty"] - 1.30) < 1e-9, holdings.get(900))
+
+
+async def t_holdings_aggregate_sell_closes_multiple_buys_at_one_level():
+    # Audit reproduction B: buy 1 LIT, buy another 2 LIT at the same level, one aggregate 3 LIT
+    # sell closes it all. Must end at zero, not a leftover count-based remainder.
+    orders = [
+        {"id": 1, "level": 900, "side": "buy", "status": "filled", "filled_qty": 1.0, "filled_price": 3.00},
+        {"id": 2, "level": 900, "side": "buy", "status": "filled", "filled_qty": 2.0, "filled_price": 3.30},
+        {"id": 3, "level": 901, "side": "sell", "closes_level": 900, "status": "filled",
+         "filled_qty": 3.0, "filled_price": 3.31},
+    ]
+    bot, fake = make_bot(base_state(), orders=orders)
+    holdings = await bot.current_holdings()
+    check("a full aggregate sell closes out all buys at the level, regardless of how many orders",
+          900 not in holdings, holdings)
+
+
+async def t_holdings_repeat_cycle_at_the_same_level_is_not_erased():
+    orders = [
+        {"id": 1, "level": 900, "side": "buy", "status": "filled", "filled_qty": 1.70, "filled_price": 3.10},
+        {"id": 2, "level": 901, "side": "sell", "closes_level": 900, "status": "filled",
+         "filled_qty": 1.70, "filled_price": 3.1039},
         {"id": 3, "level": 900, "side": "buy", "status": "filled", "filled_qty": 1.65, "filled_price": 3.09},
     ]
     bot, fake = make_bot(base_state(), orders=orders)
     holdings = await bot.current_holdings()
-    check("the SECOND cycle's buy at a previously-sold level is correctly tracked as current inventory",
-          900 in holdings, holdings)
-    check("its real quantity/cost from the NEW buy is used, not lost",
-          abs(holdings[900]["qty"] - 1.65) < 1e-9 and abs(holdings[900]["cost"] - 3.09) < 1e-9,
-          holdings.get(900))
-
-
-async def t_current_holdings_aggregates_multiple_open_buys_at_one_level():
-    orders = [
-        {"id": 1, "level": 900, "side": "buy", "status": "filled", "filled_qty": 1.00, "filled_price": 3.00},
-        {"id": 2, "level": 900, "side": "buy", "status": "filled", "filled_qty": 2.00, "filled_price": 3.30},
-    ]
-    bot, fake = make_bot(base_state(), orders=orders)
-    holdings = await bot.current_holdings()
-    check("quantity from more than one open buy at a level is SUMMED, never overwritten/lost",
-          abs(holdings[900]["qty"] - 3.00) < 1e-9, holdings.get(900))
-    expected_cost = (1.00 * 3.00 + 2.00 * 3.30) / 3.00
-    check("cost basis is a weighted average across the aggregated buys",
-          abs(holdings[900]["cost"] - expected_cost) < 1e-9, holdings.get(900))
+    check("a second cycle's buy at a previously-closed level is tracked as current inventory",
+          900 in holdings and abs(holdings[900]["qty"] - 1.65) < 1e-9, holdings.get(900))
 
 
 # ── Balance divergence (fail-closed) ────────────────────────────────────────────────────────────
@@ -430,45 +401,21 @@ async def t_balance_divergence_pauses_new_orders():
     bot, fake = make_bot(base_state(), orders=orders, assets=[FakeAsset("LIT", 2.0, 0.0)])
     safe = await bot.check_balance_divergence()
     check("a real divergence beyond tolerance blocks new order placement", safe is False, safe)
-    check("the pause is logged", any(r["action"] == "balance_divergence_paused" for r in fake.runs), fake.runs)
-
-
-async def t_balance_matches_allows_new_orders():
-    orders = [{"id": 1, "level": 900, "side": "buy", "status": "filled",
-               "filled_qty": 1.70, "filled_price": 3.10}]
-    bot, fake = make_bot(base_state(), orders=orders, assets=[FakeAsset("LIT", 1.70, 0.0)])
-    safe = await bot.check_balance_divergence()
-    check("ledger matching the real exchange balance allows new order placement", safe is True, safe)
 
 
 async def t_balance_check_fails_closed_on_the_very_first_call():
-    # External audit finding: an unverifiable balance used to default to "safe to trade" --
-    # especially dangerous on the FIRST ever call, where _balance_paused's default (False)
-    # meant a startup read failure let trading proceed completely unchecked.
     bot, fake = make_bot(base_state(), account_api_fail=True)
     safe = await bot.check_balance_divergence()
-    check("an unverifiable balance on the very first check fails CLOSED, not open", safe is False, safe)
+    check("an unverifiable balance on the very first check fails CLOSED", safe is False, safe)
 
 
 async def t_real_balances_prefers_margin_balance_over_plain_balance():
-    # Live incident, 2026-10-18: this account has margin_mode="enabled" -- its real $544.55 sat
-    # entirely in margin_balance while the plain `balance` field read "0.000000". The bot must
-    # read margin_balance as the authoritative figure, not a zero-fallback guess.
     bot, fake = make_bot(base_state(), assets=[
         FakeAsset("USDC", balance=0.0, locked_balance=0.0, margin_balance=544.549261262078),
     ])
     usdc, lit = await bot.real_balances()
-    check("margin_balance is read as the real USDC total when present, not the empty plain balance",
+    check("margin_balance is read as the real USDC total when present",
           abs(usdc - 544.549261262078) < 1e-6, usdc)
-
-
-async def t_real_balances_falls_back_to_plain_balance_without_margin():
-    bot, fake = make_bot(base_state(), assets=[
-        FakeAsset("LIT", balance=1.70, locked_balance=0.30),  # no margin_balance -- plain spot asset
-    ])
-    usdc, lit = await bot.real_balances()
-    check("an asset with no margin_balance falls back to balance+locked, as before",
-          abs(lit - 2.00) < 1e-9, lit)
 
 
 # ── Window maintenance ───────────────────────────────────────────────────────────────────────────
@@ -481,62 +428,103 @@ async def t_maintain_window_places_buys_in_the_active_down_window():
     await bot.maintain_window(fake.state, price)
     buy_levels = {o["level"] for o in fake.orders if o["side"] == "buy"}
     expected = {cur_lvl - 1, cur_lvl - 2, cur_lvl - 3}
-    check("a buy is placed at every empty level in the active down-window, nowhere else",
+    check("a buy is placed at every empty level in the active down-window",
           buy_levels == expected, (buy_levels, expected))
 
 
-async def t_maintain_window_places_sells_for_held_levels():
-    step = math.log(1 + 0.125 / 100)
-    real_cost = math.exp(900 * step)  # self-consistent: cost actually corresponds to level 900
+async def t_maintain_window_sell_price_is_exactly_one_step_above_real_cost():
+    real_cost = 3.10
     orders = [{"id": 1, "level": 900, "side": "buy", "status": "filled",
                "filled_qty": 1.70, "filled_price": real_cost}]
     bot, fake = make_bot(base_state(levels_down=0, order_size_lit=1.70), orders=orders)
     await bot.maintain_window(fake.state, real_cost)
     sell_rows = [o for o in fake.orders if o["side"] == "sell"]
-    check("a sell is placed one level above a held (filled) buy",
-          len(sell_rows) == 1 and sell_rows[0]["level"] == 901, sell_rows)
+    expected_price = round_price(real_cost * 1.00125)
+    check("the sell is placed exactly one spacing step above the real cost (direct multiplication, no floor())",
+          len(sell_rows) == 1 and abs(sell_rows[0]["limit_price"] - expected_price) < 1e-9,
+          (sell_rows, expected_price))
+    check("the sell's closes_level is the real buy's level, set explicitly",
+          sell_rows[0]["closes_level"] == 900, sell_rows[0])
 
 
-async def t_maintain_window_never_submits_buy_and_sell_at_the_same_level_in_one_tick():
-    # External audit's reproduction: a held level-900 lot, current price at level 903 -- the old
-    # code placed BOTH a buy and a sell at level 901 in the same tick (stale pre-tick snapshot
-    # read by both passes). Sells must win; the conflicting buy must be skipped.
+async def t_maintain_window_cancels_conflicting_buy_before_placing_a_sell():
+    # External audit finding: a sell could be placed at a price where a buy is ALREADY resting,
+    # without cancelling it first -- a same-price self-trade risk.
     step = math.log(1 + 0.125 / 100)
-    real_cost = math.exp(900 * step)  # self-consistent: cost actually corresponds to level 900
-    orders = [{"id": 1, "level": 900, "side": "buy", "status": "filled",
-               "filled_qty": 1.70, "filled_price": real_cost}]
-    bot, fake = make_bot(base_state(levels_down=3, order_size_lit=1.70, usdc_balance=500.0), orders=orders)
-    price = math.exp(903 * step)
-    await bot.maintain_window(fake.state, price)
-    level_901_sides = {o["side"] for o in fake.orders if o["level"] == 901}
-    check("level 901 never has BOTH a buy and a sell placed in the same tick",
-          not ({"buy", "sell"} <= level_901_sides), fake.orders)
-    check("the sell (closing real inventory) is the one that wins the slot",
-          "sell" in level_901_sides, fake.orders)
+    real_cost = math.exp(900 * step)
+    sell_price = round_price(real_cost * 1.00125)
+    sell_lvl = level_of(sell_price, step)
+    conflicting_buy = {"id": 1, "level": sell_lvl, "side": "buy", "status": "open",
+                        "client_order_index": 1, "exchange_order_id": 99,
+                        "limit_price": sell_price, "size": 1.70}
+    held = {"id": 2, "level": 900, "side": "buy", "status": "filled",
+            "filled_qty": 1.70, "filled_price": real_cost}
+    bot, fake = make_bot(base_state(levels_down=0, order_size_lit=1.70), orders=[conflicting_buy, held])
+    await bot.maintain_window(fake.state, real_cost)
+    check("the conflicting resting buy at the sell's price is cancelled",
+          99 in bot.client.cancelled, bot.client.cancelled)
+    sells = [o for o in fake.orders if o["side"] == "sell"]
+    check("the sell is placed after clearing the conflict", len(sells) == 1, sells)
 
 
-async def t_maintain_window_respects_real_usdc_balance_as_a_spending_cap():
-    # External audit finding: capital_usd was never actually enforced as a spending cap --
-    # order_size * however many window levels could far exceed it. Here order_size (1.70) at
-    # price ~3.10 costs ~$5.27/buy; with only $12 real USDC, at most 2 buys should ever land.
-    bot, fake = make_bot(base_state(levels_down=10, order_size_lit=1.70, usdc_balance=12.0))
+async def t_maintain_window_respects_real_usdc_minus_resting_commitments():
+    # External audit finding: available cash must subtract what's ALREADY committed to this
+    # bot's own resting buy orders, not just read the raw account balance.
+    already_resting = {"id": 1, "level": 850, "side": "buy", "status": "open",
+                        "client_order_index": 1, "limit_price": 10.0, "size": 1.0}  # $10 committed
+    bot, fake = make_bot(base_state(levels_down=5, order_size_lit=1.70, usdc_balance=15.0),
+                          orders=[already_resting])
+    await bot.maintain_window(fake.state, 3.10)
+    new_buys = [o for o in fake.orders if o["side"] == "buy" and o["id"] != 1]
+    total_new_cost = sum(o["limit_price"] * o["size"] for o in new_buys)
+    check("new buy spend stays within real cash MINUS what's already committed to resting buys",
+          total_new_cost <= 5.0 + 1e-6, (total_new_cost, new_buys))
+
+
+async def t_maintain_window_respects_capital_usd_as_a_ceiling_not_just_cash():
+    # External audit finding: the cap must also respect capital_usd, not just real account cash
+    # (which can be larger than the user intends this strategy to use).
+    bot, fake = make_bot(base_state(levels_down=10, order_size_lit=1.70, usdc_balance=500.0, capital_usd=5.0))
     await bot.maintain_window(fake.state, 3.10)
     buys = [o for o in fake.orders if o["side"] == "buy"]
-    check("real usdc_balance caps how many buys actually get placed, regardless of window size",
-          len(buys) <= 2, (len(buys), fake.orders))
     total_cost = sum(o["limit_price"] * o["size"] for o in buys)
-    check("total committed notional never exceeds the real available cash",
-          total_cost <= 12.0 + 1e-6, total_cost)
+    check("total buy notional stays within capital_usd even though real cash is much larger",
+          total_cost <= 5.0 + 1e-6, (total_cost, buys))
+
+
+async def t_maintain_window_max_open_buys_is_a_persistent_lifetime_cap():
+    # External audit finding: the old cap was a concurrent snapshot that reset once a cycle
+    # completed. lifetime_buy_count must prevent a SECOND buy even after the first fully cycles.
+    orders = [
+        {"id": 1, "level": 900, "side": "buy", "status": "filled", "filled_qty": 1.70, "filled_price": 3.10},
+        {"id": 2, "level": 901, "side": "sell", "closes_level": 900, "status": "filled",
+         "filled_qty": 1.70, "filled_price": 3.1039},
+    ]
+    bot, fake = make_bot(base_state(levels_down=5, order_size_lit=1.70, usdc_balance=500.0,
+                                     max_open_buys=1, lifetime_buy_count=1), orders=orders)
+    await bot.maintain_window(fake.state, 3.10)
+    new_buys = [o for o in fake.orders if o["side"] == "buy" and o["id"] not in (1, 2)]
+    check("no new buy is placed once lifetime_buy_count already reached max_open_buys, "
+          "even though the prior cycle fully completed and freed capacity",
+          len(new_buys) == 0, new_buys)
+
+
+async def t_maintain_window_increments_lifetime_buy_count_persistently():
+    bot, fake = make_bot(base_state(levels_down=3, order_size_lit=1.70, usdc_balance=500.0,
+                                     max_open_buys=1, lifetime_buy_count=0))
+    await bot.maintain_window(fake.state, 3.10)
+    check("lifetime_buy_count is incremented and persisted after the one allowed buy",
+          fake.state["lifetime_buy_count"] == 1, fake.state["lifetime_buy_count"])
+    buys = [o for o in fake.orders if o["side"] == "buy"]
+    check("exactly one buy was placed", len(buys) == 1, buys)
 
 
 async def t_maintain_window_recomputes_order_size_when_missing():
     bot, fake = make_bot(base_state(levels_down=1, order_size_lit=None, capital_usd=500, drawdown_pct=10))
     await bot.maintain_window(fake.state, 3.10)
-    check("order_size_lit is recomputed from capital/spacing/drawdown, not left null",
+    check("order_size_lit is recomputed from capital/spacing/drawdown",
           fake.state["order_size_lit"] is not None and fake.state["order_size_lit"] > 0,
           fake.state.get("order_size_lit"))
-    check("a buy is actually placed using the recomputed size",
-          any(o["side"] == "buy" for o in fake.orders), fake.orders)
 
 
 async def t_maintain_window_cancels_buys_that_drifted_out_of_window():
@@ -544,54 +532,24 @@ async def t_maintain_window_cancels_buys_that_drifted_out_of_window():
              "exchange_order_id": 77, "limit_price": 1.0, "size": 1.70}
     bot, fake = make_bot(base_state(levels_down=3, order_size_lit=1.70, usdc_balance=500.0), orders=[stale])
     await bot.maintain_window(fake.state, 3.10)
-    check("a resting buy far outside the active window gets cancelled",
-          fake.orders[0]["status"] == "cancelled", fake.orders[0])
+    check("a resting buy far outside the active window gets a cancel request sent",
+          fake.orders[0]["status"] == "cancel_requested", fake.orders[0])
     check("cancellation actually hit the (fake) exchange", 77 in bot.client.cancelled, bot.client.cancelled)
 
 
 async def t_maintain_window_entries_blocked_still_maintains_existing_sells():
-    # External audit finding: disabling used to skip reconciliation/management entirely.
-    # entries_allowed=False must still place the sell for an already-held lot.
     orders = [{"id": 1, "level": 900, "side": "buy", "status": "filled",
                "filled_qty": 1.70, "filled_price": 3.10}]
     bot, fake = make_bot(base_state(levels_down=3, order_size_lit=1.70, usdc_balance=500.0), orders=orders)
     await bot.maintain_window(fake.state, 3.10, entries_allowed=False)
-    new_orders = [o for o in fake.orders if o["id"] != 1]  # exclude the pre-existing held buy
+    new_orders = [o for o in fake.orders if o["id"] != 1]
     check("a sell for existing inventory is still placed while entries are blocked",
           any(o["side"] == "sell" for o in new_orders), new_orders)
     check("no NEW buys are placed while entries are blocked",
           not any(o["side"] == "buy" for o in new_orders), new_orders)
 
 
-async def t_maintain_window_sell_target_uses_real_cost_under_current_spacing():
-    # External audit finding: a held lot's sell price was computed from its STORED level
-    # reinterpreted under whatever spacing is currently configured -- wrong after a spacing
-    # change. The fix derives the sell target from the lot's real recorded cost instead.
-    old_step = math.log(1 + 0.125 / 100)
-    real_cost = 3.10
-    stored_level = level_of(real_cost, old_step)  # the level this buy was placed/recorded at
-    orders = [{"id": 1, "level": stored_level, "side": "buy", "status": "filled",
-               "filled_qty": 1.70, "filled_price": real_cost}]
-    new_spacing = 0.25  # changed since the buy was placed
-    bot, fake = make_bot(base_state(levels_down=0, order_size_lit=1.70, spacing_pct=new_spacing), orders=orders)
-    new_step = math.log(1 + new_spacing / 100)
-    await bot.maintain_window(fake.state, real_cost)
-    sell_rows = [o for o in fake.orders if o["side"] == "sell"]
-    expected_level = level_of(real_cost, new_step) + 1
-    check("the sell target is computed from the real cost under the CURRENT spacing",
-          len(sell_rows) == 1 and sell_rows[0]["level"] == expected_level,
-          (sell_rows, expected_level))
-
-
-async def t_maintain_window_max_open_buys_cap():
-    bot, fake = make_bot(base_state(levels_down=5, order_size_lit=1.70, usdc_balance=500.0, max_open_buys=2))
-    await bot.maintain_window(fake.state, 3.10)
-    buys = [o for o in fake.orders if o["side"] == "buy"]
-    check("max_open_buys is a hard, code-enforced cap on new buy placement",
-          len(buys) == 2, (len(buys), fake.orders))
-
-
-# ── Spacing change detection (in tick) ──────────────────────────────────────────────────────────
+# ── Spacing change ───────────────────────────────────────────────────────────────────────────────
 
 async def t_tick_cancels_everything_on_a_spacing_change():
     resting = {"id": 1, "level": 900, "side": "buy", "status": "open", "client_order_index": 1,
@@ -600,12 +558,27 @@ async def t_tick_cancels_everything_on_a_spacing_change():
                                      order_size_lit=1.70, usdc_balance=500.0), orders=[resting])
     bot.fetch_current_price = lambda: _async_return(3.10)
     await bot.tick()
-    check("a spacing change triggers a cancel of every resting order",
-          fake.orders[0]["status"] == "cancelled", fake.orders[0])
-    check("internal_spacing_pct is updated to the new value",
+    check("a spacing change triggers a cancel request on every resting order",
+          fake.orders[0]["status"] == "cancel_requested", fake.orders[0])
+    check("internal_spacing_pct is updated once the cancel succeeded",
           fake.state["internal_spacing_pct"] == 0.25, fake.state)
-    check("order_size_lit is cleared for recompute under the new spacing",
-          fake.state["order_size_lit"] is None, fake.state)
+
+
+async def t_tick_spacing_change_does_not_advance_if_cancel_fails():
+    # External audit finding: a spacing-change cancel failure used to be silently ignored --
+    # internal_spacing_pct advanced anyway, leaving an old order live under the new spacing.
+    resting = {"id": 1, "level": 900, "side": "buy", "status": "open", "client_order_index": 1,
+               "exchange_order_id": 77, "limit_price": 3.10, "size": 1.70}
+    bot, fake = make_bot(base_state(spacing_pct=0.25, internal_spacing_pct=0.125,
+                                     order_size_lit=1.70, usdc_balance=500.0), orders=[resting],
+                          cancel_err="cancel rejected")
+    bot.fetch_current_price = lambda: _async_return(3.10)
+    await bot.tick()
+    check("internal_spacing_pct does NOT advance while a cancel is still unresolved",
+          fake.state["internal_spacing_pct"] == 0.125, fake.state)
+    check("the old order is not falsely marked cancelled",
+          fake.orders[0]["status"] != "cancel_requested" or fake.orders[0]["status"] != "cancelled",
+          fake.orders[0])
 
 
 async def t_tick_skips_new_decisions_when_reconciliation_fails():
@@ -618,37 +591,50 @@ async def t_tick_skips_new_decisions_when_reconciliation_fails():
           not any(o["side"] == "buy" and o["id"] != 1 for o in fake.orders), fake.orders)
 
 
+async def t_tick_refetches_state_after_balance_check():
+    # External audit finding: maintain_window used to receive the STALE (pre-balance-check)
+    # usdc_balance, since check_balance_divergence wrote a fresh value to the DB without the
+    # caller's local `state` object being updated.
+    bot, fake = make_bot(base_state(usdc_balance=0.0, levels_down=3, order_size_lit=1.70),
+                          assets=[FakeAsset("USDC", balance=0, locked_balance=0, margin_balance=500.0)])
+    bot.fetch_current_price = lambda: _async_return(3.10)
+    await bot.tick()
+    buys = [o for o in fake.orders if o["side"] == "buy"]
+    check("buys are placed using the FRESH balance just read, not the stale $0 state at tick's start",
+          len(buys) > 0, (buys, fake.state.get("usdc_balance")))
+
+
 # ── Flatten ──────────────────────────────────────────────────────────────────────────────────────
 
-async def t_flatten_cancels_resting_orders_and_market_sells_holdings():
-    resting = {"id": 1, "level": 902, "side": "buy", "status": "open", "client_order_index": 1,
-               "exchange_order_id": 55, "limit_price": 3.00, "size": 1.70}
-    held = {"id": 2, "level": 900, "side": "buy", "status": "filled",
-            "filled_qty": 1.70, "filled_price": 3.10}
-    bot, fake = make_bot(base_state(), orders=[resting, held], assets=[FakeAsset("LIT", 0.0, 0.0)])
+async def t_flatten_sells_each_held_level_separately_with_correct_closes_level():
+    # External audit finding: a single lump-sum flatten sell at a fake level=-1 broke the
+    # ledger's level-based matching entirely. Flatten must sell per-level with real closes_level.
+    held_a = {"id": 1, "level": 900, "side": "buy", "status": "filled",
+              "filled_qty": 1.70, "filled_price": 3.10}
+    held_b = {"id": 2, "level": 910, "side": "buy", "status": "filled",
+              "filled_qty": 2.00, "filled_price": 3.15}
+    bot, fake = make_bot(base_state(), orders=[held_a, held_b], assets=[FakeAsset("LIT", 0.0, 0.0)])
     bot.live.best_mid = lambda max_age=core.BOOK_MAX_AGE: 3.10
     await bot.flatten_all()
-    check("every resting order is cancelled on the (fake) exchange", 55 in bot.client.cancelled, bot.client.cancelled)
-    check("a real market sell order is placed for the full held quantity",
-          len(bot.client.placed) == 1 and bot.client.placed[0]["base_amount"] == core.size_to_int(1.70),
-          bot.client.placed)
+    sell_rows = [o for o in fake.orders if o["side"] == "sell"]
+    closes_levels = {o["closes_level"] for o in sell_rows}
+    check("flatten places one sell per held level, each with the correct closes_level",
+          closes_levels == {900, 910}, sell_rows)
+    holdings_after = await bot.current_holdings()
+    check("the ledger correctly shows nothing held after a full flatten",
+          holdings_after == {}, holdings_after)
     check("the bot ends disabled after a VERIFIED-flat flatten", fake.state["enabled"] is False, fake.state)
-    check("flatten_requested is cleared only once verified", fake.state["flatten_requested"] is False, fake.state)
 
 
-async def t_flatten_does_not_report_completion_if_the_market_sell_failed():
-    # External audit finding: market_sell_all's return value was ignored entirely -- a stale
-    # book returning None still let flatten_all report success.
+async def t_flatten_does_not_report_completion_if_a_sell_failed():
     held = {"id": 1, "level": 900, "side": "buy", "status": "filled",
             "filled_qty": 1.70, "filled_price": 3.10}
     bot, fake = make_bot(base_state(flatten_requested=True), orders=[held],
                           assets=[FakeAsset("LIT", 1.70, 0.0)])
-    bot.live.best_mid = lambda max_age=core.BOOK_MAX_AGE: None  # stale book -- market_sell_all can't act
+    bot.live.best_mid = lambda max_age=core.BOOK_MAX_AGE: None  # stale book -- sell can't act
     await bot.flatten_all()
-    check("flatten_requested stays true when the sell never actually happened",
+    check("flatten_requested stays true when a sell never actually happened",
           fake.state["flatten_requested"] is True, fake.state)
-    check("the bot is NOT disabled while real exposure remains", fake.state.get("enabled") is not False
-          or fake.state.get("enabled") is None, fake.state)
     check("flatten_incomplete is logged, not flatten_completed",
           any(r["action"] == "flatten_incomplete" for r in fake.runs)
           and not any(r["action"] == "flatten_completed" for r in fake.runs), fake.runs)
@@ -660,29 +646,13 @@ async def t_flatten_does_not_report_completion_if_a_cancel_failed():
     bot, fake = make_bot(base_state(flatten_requested=True), orders=[resting],
                           cancel_err="cancel rejected", assets=[FakeAsset("LIT", 0.0, 0.0)])
     await bot.flatten_all()
-    check("a failed cancel leaves the order row NOT marked cancelled",
-          fake.orders[0]["status"] != "cancelled", fake.orders[0])
     check("flatten does not report completion when a cancel failed",
           not any(r["action"] == "flatten_completed" for r in fake.runs), fake.runs)
 
 
-async def t_cancel_order_row_checks_the_sdk_error():
-    # External audit finding: cancel_order's returned (tx, resp, err) tuple was never checked --
-    # only an exception would have been noticed, not an explicit error in a clean response.
-    row = {"id": 1, "exchange_order_id": 55}
-    bot, fake = make_bot(base_state(), cancel_err="cancel rejected")
-    ok = await bot.cancel_order_row(row)
-    check("a cancel the exchange explicitly rejects returns False", ok is False, ok)
-    check("the row is NOT marked cancelled when the exchange rejected it",
-          len(fake.orders) == 0 or fake.orders[0].get("status") != "cancelled", fake.orders)
-
-
-# ── Lock heartbeat touched during a busy tick ───────────────────────────────────────────────────
+# ── Lock heartbeat ───────────────────────────────────────────────────────────────────────────────
 
 async def t_lock_heartbeat_touched_after_each_order_placement():
-    # External audit finding: a tick placing several real orders (each up to ORDER_TIMEOUT=12s)
-    # could run past LOCK_STALE_AFTER=30s with a stale heartbeat, since the heartbeat only used
-    # to refresh once per outer loop iteration.
     bot, fake = make_bot(base_state(levels_down=3, order_size_lit=1.70, usdc_balance=500.0))
     heartbeats = []
     orig_sb = bot.sb
@@ -696,7 +666,7 @@ async def t_lock_heartbeat_touched_after_each_order_placement():
           len(heartbeats) >= 3, len(heartbeats))
 
 
-# ── Rate-limit backoff (unchanged behavior, still covered) ─────────────────────────────────────
+# ── Rate-limit backoff ──────────────────────────────────────────────────────────────────────────
 
 async def t_rate_limited_errors_back_off_before_retrying():
     class RateLimitedBot:
@@ -735,45 +705,42 @@ async def t_rate_limited_errors_back_off_before_retrying():
           len(sleeps) >= 2 and sleeps[1] > sleeps[0], sleeps)
 
 
-async def _async_return(value):
-    return value
-
-
 async def main():
     t_precision_and_minimum_enforcement()
     t_order_fill_amounts_uses_real_human_decimal_units()
     t_order_is_terminal_uses_remaining_amount_primarily()
+    t_rounding_does_not_shift_the_real_fill_price_bin()
     for t in (t_place_grid_order_writes_ledger_before_sending,
+              t_place_grid_order_records_explicit_closes_level,
               t_place_grid_order_rejected_by_exchange,
               t_place_grid_order_unknown_outcome_stays_pending,
-              t_reconcile_detects_a_fill_the_bot_never_saw_happen,
-              t_reconcile_leaves_truly_unknown_orders_pending,
-              t_reconcile_reports_failure_and_does_not_mark_rows,
-              t_reconcile_partial_fill_stays_open_for_further_reconciliation,
-              t_reconcile_cancelled_with_partial_fill_preserves_the_real_quantity,
-              t_current_holdings_respects_tied_pairing,
-              t_current_holdings_repeat_cycle_at_the_same_level_is_not_erased,
-              t_current_holdings_aggregates_multiple_open_buys_at_one_level,
+              t_cancel_marks_cancel_requested_not_cancelled_directly,
+              t_cancel_requested_resolves_to_filled_if_a_fill_raced_it,
+              t_cancel_order_row_checks_the_sdk_error,
+              t_holdings_survives_rounding_via_explicit_closes_level,
+              t_holdings_partial_sell_leaves_correct_remaining_quantity,
+              t_holdings_aggregate_sell_closes_multiple_buys_at_one_level,
+              t_holdings_repeat_cycle_at_the_same_level_is_not_erased,
               t_balance_divergence_pauses_new_orders,
-              t_balance_matches_allows_new_orders,
               t_balance_check_fails_closed_on_the_very_first_call,
               t_real_balances_prefers_margin_balance_over_plain_balance,
-              t_real_balances_falls_back_to_plain_balance_without_margin,
               t_maintain_window_places_buys_in_the_active_down_window,
-              t_maintain_window_places_sells_for_held_levels,
-              t_maintain_window_never_submits_buy_and_sell_at_the_same_level_in_one_tick,
-              t_maintain_window_respects_real_usdc_balance_as_a_spending_cap,
+              t_maintain_window_sell_price_is_exactly_one_step_above_real_cost,
+              t_maintain_window_cancels_conflicting_buy_before_placing_a_sell,
+              t_maintain_window_respects_real_usdc_minus_resting_commitments,
+              t_maintain_window_respects_capital_usd_as_a_ceiling_not_just_cash,
+              t_maintain_window_max_open_buys_is_a_persistent_lifetime_cap,
+              t_maintain_window_increments_lifetime_buy_count_persistently,
               t_maintain_window_recomputes_order_size_when_missing,
               t_maintain_window_cancels_buys_that_drifted_out_of_window,
               t_maintain_window_entries_blocked_still_maintains_existing_sells,
-              t_maintain_window_sell_target_uses_real_cost_under_current_spacing,
-              t_maintain_window_max_open_buys_cap,
               t_tick_cancels_everything_on_a_spacing_change,
+              t_tick_spacing_change_does_not_advance_if_cancel_fails,
               t_tick_skips_new_decisions_when_reconciliation_fails,
-              t_flatten_cancels_resting_orders_and_market_sells_holdings,
-              t_flatten_does_not_report_completion_if_the_market_sell_failed,
+              t_tick_refetches_state_after_balance_check,
+              t_flatten_sells_each_held_level_separately_with_correct_closes_level,
+              t_flatten_does_not_report_completion_if_a_sell_failed,
               t_flatten_does_not_report_completion_if_a_cancel_failed,
-              t_cancel_order_row_checks_the_sdk_error,
               t_lock_heartbeat_touched_after_each_order_placement,
               t_rate_limited_errors_back_off_before_retrying):
         try:

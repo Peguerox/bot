@@ -10,89 +10,83 @@ built): a durable log of every real order, with a stable ID and the ACTUAL fille
 survives a restart -- so the bot never ends up holding LIT with no record of what it cost.
 lighter_lit_grid_live_orders is that ledger: one row per order, written BEFORE the order is even
 sent (status='pending'), updated in place as its real status resolves -- never a new row per
-event. On every start (restart, redeploy, manual enable), reconcile_pending_orders() checks every
-non-terminal row against the exchange's own account_orders() before any new decision is made, and
-a periodic balance-divergence check compares ledger-derived holdings against the real exchange
-balance, pausing new orders (never silently trusting internal bookkeeping) if they disagree by
-more than a rounding step.
+event.
+
+THIRD-PASS REWRITE (2026-10-18), after a second independent audit found the previous round's
+sell-target fix had a real, high-frequency bug, plus several deeper issues in how inventory was
+tracked. All confirmed against this code (the rounding bug independently reproduced with plain
+arithmetic) before rewriting:
+
+  - ROOT CAUSE of the worst finding: a held lot's sell target used to be computed as
+    `level_of(real_cost, step) + 1` every tick. But every fill price is `exp(level * step)` --
+    EXACTLY the lower boundary of its own bin, by construction. Rounding that to 4 decimals (the
+    exchange's real precision) has roughly 50% odds of landing just BELOW the boundary, which
+    floor()'s math then classifies as the PREVIOUS bin -- not rare, close to a coin flip on every
+    single fill (reproduced directly: exp(905*step) rounds to a price whose own level_of() comes
+    back 904, not 905). The sell would then target the SAME price as the buy, or the wrong level
+    entirely, and -- because the old pairing logic (current_holdings) inferred "which buy does
+    this sell close" purely from `sell.level - 1` -- a pairing drawn from the WRONG recomputed
+    level broke inventory tracking too (a sold lot could still show as held, or an unrelated lot
+    could appear sold).
+  - THE FIX: sells no longer infer their target level by recomputing anything from a price.
+    place_grid_order() now takes an explicit `closes_level` for a sell -- set directly from the
+    real buy's own stored level at the moment the sell is decided, never recomputed later. The
+    sell's own resting price is computed directly as `cost * (1 + spacing_pct/100)` (one real
+    step above the real cost, no floor() involved at all). current_holdings() now walks each
+    level's buy/sell events in chronological (id) order as a running balance -- quantity-aware
+    (a partial sell correctly reduces remaining qty and cost proportionally, not "count one order
+    closed, drop one whole buy row"), and pairs by `closes_level` (explicit) rather than
+    `sell.level - 1` (inferred, and exactly what the rounding bug broke).
+  - Cancel acknowledgment is not final confirmation (a request can race a fill on the exchange).
+    cancel_order_row() now marks a successful cancel send as 'cancel_requested', an intermediate
+    status -- reconcile_pending_orders() (which already polls pending/open/cancel_requested rows)
+    resolves it to the REAL terminal outcome next pass (filled, filled-despite-the-cancel-attempt,
+    or genuinely cancelled), never assumed from the send alone.
+  - Flatten no longer places one lump-sum market sell at a fake level=-1 (which broke the
+    level-based ledger entirely, pairing against a buy level that never existed). It now places
+    one real market sell PER HELD LEVEL, each with the correct closes_level, so the ledger's
+    accounting stays correct through a flatten too.
+  - tick() used to read `state` once, then check_balance_divergence() wrote a FRESH usdc_balance
+    to the database without updating that same local `state` object -- maintain_window() received
+    the OLD (pre-check) cash figure. tick() now re-fetches state after a successful balance check.
+  - The real spending cap now accounts for USDC already committed to this bot's own resting buy
+    orders (not just the real account balance, which could overstate what's actually free), AND
+    is capped at the user's configured capital_usd minus whatever's already deployed in holdings
+    + resting buys -- not just whatever real cash happens to be sitting in the account (which
+    could be far more than the user intended this strategy to use).
+  - max_open_buys is now a REAL one-shot/lifetime cap (`lifetime_buy_count`, persisted, survives
+    restarts), not a concurrent snapshot (open resting buys + held levels) that silently resets
+    the moment one full buy-sell cycle completes -- the old version did not actually limit
+    anything to "one order total" the way it was described.
+  - A spacing change's cancel-all is no longer assumed to succeed -- internal_spacing_pct only
+    advances (completing the "migration" to the new spacing) once every resting order is
+    confirmed cancelled; a failure retries the next tick instead of silently moving on while an
+    old order is still live.
+  - Placing a sell now cancels any conflicting resting BUY at that exact target level FIRST --
+    the sell (closing real inventory) always wins, enforced, not just a same-tick ordering
+    assumption.
 
 Nothing in this codebase has placed a real LIMIT order before this (stoch_bot_core.py's
 place_order only ever sends MARKET orders; native SL/TP are the only conditional orders that
 exist). The Lighter SDK (lighter.SignerClient.create_order) supports real ORDER_TYPE_LIMIT with
 ORDER_TIME_IN_FORCE_POST_ONLY -- used here specifically because Lighter's maker fee on this pair
-is confirmed 0%, so POST_ONLY guarantees every fill is a maker fill, matching this session's own
-"limit beats market" research conclusion for this strategy.
+is confirmed 0%, so POST_ONLY guarantees every fill is a maker fill.
 
-Precision (2026-10-18, confirmed live against Lighter's own orderBooks endpoint for market 2049):
-price to 4 decimals, size to 2 decimals, hard minimum 1.00 LIT per order -- no dynamic
-market-metadata fetch exists anywhere in this codebase (every bot hardcodes decimals per market,
-same convention here). clamp_order_size() refuses (returns None) rather than ever place an
-undersized order that the exchange would reject.
+Precision (confirmed live against Lighter's own orderBooks endpoint for market 2049): price to 4
+decimals, size to 2 decimals, hard minimum 1.00 LIT per order -- no dynamic market-metadata fetch
+exists anywhere in this codebase (every bot hardcodes decimals per market, same convention here).
+clamp_order_size() refuses (returns None) rather than ever place an undersized order.
 
-Second-pass fixes, all from an independent external audit (2026-10-18, after commit 49a64ef),
-each confirmed against this code before fixing (several independently re-verified -- e.g. the
-fill-amount scaling claim was checked directly against Lighter's own read-schema docs, which show
-filled_base_amount as a human-decimal string like "68.0066", not a raw scaled integer):
+Real balance: this account has margin_mode="enabled" -- a per-asset `balance` field reads
+0.000000 even with real funds present; the actual usable amount sits in `margin_balance`
+(confirmed live, account-level `collateral` reads the same number). margin_balance is the
+PRIMARY source per asset here, falling back to balance+locked_balance only for an asset with no
+margin_balance at all. NOTE (still unverified, flagged honestly): this was confirmed only for
+USDC on this account -- a real LIT asset entry doesn't exist yet (zero held), so whether it
+follows the same shape is unconfirmed until the bot actually holds some.
 
-  - _order_fill_amounts() no longer divides by 10**SIZE_DECIMALS -- the SDK's read responses are
-    already human-scaled. The earlier assumption (and the earlier claim that quote/base is
-    unit-invariant regardless of scaling) was wrong when base and quote use different scale
-    factors, which they do on the request side; it happens to not matter now only because both
-    are already real units on the read side.
-  - current_holdings() now does FIFO pairing of buys-to-sells WITHIN each level (by ledger row
-    id order), not a flat "this level was ever sold" set -- the old version let a second buy
-    cycle at a previously-sold level vanish from inventory entirely (reproduced: buy, sell,
-    buy-again at the same level returned an empty holdings dict). Multiple still-open buys at one
-    level (shouldn't happen by design, defended anyway) are aggregated, not overwritten.
-  - reconcile_pending_orders() now uses the order's real `remaining_base_amount` as the primary
-    "is this actually done" signal, not "any positive fill = terminal". A genuine partial fill
-    now stays `status='open'` (still reconciled every pass, fill progress recorded) until the
-    exchange reports nothing left to fill -- the old version marked any partial fill terminal and
-    silently stopped tracking further fills on that order forever.
-  - flatten_all() now reconciles pending orders FIRST (so a flatten right after placing an order
-    can find its real exchange id instead of silently skipping it), checks every cancel's and the
-    market sell's real result, and re-reads the REAL exchange LIT balance before ever reporting
-    completion -- any failure, or real LIT still above tolerance, leaves flatten_requested=true so
-    the next tick retries instead of falsely marking the position flat.
-  - reconcile_pending_orders() and check_balance_divergence() both now FAIL CLOSED: an API error
-    blocks new order placement for that tick instead of silently letting it proceed (the old
-    balance check especially defaulted to "safe to trade" on its very first, unverified call).
-  - cancel_order_row() checks the SDK's returned error instead of assuming success whenever no
-    exception was raised, and returns a real bool so callers (flatten_all) know whether it worked.
-  - maintain_window() takes one in-tick snapshot of resting orders and mutates it in memory as
-    THIS tick places/cancels orders, instead of two passes both reading the same stale pre-tick
-    state -- the old version could submit a buy and a sell at the identical price in one tick.
-    Sells (closing real inventory) are placed before buys and always win a same-level conflict.
-    Buy/sell occupancy is now tracked as two separate sets, not one shared "is anything here" set
-    keyed only by level.
-  - Every buy placement is now checked against real, currently-available usdc_balance (updated by
-    check_balance_divergence) before being sent, stopping the loop once real cash runs out --
-    capital_usd was previously just an input to a sizing formula, never an enforced spending cap,
-    so a small drawdown_pct with a larger levels_down could submit far more notional than the
-    configured capital (reproduced: $500 capital, 0.1% drawdown, 50 levels down attempted
-    $24,229 of buys).
-  - A held lot's sell target is now computed from its REAL recorded cost under the CURRENT
-    spacing (`level_of(cost, step) + 1`), not from its stored placement-time level reinterpreted
-    under a possibly-changed spacing -- the exact bug already fixed in the paper bot and missed
-    here. A spacing change also now triggers a clean cancel-all of every resting order (detected
-    via internal_spacing_pct, persisted) before the next tick places anything fresh.
-  - The single-instance lock's heartbeat is now touched after every individual order
-    placement/cancellation inside a tick, not only once per outer loop iteration -- a tick
-    processing several orders (each with up to ORDER_TIMEOUT=12s) could previously run past
-    LOCK_STALE_AFTER=30s with its heartbeat still showing stale, letting a second instance
-    believe the first was dead and steal the lock mid-flight.
-  - Disabling (`enabled=false`) no longer skips reconciliation and existing-position management
-    entirely -- it now only blocks placing NEW buys; resting sells for inventory already held
-    keep getting maintained, same "lock/pause gates entries only, never exits" principle used
-    everywhere else in this codebase.
-  - New `max_open_buys` (defaults to 1): a code-enforced cap on new buy placement, not just a
-    manual-settings convention -- the earlier "single order test" had nothing in code actually
-    limiting it to one order.
-  - `lighter_lit_grid_live_orders.client_order_index` now has a real unique constraint
-    (migration) as defense-in-depth against the timestamp-derived id colliding.
-
-Starts disabled. Nothing here ever places a real order until enabled=true is set from the
-dashboard -- explicitly the user's call, same standing rule as every other live bot.
+Starts disabled, max_open_buys defaults to 1. Nothing here ever places a real order until
+enabled=true is set from the dashboard -- explicitly the user's call.
 """
 import asyncio
 import contextlib
@@ -119,8 +113,6 @@ TABLE_STATE = "lighter_lit_grid_live_state"
 TABLE_ORDERS = "lighter_lit_grid_live_orders"
 TABLE_RUNS = "lighter_lit_grid_live_runs"
 
-# Confirmed live 2026-10-18 against GET /api/v1/orderBooks, market_id=2049:
-# supported_price_decimals=4, supported_size_decimals=2, min_base_amount="1.00".
 PRICE_DECIMALS = 4
 SIZE_DECIMALS = 2
 MIN_BASE_AMOUNT = 1.00
@@ -136,9 +128,9 @@ RATE_LIMIT_BACKOFF_START = 15.0
 RATE_LIMIT_BACKOFF_MAX = 120.0
 BALANCE_RECONCILE_EVERY = 60.0
 BALANCE_DIVERGENCE_TOLERANCE_LIT = 0.03
-# Exchange statuses containing any of these substrings are terminal regardless of remaining
-# quantity (covers canceled-post-only, canceled-expired, canceled-invalid-balance, etc. without
-# needing the exact enum -- external audit finding, 2026-10-18).
+# Non-terminal statuses this bot still needs to poll (an in-flight cancel request is one of
+# them now -- its real outcome isn't known until reconciliation confirms it).
+OPEN_STATUSES = ("pending", "open", "cancel_requested")
 TERMINAL_STATUS_SUBSTRINGS = ("cancel", "reject", "expir")
 
 
@@ -151,8 +143,6 @@ def round_size(qty):
 
 
 def clamp_order_size(qty):
-    """Rounds to the exchange's real size precision and enforces its real minimum. Returns None
-    (never a too-small order) if the result would round below MIN_BASE_AMOUNT."""
     sized = round_size(qty)
     if sized < MIN_BASE_AMOUNT:
         return None
@@ -168,10 +158,6 @@ def size_to_int(qty):
 
 
 def _order_fill_amounts(order):
-    """Lighter's read-side order fields are already human-scaled decimal strings (confirmed
-    2026-10-18 against the SDK's own read-schema docs: filled_base_amount example "68.0066") --
-    NOT raw integers needing division by 10**decimals the way request-side fields do. Returns
-    (filled_qty, filled_price) or (0.0, None) if nothing has filled yet."""
     filled_base = float(getattr(order, "filled_base_amount", 0) or 0)
     filled_quote = float(getattr(order, "filled_quote_amount", 0) or 0)
     if filled_base <= 0:
@@ -180,9 +166,6 @@ def _order_fill_amounts(order):
 
 
 def _order_is_terminal(order):
-    """True once an order can never receive another fill -- primarily decided by
-    remaining_base_amount hitting zero (works regardless of the exact status vocabulary), with a
-    substring fallback on status for a cancel/reject/expiry reported with nonzero remaining."""
     remaining = getattr(order, "remaining_base_amount", None)
     if remaining is not None and float(remaining) <= 0:
         return True
@@ -200,18 +183,18 @@ def now_iso():
 
 
 class LiveSnapshot:
-    """In-tick mutable view of what's resting, built once per maintain_window() call and updated
-    as THAT SAME tick places/cancels orders -- fixes a same-tick buy+sell-at-the-same-price race
-    (external audit finding, 2026-10-18) that a re-query-per-pass design can't avoid, since two
-    passes reading the same stale pre-tick snapshot have no way to see what the OTHER pass just
-    did. Buy and sell occupancy are tracked as two separate sets (also an audit finding: a shared
-    "is anything resting here" set keyed only by level wrongly let one side block the other)."""
+    """In-tick mutable view of what's resting. buy_levels is keyed by a resting buy's own
+    `level`. sell_closes is keyed by a resting sell's `closes_level` (explicit -- NOT its own
+    display level, which is cosmetic only and never load-bearing for pairing/placement logic)."""
     def __init__(self, resting_by_level):
         self.rows_by_level = resting_by_level
         self.buy_levels = {lvl for lvl, rows in resting_by_level.items()
                             if any(r["side"] == "buy" for r in rows)}
-        self.sell_levels = {lvl for lvl, rows in resting_by_level.items()
-                             if any(r["side"] == "sell" for r in rows)}
+        self.sell_closes = set()
+        for rows in resting_by_level.values():
+            for r in rows:
+                if r["side"] == "sell" and r.get("closes_level") is not None:
+                    self.sell_closes.add(r["closes_level"])
 
 
 class LitGridLive:
@@ -233,7 +216,7 @@ class LitGridLive:
         self._last_balance_check = 0.0
         self._balance_paused = False
 
-    # ── Supabase (same pattern as lit_grid_paper.py) ────────────────────────────────────────────
+    # ── Supabase ─────────────────────────────────────────────────────────────────────────────
     async def sb(self, method, path, body=None):
         url = f"{SUPABASE_URL}/rest/v1/{path}"
         headers = {
@@ -264,17 +247,16 @@ class LitGridLive:
         except Exception as e:
             print(f"  (lit-grid-live log_run failed: {e})", flush=True)
 
-    # ── Order ledger (the core safety requirement) ──────────────────────────────────────────────
-    async def place_grid_order(self, level, side, limit_price, size):
-        """Writes the ledger row FIRST, status='pending', before the real order is even sent.
-        If the send itself raises/times out, the row stays 'pending' -- reconcile_pending_orders()
-        checks the exchange for the real answer on the next pass. Returns the ledger row id, or
-        None if the exchange explicitly rejected it."""
+    # ── Order ledger ─────────────────────────────────────────────────────────────────────────
+    async def place_grid_order(self, level, side, limit_price, size, closes_level=None):
+        """Writes the ledger row FIRST, status='pending'. `closes_level` (sells only) is the
+        REAL buy level this sell is intended to close -- set explicitly here, never recomputed
+        later from a price (that recomputation is exactly what broke pairing before)."""
         co_idx = int(time.time() * 1000) % 500_000_000
         row = {
             "level": level, "side": side, "client_order_index": co_idx,
             "status": "pending", "limit_price": limit_price, "size": size,
-            "placed_at": now_iso(),
+            "placed_at": now_iso(), "closes_level": closes_level,
         }
         inserted = await self.sb("POST", TABLE_ORDERS, row)
         row_id = inserted[0]["id"]
@@ -300,19 +282,18 @@ class LitGridLive:
         except Exception as e:
             await self.log_run("order_place_unknown", {"row_id": row_id, "error": str(e)[:200]})
             await self._touch_lock_heartbeat()
-            return row_id  # left 'pending' on purpose -- reconciliation resolves it for real
+            return row_id
         await self.sb("PATCH", f"{TABLE_ORDERS}?id=eq.{row_id}", {"status": "open"})
         await self._touch_lock_heartbeat()
         return row_id
 
     async def cancel_order_row(self, row):
-        """Cancels one specific resting order by its real exchange order_index. Returns True only
-        on a confirmed, error-free cancel -- callers (flatten_all) must not assume success just
-        because no exception was raised; the SDK's own returned error is checked too."""
+        """Submits a cancel. A clean SDK ack is NOT final confirmation (a fill can race the
+        cancel on the exchange) -- marks 'cancel_requested' (an intermediate, still-polled
+        status), never 'cancelled' directly. reconcile_pending_orders() resolves the REAL
+        outcome next pass. Returns True only if the cancel request itself was sent cleanly."""
         order_index = row.get("exchange_order_id")
         if order_index is None:
-            # No real order_index on file -- can't cancel something we can't identify. The
-            # caller should reconcile first so a 'pending' row gets a chance to resolve.
             return False
         try:
             _tx, _resp, err = await asyncio.wait_for(
@@ -327,32 +308,25 @@ class LitGridLive:
             await self.log_run("cancel_order_failed", {"row_id": row["id"], "error": str(e)[:200]})
             await self._touch_lock_heartbeat()
             return False
-        await self.sb("PATCH", f"{TABLE_ORDERS}?id=eq.{row['id']}",
-                       {"status": "cancelled", "filled_at": now_iso()})
+        await self.sb("PATCH", f"{TABLE_ORDERS}?id=eq.{row['id']}", {"status": "cancel_requested"})
         await self._touch_lock_heartbeat()
         return True
 
     async def cancel_all_resting(self):
-        """Cancels every pending/open ledger row -- used on a spacing change (a clean slate
-        before the next tick places anything fresh) and available for flatten_all."""
+        """Returns True only if every resting order's cancel was sent cleanly."""
         resting = await self.resting_orders_by_level()
+        all_ok = True
         for rows in resting.values():
             for r in rows:
-                await self.cancel_order_row(r)
+                if not await self.cancel_order_row(r):
+                    all_ok = False
+        return all_ok
 
     async def reconcile_pending_orders(self):
-        """Runs before every tick's new decisions -- checks every non-terminal ledger row against
-        the exchange's own account_orders() (by OUR OWN client_order_index, up to 20 at a time).
-        Returns True only if every batch was successfully read; callers must treat False as "the
-        current state can't be trusted this tick" and skip new decisions (external audit fix,
-        2026-10-18 -- a read failure used to be silently swallowed and trading continued anyway).
-
-        Partial fills (external audit fix): status only becomes a terminal 'filled'/'cancelled'
-        once the order itself is genuinely done (_order_is_terminal) -- a fill with quantity
-        still outstanding stays 'open' so the NEXT pass keeps checking it, instead of being
-        marked terminal on the first positive fill and never looked at again."""
+        """Checks every non-terminal ledger row (pending/open/cancel_requested) against the
+        exchange's own account_orders(). Returns True only if every batch was successfully read."""
         pending = await self.sb(
-            "GET", f"{TABLE_ORDERS}?status=in.(pending,open)&select=*&order=id.asc")
+            "GET", f"{TABLE_ORDERS}?status=in.({','.join(OPEN_STATUSES)})&select=*&order=id.asc")
         if not pending:
             return True
         auth = self._get_auth_token()
@@ -375,7 +349,7 @@ class LitGridLive:
             for r in batch:
                 o = by_co.get(r["client_order_index"])
                 if o is None:
-                    continue  # still genuinely unknown -- leave pending, retry next pass
+                    continue
                 filled_qty, filled_price = _order_fill_amounts(o)
                 terminal = _order_is_terminal(o)
                 status_raw = str(getattr(o, "status", "") or "").lower()
@@ -389,27 +363,17 @@ class LitGridLive:
                     if filled_qty > 0:
                         patch["filled_at"] = now_iso()
                 else:
+                    # Still genuinely live -- including a cancel_requested row the exchange
+                    # hasn't resolved yet. Keep polling it, don't assume the cancel "worked".
                     patch["status"] = "open"
                 await self.sb("PATCH", f"{TABLE_ORDERS}?id=eq.{r['id']}", patch)
                 await self.log_run("reconciled_order", {
                     "row_id": r["id"], "raw_status": status_raw, "terminal": terminal,
-                    "raw_filled_base": getattr(o, "filled_base_amount", None),
-                    "raw_filled_quote": getattr(o, "filled_quote_amount", None),
-                    "raw_remaining": getattr(o, "remaining_base_amount", None),
                     "computed_filled_qty": filled_qty, "computed_filled_price": filled_price,
                 })
         return all_ok
 
     async def real_balances(self):
-        """Ground truth, straight from the exchange -- never the ledger, never a cached value.
-        Returns (usdc, lit).
-
-        Confirmed live 2026-10-18 (real account, margin_mode="enabled"): an asset's plain
-        `balance` field reads 0.000000 even when real funds are present -- the actual usable
-        amount sits in `margin_balance` (account-level `collateral` reads the same number).
-        margin_balance is therefore the PRIMARY source per asset here, not a fallback-when-zero
-        guess; `balance + locked_balance` (the non-margin, pure-spot shape) is the fallback, used
-        only if an asset carries no margin_balance at all."""
         auth = self._get_auth_token()
         resp = await asyncio.wait_for(
             self._account_api.account(by="index", value=str(self.account_index),
@@ -436,11 +400,6 @@ class LitGridLive:
         return usdc, lit
 
     async def check_balance_divergence(self):
-        """Periodic (a real REST call) -- sums ledger-derived holdings and compares against the
-        real exchange LIT balance. A mismatch beyond tolerance, OR an inability to even check,
-        pauses new order placement (external audit fix, 2026-10-18: this used to fail OPEN --
-        an unverifiable balance, including on the very first-ever call, defaulted to "safe to
-        trade" instead of blocking until a real read actually succeeds)."""
         now = time.time()
         if now - self._last_balance_check < BALANCE_RECONCILE_EVERY:
             return not self._balance_paused
@@ -451,7 +410,7 @@ class LitGridLive:
             await self.log_run("balance_check_failed", {"error": str(e)[:200]})
             self._balance_paused = True
             return False
-        self._last_balance_check = now  # only consumed on a call that actually succeeded
+        self._last_balance_check = now
         await self.update_state({"usdc_balance": real_usdc, "lit_balance": real_lit})
         ledger_lit = sum(h["qty"] for h in holdings.values())
         diverged = abs(ledger_lit - real_lit) > BALANCE_DIVERGENCE_TOLERANCE_LIT
@@ -464,7 +423,7 @@ class LitGridLive:
         self._balance_paused = diverged
         return not diverged
 
-    # ── Auth (identical caching pattern to stoch_bot_core.py's _get_auth_token) ─────────────────
+    # ── Auth ─────────────────────────────────────────────────────────────────────────────────
     def _get_auth_token(self):
         now = time.time()
         if self._auth_token is not None and now < self._auth_token_expiry_at - AUTH_TOKEN_REFRESH_MARGIN_S:
@@ -476,7 +435,7 @@ class LitGridLive:
         self._auth_token_expiry_at = now + AUTH_TOKEN_LIFETIME_S
         return self._auth_token
 
-    # ── Single-instance lock (same pattern as every other live bot) ────────────────────────────
+    # ── Single-instance lock ─────────────────────────────────────────────────────────────────
     async def acquire_lock(self):
         now = time.time()
         if now - self._lock_checked_at < LOCK_REFRESH_EVERY:
@@ -520,11 +479,6 @@ class LitGridLive:
             pass
 
     async def _touch_lock_heartbeat(self):
-        """Refreshes the heartbeat without re-running the full acquire logic -- called after
-        every individual order placement/cancellation (external audit fix, 2026-10-18): a tick
-        placing several real orders, each with up to ORDER_TIMEOUT=12s, could previously run
-        past LOCK_STALE_AFTER=30s with a stale heartbeat, letting a second instance believe the
-        first was dead and steal the lock mid-flight."""
         if not self._lock_held:
             return
         try:
@@ -533,7 +487,7 @@ class LitGridLive:
         except Exception:
             pass
 
-    # ── Live price (push-based, same LiveBook as the paper bot) ────────────────────────────────
+    # ── Live price ───────────────────────────────────────────────────────────────────────────
     async def fetch_current_price(self):
         return self.live.best_mid()
 
@@ -569,58 +523,62 @@ class LitGridLive:
                     await task
             await asyncio.sleep(1.0)
 
-    # ── Window maintenance: the real-order analogue of the paper bot's process_price ───────────
+    # ── Holdings: quantity-aware running balance per level, paired by explicit closes_level ───
     async def current_holdings(self):
-        """Reconstructs {stored_level: {qty, cost}} purely from the ledger's filled rows, pairing
-        each level's buys to its sells FIFO (external audit fix, 2026-10-18): a flat "this level
-        was ever sold" set used to erase ALL inventory at a level the instant even one sell ever
-        happened there, including a brand new cycle's buy long after. Any buys beyond the matched
-        count at a level are open and aggregated (summed qty, weighted-avg cost) as defense in
-        depth against more than one open lot at a level, which shouldn't happen by construction
-        but must never silently lose quantity if it does."""
+        """Walks each level's buy/sell fills in chronological (id) order as a running balance --
+        quantity-aware (a partial sell reduces remaining qty/cost proportionally, never "count
+        one order, drop one whole buy row") and paired via the sell's explicit `closes_level`,
+        never inferred from a (possibly-rounded) price. Returns {level: {qty, cost}} for
+        whatever's still open."""
         buys = await self.sb(
             "GET", f"{TABLE_ORDERS}?status=eq.filled&side=eq.buy&select=id,level,filled_qty,filled_price&order=id.asc")
         sells = await self.sb(
-            "GET", f"{TABLE_ORDERS}?status=eq.filled&side=eq.sell&select=id,level&order=id.asc")
-        buys_by_level = {}
+            "GET", f"{TABLE_ORDERS}?status=eq.filled&side=eq.sell&select=id,closes_level,filled_qty&order=id.asc")
+        events_by_level = {}
         for b in (buys or []):
-            buys_by_level.setdefault(b["level"], []).append(b)
-        sell_count_by_buy_level = {}
+            events_by_level.setdefault(b["level"], []).append(
+                ("buy", b["id"], float(b["filled_qty"] or 0), float(b["filled_price"] or 0)))
         for s in (sells or []):
-            buy_level = s["level"] - 1
-            sell_count_by_buy_level[buy_level] = sell_count_by_buy_level.get(buy_level, 0) + 1
+            lvl = s.get("closes_level")
+            if lvl is None:
+                continue  # legacy/flatten rows with no explicit link -- never guessed at
+            events_by_level.setdefault(lvl, []).append(
+                ("sell", s["id"], float(s["filled_qty"] or 0), None))
         holdings = {}
-        for lvl, blist in buys_by_level.items():
-            closed = sell_count_by_buy_level.get(lvl, 0)
-            open_buys = blist[closed:]  # FIFO: the earliest `closed` buys at this level are matched
-            if not open_buys:
-                continue
-            total_qty = sum(float(b["filled_qty"] or 0) for b in open_buys)
-            if total_qty <= 0:
-                continue
-            total_cost = sum(float(b["filled_qty"] or 0) * float(b["filled_price"] or 0) for b in open_buys)
-            holdings[lvl] = {"qty": total_qty, "cost": total_cost / total_qty}
+        for lvl, events in events_by_level.items():
+            events.sort(key=lambda e: e[1])
+            qty = 0.0
+            cost_total = 0.0
+            for kind, _id, ev_qty, ev_price in events:
+                if kind == "buy":
+                    cost_total += ev_qty * ev_price
+                    qty += ev_qty
+                else:
+                    if qty > 1e-12:
+                        avg = cost_total / qty
+                        take = min(ev_qty, qty)
+                        cost_total -= take * avg
+                        qty -= take
+            if qty > 1e-9:
+                holdings[lvl] = {"qty": qty, "cost": cost_total / qty}
         return holdings
 
     async def resting_orders_by_level(self):
-        rows = await self.sb("GET", f"{TABLE_ORDERS}?status=in.(pending,open)&select=*")
+        rows = await self.sb(
+            "GET", f"{TABLE_ORDERS}?status=in.({','.join(OPEN_STATUSES)})&select=*")
         by_level = {}
         for r in (rows or []):
             by_level.setdefault(r["level"], []).append(r)
         return by_level
 
     async def maintain_window(self, state, price, entries_allowed=True):
-        """Each tick: make sure the resting orders match what they should be. Sells (closing real
-        inventory) are placed before buys and always win a same-level conflict (external audit
-        fix, 2026-10-18); entries_allowed=False (disabled, or balance-paused) still lets existing
-        inventory get its sell placed/maintained, it just skips opening anything new -- same
-        "pause gates entries only, never exits" principle used everywhere else in this codebase."""
         spacing_pct = float(state["spacing_pct"])
         step = math.log(1 + spacing_pct / 100.0)
         levels_down = max(1, int(state["levels_down"]))
         cur_lvl = level_of(price, step)
         max_open_buys = state.get("max_open_buys")
         max_open_buys = int(max_open_buys) if max_open_buys is not None else None
+        lifetime_buy_count = int(state.get("lifetime_buy_count") or 0)
 
         order_size_lit = state.get("order_size_lit")
         if order_size_lit is None:
@@ -641,56 +599,71 @@ class LitGridLive:
                     if await self.cancel_order_row(r):
                         snap.buy_levels.discard(lvl)
 
-        # Place sells FIRST -- closing real inventory always wins a same-level conflict over
-        # opening a new position. Sell target comes from the lot's REAL cost under the CURRENT
-        # step (external audit fix, 2026-10-18), not its stored placement-time level, which could
-        # be stale after a spacing change.
+        # Place sells FIRST, keyed by the REAL buy level (closes_level), never a recomputed
+        # price-bin. Cancel any conflicting resting BUY at the sell's own target price first --
+        # the sell always wins a same-price conflict, enforced, not assumed.
         for lvl, h in holdings.items():
-            sell_target_lvl = level_of(h["cost"], step) + 1
-            if sell_target_lvl in snap.sell_levels:
+            if lvl in snap.sell_closes:
                 continue
+            sell_price = round_price(h["cost"] * (1 + spacing_pct / 100.0))
+            sell_display_lvl = level_of(sell_price, step)  # cosmetic only, never load-bearing
+            for r in list(snap.rows_by_level.get(sell_display_lvl, [])):
+                if r["side"] == "buy":
+                    if await self.cancel_order_row(r):
+                        snap.buy_levels.discard(sell_display_lvl)
             sell_size = clamp_order_size(h["qty"])
             if sell_size is None:
                 continue
-            limit_price = round_price(math.exp(sell_target_lvl * step))
-            await self.place_grid_order(sell_target_lvl, "sell", limit_price, sell_size)
-            snap.sell_levels.add(sell_target_lvl)
+            await self.place_grid_order(sell_display_lvl, "sell", sell_price, sell_size, closes_level=lvl)
+            snap.sell_closes.add(lvl)
 
-        # Place buys for empty levels in the active down-window -- real affordability (updated by
-        # check_balance_divergence) caps actual spend regardless of how the window is configured
-        # (external audit fix, 2026-10-18), and max_open_buys is a code-enforced count cap, not
-        # just a settings convention.
+        # Place buys for empty levels in the active down-window. Real affordability caps actual
+        # spend at the SMALLER of (a) real cash not already committed to this bot's own resting
+        # buys, and (b) capital_usd minus whatever's already deployed in holdings + resting buys
+        # -- not just whatever real cash happens to sit in the account. max_open_buys is now a
+        # persistent, restart-surviving LIFETIME cap (lifetime_buy_count), not a concurrent
+        # snapshot that resets the moment one cycle completes.
         if entries_allowed and order_size is not None:
-            available_usdc = float(state.get("usdc_balance") or 0)
-            open_buy_count = len(snap.buy_levels) + len(holdings)
+            resting_buy_cost = sum(
+                float(r["limit_price"]) * float(r["size"])
+                for rows in resting.values() for r in rows if r["side"] == "buy"
+            )
+            real_usdc = float(state.get("usdc_balance") or 0)
+            holdings_cost = sum(h["qty"] * h["cost"] for h in holdings.values())
+            capital_committed = holdings_cost + resting_buy_cost
+            capital_remaining = max(0.0, float(state["capital_usd"]) - capital_committed)
+            available_usdc = min(real_usdc - resting_buy_cost, capital_remaining)
+
             for lvl in range(cur_lvl - 1, cur_lvl - 1 - levels_down, -1):
-                if lvl in snap.buy_levels or lvl in snap.sell_levels or lvl in holdings:
+                if lvl in snap.buy_levels or lvl in snap.sell_closes or lvl in holdings:
                     continue
-                if max_open_buys is not None and open_buy_count >= max_open_buys:
+                if max_open_buys is not None and lifetime_buy_count >= max_open_buys:
                     break
                 limit_price = round_price(math.exp(lvl * step))
                 cost = limit_price * order_size
                 if cost > available_usdc:
-                    break  # real cash exhausted -- defer the rest, never overspend
+                    break
                 await self.place_grid_order(lvl, "buy", limit_price, order_size)
                 snap.buy_levels.add(lvl)
                 available_usdc -= cost
-                open_buy_count += 1
+                lifetime_buy_count += 1
+                await self.update_state({"lifetime_buy_count": lifetime_buy_count})
 
-    async def market_sell_all(self, qty):
-        """A real MARKET order (not a resting limit) -- used ONLY by flatten_all. The pinned SDK
-        implements this as immediate-or-cancel, not a guaranteed full fill -- flatten_all checks
-        the real post-sell balance rather than trusting this call's own success as proof."""
+    async def market_sell_level(self, level, qty):
+        """Real MARKET sell closing ONE specific held level's lot -- flatten calls this once per
+        held level (never one lump-sum sell) so the ledger's closes_level accounting stays
+        correct through a flatten too. IOC per the SDK, not a guaranteed full fill -- flatten_all
+        checks the real post-sell balance rather than trusting this call's own send as proof."""
         sized = clamp_order_size(qty)
         if sized is None:
             return None
         price = self.live.best_mid()
         if price is None:
             return None
-        band_price = round_price(price * 0.995)  # tolerate up to 0.5% slippage, prefer a fill
+        band_price = round_price(price * 0.995)
         co_idx = int(time.time() * 1000) % 500_000_000
-        row = {"level": -1, "side": "sell", "client_order_index": co_idx, "status": "pending",
-               "limit_price": band_price, "size": sized, "placed_at": now_iso()}
+        row = {"level": level, "side": "sell", "closes_level": level, "client_order_index": co_idx,
+               "status": "pending", "limit_price": band_price, "size": sized, "placed_at": now_iso()}
         inserted = await self.sb("POST", TABLE_ORDERS, row)
         row_id = inserted[0]["id"]
         try:
@@ -713,11 +686,10 @@ class LitGridLive:
         return row_id
 
     async def flatten_all(self):
-        """Emergency path, retried every tick until VERIFIED complete (external audit fix,
-        2026-10-18): reconciles pending orders first (so a just-placed order has a real
-        exchange_order_id to cancel), checks every cancel's and the market sell's actual result,
-        then re-reads the REAL exchange LIT balance -- never clears flatten_requested or disables
-        on anything less than a confirmed-flat real balance with nothing left resting."""
+        """Emergency path, retried every tick until VERIFIED complete: reconciles first, cancels
+        every resting order, sells each held level separately (correct ledger accounting), then
+        re-reads the REAL exchange LIT balance -- never clears flatten_requested or disables on
+        anything less than a confirmed-flat real balance with nothing left resting."""
         await self.reconcile_pending_orders()
         resting = await self.resting_orders_by_level()
         any_cancel_failed = False
@@ -725,25 +697,23 @@ class LitGridLive:
             for r in rows:
                 if not await self.cancel_order_row(r):
                     any_cancel_failed = True
+        if resting:
+            await self.reconcile_pending_orders()  # resolve the cancel_requested rows for real
 
         holdings = await self.current_holdings()
-        total_lit_ledger = sum(h["qty"] for h in holdings.values())
         sell_failed = False
-        if total_lit_ledger > 0:
-            row_id = await self.market_sell_all(total_lit_ledger)
+        for lvl, h in holdings.items():
+            row_id = await self.market_sell_level(lvl, h["qty"])
             if row_id is None:
                 sell_failed = True
-            else:
-                # Resolve the market sell's own real outcome before checking "still resting" --
-                # it was just inserted as 'open' and would otherwise count as unresolved exposure
-                # even on a real exchange where an IOC market order settles near-instantly.
-                await self.reconcile_pending_orders()
+        if holdings:
+            await self.reconcile_pending_orders()  # resolve the market sells' real outcomes
 
         try:
             _usdc, real_lit = await self.real_balances()
         except Exception as e:
             await self.log_run("flatten_balance_check_failed", {"error": str(e)[:200]})
-            return  # try again next tick
+            return
 
         still_resting = await self.resting_orders_by_level()
         if any_cancel_failed or sell_failed or real_lit > BALANCE_DIVERGENCE_TOLERANCE_LIT or still_resting:
@@ -751,7 +721,7 @@ class LitGridLive:
                 "any_cancel_failed": any_cancel_failed, "sell_failed": sell_failed,
                 "real_lit_remaining": real_lit, "still_resting_levels": list(still_resting.keys()),
             })
-            return  # leave flatten_requested=true, retry next tick
+            return
 
         await self.update_state({"flatten_requested": False, "enabled": False})
         await self.log_run("flatten_completed", {"final_real_lit": real_lit})
@@ -763,21 +733,30 @@ class LitGridLive:
             return
         reconciled_ok = await self.reconcile_pending_orders()
         if not reconciled_ok:
-            return  # can't trust current order state this tick -- skip new decisions
+            return
         balance_ok = await self.check_balance_divergence()
         price = await self.fetch_current_price()
         if price is None:
             return
+        if balance_ok:
+            # Re-fetch: check_balance_divergence() just wrote a FRESH usdc_balance/lit_balance
+            # to the database -- the `state` object read at the top of this tick is now stale
+            # (external audit fix: maintain_window used to receive the pre-check cash figure).
+            state = await self.get_state()
         entries_allowed = bool(state.get("enabled")) and balance_ok
 
         spacing_pct = float(state["spacing_pct"])
         persisted_spacing = state.get("internal_spacing_pct")
         if persisted_spacing is not None and float(persisted_spacing) != spacing_pct:
-            await self.cancel_all_resting()
+            cancelled_ok = await self.cancel_all_resting()
+            if not cancelled_ok:
+                await self.log_run("spacing_change_cancel_incomplete",
+                                    {"old": persisted_spacing, "new": spacing_pct})
+                return  # retry next tick -- don't advance internal_spacing_pct until clean
             await self.update_state({"internal_spacing_pct": spacing_pct, "order_size_lit": None})
             await self.log_run("spacing_changed_rearmed",
                                 {"old": persisted_spacing, "new": spacing_pct})
-            return  # let the next tick place fresh orders under the new spacing
+            return
         if persisted_spacing is None:
             await self.update_state({"internal_spacing_pct": spacing_pct})
 
@@ -809,10 +788,6 @@ async def _run_tick_loop(bot):
 
 
 async def run_lit_grid_live():
-    """Entrypoint. Starts disabled -- see module docstring. account_index/api_key_index/
-    api_private_key read from this process's own LIGHTER_ACCOUNT_INDEX/LIGHTER_API_KEY_INDEX/
-    LIGHTER_API_PRIVATE_KEY env vars, same default-path convention as every standalone bot in
-    this codebase (stoch_bot_core.py's run())."""
     async with aiohttp.ClientSession() as http:
         bot = LitGridLive(http)
         bot.account_index = int(os.environ["LIGHTER_ACCOUNT_INDEX"])
