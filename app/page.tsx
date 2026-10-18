@@ -1720,35 +1720,46 @@ function LitGridPaperPanel({
       </div>
 
       <div>
-        <p className="text-gray-500 text-xs uppercase tracking-wide mb-2">Recent Cycles</p>
+        {/* Direct correction (2026-10-18): "buy and sell, not a round trip -- you need to know
+            the order so we know what's happening, matching the price going up and down." Each
+            row is now one individual fill (buy OR sell), in the order they really happened --
+            not a bundled entry+exit summary. Buy = yellow (spending cash, no profit yet), sell =
+            green (this is the moment profit is actually realized). */}
+        <p className="text-gray-500 text-xs uppercase tracking-wide mb-2">Recent Fills</p>
         {trades.length === 0 ? (
-          <p className="text-gray-600 text-sm">No completed cycles yet</p>
+          <p className="text-gray-600 text-sm">No fills yet</p>
         ) : (
           <div className="overflow-auto">
             <table className="w-full text-xs font-mono">
               <thead>
                 <tr className="text-gray-500 border-b border-gray-800">
+                  <th className="text-left pb-1">Time</th>
                   <th className="text-left pb-1">Side</th>
-                  <th className="text-right pb-1">Entry</th>
-                  <th className="text-right pb-1">Exit</th>
+                  <th className="text-right pb-1">Price</th>
                   <th className="text-right pb-1">Qty</th>
                   <th className="text-right pb-1">PnL</th>
                 </tr>
               </thead>
               <tbody className="divide-y divide-gray-800/50">
-                {trades.slice(0, 8).map((t: any) => (
-                  <tr key={t.id} className="hover:bg-gray-800/30">
-                    <td className={`py-1.5 ${t.side === "buy_then_sell" ? "text-green-400" : "text-orange-400"}`}>
-                      {t.side === "buy_then_sell" ? "buy→sell" : "sell→buy"}
-                    </td>
-                    <td className="py-1.5 text-right text-gray-300">{Number(t.entry_price).toFixed(4)}</td>
-                    <td className="py-1.5 text-right text-gray-300">{Number(t.exit_price).toFixed(4)}</td>
-                    <td className="py-1.5 text-right text-gray-500">{Number(t.qty_lit).toFixed(2)}</td>
-                    <td className={`py-1.5 text-right ${t.pnl_usd >= 0 ? "text-green-400" : "text-red-400"}`}>
-                      {t.pnl_usd >= 0 ? "+" : ""}${Number(t.pnl_usd).toFixed(4)}
-                    </td>
-                  </tr>
-                ))}
+                {trades.slice(0, 12).map((t: any) => {
+                  const isBuy = t.side === "buy";
+                  const time = t.closed_at
+                    ? new Date(t.closed_at).toLocaleTimeString([], { hour: "2-digit", minute: "2-digit", second: "2-digit", hour12: false })
+                    : "";
+                  return (
+                    <tr key={t.id} className="hover:bg-gray-800/30">
+                      <td className="py-1.5 text-gray-600">{time}</td>
+                      <td className={`py-1.5 font-bold ${isBuy ? "text-yellow-400" : "text-green-400"}`}>
+                        {isBuy ? "BUY" : "SELL"}
+                      </td>
+                      <td className="py-1.5 text-right text-gray-300">{Number(t.exit_price).toFixed(4)}</td>
+                      <td className="py-1.5 text-right text-gray-500">{Number(t.qty_lit).toFixed(2)}</td>
+                      <td className={`py-1.5 text-right ${isBuy ? "text-gray-600" : t.pnl_usd >= 0 ? "text-green-400" : "text-red-400"}`}>
+                        {isBuy ? "—" : `${t.pnl_usd >= 0 ? "+" : ""}$${Number(t.pnl_usd).toFixed(4)}`}
+                      </td>
+                    </tr>
+                  );
+                })}
               </tbody>
             </table>
           </div>

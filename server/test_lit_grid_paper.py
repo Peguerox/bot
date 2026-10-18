@@ -127,9 +127,13 @@ async def t_paired_cycle_buy_then_sell():
     check("a buy fill credits real LIT", state["lit_balance"] > 0, state["lit_balance"])
     await bot.process_price(p0 * math.exp(1 * step), state)
     state = (await bot.sb("GET", f"{core.TABLE_STATE}?id=eq.1"))[0]
-    check("a drop then a bigger recovery produces at least one completed pair", len(fake.trades) >= 1, fake.trades)
-    check("no individual pair is ever negative (every pair is exactly one level, always a win or a wash)",
-          all(t["pnl_usd"] >= -1e-9 for t in fake.trades), fake.trades)
+    sells = [t for t in fake.trades if t["side"] == "sell"]
+    buys = [t for t in fake.trades if t["side"] == "buy"]
+    check("a drop then a bigger recovery produces at least one completed sell", len(sells) >= 1, fake.trades)
+    check("every buy fill is logged with its own row too, not just the closing sell",
+          len(buys) >= 1, fake.trades)
+    check("no individual sell is ever negative (every pair is exactly one level, always a win or a wash)",
+          all(t["pnl_usd"] >= -1e-9 for t in sells), sells)
     check("net profit across the whole round trip is positive", state["bot_profit_usd"] > 0, state["bot_profit_usd"])
     check("the matching sells return lit_balance back to zero", abs(state["lit_balance"]) < 1e-9, state["lit_balance"])
     check("usdc_balance ends above where it started (net profit, back in cash)",
@@ -187,10 +191,14 @@ async def t_repeated_chop_profits_on_every_touch():
     for _ in range(2):  # each iteration is one full down-then-up round trip between the two lines
         await bot.process_price(p_lo, fake.state)
         await bot.process_price(p_hi, fake.state)
-    check("chopping between two adjacent lines twice produces two profitable trades, not zero or one",
-          len(fake.trades) == 2, fake.trades)
-    check("each chop trade profits (buy low, sell high, same two prices every time)",
-          all(t["pnl_usd"] > 0 for t in fake.trades), fake.trades)
+    sells = [t for t in fake.trades if t["side"] == "sell"]
+    buys = [t for t in fake.trades if t["side"] == "buy"]
+    check("chopping between two adjacent lines twice produces two buy fills and two sell fills, not zero or one",
+          len(buys) == 2 and len(sells) == 2, fake.trades)
+    check("each chop sell profits (buy low, sell high, same two prices every time)",
+          all(t["pnl_usd"] > 0 for t in sells), sells)
+    check("each chop buy is logged with zero pnl (nothing realized until the matching sell)",
+          all(t["pnl_usd"] == 0 for t in buys), buys)
 
 
 async def t_sell_skipped_without_inventory_no_naked_short():

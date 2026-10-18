@@ -3,8 +3,8 @@ Paper-only LIT/USDC grid bot (2026-10-18, direct request).
 
 NOT a real-money bot: no exchange credentials anywhere in this file, no order placement -- it
 only reads Lighter's public LIT/USDC live trade price (market_id 2049, no auth needed) and
-simulates fills against the configured grid, logging paired round-trips to
-lighter_lit_grid_trades for the dashboard panel to show.
+simulates fills against the configured grid, logging each individual buy and sell fill as its
+own row to lighter_lit_grid_trades the instant it happens for the dashboard panel to show.
 
 Runs as a second, fully isolated asyncio task inside Worker 4's existing Render process
 (see the bottom of lighter_stoch_dca_btc_worker4.py) rather than its own service, to avoid the
@@ -153,10 +153,18 @@ class LitGridPaper:
         except Exception as e:
             print(f"  (lit-grid log_run failed: {e})", flush=True)
 
-    async def log_trade(self, side, opened_at, closed_at, entry_price, exit_price, qty, pnl_usd, order_type):
+    async def log_fill(self, side, price, qty, pnl_usd, order_type, at):
+        """Direct correction (2026-10-18): "buy and sell, not a round trip -- I need to know the
+        order so we know what's happening, matching the price going up and down." Logs each
+        individual fill as its own row the instant it happens (a buy the moment it fills, a sell
+        the moment it fills), instead of waiting for a sell to close a position and writing one
+        combined round-trip row. side is literally 'buy' or 'sell'. Reuses the existing
+        entry_price/exit_price columns (both set to the single fill price) rather than adding a
+        migration -- a buy row's pnl_usd is 0 (nothing realized yet), a sell row's is the real
+        profit from closing whatever it paired against."""
         row = {
-            "side": side, "opened_at": opened_at, "closed_at": closed_at,
-            "entry_price": entry_price, "exit_price": exit_price,
+            "side": side, "opened_at": at, "closed_at": at,
+            "entry_price": price, "exit_price": price,
             "qty_lit": qty, "pnl_usd": pnl_usd, "order_type": order_type,
         }
         try:
@@ -286,6 +294,11 @@ class LitGridPaper:
 
         now_iso = datetime.now(timezone.utc).isoformat()
         blocked = False  # ran out of real USDC -- stop advancing entirely, defer the rest
+        # A fresh timestamp per individual fill (not once per tick) -- a fast multi-level move
+        # can fill several lines in one tick, and each fill needs its own correctly-ordered time
+        # so the panel's chronological fill log reads in the real order they happened.
+        def fill_now():
+            return datetime.now(timezone.utc).isoformat()
 
         while lvl != target_lvl and not blocked:
             if target_lvl > lvl:
@@ -305,7 +318,7 @@ class LitGridPaper:
                     usdc_balance += proceeds
                     bot_profit_usd += pnl
                     del holdings[buy_level]
-                    await self.log_trade("buy_then_sell", now_iso, now_iso, buy_price, fill_price, qty, pnl, order_type)
+                    await self.log_fill("sell", fill_price, qty, pnl, order_type, fill_now())
                 # No holding at buy_level -- no resting sell order armed at this level, do nothing.
             else:
                 lvl -= 1
@@ -323,6 +336,7 @@ class LitGridPaper:
                         holdings[lvl] = {"qty": total_qty, "cost": avg_cost}
                     else:
                         holdings[lvl] = {"qty": order_size, "cost": fill_price}
+                    await self.log_fill("buy", fill_price, order_size, 0, order_type, fill_now())
                 else:
                     blocked = True
 
