@@ -1136,6 +1136,19 @@ class LitGridLive:
                                  round_price(h["cost"]))
             else:
                 sell_price = round_price(h["cost"] * (1 + spacing_pct / 100.0))
+            if sell_price < price:
+                # Price already ran past this lot's sell level before the sell could rest (fill
+                # seen late, or a fast spike). A post-only limit below the market is cancelled
+                # by the exchange on arrival -- live it was re-placed and cancelled 25+ times,
+                # pinning the buys below it. The lot is already past its target, so sell it now
+                # at market (more profit than the target, never less than cost).
+                mkt_size = clamp_order_size(h["qty"])
+                if mkt_size is not None:
+                    await self.log_run("sell_level_passed_market_sell", {
+                        "closes_level": lvl, "sell_level_price": sell_price, "price": price})
+                    if await self.market_sell_level(lvl, mkt_size) is not None:
+                        snap.sell_closes.add(lvl)
+                continue
             sell_price_int = price_to_int(sell_price)
             conflicting_buys = [
                 r for rows in snap.rows_by_level.values() for r in rows

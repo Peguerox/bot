@@ -1309,6 +1309,26 @@ async def t_trailing_up_keeps_levels_up_sells_and_twenty_orders():
           bot.client.placed)
 
 
+async def t_a_lot_whose_sell_level_price_already_passed_is_sold_at_market():
+    # Live bug: lot at -6 had its sell level (-5, 2.8259) below the market (2.836) -- the
+    # post-only sell was cancelled on arrival, re-placed and cancelled 25+ times.
+    P = 2.84365
+    rows = _grid_rows(P, held=[-6], sells_for=[], buys_at=range(-11, -6))
+    price = round(P * 1.00125 ** -2.7, 5)
+    bot, fake = make_bot(base_state(levels_up=1, levels_down=5, order_size_lit=2.18,
+                                     usdc_balance=500.0, grid_anchor_price=P), orders=rows)
+    bot.live.best_mid = lambda max_age=core.BOOK_MAX_AGE: price
+    await bot.maintain_window(fake.state, price)
+    limit_sells = [kw for kw in bot.client.placed if "order_type" in kw and kw.get("is_ask")]
+    market_sells = [kw for kw in bot.client.placed if "order_type" not in kw and kw.get("is_ask")]
+    check("no post-only sell is placed below the market", limit_sells == [], limit_sells)
+    check("the lot is sold once at market instead", len(market_sells) == 1, bot.client.placed)
+    await bot.maintain_window(fake.state, price)
+    check("while that market sell is in flight it is not sent again",
+          len([kw for kw in bot.client.placed if "order_type" not in kw and kw.get("is_ask")]) == 1,
+          bot.client.placed)
+
+
 async def t_trailing_up_never_double_buys_while_a_market_buy_is_in_flight():
     P = 2.87055
     rows = _grid_rows(P, held=range(1, 5), sells_for=range(1, 5), buys_at=range(-14, 1), sold=[0])
@@ -1915,6 +1935,7 @@ async def main():
         t_no_funds_logs_once_and_stays_quiet,
         t_trailing_up_keeps_levels_up_sells_and_twenty_orders,
         t_trailing_up_never_double_buys_while_a_market_buy_is_in_flight,
+        t_a_lot_whose_sell_level_price_already_passed_is_sold_at_market,
               t_maintain_window_cold_start_budget_uses_real_price_not_theoretical_level_price,
               t_maintain_window_reverts_to_resting_limit_ladder_after_the_first_ever_fill,
               t_maintain_window_accumulates_resting_buys_as_price_drifts_without_cancelling_old_ones,
