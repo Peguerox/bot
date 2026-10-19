@@ -1760,7 +1760,7 @@ function LitGridLivePanel({
               <p className="text-gray-500 text-[10px] uppercase tracking-wide">High</p>
               <p className="text-gray-100 text-sm font-bold tabular-nums">${dynHigh != null ? dynHigh.toFixed(4) : "—"}</p>
               <button
-                onClick={() => handleDynamicDrawdown({ resetDynamicHigh: true }, `Make the current price ($${livePrice != null ? Number(livePrice).toFixed(4) : "—"}) the new high?`)}
+                onClick={() => handleDynamicDrawdown({ resetDynamicHigh: true }, `Reset the high from $${dynHigh != null ? dynHigh.toFixed(4) : "—"} to the current price $${livePrice != null ? Number(livePrice).toFixed(4) : "—"}?\n\nPrice fall goes back to 0%, the bot returns to the 10% level and new orders get BIGGER (re-sized on the available balance).`)}
                 disabled={dynSaving}
                 className="mt-1 w-full text-[11px] font-semibold px-2 py-1 rounded-md border border-blue-500/50 bg-blue-500/10 text-blue-300 hover:bg-blue-500/20 disabled:opacity-40"
               >
