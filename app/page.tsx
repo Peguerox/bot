@@ -1733,39 +1733,91 @@ function LitGridLivePanel({
         </p>
       </div>
 
-      <div className="space-y-2">
-        <div className="flex items-center justify-between gap-2">
-          <p className="text-gray-500 text-[9px] uppercase tracking-wide">
-            Dynamic Drawdown {dynOn ? `· now ${dynTier ?? "—"}%` : "· off"}
-          </p>
-          <div className="flex gap-1.5">
-            {dynOn && (
-              <button
-                onClick={() => handleDynamicDrawdown({ resetDynamicHigh: true }, `Reset the high to the current price ($${livePrice != null ? Number(livePrice).toFixed(4) : "—"})?`)}
-                disabled={dynSaving}
-                className="text-xs font-semibold px-2 py-1 rounded-md bg-gray-800 text-gray-400 hover:bg-gray-700 disabled:opacity-40"
-              >
-                Reset high
-              </button>
-            )}
-            <button
-              onClick={() => handleDynamicDrawdown({ dynamicDrawdown: !dynOn }, dynOn
-                ? "Turn dynamic drawdown OFF? Order size goes back to your Drawdown setting."
-                : "Turn dynamic drawdown ON? The high starts at the current price; order size follows the gates using the available balance.")}
-              disabled={dynSaving}
-              className={`text-xs font-bold px-2.5 py-1 rounded-md disabled:opacity-40 ${dynOn ? "bg-green-500/20 text-green-400" : "bg-gray-800 text-gray-400 hover:bg-gray-700"}`}
-            >
-              {dynOn ? "ON" : "OFF"}
-            </button>
+      <div className="rounded-xl border border-gray-700 bg-gray-900/60 p-3 space-y-3">
+        <div className="flex items-start justify-between gap-2">
+          <div>
+            <p className="text-gray-200 text-sm font-bold">Dynamic Drawdown</p>
+            <p className="text-gray-500 text-[11px] leading-snug">
+              The further price falls from its high, the deeper the money is stretched, so the bot never runs out of cash.
+            </p>
           </div>
+          <button
+            onClick={() => handleDynamicDrawdown({ dynamicDrawdown: !dynOn }, dynOn
+              ? "Turn dynamic drawdown OFF? Order size goes back to your Drawdown setting."
+              : "Turn dynamic drawdown ON? The high starts at the current price and order size follows the levels below, using the available balance.")}
+            disabled={dynSaving}
+            className={`shrink-0 text-xs font-bold px-3 py-1.5 rounded-full border disabled:opacity-40 ${dynOn
+              ? "bg-green-500/15 text-green-400 border-green-500/40"
+              : "bg-gray-800 text-gray-400 border-gray-600 hover:text-gray-200"}`}
+          >
+            {dynOn ? "● ON" : "○ OFF"}
+          </button>
         </div>
+
         {dynOn && (
-          <p className="text-gray-400 text-xs tabular-nums">
-            high ${dynHigh != null ? dynHigh.toFixed(4) : "—"} · {dynDrop != null ? `${dynDrop.toFixed(2)}% below` : "—"}
-          </p>
+          <div className="grid grid-cols-3 gap-2">
+            <div className="rounded-lg border border-gray-700 bg-gray-800/60 p-2">
+              <p className="text-gray-500 text-[10px] uppercase tracking-wide">High</p>
+              <p className="text-gray-100 text-sm font-bold tabular-nums">${dynHigh != null ? dynHigh.toFixed(4) : "—"}</p>
+              <button
+                onClick={() => handleDynamicDrawdown({ resetDynamicHigh: true }, `Make the current price ($${livePrice != null ? Number(livePrice).toFixed(4) : "—"}) the new high?`)}
+                disabled={dynSaving}
+                className="text-[10px] text-blue-400 hover:text-blue-300 disabled:opacity-40"
+              >
+                reset to price
+              </button>
+            </div>
+            <div className="rounded-lg border border-gray-700 bg-gray-800/60 p-2">
+              <p className="text-gray-500 text-[10px] uppercase tracking-wide">Price fall</p>
+              <p className={`text-sm font-bold tabular-nums ${dynDrop != null && dynDrop >= 5 ? "text-red-400" : "text-gray-100"}`}>
+                {dynDrop != null ? `${dynDrop.toFixed(2)}%` : "—"}
+              </p>
+              <p className="text-gray-500 text-[10px]">below the high</p>
+            </div>
+            <div className="rounded-lg border border-blue-500/40 bg-blue-500/10 p-2">
+              <p className="text-blue-300/80 text-[10px] uppercase tracking-wide">Money lasts to</p>
+              <p className="text-blue-300 text-sm font-bold tabular-nums">{dynTier != null && dynHigh != null ? `$${(dynHigh * (1 - dynTier / 100)).toFixed(4)}` : "—"}</p>
+              <p className="text-gray-500 text-[10px] tabular-nums">{dynTier != null ? `−${dynTier}% · ` : ""}{st?.order_size_lit != null ? `${Number(st.order_size_lit).toFixed(1)} LIT/order` : ""}</p>
+            </div>
+          </div>
         )}
-        <p className="text-gray-600 text-[9px] leading-snug">
-          Below the high: under 5% → 10% · 5–10% → 20% · 10–20% → 40% · over 20% → 80%. Each switch re-sizes orders on the available balance.
+
+        {dynOn && dynDrop != null && (
+          <div>
+            <div className="relative h-2.5 rounded-full bg-gray-800 overflow-hidden border border-gray-700">
+              <div className="absolute inset-y-0 left-0 bg-gradient-to-r from-green-500/70 via-yellow-500/70 to-red-500/80"
+                   style={{ width: `${Math.min(dynDrop / 25, 1) * 100}%` }} />
+              {[5, 10, 20].map((g) => (
+                <div key={g} className="absolute inset-y-0 w-px bg-gray-400/60" style={{ left: `${(g / 25) * 100}%` }} />
+              ))}
+            </div>
+            <div className="relative h-3 text-[9px] text-gray-500 tabular-nums">
+              {[0, 5, 10, 20].map((g) => (
+                <span key={g} className="absolute -translate-x-1/2 first:translate-x-0" style={{ left: `${(g / 25) * 100}%` }}>{g === 0 ? "high" : `−${g}%`}</span>
+              ))}
+            </div>
+          </div>
+        )}
+
+        <div className="rounded-lg border border-gray-700 overflow-hidden">
+          <div className="grid grid-cols-3 bg-gray-800/80 text-[10px] uppercase tracking-wide text-gray-500 px-2 py-1">
+            <span>Price fall</span><span>Switches at</span><span className="text-right">Money lasts to</span>
+          </div>
+          {([[0, 5, 10], [5, 10, 20], [10, 20, 40], [20, null, 80]] as const).map(([from, to, tier]) => {
+            const active = dynOn && dynTier === tier;
+            const ref = dynOn ? dynHigh : livePrice;
+            return (
+              <div key={tier} className={`grid grid-cols-3 px-2 py-1.5 text-xs tabular-nums border-t border-gray-800 ${active ? "bg-blue-500/15 text-blue-200 font-semibold" : "text-gray-400"}`}>
+                <span>{active ? "▶ " : ""}{to == null ? `over ${from}%` : `${from}–${to}%`}</span>
+                <span>{from === 0 ? "start" : ref != null ? `$${(ref * (1 - from / 100)).toFixed(4)}` : "—"}</span>
+                <span className="text-right">{ref != null ? `$${(ref * (1 - tier / 100)).toFixed(4)}` : "—"} <span className="text-gray-500">(−{tier}%)</span></span>
+              </div>
+            );
+          })}
+        </div>
+        <p className="text-gray-500 text-[10px] leading-snug">
+          All % are measured from the high. At each switch the <span className="text-gray-300">available balance</span> is spread over every buy line from today's price down to "money lasts to", so new orders get smaller as price falls and the cash never runs out before that price.
+          Orders already placed keep their size. When price climbs back above a switch price, orders grow again.
         </p>
       </div>
 
