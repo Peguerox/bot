@@ -1412,12 +1412,12 @@ const LIT_GRID_EXCLUDED_WINDOWS: [string, string][] = [
 ];
 
 function LitGridLivePanel({
-  state, orders, sells, loading,
+  state, orders, sells, resting, loading,
   enabled, onToggle, toggling,
   onFlatten, flattening,
   onClearHistory, clearingHistory,
 }: {
-  state: any; orders: any[]; sells: any[]; loading: boolean;
+  state: any; orders: any[]; sells: any[]; resting: any[]; loading: boolean;
   enabled: boolean; onToggle: () => void; toggling: boolean;
   onFlatten: () => void; flattening: boolean;
   onClearHistory: () => void; clearingHistory: boolean;
@@ -1460,6 +1460,10 @@ function LitGridLivePanel({
   const pnlColor = (v: number | null) => v == null ? "text-gray-500" : Math.abs(v) < 0.005 ? "text-gray-300" : v >= 0 ? "text-green-400" : "text-red-400";
   const fmtUsd = (v: number | null) => v == null ? "—" : `${v >= 0 ? "+" : "-"}$${Math.abs(v).toFixed(2)}`;
   const fmtPct = (v: number | null, d = 2) => v == null ? "" : `${v >= 0 ? "+" : ""}${v.toFixed(d)}%`;
+
+  const restingPrices = (side: string) => resting.filter((r: any) => r.side === side).map((r: any) => Number(r.limit_price));
+  const nearestSell = livePrice != null ? (restingPrices("sell").filter((p: number) => p >= livePrice).sort((a: number, b: number) => a - b)[0] ?? null) : null;
+  const nearestBuy = livePrice != null ? (restingPrices("buy").filter((p: number) => p <= livePrice).sort((a: number, b: number) => b - a)[0] ?? null) : null;
 
   const openOrders = orders.filter((o: any) => o.status === "pending" || o.status === "open");
   const filledOrders = orders.filter((o: any) => o.status === "filled");
@@ -1601,7 +1605,11 @@ function LitGridLivePanel({
           <Stat
             label="Live Price"
             value={livePrice != null ? `$${Number(livePrice).toFixed(4)}` : "—"}
-            sub={st?.order_size_lit != null ? `${Number(st.order_size_lit).toFixed(2)} LIT/order` : ""}
+            sub={<>
+              {st?.order_size_lit != null ? `${Number(st.order_size_lit).toFixed(2)} LIT/order` : ""}
+              <span className="block text-red-400/80">sell ↑ {nearestSell != null ? `$${nearestSell.toFixed(4)} (+${((nearestSell / livePrice - 1) * 100).toFixed(2)}%)` : "none"}</span>
+              <span className="block text-green-400/80">buy ↓ {nearestBuy != null ? `$${nearestBuy.toFixed(4)} (-${((1 - nearestBuy / livePrice) * 100).toFixed(2)}%)` : "none"}</span>
+            </>}
             color="text-gray-300"
           />
           <Stat label="USDC Balance" value={usdcBalance != null ? `$${usdcBalance.toFixed(2)}` : "—"} sub="real, from the exchange" color="text-gray-300" />
@@ -6274,6 +6282,7 @@ export default function Dashboard() {
   const [litGridLiveState,     setLitGridLiveState]     = useState<any>(null);
   const [litGridLiveOrders,    setLitGridLiveOrders]    = useState<any[]>([]);
   const [litGridLiveSells,     setLitGridLiveSells]     = useState<any[]>([]);
+  const [litGridLiveResting,   setLitGridLiveResting]   = useState<any[]>([]);
   const [litGridLiveToggling,  setLitGridLiveToggling]  = useState(false);
   const [litGridLiveFlattening, setLitGridLiveFlattening] = useState(false);
   const [litGridLiveClearing, setLitGridLiveClearing] = useState(false);
@@ -6325,6 +6334,7 @@ export default function Dashboard() {
       { data: litGridLiveSt },
       { data: litGridLiveOr },
       { data: litGridLiveSells },
+      { data: litGridLiveResting },
     ] = await Promise.all([
       getSupabase().from("surfer_state").select("*").eq("id", 1).single(),
       getSupabase().from("surfer_trades").select("*").order("exit_time", { ascending: false }).limit(5000),
@@ -6371,6 +6381,7 @@ export default function Dashboard() {
       getSupabase().from("lighter_lit_grid_live_state").select("*").eq("id", 1).single(),
       getSupabase().from("lighter_lit_grid_live_orders").select("*").order("id", { ascending: false }).limit(50),
       getSupabase().from("lighter_lit_grid_live_orders").select("id,filled_at,filled_qty,filled_price,filled_quote,realized_profit_usd").eq("side", "sell").not("realized_profit_usd", "is", null).order("id", { ascending: false }).limit(1000),
+      getSupabase().from("lighter_lit_grid_live_orders").select("side,limit_price").in("status", ["open", "pending"]).limit(500),
     ]);
     setSurferState(surferSt ?? null);
     setSurferTrades(surferTr ?? []);
@@ -6401,6 +6412,7 @@ export default function Dashboard() {
     setLitGridLiveState(litGridLiveSt ?? null);
     setLitGridLiveOrders(litGridLiveOr ?? []);
     setLitGridLiveSells(litGridLiveSells ?? []);
+    setLitGridLiveResting(litGridLiveResting ?? []);
     setDcaBtcStats({ total: dcaBtcTotal ?? 0, wins: dcaBtcWins ?? 0 });
     setInitialBtcStats({ total: initialBtcTotal ?? 0, wins: initialBtcWins ?? 0 });
     setOptimalBtcStats({ total: optimalBtcTotal ?? 0, wins: optimalBtcWins ?? 0 });
@@ -6701,6 +6713,7 @@ export default function Dashboard() {
           state={litGridLiveState}
           orders={litGridLiveOrders}
           sells={litGridLiveSells}
+          resting={litGridLiveResting}
           loading={loading}
           enabled={litGridLiveState?.enabled ?? false}
           onToggle={handleLitGridLiveToggle}
