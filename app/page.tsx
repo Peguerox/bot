@@ -1762,9 +1762,9 @@ function LitGridLivePanel({
               <button
                 onClick={() => handleDynamicDrawdown({ resetDynamicHigh: true }, `Make the current price ($${livePrice != null ? Number(livePrice).toFixed(4) : "—"}) the new high?`)}
                 disabled={dynSaving}
-                className="text-[10px] text-blue-400 hover:text-blue-300 disabled:opacity-40"
+                className="mt-1 w-full text-[11px] font-semibold px-2 py-1 rounded-md border border-blue-500/50 bg-blue-500/10 text-blue-300 hover:bg-blue-500/20 disabled:opacity-40"
               >
-                reset to price
+                ↻ Reset high
               </button>
             </div>
             <div className="rounded-lg border border-gray-700 bg-gray-800/60 p-2">
