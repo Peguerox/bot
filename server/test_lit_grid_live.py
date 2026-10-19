@@ -1382,6 +1382,62 @@ async def t_gap_fill_never_moves_a_sell_below_that_lots_cost():
           not any(r["status"] == "cancel_requested" for r in fake.orders), [r for r in fake.orders if r["status"] == "cancel_requested"])
 
 
+async def t_dust_lot_does_not_pin_the_buy_ladder():
+    # Live 2026-10-19 14:46-18:40: a buy cancelled after a 0.24 LIT partial fill left a lot at
+    # line 49 that can never be sold (exchange minimum 1 LIT). Counted as held, it kept the 5
+    # buys on 44..48 while price sat at line 55 and every real lot was at 73+ -- no trade for
+    # 4+ hours. Dust must be ignored by the window: buys move to 51..55, right under price.
+    P = 2.83365
+    lots = [73, 74, 75, 76, 77]
+    rows = _grid_rows(P, held=lots, sells_for=lots, buys_at=range(44, 49))
+    rows.append({"id": 500, "level": 49, "side": "buy", "status": "filled", "filled_qty": 0.24,
+                 "filled_price": round(P * 1.00125 ** 49, 4), "size": 2.16})
+    price = round(P * 1.00125 ** 55.6, 5)
+    bot, fake = make_bot(base_state(levels_up=5, levels_down=5, order_size_lit=2.16,
+                                     usdc_balance=500.0, grid_anchor_price=P), orders=rows)
+    bot.live.best_mid = lambda max_age=core.BOOK_MAX_AGE: price
+    logged = []
+    orig = bot.log_run
+    async def spy(action, detail, orig=orig):
+        logged.append((action, detail))
+        return await orig(action, detail)
+    bot.log_run = spy
+    await bot.maintain_window(fake.state, price)
+    old = [r for r in fake.orders if r["side"] == "buy" and 44 <= r["level"] <= 48 and r["id"] < 500]
+    check("the stale buys under the dust (44..48) are cancelled",
+          all(r["status"] == "cancel_requested" for r in old), old)
+    new_buys = sorted(r["level"] for r in fake.orders if r["side"] == "buy"
+                      and r["status"] in ("open", "pending") and r["id"] > 500)
+    check("new buys go right under price (51..55)", new_buys == list(range(51, 56)), new_buys)
+    check("no sell is attempted for the 0.24 LIT dust",
+          not any(r["side"] == "sell" and r.get("closes_level") == 49 for r in fake.orders))
+    check("the dust is logged", any(a == "dust_lots_ignored" and d["levels"] == [49] for a, d in logged), logged)
+    n = len(logged)
+    await bot.maintain_window(fake.state, price)
+    check("and logged only once", not any(a == "dust_lots_ignored" for a, _ in logged[n:]), logged[n:])
+
+
+async def t_dust_lot_does_not_block_gap_fill():
+    # Same live state: a dust lot has no sell, so it counted as a "free lot" and the top-sell
+    # gap fill (which only runs when every lot has a sell) could never fire.
+    P = 2.83365
+    lots = [17, 18, 19, 21, 22, 23, 24, 25]
+    rows = _grid_rows(P, held=lots, sells_for=lots, buys_at=range(12, 17))
+    for r in rows:
+        if r["side"] == "buy" and r["status"] == "filled" and r["level"] == 25:
+            r["filled_price"] = round(P * 1.00125 ** 19.9, 4)
+    rows.append({"id": 500, "level": 10, "side": "buy", "status": "filled", "filled_qty": 0.12,
+                 "filled_price": round(P * 1.00125 ** 10, 4), "size": 2.16})
+    price = round(P * 1.00125 ** 17.6, 5)
+    bot, fake = make_bot(base_state(levels_up=5, levels_down=5, order_size_lit=2.16,
+                                     usdc_balance=500.0, grid_anchor_price=P), orders=rows)
+    bot.live.best_mid = lambda max_age=core.BOOK_MAX_AGE: price
+    await bot.maintain_window(fake.state, price)
+    top = next(r for r in fake.orders if r["side"] == "sell" and r.get("closes_level") == 25 and r["id"] < 100)
+    check("gap fill still cancels the top sell with a dust lot present",
+          top["status"] == "cancel_requested", top)
+
+
 async def t_gap_fill_never_moves_a_cold_start_sell_down_to_breakeven():
     # Cold-start lots 0..4 all cost about the start price. Price dipping just under line 0
     # leaves line 0 empty -- moving the top sell there would sell at cost. Must not happen.
@@ -2204,6 +2260,8 @@ async def main():
         t_gap_in_the_sell_ladder_is_filled_by_moving_the_top_sell_down,
         t_gap_fill_never_moves_a_sell_below_that_lots_cost,
         t_gap_fill_never_moves_a_cold_start_sell_down_to_breakeven,
+        t_dust_lot_does_not_pin_the_buy_ladder,
+        t_dust_lot_does_not_block_gap_fill,
         t_a_lot_whose_sell_level_price_already_passed_is_sold_at_market,
               t_maintain_window_cold_start_budget_uses_real_price_not_theoretical_level_price,
               t_maintain_window_reverts_to_resting_limit_ladder_after_the_first_ever_fill,

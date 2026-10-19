@@ -449,6 +449,7 @@ class LitGridLive:
         self._lock_blocked_logged = False
         self._last_level = None
         self._window_center = None  # guard-banded active-window center, external audit fix P2-11
+        self._dust_logged = set()
         self.live = LiveBook(MARKET_ID)
         self._book_ws_connected_at = 0.0
         self.client = None
@@ -1078,6 +1079,19 @@ class LitGridLive:
         holdings = await self.current_holdings()
         resting = await self.resting_orders_by_level()
         snap = LiveSnapshot(resting)
+        # Dust lots (below the 1 LIT exchange minimum, left by a buy cancelled after a tiny
+        # partial fill) can never get a sell. Counted as held they pinned the buy ladder under
+        # them and blocked gap fill -- live 2026-10-19, a 0.24 LIT lot at line 49 froze trading
+        # for 4+ hours while price sat 6 lines higher. The window ignores them; their line can
+        # be bought again, which merges the dust into a sellable lot.
+        dust = {lv for lv, h in holdings.items() if clamp_order_size(h["qty"]) is None}
+        if dust != getattr(self, "_dust_logged", set()):
+            self._dust_logged = dust
+            if dust:
+                await self.log_run("dust_lots_ignored", {
+                    "levels": sorted(dust),
+                    "qty": {str(lv): round(holdings[lv]["qty"], 4) for lv in sorted(dust)}})
+        active = {lv: h for lv, h in holdings.items() if lv not in dust}
 
         # Cold-start detector (direct request, eighth pass) -- computed once per call, before
         # anything below can change holdings/has-ever-bought, so the whole buy-placement section
@@ -1110,7 +1124,7 @@ class LitGridLive:
         # drop nothing trails: buys fill, their sells appear above them, and spending is capped
         # by the buys already in the grid.
         levels_up = max(1, int(state.get("levels_up") or 1))
-        held_lines = set(holdings)
+        held_lines = set(active)
         # Buys always sit on the levels_down lines directly below the empty line next to price
         # (trailing down, direct request): the empty line is the lowest held lot's line, or with
         # nothing held, the line at price. As buys fill on a drop the window moves down and a
@@ -1141,13 +1155,9 @@ class LitGridLive:
                             return
                         await self.cancel_order_row(r)
 
-        # Window-chasing removed entirely (direct request, eighth pass): a resting buy used to
-        # get cancelled the moment its own level fell outside the window's current top edge,
-        # even though price had never actually reached its real limit price -- repeated
-        # cancel/replace cycles like that could burn through a one-shot allowance with zero real
-        # fills ever happening. A resting buy is now cancelled ONLY by an explicit spacing change
-        # or a flatten (elsewhere in this file); this window now only decides where NEW buys get
-        # placed, never un-places existing ones.
+        # A resting buy below grid_bottom is cancelled just above (the window trails up with
+        # price). Buys inside the window are never cancelled for being "outside the top edge" --
+        # that older eighth-pass rule is gone; the guard-banded cur_lvl stops boundary noise.
 
         # Place sells FIRST. Conflict detection compares REAL integer price ticks, never a
         # recomputed display level (external audit fix P2-8). If a conflicting buy is found, it
@@ -1159,12 +1169,12 @@ class LitGridLive:
         # the TOP sell is cancelled so that lot can move down into the gap next tick. Only when
         # the gap is above the market and still at least one spacing above that lot's cost.
         hole_target = {}
-        if anchored and holdings:
+        if anchored and active:
             def _line(p):
                 return int(round(math.log(float(p) / anchor) / step))
             sell_rows = [r for rows in resting.values() for r in rows
                          if r["side"] == "sell" and r.get("closes_level") is not None]
-            free_lots = sorted(lv for lv in holdings if lv not in snap.sell_closes)
+            free_lots = sorted(lv for lv in active if lv not in snap.sell_closes)
             all_lines = {_line(r["limit_price"]) for r in sell_rows} | {lv + 1 for lv in free_lots}
             # Empty lines from just above price up to the top sell.
             holes = [x for x in range(cur_lvl + 1, max(all_lines))
@@ -1177,7 +1187,7 @@ class LitGridLive:
                 return min(fits) if fits else None
 
             for lv in sorted(free_lots, reverse=True):
-                hl = _best_hole(lv + 1, holdings[lv]["cost"])
+                hl = _best_hole(lv + 1, active[lv]["cost"])
                 if hl is not None:
                     hole_target[lv] = hl
                     holes.remove(hl)
@@ -1185,7 +1195,7 @@ class LitGridLive:
                     and not any(r.get("status") == "cancel_requested" for r in sell_rows)):
                 top = max(sell_rows, key=lambda r: float(r["limit_price"]))
                 top_lot = top["closes_level"]
-                hl = _best_hole(_line(top["limit_price"]), holdings[top_lot]["cost"]) if top_lot in holdings else None
+                hl = _best_hole(_line(top["limit_price"]), active[top_lot]["cost"]) if top_lot in active else None
                 if hl is not None:
                     await self.log_run("gap_fill_move_top_sell", {
                         "row_id": top["id"], "from_line": _line(top["limit_price"]), "to_line": hl})
@@ -1340,8 +1350,8 @@ class LitGridLive:
                 bottom = top - levels_down + 1
             buy_lines = [
                 lvl for lvl in range(top, bottom - 1, -1)
-                if not (lvl in snap.buy_levels or lvl in snap.sell_closes or lvl in holdings
-                        or (anchored and (lvl - 1) in holdings))
+                if not (lvl in snap.buy_levels or lvl in snap.sell_closes or lvl in active
+                        or (anchored and (lvl - 1) in active))
             ]
             buys_open = True
             si = bi = 0
