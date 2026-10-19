@@ -1440,6 +1440,12 @@ function LitGridLivePanel({
   // profit). Unrealized = whatever is left of Total PNL (held LIT marked at live price).
   const botProfit = sells.reduce((sum: number, r: any) => sum + Number(r.realized_profit_usd ?? 0), 0);
   const botProfitPct = capitalUsd > 0 ? (botProfit / capitalUsd) * 100 : null;
+  // Trades/hour: sell count since the bot's current history started (history_reset_at), or
+  // since the oldest sell we have if that's missing -- live, recomputes as nowTick ticks.
+  const sellTimes = sells.map((r: any) => r.filled_at ? new Date(r.filled_at).getTime() : null).filter((t: number | null): t is number => t != null);
+  const tradesStartMs = st?.history_reset_at ? new Date(st.history_reset_at).getTime() : (sellTimes.length ? Math.min(...sellTimes) : null);
+  const tradesHours = tradesStartMs != null ? Math.max((nowTick - tradesStartMs) / 3_600_000, 1 / 60) : null;
+  const tradesPerHour = tradesHours != null && sells.length > 0 ? sells.length / tradesHours : null;
   const unrealizedPnl = totalPnl != null ? totalPnl - botProfit : null;
   const unrealizedPct = unrealizedPnl != null && capitalUsd > 0 ? (unrealizedPnl / capitalUsd) * 100 : null;
   const pnlColor = (v: number | null) => v == null ? "text-gray-500" : Math.abs(v) < 0.005 ? "text-gray-300" : v >= 0 ? "text-green-400" : "text-red-400";
@@ -1572,7 +1578,7 @@ function LitGridLivePanel({
           <Stat
             label="Bot Profit"
             value={`${botProfit >= 0 ? "+" : "-"}$${Math.abs(botProfit).toFixed(4)}`}
-            sub={`${fmtPct(botProfitPct, 3)} · ${sells.length} trades`}
+            sub={`${fmtPct(botProfitPct, 3)} · ${sells.length} trades${tradesPerHour != null ? ` · ${tradesPerHour.toFixed(1)}/hr` : ""}`}
             color={pnlColor(botProfit)}
           />
           <Stat label="Unrealized PNL" value={fmtUsd(unrealizedPnl)} sub={fmtPct(unrealizedPct)} color={pnlColor(unrealizedPnl)} />
