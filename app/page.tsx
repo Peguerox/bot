@@ -1620,8 +1620,8 @@ function LitGridLivePanel({
           />
           <Stat
             label="Open Orders"
-            value={String(openOrders.length)}
-            sub={`spacing ${st?.spacing_pct ?? "—"}% · ${st?.levels_up ?? "—"} up / ${st?.levels_down ?? "—"} down window`}
+            value={String(resting.length)}
+            sub={`${resting.filter((r: any) => r.side === "sell").length} sells · ${resting.filter((r: any) => r.side === "buy").length} buys · spacing ${st?.spacing_pct ?? "—"}% · ${st?.levels_up ?? "—"} up / ${st?.levels_down ?? "—"} down window`}
             color="text-gray-300"
           />
           <Stat
