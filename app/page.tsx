@@ -1407,6 +1407,10 @@ function SolbtcSizeconfPanel({
   );
 }
 
+const LIT_GRID_EXCLUDED_WINDOWS: [string, string][] = [
+  ["2026-10-19T14:46:00Z", "2026-10-19T20:13:00Z"],
+];
+
 function LitGridLivePanel({
   state, orders, sells, loading,
   enabled, onToggle, toggling,
@@ -1444,7 +1448,12 @@ function LitGridLivePanel({
   // since the oldest sell we have if that's missing -- live, recomputes as nowTick ticks.
   const sellTimes = sells.map((r: any) => r.filled_at ? new Date(r.filled_at).getTime() : null).filter((t: number | null): t is number => t != null);
   const tradesStartMs = st?.history_reset_at ? new Date(st.history_reset_at).getTime() : (sellTimes.length ? Math.min(...sellTimes) : null);
-  const tradesHours = tradesStartMs != null ? Math.max((nowTick - tradesStartMs) / 3_600_000, 1 / 60) : null;
+  // Hours the bot was stuck (not its normal pace) don't count -- 2026-10-19 dust-lot freeze.
+  const excludedMs = tradesStartMs == null ? 0 : LIT_GRID_EXCLUDED_WINDOWS.reduce((sum, [a, b]) => {
+    const s = Math.max(Date.parse(a), tradesStartMs), e = Math.min(Date.parse(b), nowTick);
+    return sum + Math.max(0, e - s);
+  }, 0);
+  const tradesHours = tradesStartMs != null ? Math.max((nowTick - tradesStartMs - excludedMs) / 3_600_000, 1 / 60) : null;
   const tradesPerHour = tradesHours != null && sells.length > 0 ? sells.length / tradesHours : null;
   const unrealizedPnl = totalPnl != null ? totalPnl - botProfit : null;
   const unrealizedPct = unrealizedPnl != null && capitalUsd > 0 ? (unrealizedPnl / capitalUsd) * 100 : null;
