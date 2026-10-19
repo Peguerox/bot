@@ -1604,11 +1604,14 @@ function LitGridLivePanel({
           <Stat label="Investment" value={`$${capitalUsd.toFixed(2)}`} sub="set via Settings" color="text-gray-300" />
           <Stat
             label="Live Price"
-            value={livePrice != null ? `$${Number(livePrice).toFixed(4)}` : "—"}
-            sub={<>
-              {st?.order_size_lit != null ? `${Number(st.order_size_lit).toFixed(2)} LIT/order` : ""}
-              <span className="block"><span className="text-green-400/80">sell ↑ {nearestSell != null ? `$${nearestSell.toFixed(4)} (+${((nearestSell / livePrice - 1) * 100).toFixed(2)}%)` : "none"}</span>{" · "}<span className="text-red-400/80">buy ↓ {nearestBuy != null ? `$${nearestBuy.toFixed(4)} (-${((1 - nearestBuy / livePrice) * 100).toFixed(2)}%)` : "none"}</span></span>
-            </>}
+            value={<span className="flex items-center gap-3">
+              <span>{livePrice != null ? `$${Number(livePrice).toFixed(4)}` : "—"}</span>
+              <span className="flex flex-col text-xs font-normal leading-tight">
+                <span className="text-green-400/80">sell ↑ {nearestSell != null && livePrice != null ? `$${nearestSell.toFixed(4)} (+${((nearestSell / livePrice - 1) * 100).toFixed(2)}%)` : "none"}</span>
+                <span className="text-red-400/80">buy ↓ {nearestBuy != null && livePrice != null ? `$${nearestBuy.toFixed(4)} (-${((1 - nearestBuy / livePrice) * 100).toFixed(2)}%)` : "none"}</span>
+              </span>
+            </span>}
+            sub={st?.order_size_lit != null ? `${Number(st.order_size_lit).toFixed(2)} LIT/order` : ""}
             color="text-gray-300"
           />
           <Stat label="USDC Balance" value={usdcBalance != null ? `$${usdcBalance.toFixed(2)}` : "—"} sub="real, from the exchange" color="text-gray-300" />
