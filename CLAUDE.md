@@ -229,6 +229,27 @@ project with no git/Render/Vercel link -- never work there.
 - **Worker 3**: its own Render service is **suspended**. Its sub-account is driven entirely from
   Worker 2's process. `server/lighter_stoch_dca_btc_bot.py` still works standalone if the hedge is
   ever abandoned — re-enable that service and disable the dual-leg one, no data migration needed.
+- **LIT grid bot (Worker 4's Render service + sub-account `worker4`, index 281474976476916)**:
+  `server/lit_grid_live.py` — LIVE real money, LIT/USDC spot grid on Lighter (market 2049),
+  replaced the old BTC stochastic Worker 4 on 2026-10-18. Tables `lighter_lit_grid_live_*`,
+  panel `LitGridLivePanel` (own full-width row), routes `app/api/lighter-lit-grid-live/*`.
+  The user's rules (final, after a long day of wrong guesses — follow them literally):
+  - `levels_up`/`levels_down` sells/buys kept around price **always**, `spacing_pct` (0.125%)
+    geometric from `grid_anchor_price`. Buy fill → its sell one line up; sell fill → a buy one
+    line down; never a second buy on a held line.
+  - **Trailing up** (market-buys missing lots, counted while in flight by `order_kind='market'`)
+    and **trailing down** (new bottom buy as buys fill). Investment (`capital_usd`) pays for
+    everything first; then the cover-drop bucket; then log `no_funds_for_buy` and wait.
+  - **The three buckets are profit only** (Rest = withdraw, Cover-drop = extra buying past
+    capital, Compound = bigger order size only). Never route capital through a bucket.
+  - Investment can't exceed real account value (UI + bot refuse). Passed sell level → market
+    sell. Gap fill moves sells down only if still ≥1 spacing over cost. Orders placed nearest
+    to price first, alternating sides. Cover-Drop box shows `drawdown_coverage_pct`.
+  - Adding money: deposit, then raise Investment (and Drawdown % to cover deeper) while running.
+    OFF never sells; only Flatten does. Never Clear while holding LIT.
+  - Migrations it needs (all applied): `lighter_lit_grid_live_anchor.sql`,
+    `_order_kind.sql`, `_drawdown_coverage.sql`. Tests: `python3 server/test_lit_grid_live.py`.
+  - An audit/"did it work?" question gets findings only — no code changes until asked.
 
 Start Commands are `python server/<file>.py`. **There is no Render API/CLI access from this
 environment** — changing which file a worker runs means the user has to manually update that

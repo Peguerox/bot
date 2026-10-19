@@ -284,6 +284,22 @@ line up. A held line is never bought again until its sell fills. Buys are paid f
 first; only once capital is used up does the cover-drop bucket pay -- with both used up the bot
 logs no_funds_for_buy once and waits.
 
+TENTH PASS (2026-10-18/19, live fixes after the first real trading day):
+  - In-flight trailing-up market buys are marked order_kind='market' on their row and counted by
+    that mark. Price-based checks (row band above market, line above the buy ladder) went stale
+    in a fast rise: the bot held 9 lots against levels_up=5. Tick-by-tick replays of a very fast
+    rise and drop are in the tests.
+  - New orders go in nearest to price first, alternating sell/buy (limit sells are queued and
+    merged with the buy ladder); market sells/cancels stay immediate, trailing buys last.
+  - drawdown_coverage_pct: each tick, how far price can drop while the bot can still keep buying
+    (deepest buy on the book + lines the free money can still pay for); shown on the dashboard's
+    Cover-Drop box.
+  - Investment > real account value refuses the cold start (the dashboard refuses too).
+  Last audit (2026-10-19 ~00:10 UTC): ledger LIT matched the exchange, every order on a grid
+  line, no doubles, none on the wrong side of price, 0 rejections in 3h. Known, unfixed: brief
+  balance-divergence pauses around fills (longest 26s); lowest buys cancelled/re-placed as the
+  window trails; in very fast rises some trailing lots get market-sold back at about cost.
+
 Nothing in this codebase has placed a real LIMIT order before this (stoch_bot_core.py's
 place_order only ever sends MARKET orders; native SL/TP are the only conditional orders that
 exist). The Lighter SDK (lighter.SignerClient.create_order) supports real ORDER_TYPE_LIMIT with
