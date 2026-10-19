@@ -1607,8 +1607,8 @@ function LitGridLivePanel({
             value={livePrice != null ? `$${Number(livePrice).toFixed(4)}` : "—"}
             sub={<>
               {st?.order_size_lit != null ? `${Number(st.order_size_lit).toFixed(2)} LIT/order` : ""}
-              <span className="block text-red-400/80">sell ↑ {nearestSell != null ? `$${nearestSell.toFixed(4)} (+${((nearestSell / livePrice - 1) * 100).toFixed(2)}%)` : "none"}</span>
-              <span className="block text-green-400/80">buy ↓ {nearestBuy != null ? `$${nearestBuy.toFixed(4)} (-${((1 - nearestBuy / livePrice) * 100).toFixed(2)}%)` : "none"}</span>
+              <span className="block text-green-400/80">sell ↑ {nearestSell != null ? `$${nearestSell.toFixed(4)} (+${((nearestSell / livePrice - 1) * 100).toFixed(2)}%)` : "none"}</span>
+              <span className="block text-red-400/80">buy ↓ {nearestBuy != null ? `$${nearestBuy.toFixed(4)} (-${((1 - nearestBuy / livePrice) * 100).toFixed(2)}%)` : "none"}</span>
             </>}
             color="text-gray-300"
           />
