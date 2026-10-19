@@ -1461,6 +1461,10 @@ function LitGridLivePanel({
   const fmtUsd = (v: number | null) => v == null ? "—" : `${v >= 0 ? "+" : "-"}$${Math.abs(v).toFixed(2)}`;
   const fmtPct = (v: number | null, d = 2) => v == null ? "" : `${v >= 0 ? "+" : ""}${v.toFixed(d)}%`;
 
+  const dynOn = !!st?.dynamic_dd_enabled;
+  const dynTier = st?.dynamic_dd_tier != null ? Number(st.dynamic_dd_tier) : null;
+  const dynHigh = st?.dynamic_dd_high != null ? Number(st.dynamic_dd_high) : null;
+  const dynDrop = dynHigh != null && livePrice != null ? Math.max(0, (1 - livePrice / dynHigh) * 100) : null;
   const restingPrices = (side: string) => resting.filter((r: any) => r.side === side).map((r: any) => Number(r.limit_price));
   const nearestSell = livePrice != null ? (restingPrices("sell").filter((p: number) => p >= livePrice).sort((a: number, b: number) => a - b)[0] ?? null) : null;
   const nearestBuy = livePrice != null ? (restingPrices("buy").filter((p: number) => p <= livePrice).sort((a: number, b: number) => b - a)[0] ?? null) : null;
@@ -1496,6 +1500,25 @@ function LitGridLivePanel({
       if (res.status === 401) { try { localStorage.removeItem("litGridLiveAdminSecret"); } catch {} }
     }
     setProfitModeSaving(false);
+  }
+
+  const [dynSaving, setDynSaving] = useState(false);
+  async function handleDynamicDrawdown(body: Record<string, boolean>, question: string) {
+    if (dynSaving || !confirm(question)) return;
+    const secret = litGridLiveAdminSecret();
+    if (!secret) return;
+    setDynSaving(true);
+    const res = await fetch("/api/lighter-lit-grid-live/settings", {
+      method: "POST",
+      headers: { "Content-Type": "application/json", "x-admin-secret": secret },
+      body: JSON.stringify(body),
+    });
+    if (!res.ok) {
+      const data = await res.json().catch(() => ({}));
+      alert(data.error ?? "Failed to save.");
+      if (res.status === 401) { try { localStorage.removeItem("litGridLiveAdminSecret"); } catch {} }
+    }
+    setDynSaving(false);
   }
 
   async function handleSave() {
@@ -1707,6 +1730,42 @@ function LitGridLivePanel({
         <p className="text-gray-600 text-[9px] leading-snug">
           "Max open buys" is a code-enforced cap on new buy placement (defaults to 1 for the first
           real test) -- raise it once that's verified before enabling the full ladder.
+        </p>
+      </div>
+
+      <div className="space-y-2">
+        <div className="flex items-center justify-between gap-2">
+          <p className="text-gray-500 text-[9px] uppercase tracking-wide">
+            Dynamic Drawdown {dynOn ? `· now ${dynTier ?? "—"}%` : "· off"}
+          </p>
+          <div className="flex gap-1.5">
+            {dynOn && (
+              <button
+                onClick={() => handleDynamicDrawdown({ resetDynamicHigh: true }, `Reset the high to the current price ($${livePrice != null ? Number(livePrice).toFixed(4) : "—"})?`)}
+                disabled={dynSaving}
+                className="text-xs font-semibold px-2 py-1 rounded-md bg-gray-800 text-gray-400 hover:bg-gray-700 disabled:opacity-40"
+              >
+                Reset high
+              </button>
+            )}
+            <button
+              onClick={() => handleDynamicDrawdown({ dynamicDrawdown: !dynOn }, dynOn
+                ? "Turn dynamic drawdown OFF? Order size goes back to your Drawdown setting."
+                : "Turn dynamic drawdown ON? The high starts at the current price; order size follows the gates using the available balance.")}
+              disabled={dynSaving}
+              className={`text-xs font-bold px-2.5 py-1 rounded-md disabled:opacity-40 ${dynOn ? "bg-green-500/20 text-green-400" : "bg-gray-800 text-gray-400 hover:bg-gray-700"}`}
+            >
+              {dynOn ? "ON" : "OFF"}
+            </button>
+          </div>
+        </div>
+        {dynOn && (
+          <p className="text-gray-400 text-xs tabular-nums">
+            high ${dynHigh != null ? dynHigh.toFixed(4) : "—"} · {dynDrop != null ? `${dynDrop.toFixed(2)}% below` : "—"}
+          </p>
+        )}
+        <p className="text-gray-600 text-[9px] leading-snug">
+          Below the high: under 5% → 10% · 5–10% → 20% · 10–20% → 40% · over 20% → 80%. Each switch re-sizes orders on the available balance.
         </p>
       </div>
 

@@ -1438,6 +1438,71 @@ async def t_dust_lot_does_not_block_gap_fill():
           top["status"] == "cancel_requested", top)
 
 
+async def t_dynamic_drawdown_sizes_on_available_cash_and_follows_the_gates():
+    # Toggle on: high = price at switch-on, tier 10, size = spendable cash spread down to 10%
+    # below the high. A 6% drop switches to 20% and re-sizes on the cash left; a further fall
+    # past 20% -> 80%; back above -5% -> 10% again (same gates both ways).
+    P = 2.83365
+    bot, fake = make_bot(base_state(levels_up=5, levels_down=5, order_size_lit=None,
+                                     usdc_balance=6500.0, capital_usd=6500.0, grid_anchor_price=P,
+                                     dynamic_dd_enabled=True), orders=_grid_rows(P, held=[], sells_for=[], buys_at=[]))
+    logged = []
+    orig = bot.log_run
+    async def spy(action, detail, orig=orig):
+        logged.append((action, detail))
+        return await orig(action, detail)
+    bot.log_run = spy
+    st = fake.state
+    sizes = {}
+    for label, price in (("start", P), ("drop6", P * 0.94), ("drop22", P * 0.78), ("back", P * 0.97)):
+        await bot._dynamic_order_size(st, price, 0.125, {}, {})
+        sizes[label] = (st["dynamic_dd_tier"], st["order_size_lit"], st["dynamic_dd_high"])
+    check("starts at tier 10 with the high = price at switch-on",
+          sizes["start"][0] == 10 and abs(sizes["start"][2] - P) < 1e-9, sizes)
+    expect = core.compute_order_size_lit(6500.0, P, 0.125, core.levels_for_drawdown(0.125, 10))
+    check("tier-10 size spreads the spendable cash down to 10% below the high",
+          abs(sizes["start"][1] - expect) < 1e-6, (sizes["start"][1], expect))
+    check("6% drop -> tier 20", sizes["drop6"][0] == 20, sizes)
+    check("22% drop -> tier 80", sizes["drop22"][0] == 80, sizes)
+    check("back within 5% of the high -> tier 10 again", sizes["back"][0] == 10, sizes)
+    check("the high does not move on the way down", sizes["drop22"][2] == P, sizes)
+    check("each switch is logged", [d["to"] for a, d in logged if a == "dynamic_drawdown_switch"] == [10, 20, 80, 10], logged)
+    n = len(logged)
+    await bot._dynamic_order_size(st, P * 0.97, 0.125, {}, {})
+    check("no re-size while the tier is unchanged", len(logged) == n, logged[n:])
+    await bot._dynamic_order_size(st, P * 1.02, 0.125, {}, {})
+    check("a new high is tracked", abs(st["dynamic_dd_high"] - P * 1.02) < 1e-9, st["dynamic_dd_high"])
+
+
+async def t_dynamic_drawdown_resize_uses_cash_left_not_the_full_investment():
+    # Half the money already sits in LIT: the 20% tier is sized on the cash actually left.
+    P = 2.83365
+    rows = _grid_rows(P, held=range(0, 5), sells_for=range(0, 5), buys_at=[])
+    bot, fake = make_bot(base_state(levels_up=5, levels_down=5, order_size_lit=None,
+                                     usdc_balance=3000.0, capital_usd=6500.0, grid_anchor_price=P,
+                                     dynamic_dd_enabled=True, dynamic_dd_high=P, dynamic_dd_tier=10),
+                          orders=rows)
+    holdings = await bot.current_holdings()
+    price = P * 0.94
+    _, _, available = bot._funding(fake.state, holdings, {})
+    await bot._dynamic_order_size(fake.state, price, 0.125, holdings, {})
+    drop = 6.0
+    cover = (20 - drop) / (1 - drop / 100)
+    expect = core.compute_order_size_lit(available, price, 0.125, core.levels_for_drawdown(0.125, cover))
+    check("20% tier sized on the cash left (not $6,500)",
+          abs(fake.state["order_size_lit"] - expect) < 1e-6 and available <= 3000.0,
+          (fake.state["order_size_lit"], expect, available))
+
+
+async def t_dynamic_drawdown_off_keeps_the_normal_sizing():
+    P = 2.83365
+    bot, fake = make_bot(base_state(levels_up=5, levels_down=5, order_size_lit=None,
+                                     usdc_balance=500.0, grid_anchor_price=P),
+                          orders=_grid_rows(P, held=range(0, 5), sells_for=range(0, 5), buys_at=[]))
+    await bot.maintain_window(fake.state, P * 0.999)
+    check("toggle off: never writes a dynamic tier", fake.state.get("dynamic_dd_tier") is None, fake.state.get("dynamic_dd_tier"))
+
+
 async def t_gap_fill_never_moves_a_cold_start_sell_down_to_breakeven():
     # Cold-start lots 0..4 all cost about the start price. Price dipping just under line 0
     # leaves line 0 empty -- moving the top sell there would sell at cost. Must not happen.
@@ -2262,6 +2327,9 @@ async def main():
         t_gap_fill_never_moves_a_cold_start_sell_down_to_breakeven,
         t_dust_lot_does_not_pin_the_buy_ladder,
         t_dust_lot_does_not_block_gap_fill,
+        t_dynamic_drawdown_sizes_on_available_cash_and_follows_the_gates,
+        t_dynamic_drawdown_resize_uses_cash_left_not_the_full_investment,
+        t_dynamic_drawdown_off_keeps_the_normal_sizing,
         t_a_lot_whose_sell_level_price_already_passed_is_sold_at_market,
               t_maintain_window_cold_start_budget_uses_real_price_not_theoretical_level_price,
               t_maintain_window_reverts_to_resting_limit_ladder_after_the_first_ever_fill,

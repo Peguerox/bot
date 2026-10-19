@@ -357,6 +357,11 @@ RATE_LIMIT_BACKOFF_START = 15.0
 RATE_LIMIT_BACKOFF_MAX = 120.0
 BALANCE_RECONCILE_EVERY = 10.0
 BALANCE_DIVERGENCE_TOLERANCE_LIT = 0.03
+# Dynamic drawdown (toggle `dynamic_dd_enabled`, 2026-10-19 research in
+# research/lit-dynamic-drawdown-2026-10-19/): Drawdown follows how far price is below its
+# high -- <5% -> 10, 5-10% -> 20, 10-20% -> 40, >20% -> 80, same gates both ways.
+DYNAMIC_DD_BASE = 10.0
+DYNAMIC_DD_GATES = ((5.0, 20.0), (10.0, 40.0), (20.0, 80.0))
 OPEN_STATUSES = ("pending", "open", "cancel_requested")
 TERMINAL_STATUS_SUBSTRINGS = ("cancel", "reject", "expir")
 PAGE_SIZE = 500
@@ -1055,6 +1060,83 @@ class LitGridLive:
             return None
         return expected_count + 1
 
+    def _funding(self, state, holdings, resting):
+        """Money the next buy may spend: (resting_buy_cost, base_capital_remaining,
+        available_usdc). Shared by the buy ladder and the dynamic-drawdown sizing so both
+        use the exact same figure."""
+        resting_buy_cost = sum(
+            float(r["limit_price"]) * float(r["size"])
+            for rows in resting.values() for r in rows if r["side"] == "buy"
+        )
+        # The base budget now excludes each holding's/resting buy's own bucket-funded share
+        # (external audit fix, eighth pass): charging the FULL cost of a position that was
+        # actually funded by cover_drop against capital_usd double-counted that same dollar,
+        # since _bucket_balances() already subtracts it from cover_drop's own derived figure.
+        resting_buy_bucket_cost = sum(
+            float(r.get("funded_from_bucket_usd") or 0)
+            for rows in resting.values() for r in rows if r["side"] == "buy"
+        )
+        real_usdc = float(state.get("usdc_balance") or 0)
+        holdings_cost = sum(h["qty"] * h["cost"] for h in holdings.values())
+        holdings_bucket_cost = sum(h.get("bucket_cost_total", 0.0) for h in holdings.values())
+        capital_committed_base_only = (
+            (holdings_cost - holdings_bucket_cost) + (resting_buy_cost - resting_buy_bucket_cost)
+        )
+        # Compound bucket folded into the SPENDING ceiling too, not just the sizing basis
+        # above (external audit fix, sixth pass: a bigger order size from compounding used
+        # to just consume the old, unexpanded budget sooner instead of the compound bucket
+        # actually funding more depth -- the two bases must agree).
+        compound_bucket = float(state.get("profit_bucket_compound_usd") or 0)
+        base_capital_remaining = max(
+            0.0, (float(state["capital_usd"]) + compound_bucket) - capital_committed_base_only)
+        # Cover-drop bucket extends the ceiling ON TOP OF that, never replacing it -- only
+        # reached once the (compound-inclusive) base budget is exhausted (direct request,
+        # profit allocation feature). state["profit_bucket_cover_drop_usd"] is this tick's
+        # freshly-DERIVED figure (tick() computes it via _bucket_balances() before calling
+        # here) -- there is no separate decrement to write at the end of this loop anymore
+        # (external audit fix, seventh pass): available_usdc below is the single running
+        # total that already correctly shrinks by each buy's full cost regardless of which
+        # sub-budget it's attributed to, and the per-buy funded_from_bucket_usd tag (written
+        # atomically with the order itself, external audit fix eighth pass) is the only
+        # durable fact _bucket_balances() needs to derive the post-spend figure correctly on
+        # the very next tick. The real-cash ceiling below always uses the FULL resting cost
+        # regardless of attribution -- real cash doesn't care which sub-budget funded it.
+        cover_drop_bucket = float(state.get("profit_bucket_cover_drop_usd") or 0)
+        available_usdc = min(real_usdc - resting_buy_cost, base_capital_remaining + cover_drop_bucket)
+        return resting_buy_cost, base_capital_remaining, available_usdc
+
+    async def _dynamic_order_size(self, state, price, spacing_pct, holdings, resting):
+        """Order size under the dynamic drawdown toggle. The high starts at the price when the
+        toggle is switched on and follows every new high. On each gate change the size is
+        recomputed from the money ACTUALLY spendable now (not the full Investment): that cash
+        is spread over every line from price down to tier% below the high -- the research's
+        "B" sizing, which never ran out of money where sizing on the full Investment did."""
+        stored = state.get("dynamic_dd_high")
+        high = max(float(stored), price) if stored else price
+        patch = {}
+        if not stored or high > float(stored):
+            patch["dynamic_dd_high"] = high
+        drop = max(0.0, (1 - price / high) * 100)
+        tier = DYNAMIC_DD_BASE
+        for gate, t in DYNAMIC_DD_GATES:
+            if drop >= gate:
+                tier = t
+        size = state.get("order_size_lit")
+        old_tier = state.get("dynamic_dd_tier")
+        if size is None or old_tier is None or float(old_tier) != tier:
+            _, _, available = self._funding(state, holdings, resting)
+            cover = max(tier - drop, 1.0) / (1 - drop / 100)
+            size = compute_order_size_lit(max(available, 0.0), price, spacing_pct,
+                                          levels_for_drawdown(spacing_pct, cover))
+            patch.update({"dynamic_dd_tier": tier, "order_size_lit": size})
+            await self.log_run("dynamic_drawdown_switch", {
+                "from": old_tier, "to": tier, "high": round(high, 5), "drop_pct": round(drop, 2),
+                "available_usdc": round(available, 2), "order_size_lit": round(size, 4)})
+        if patch:
+            await self.update_state(patch)
+            state.update(patch)
+        return clamp_order_size(float(size))
+
     async def maintain_window(self, state, price, entries_allowed=True):
         spacing_pct = float(state["spacing_pct"])
         step = math.log(1 + spacing_pct / 100.0)
@@ -1064,7 +1146,7 @@ class LitGridLive:
         lifetime_buy_count = int(state.get("lifetime_buy_count") or 0)
 
         order_size_lit = state.get("order_size_lit")
-        if order_size_lit is None:
+        if order_size_lit is None and not state.get("dynamic_dd_enabled"):
             # Compound bucket folded into the sizing basis (direct request, profit allocation
             # feature), mirroring the paper bot's compounding_basis = capital_usd + bot_profit_usd
             # -- never decremented by this use, it keeps growing as more profit lands in it.
@@ -1092,6 +1174,8 @@ class LitGridLive:
                     "levels": sorted(dust),
                     "qty": {str(lv): round(holdings[lv]["qty"], 4) for lv in sorted(dust)}})
         active = {lv: h for lv, h in holdings.items() if lv not in dust}
+        if state.get("dynamic_dd_enabled"):
+            order_size = await self._dynamic_order_size(state, price, spacing_pct, holdings, resting)
 
         # Cold-start detector (direct request, eighth pass) -- computed once per call, before
         # anything below can change holdings/has-ever-bought, so the whole buy-placement section
@@ -1263,45 +1347,7 @@ class LitGridLive:
         if not (entries_allowed and order_size is not None):
             await flush_sells()
             return
-        resting_buy_cost = sum(
-            float(r["limit_price"]) * float(r["size"])
-            for rows in resting.values() for r in rows if r["side"] == "buy"
-        )
-        # The base budget now excludes each holding's/resting buy's own bucket-funded share
-        # (external audit fix, eighth pass): charging the FULL cost of a position that was
-        # actually funded by cover_drop against capital_usd double-counted that same dollar,
-        # since _bucket_balances() already subtracts it from cover_drop's own derived figure.
-        resting_buy_bucket_cost = sum(
-            float(r.get("funded_from_bucket_usd") or 0)
-            for rows in resting.values() for r in rows if r["side"] == "buy"
-        )
-        real_usdc = float(state.get("usdc_balance") or 0)
-        holdings_cost = sum(h["qty"] * h["cost"] for h in holdings.values())
-        holdings_bucket_cost = sum(h.get("bucket_cost_total", 0.0) for h in holdings.values())
-        capital_committed_base_only = (
-            (holdings_cost - holdings_bucket_cost) + (resting_buy_cost - resting_buy_bucket_cost)
-        )
-        # Compound bucket folded into the SPENDING ceiling too, not just the sizing basis
-        # above (external audit fix, sixth pass: a bigger order size from compounding used
-        # to just consume the old, unexpanded budget sooner instead of the compound bucket
-        # actually funding more depth -- the two bases must agree).
-        compound_bucket = float(state.get("profit_bucket_compound_usd") or 0)
-        base_capital_remaining = max(
-            0.0, (float(state["capital_usd"]) + compound_bucket) - capital_committed_base_only)
-        # Cover-drop bucket extends the ceiling ON TOP OF that, never replacing it -- only
-        # reached once the (compound-inclusive) base budget is exhausted (direct request,
-        # profit allocation feature). state["profit_bucket_cover_drop_usd"] is this tick's
-        # freshly-DERIVED figure (tick() computes it via _bucket_balances() before calling
-        # here) -- there is no separate decrement to write at the end of this loop anymore
-        # (external audit fix, seventh pass): available_usdc below is the single running
-        # total that already correctly shrinks by each buy's full cost regardless of which
-        # sub-budget it's attributed to, and the per-buy funded_from_bucket_usd tag (written
-        # atomically with the order itself, external audit fix eighth pass) is the only
-        # durable fact _bucket_balances() needs to derive the post-spend figure correctly on
-        # the very next tick. The real-cash ceiling below always uses the FULL resting cost
-        # regardless of attribution -- real cash doesn't care which sub-budget funded it.
-        cover_drop_bucket = float(state.get("profit_bucket_cover_drop_usd") or 0)
-        available_usdc = min(real_usdc - resting_buy_cost, base_capital_remaining + cover_drop_bucket)
+        resting_buy_cost, base_capital_remaining, available_usdc = self._funding(state, holdings, resting)
 
         real_total = float(state.get("usdc_balance") or 0) + float(state.get("lit_balance") or 0) * price
         if is_cold_start and float(state["capital_usd"]) > real_total + 0.005:

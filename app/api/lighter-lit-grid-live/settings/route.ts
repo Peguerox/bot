@@ -28,7 +28,7 @@ export async function POST(req: NextRequest) {
   const authError = checkLitGridLiveAuth(req);
   if (authError) return authError;
   const body = await req.json();
-  const out: Record<string, number | string | null> = {};
+  const out: Record<string, number | string | boolean | null> = {};
 
   // maxOpenBuys: 0 explicitly means "no cap" (continuous production mode) -- previously there
   // was no way to CLEAR the cap back to null once set, since undefined/null/"" were all treated
@@ -45,6 +45,20 @@ export async function POST(req: NextRequest) {
       );
     }
     out["profit_mode"] = body.profitMode;
+  }
+
+  // Dynamic drawdown toggle (2026-10-19). Switching it either way, or "reset high", clears the
+  // high/tier/size so the worker re-sizes from the live price on its next tick.
+  if (body.dynamicDrawdown === true || body.dynamicDrawdown === false) {
+    out["dynamic_dd_enabled"] = body.dynamicDrawdown;
+    out["dynamic_dd_high"] = null;
+    out["dynamic_dd_tier"] = null;
+    out["order_size_lit"] = null;
+  }
+  if (body.resetDynamicHigh === true) {
+    out["dynamic_dd_high"] = null;
+    out["dynamic_dd_tier"] = null;
+    out["order_size_lit"] = null;
   }
 
   for (const [key, col] of [
