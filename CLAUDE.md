@@ -247,8 +247,15 @@ project with no git/Render/Vercel link -- never work there.
     to price first, alternating sides. Cover-Drop box shows `drawdown_coverage_pct`.
   - Adding money: deposit, then raise Investment (and Drawdown % to cover deeper) while running.
     OFF never sells; only Flatten does. Never Clear while holding LIT.
+  - Lots under 1 LIT (dust from a buy cancelled after a tiny partial fill) are ignored by the
+    window -- counted as held they froze trading 4+ h on 2026-10-19 (`dust_lots_ignored` log).
+  - **Dynamic drawdown toggle** (`dynamic_dd_enabled`, ON since 2026-10-19 22:57 UTC): Drawdown
+    follows the fall from the high (<5%→10, 5-10→20, 10-20→40, >20→80); each switch re-sizes on
+    the available balance (`_funding()`, includes cover-drop). High = price at switch-on, follows
+    new highs, panel "Reset high". Research: `research/lit-dynamic-drawdown-2026-10-19/` (local).
   - Migrations it needs (all applied): `lighter_lit_grid_live_anchor.sql`,
-    `_order_kind.sql`, `_drawdown_coverage.sql`. Tests: `python3 server/test_lit_grid_live.py`.
+    `_order_kind.sql`, `_drawdown_coverage.sql`, `_dynamic_drawdown.sql`.
+    Tests: `python3 server/test_lit_grid_live.py` (203).
   - An audit/"did it work?" question gets findings only — no code changes until asked.
 
 Start Commands are `python server/<file>.py`. **There is no Render API/CLI access from this
