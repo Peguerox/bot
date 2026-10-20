@@ -1442,7 +1442,11 @@ function LitGridLivePanel({
   const totalPnlPct = totalPnl != null && capitalUsd > 0 ? (totalPnl / capitalUsd) * 100 : null;
   // Bot profit = realized profit from completed grid round trips (each sell's own recorded
   // profit). Unrealized = whatever is left of Total PNL (held LIT marked at live price).
-  const botProfit = sells.reduce((sum: number, r: any) => sum + Number(r.realized_profit_usd ?? 0), 0);
+  // The buckets are server-derived over the FULL ledger (no row cap) -- summing them avoids
+  // the bug where summing the (capped) `sells` array silently dropped older trades' profit
+  // once the ledger grew past the query's limit (2026-10-20 audit finding).
+  const botProfit = Number(st?.profit_bucket_rest_usd ?? 0) + Number(st?.profit_bucket_cover_drop_usd ?? 0)
+    + Number(st?.profit_bucket_compound_usd ?? 0);
   const botProfitPct = capitalUsd > 0 ? (botProfit / capitalUsd) * 100 : null;
   // Trades/hour: sell count since the bot's current history started (history_reset_at), or
   // since the oldest sell we have if that's missing -- live, recomputes as nowTick ticks.
@@ -6577,7 +6581,7 @@ export default function Dashboard() {
       getSupabase().from("bot_schedule_rules").select("*").eq("id", 1).single(),
       getSupabase().from("lighter_lit_grid_live_state").select("*").eq("id", 1).single(),
       getSupabase().from("lighter_lit_grid_live_orders").select("*").order("id", { ascending: false }).limit(50),
-      getSupabase().from("lighter_lit_grid_live_orders").select("id,filled_at,filled_qty,filled_price,filled_quote,realized_profit_usd").eq("side", "sell").not("realized_profit_usd", "is", null).order("id", { ascending: false }).limit(1000),
+      getSupabase().from("lighter_lit_grid_live_orders").select("id,filled_at,filled_qty,filled_price,filled_quote,realized_profit_usd").eq("side", "sell").not("realized_profit_usd", "is", null).order("id", { ascending: false }).limit(5000),
       getSupabase().from("lighter_lit_grid_live_orders").select("side,limit_price").in("status", ["open", "pending"]).limit(500),
     ]);
     setSurferState(surferSt ?? null);
