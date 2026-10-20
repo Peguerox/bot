@@ -1693,6 +1693,35 @@ function LitGridLivePanel({
           />
         </div>
       )}
+      <div className="space-y-2">
+        <p className="text-gray-500 text-[9px] uppercase tracking-wide">
+          Profit Allocation (currently: {st?.profit_mode ?? "rest"})
+        </p>
+        <div className="grid grid-cols-3 gap-1.5">
+          {([
+            ["rest", "Rest"],
+            ["cover_drop", "Cover Drop"],
+            ["compound", "Compound"],
+          ] as const).map(([mode, label]) => (
+            <button
+              key={mode}
+              onClick={() => handleSetProfitMode(mode)}
+              disabled={profitModeSaving}
+              className={`text-xs font-semibold px-2 py-1.5 rounded-md transition-all disabled:opacity-40 ${
+                (st?.profit_mode ?? "rest") === mode
+                  ? "bg-red-500/20 text-red-400"
+                  : "bg-gray-800 text-gray-400 hover:bg-gray-700 hover:text-gray-200"
+              }`}
+            >
+              {label}
+            </button>
+          ))}
+        </div>
+        <p className="text-gray-600 text-[9px] leading-snug">
+          Only one mode active at a time. Switching only changes where NEW realized profit goes
+          going forward -- money already in a bucket stays earmarked for that bucket's own purpose.
+        </p>
+      </div>
       {(() => {
         const restMode = (st?.profit_mode ?? "rest") === "rest";
         const cap = st?.rest_cap_usd != null ? Number(st.rest_cap_usd) : null;
@@ -1903,36 +1932,6 @@ function LitGridLivePanel({
         <p className="text-gray-500 text-[10px] leading-snug">
           All % are measured from the high. At each switch the <span className="text-gray-300">available balance</span> is spread over every buy line from today's price down to "money lasts to", so new orders get smaller as price falls and the cash never runs out before that price.
           Orders already placed keep their size. When price climbs back above a switch price, orders grow again.
-        </p>
-      </div>
-
-      <div className="space-y-2">
-        <p className="text-gray-500 text-[9px] uppercase tracking-wide">
-          Profit Allocation (currently: {st?.profit_mode ?? "rest"})
-        </p>
-        <div className="grid grid-cols-3 gap-1.5">
-          {([
-            ["rest", "Rest"],
-            ["cover_drop", "Cover Drop"],
-            ["compound", "Compound"],
-          ] as const).map(([mode, label]) => (
-            <button
-              key={mode}
-              onClick={() => handleSetProfitMode(mode)}
-              disabled={profitModeSaving}
-              className={`text-xs font-semibold px-2 py-1.5 rounded-md transition-all disabled:opacity-40 ${
-                (st?.profit_mode ?? "rest") === mode
-                  ? "bg-red-500/20 text-red-400"
-                  : "bg-gray-800 text-gray-400 hover:bg-gray-700 hover:text-gray-200"
-              }`}
-            >
-              {label}
-            </button>
-          ))}
-        </div>
-        <p className="text-gray-600 text-[9px] leading-snug">
-          Only one mode active at a time. Switching only changes where NEW realized profit goes
-          going forward -- money already in a bucket stays earmarked for that bucket's own purpose.
         </p>
       </div>
 
