@@ -1412,12 +1412,12 @@ const LIT_GRID_EXCLUDED_WINDOWS: [string, string][] = [
 ];
 
 function LitGridLivePanel({
-  state, orders, sells, resting, loading,
+  state, orders, sells, sellCount, resting, loading,
   enabled, onToggle, toggling,
   onFlatten, flattening,
   onClearHistory, clearingHistory,
 }: {
-  state: any; orders: any[]; sells: any[]; resting: any[]; loading: boolean;
+  state: any; orders: any[]; sells: any[]; sellCount: number; resting: any[]; loading: boolean;
   enabled: boolean; onToggle: () => void; toggling: boolean;
   onFlatten: () => void; flattening: boolean;
   onClearHistory: () => void; clearingHistory: boolean;
@@ -1458,7 +1458,10 @@ function LitGridLivePanel({
     return sum + Math.max(0, e - s);
   }, 0);
   const tradesHours = tradesStartMs != null ? Math.max((nowTick - tradesStartMs - excludedMs) / 3_600_000, 1 / 60) : null;
-  const tradesPerHour = tradesHours != null && sells.length > 0 ? sells.length / tradesHours : null;
+  // sellCount is a count-only query over the full ledger -- never capped by a row limit,
+  // unlike sells.length which only reflects whatever this page happened to fetch for display
+  // (2026-10-20 fix: the fetch limit used to be reused as the trade-rate denominator too).
+  const tradesPerHour = tradesHours != null && sellCount > 0 ? sellCount / tradesHours : null;
   const unrealizedPnl = totalPnl != null ? totalPnl - botProfit : null;
   const unrealizedPct = unrealizedPnl != null && capitalUsd > 0 ? (unrealizedPnl / capitalUsd) * 100 : null;
   const pnlColor = (v: number | null) => v == null ? "text-gray-500" : Math.abs(v) < 0.005 ? "text-gray-300" : v >= 0 ? "text-green-400" : "text-red-400";
@@ -1639,7 +1642,7 @@ function LitGridLivePanel({
           <Stat
             label="Bot Profit"
             value={`${botProfit >= 0 ? "+" : "-"}$${Math.abs(botProfit).toFixed(4)}`}
-            sub={`${fmtPct(botProfitPct, 3)} · ${sells.length} trades${tradesPerHour != null ? ` · ${tradesPerHour.toFixed(1)}/hr` : ""}`}
+            sub={`${fmtPct(botProfitPct, 3)} · ${sellCount} trades${tradesPerHour != null ? ` · ${tradesPerHour.toFixed(1)}/hr` : ""}`}
             color={pnlColor(botProfit)}
           />
           <Stat label="Unrealized PNL" value={fmtUsd(unrealizedPnl)} sub={fmtPct(unrealizedPct)} color={pnlColor(unrealizedPnl)} />
@@ -1940,7 +1943,7 @@ function LitGridLivePanel({
       </div>
 
       <div>
-        <p className="text-gray-500 text-xs uppercase tracking-wide mb-2">Completed Trades ({sells.length})</p>
+        <p className="text-gray-500 text-xs uppercase tracking-wide mb-2">Completed Trades ({sellCount})</p>
         {sells.length === 0 ? (
           <p className="text-gray-600 text-sm">No completed trades yet</p>
         ) : (
@@ -6484,6 +6487,10 @@ export default function Dashboard() {
   const [litGridLiveOrders,    setLitGridLiveOrders]    = useState<any[]>([]);
   const [litGridLiveSells,     setLitGridLiveSells]     = useState<any[]>([]);
   const [litGridLiveResting,   setLitGridLiveResting]   = useState<any[]>([]);
+  // True lifetime sell count, uncapped by any row fetch (2026-10-20 audit: trades/hour read
+  // litGridLiveSells.length, which silently undercounted once the ledger passed that query's
+  // row limit -- a count-only query never hits a wall no matter how large the ledger grows.
+  const [litGridLiveSellCount, setLitGridLiveSellCount] = useState(0);
   const [litGridLiveToggling,  setLitGridLiveToggling]  = useState(false);
   const [litGridLiveFlattening, setLitGridLiveFlattening] = useState(false);
   const [litGridLiveClearing, setLitGridLiveClearing] = useState(false);
@@ -6533,6 +6540,7 @@ export default function Dashboard() {
       { data: hedgeEnvironmentRows },
       { data: scheduleSt },
       { data: litGridLiveSt },
+      { count: litGridLiveSellCount },
       { data: litGridLiveOr },
       { data: litGridLiveSells },
       { data: litGridLiveResting },
@@ -6580,8 +6588,10 @@ export default function Dashboard() {
       getSupabase().from("lighter_btc_optimal_runs").select("ran_at,detail").eq("action", "environment_er").order("id", { ascending: false }).limit(1),
       getSupabase().from("bot_schedule_rules").select("*").eq("id", 1).single(),
       getSupabase().from("lighter_lit_grid_live_state").select("*").eq("id", 1).single(),
+      getSupabase().from("lighter_lit_grid_live_orders").select("id", { count: "exact", head: true })
+        .eq("side", "sell").not("realized_profit_usd", "is", null),
       getSupabase().from("lighter_lit_grid_live_orders").select("*").order("id", { ascending: false }).limit(50),
-      getSupabase().from("lighter_lit_grid_live_orders").select("id,filled_at,filled_qty,filled_price,filled_quote,realized_profit_usd").eq("side", "sell").not("realized_profit_usd", "is", null).order("id", { ascending: false }).limit(5000),
+      getSupabase().from("lighter_lit_grid_live_orders").select("id,filled_at,filled_qty,filled_price,filled_quote,realized_profit_usd").eq("side", "sell").not("realized_profit_usd", "is", null).order("id", { ascending: false }).limit(200),
       getSupabase().from("lighter_lit_grid_live_orders").select("side,limit_price").in("status", ["open", "pending"]).limit(500),
     ]);
     setSurferState(surferSt ?? null);
@@ -6613,6 +6623,7 @@ export default function Dashboard() {
     setLitGridLiveState(litGridLiveSt ?? null);
     setLitGridLiveOrders(litGridLiveOr ?? []);
     setLitGridLiveSells(litGridLiveSells ?? []);
+    setLitGridLiveSellCount(litGridLiveSellCount ?? 0);
     setLitGridLiveResting(litGridLiveResting ?? []);
     setDcaBtcStats({ total: dcaBtcTotal ?? 0, wins: dcaBtcWins ?? 0 });
     setInitialBtcStats({ total: initialBtcTotal ?? 0, wins: initialBtcWins ?? 0 });
@@ -6914,6 +6925,7 @@ export default function Dashboard() {
           state={litGridLiveState}
           orders={litGridLiveOrders}
           sells={litGridLiveSells}
+          sellCount={litGridLiveSellCount}
           resting={litGridLiveResting}
           loading={loading}
           enabled={litGridLiveState?.enabled ?? false}
