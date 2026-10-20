@@ -1693,6 +1693,70 @@ function LitGridLivePanel({
           />
         </div>
       )}
+      {(() => {
+        const restMode = (st?.profit_mode ?? "rest") === "rest";
+        const cap = st?.rest_cap_usd != null ? Number(st.rest_cap_usd) : null;
+        const overflow: string | null = st?.rest_overflow_to ?? null;
+        const restNow = Number(st?.profit_bucket_rest_usd ?? 0);
+        const full = cap != null && overflow != null && restNow >= cap;
+        const off = !restMode || restSaving;
+        return (
+          <div className={`border border-gray-800 rounded-md p-2 space-y-1.5 ${restMode ? "" : "opacity-40"}`}>
+            <p className="text-gray-500 text-[9px] uppercase tracking-wide">
+              Rest cap {restMode ? (cap != null && overflow
+                ? `· $${restNow.toFixed(2)} of $${cap.toFixed(2)}${full ? ` · FULL → ${overflow === "compound" ? "Compound" : "Cover Drop"}` : ""}`
+                : "· no cap") : "· only in Rest mode"}
+            </p>
+            <div className="flex items-center gap-1.5">
+              <span className="text-gray-500 text-[10px] w-16 shrink-0">Fill to $</span>
+              <input
+                value={restCapIn} onChange={(e) => setRestCapIn(e.target.value)} disabled={off}
+                placeholder={cap != null ? String(cap) : "no cap"} inputMode="decimal"
+                className="flex-1 min-w-0 bg-gray-800 text-gray-200 text-xs rounded px-2 py-1 disabled:opacity-60"
+              />
+              <button
+                disabled={off || restCapIn.trim() === ""}
+                onClick={() => handleRestSetting({ restCapUsd: restCapIn.trim() },
+                  Number(restCapIn) === 0 ? "Remove the Rest cap? All profit stays in Rest." : `Set the Rest cap to $${restCapIn.trim()}?`,
+                  () => setRestCapIn(""))}
+                className="text-[10px] font-semibold px-2 py-1 rounded bg-gray-800 text-gray-300 hover:bg-gray-700 disabled:opacity-40"
+              >Save</button>
+            </div>
+            <div className="flex items-center gap-1.5">
+              <span className="text-gray-500 text-[10px] w-16 shrink-0">When full →</span>
+              {([["compound", "Compound"], ["cover_drop", "Cover Drop"]] as const).map(([dest, label]) => (
+                <button
+                  key={dest}
+                  disabled={off}
+                  onClick={() => overflow !== dest && handleRestSetting({ restOverflowTo: dest },
+                    `When Rest is full, send new profit to ${label}?`)}
+                  className={`flex-1 text-[10px] font-semibold px-2 py-1 rounded disabled:opacity-40 ${
+                    overflow === dest ? "bg-red-500/20 text-red-400" : "bg-gray-800 text-gray-400 hover:bg-gray-700"
+                  }`}
+                >{label}</button>
+              ))}
+            </div>
+            <div className="flex items-center gap-1.5">
+              <span className="text-gray-500 text-[10px] w-16 shrink-0">Withdrew $</span>
+              <input
+                value={restWithdrawIn} onChange={(e) => setRestWithdrawIn(e.target.value)} disabled={off}
+                placeholder="amount taken out" inputMode="decimal"
+                className="flex-1 min-w-0 bg-gray-800 text-gray-200 text-xs rounded px-2 py-1 disabled:opacity-60"
+              />
+              <button
+                disabled={off || restWithdrawIn.trim() === ""}
+                onClick={() => handleRestSetting({ restWithdrawUsd: restWithdrawIn.trim() },
+                  `Record a $${restWithdrawIn.trim()} withdrawal from Rest? Rest drops by that amount and starts filling again.`,
+                  () => setRestWithdrawIn(""))}
+                className="text-[10px] font-semibold px-2 py-1 rounded bg-gray-800 text-gray-300 hover:bg-gray-700 disabled:opacity-40"
+              >Save</button>
+            </div>
+            {Number(st?.rest_withdrawn_usd ?? 0) > 0 && (
+              <p className="text-gray-600 text-[9px]">Withdrawn so far: ${Number(st.rest_withdrawn_usd).toFixed(2)}</p>
+            )}
+          </div>
+        );
+      })()}
 
       <div className="space-y-2">
         <p className="text-gray-500 text-[9px] uppercase tracking-wide">Settings</p>
@@ -1866,70 +1930,6 @@ function LitGridLivePanel({
             </button>
           ))}
         </div>
-        {(() => {
-          const restMode = (st?.profit_mode ?? "rest") === "rest";
-          const cap = st?.rest_cap_usd != null ? Number(st.rest_cap_usd) : null;
-          const overflow: string | null = st?.rest_overflow_to ?? null;
-          const restNow = Number(st?.profit_bucket_rest_usd ?? 0);
-          const full = cap != null && overflow != null && restNow >= cap;
-          const off = !restMode || restSaving;
-          return (
-            <div className={`border border-gray-800 rounded-md p-2 space-y-1.5 ${restMode ? "" : "opacity-40"}`}>
-              <p className="text-gray-500 text-[9px] uppercase tracking-wide">
-                Rest cap {restMode ? (cap != null && overflow
-                  ? `· $${restNow.toFixed(2)} of $${cap.toFixed(2)}${full ? ` · FULL → ${overflow === "compound" ? "Compound" : "Cover Drop"}` : ""}`
-                  : "· no cap") : "· only in Rest mode"}
-              </p>
-              <div className="flex items-center gap-1.5">
-                <span className="text-gray-500 text-[10px] w-16 shrink-0">Fill to $</span>
-                <input
-                  value={restCapIn} onChange={(e) => setRestCapIn(e.target.value)} disabled={off}
-                  placeholder={cap != null ? String(cap) : "no cap"} inputMode="decimal"
-                  className="flex-1 min-w-0 bg-gray-800 text-gray-200 text-xs rounded px-2 py-1 disabled:opacity-60"
-                />
-                <button
-                  disabled={off || restCapIn.trim() === ""}
-                  onClick={() => handleRestSetting({ restCapUsd: restCapIn.trim() },
-                    Number(restCapIn) === 0 ? "Remove the Rest cap? All profit stays in Rest." : `Set the Rest cap to $${restCapIn.trim()}?`,
-                    () => setRestCapIn(""))}
-                  className="text-[10px] font-semibold px-2 py-1 rounded bg-gray-800 text-gray-300 hover:bg-gray-700 disabled:opacity-40"
-                >Save</button>
-              </div>
-              <div className="flex items-center gap-1.5">
-                <span className="text-gray-500 text-[10px] w-16 shrink-0">When full →</span>
-                {([["compound", "Compound"], ["cover_drop", "Cover Drop"]] as const).map(([dest, label]) => (
-                  <button
-                    key={dest}
-                    disabled={off}
-                    onClick={() => overflow !== dest && handleRestSetting({ restOverflowTo: dest },
-                      `When Rest is full, send new profit to ${label}?`)}
-                    className={`flex-1 text-[10px] font-semibold px-2 py-1 rounded disabled:opacity-40 ${
-                      overflow === dest ? "bg-red-500/20 text-red-400" : "bg-gray-800 text-gray-400 hover:bg-gray-700"
-                    }`}
-                  >{label}</button>
-                ))}
-              </div>
-              <div className="flex items-center gap-1.5">
-                <span className="text-gray-500 text-[10px] w-16 shrink-0">Withdrew $</span>
-                <input
-                  value={restWithdrawIn} onChange={(e) => setRestWithdrawIn(e.target.value)} disabled={off}
-                  placeholder="amount taken out" inputMode="decimal"
-                  className="flex-1 min-w-0 bg-gray-800 text-gray-200 text-xs rounded px-2 py-1 disabled:opacity-60"
-                />
-                <button
-                  disabled={off || restWithdrawIn.trim() === ""}
-                  onClick={() => handleRestSetting({ restWithdrawUsd: restWithdrawIn.trim() },
-                    `Record a $${restWithdrawIn.trim()} withdrawal from Rest? Rest drops by that amount and starts filling again.`,
-                    () => setRestWithdrawIn(""))}
-                  className="text-[10px] font-semibold px-2 py-1 rounded bg-gray-800 text-gray-300 hover:bg-gray-700 disabled:opacity-40"
-                >Save</button>
-              </div>
-              {Number(st?.rest_withdrawn_usd ?? 0) > 0 && (
-                <p className="text-gray-600 text-[9px]">Withdrawn so far: ${Number(st.rest_withdrawn_usd).toFixed(2)}</p>
-              )}
-            </div>
-          );
-        })()}
         <p className="text-gray-600 text-[9px] leading-snug">
           Only one mode active at a time. Switching only changes where NEW realized profit goes
           going forward -- money already in a bucket stays earmarked for that bucket's own purpose.
