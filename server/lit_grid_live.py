@@ -594,7 +594,15 @@ class LitGridLive:
                     all_ok = False
         return all_ok
 
-    async def _bucket_balances(self):
+    async def _rest_net(self, withdrawn):
+        sells = await self.sb_paginate(
+            f"{TABLE_ORDERS}?side=eq.sell&realized_profit_usd=not.is.null"
+            f"&select=realized_profit_usd,profit_bucket_destination")
+        gross = sum(float(s.get("realized_profit_usd") or 0) for s in (sells or [])
+                    if (s.get("profit_bucket_destination") or "profit_bucket_rest_usd") == "profit_bucket_rest_usd")
+        return gross - float(withdrawn or 0)
+
+    async def _bucket_balances(self, rest_withdrawn=0.0):
         """PURE DERIVED balances (external audit fix, seventh pass -- replaces the sixth pass's
         mutable spend/credit counter entirely, which had THREE separate non-atomicity bugs found
         by the same audit round: a retry could double-apply a credit if the "mark credited"
@@ -632,7 +640,9 @@ class LitGridLive:
         held_bucket_cost = sum(h.get("bucket_cost_total", 0.0) for h in holdings.values())
         gross["profit_bucket_cover_drop_usd"] = round(
             max(0.0, gross["profit_bucket_cover_drop_usd"] - reserved - held_bucket_cost), 8)
-        gross["profit_bucket_rest_usd"] = round(gross["profit_bucket_rest_usd"], 8)
+        # Rest minus what the user recorded as withdrawn ("Withdrew $" on the panel).
+        gross["profit_bucket_rest_usd"] = round(
+            max(0.0, gross["profit_bucket_rest_usd"] - float(rest_withdrawn or 0)), 8)
         gross["profit_bucket_compound_usd"] = round(gross["profit_bucket_compound_usd"], 8)
         return gross
 
@@ -645,7 +655,7 @@ class LitGridLive:
         rows = await self.sb("GET", f"{TABLE_ORDERS}?side=eq.buy&status=eq.filled&select=id&limit=1")
         return bool(rows)
 
-    async def reconcile_pending_orders(self, profit_mode=None):
+    async def reconcile_pending_orders(self, profit_mode=None, route=None):
         """Checks every non-terminal ledger row against the exchange's own account_orders().
         Returns (all_ok, usdc_delta, has_stale_unresolved): all_ok is True only if every batch
         was successfully read; usdc_delta is the net REAL cash impact (negative for buys,
@@ -684,6 +694,14 @@ class LitGridLive:
         usdc_delta = 0.0
         has_stale_unresolved = False
         now = datetime.now(timezone.utc)
+        # Rest cap (2026-10-20): in rest mode, once Rest (net of withdrawals) reaches the cap,
+        # new profit goes to the chosen overflow bucket instead. A whole trade's profit goes to
+        # one bucket, so Rest can end a few cents over the cap.
+        route = route or {}
+        rest_cap = route.get("cap")
+        overflow_col = PROFIT_BUCKET_COLUMN.get(route.get("overflow")) if route.get("overflow") in ("compound", "cover_drop") else None
+        capped = profit_mode in (None, "rest") and overflow_col is not None and rest_cap is not None and float(rest_cap) > 0
+        rest_now = None
         for batch in _chunks(pending, 20):
             co_idxs = ",".join(str(r["client_order_index"]) for r in batch)
             try:
@@ -737,8 +755,15 @@ class LitGridLive:
                                 patch["realized_profit_usd"] = round(
                                     float(r.get("realized_profit_usd") or 0) + profit_delta, 8)
                                 if not r.get("profit_bucket_destination"):
-                                    patch["profit_bucket_destination"] = PROFIT_BUCKET_COLUMN.get(
-                                        profit_mode, "profit_bucket_rest_usd")
+                                    dest = PROFIT_BUCKET_COLUMN.get(profit_mode, "profit_bucket_rest_usd")
+                                    if capped:
+                                        if rest_now is None:
+                                            rest_now = await self._rest_net(route.get("withdrawn"))
+                                        if rest_now >= float(rest_cap):
+                                            dest = overflow_col
+                                        else:
+                                            rest_now += patch["realized_profit_usd"]
+                                    patch["profit_bucket_destination"] = dest
                 if terminal:
                     patch["status"] = "filled" if filled_qty > 0 else (
                         "cancelled" if any(p in status_raw for p in TERMINAL_STATUS_SUBSTRINGS) else "rejected")
@@ -1577,7 +1602,7 @@ class LitGridLive:
         await self.sb("PATCH", f"{TABLE_ORDERS}?id=eq.{row_id}", {"status": "open"})
         return row_id
 
-    async def flatten_all(self, profit_mode=None):
+    async def flatten_all(self, profit_mode=None, route=None):
         """Emergency path, retried every tick until VERIFIED complete. Cancels everything
         resting first, reconciles, then sells each held level that has no unresolved resting
         sell already working it (external audit fix P1-2) -- never a duplicate attempt against
@@ -1592,7 +1617,7 @@ class LitGridLive:
         is applied via _apply_usdc_delta() (external audit fix, seventh pass) -- discarding it
         here is harmless to safety (entries are blocked throughout flatten regardless) but was
         still a real, permanent loss of display accuracy for exactly the reason fixed in tick()."""
-        _ok, delta, _stale = await self.reconcile_pending_orders(profit_mode=profit_mode)
+        _ok, delta, _stale = await self.reconcile_pending_orders(profit_mode=profit_mode, route=route)
         await self._apply_usdc_delta(delta)
         resting = await self.resting_orders_by_level()
         any_cancel_failed = False
@@ -1604,7 +1629,7 @@ class LitGridLive:
                 if not await self.cancel_order_row(r):
                     any_cancel_failed = True
         if resting:
-            _ok, delta, _stale = await self.reconcile_pending_orders(profit_mode=profit_mode)
+            _ok, delta, _stale = await self.reconcile_pending_orders(profit_mode=profit_mode, route=route)
             await self._apply_usdc_delta(delta)
 
         if not self._lock_held:
@@ -1635,7 +1660,7 @@ class LitGridLive:
             if row_id is None:
                 sell_failed = True
         if holdings:
-            _ok, delta, _stale = await self.reconcile_pending_orders(profit_mode=profit_mode)
+            _ok, delta, _stale = await self.reconcile_pending_orders(profit_mode=profit_mode, route=route)
             await self._apply_usdc_delta(delta)
 
         try:
@@ -1686,10 +1711,12 @@ class LitGridLive:
     async def _tick(self):
         state = await self.get_state()
         profit_mode = state.get("profit_mode")
+        route = {"cap": state.get("rest_cap_usd"), "overflow": state.get("rest_overflow_to"),
+                 "withdrawn": state.get("rest_withdrawn_usd")}
         if state.get("flatten_requested"):
-            await self.flatten_all(profit_mode=profit_mode)
+            await self.flatten_all(profit_mode=profit_mode, route=route)
             return
-        reconciled_ok, usdc_delta, has_stale_unresolved = await self.reconcile_pending_orders(profit_mode=profit_mode)
+        reconciled_ok, usdc_delta, has_stale_unresolved = await self.reconcile_pending_orders(profit_mode=profit_mode, route=route)
         await self._apply_usdc_delta(usdc_delta)
         if not reconciled_ok:
             return
@@ -1707,7 +1734,7 @@ class LitGridLive:
         # entirely). Computed fresh every tick and persisted purely for dashboard display;
         # maintain_window() below reads these same freshly-derived figures off `state`, never a
         # value that could have drifted out of sync with the ledger.
-        buckets = await self._bucket_balances()
+        buckets = await self._bucket_balances(rest_withdrawn=state.get("rest_withdrawn_usd"))
         if buckets.get("profit_bucket_compound_usd") != state.get("profit_bucket_compound_usd"):
             # New compound profit should actually trigger a resize at the next tick, not sit
             # inert until an unrelated settings change.
@@ -1722,7 +1749,7 @@ class LitGridLive:
         persisted_spacing = state.get("internal_spacing_pct")
         if persisted_spacing is not None and float(persisted_spacing) != spacing_pct:
             await self.cancel_all_resting()
-            _spacing_ok, spacing_usdc_delta, _spacing_stale = await self.reconcile_pending_orders(profit_mode=profit_mode)
+            _spacing_ok, spacing_usdc_delta, _spacing_stale = await self.reconcile_pending_orders(profit_mode=profit_mode, route=route)
             await self._apply_usdc_delta(spacing_usdc_delta)
             still_resting = await self.resting_orders_by_level()
             if still_resting:

@@ -47,6 +47,22 @@ export async function POST(req: NextRequest) {
     out["profit_mode"] = body.profitMode;
   }
 
+  // Rest cap (2026-10-20): in rest mode, once Rest reaches the cap new profit goes to the
+  // overflow bucket. 0 clears the cap.
+  if (body.restCapUsd !== undefined && body.restCapUsd !== null && body.restCapUsd !== "") {
+    const v = Number(body.restCapUsd);
+    if (!Number.isFinite(v) || v < 0 || v > 1_000_000) {
+      return NextResponse.json({ error: `Rest cap must be between 0 and 1,000,000 (got ${body.restCapUsd}).` }, { status: 400 });
+    }
+    out["rest_cap_usd"] = v === 0 ? null : v;
+  }
+  if (body.restOverflowTo !== undefined && body.restOverflowTo !== null && body.restOverflowTo !== "") {
+    if (!["compound", "cover_drop"].includes(body.restOverflowTo)) {
+      return NextResponse.json({ error: "When-full destination must be compound or cover_drop." }, { status: 400 });
+    }
+    out["rest_overflow_to"] = body.restOverflowTo;
+  }
+
   // Dynamic drawdown toggle (2026-10-19). Switching it either way, or "reset high", clears the
   // high/tier/size so the worker re-sizes from the live price on its next tick.
   if (body.dynamicDrawdown === true || body.dynamicDrawdown === false) {
@@ -86,10 +102,6 @@ export async function POST(req: NextRequest) {
     out[col] = v;
   }
 
-  if (Object.keys(out).length === 0) {
-    return NextResponse.json({ error: "Nothing to change." }, { status: 400 });
-  }
-
   // Changing spacing or capital recomputes order_size_lit -- the running worker does the real
   // math (it needs the live price, which this route doesn't have); clearing it here just marks
   // "needs recompute" so the worker never trades on a stale size after a settings change.
@@ -100,6 +112,23 @@ export async function POST(req: NextRequest) {
   if (out["capital_usd"] !== undefined) {
     const shortfall = await investmentShortfallError(getSupabaseAdmin(), Number(out["capital_usd"]));
     if (shortfall) return NextResponse.json({ error: shortfall }, { status: 400 });
+  }
+
+  // "Withdrew $": adds to rest_withdrawn_usd so Rest drops and can refill under the cap.
+  if (body.restWithdrawUsd !== undefined && body.restWithdrawUsd !== null && body.restWithdrawUsd !== "") {
+    const v = Number(body.restWithdrawUsd);
+    const { data: cur, error: readErr } = await getSupabaseAdmin()
+      .from("lighter_lit_grid_live_state").select("*").eq("id", 1).single();
+    if (readErr || !cur) return NextResponse.json({ error: readErr?.message ?? "State not found." }, { status: 500 });
+    const rest = Number(cur.profit_bucket_rest_usd ?? 0);
+    if (!Number.isFinite(v) || v <= 0 || v > rest + 1e-6) {
+      return NextResponse.json({ error: `Withdrawal must be more than 0 and at most the Rest bucket ($${rest.toFixed(2)}).` }, { status: 400 });
+    }
+    out["rest_withdrawn_usd"] = Number(cur.rest_withdrawn_usd ?? 0) + v;
+  }
+
+  if (Object.keys(out).length === 0) {
+    return NextResponse.json({ error: "Nothing to change." }, { status: 400 });
   }
 
   const { error } = await getSupabaseAdmin().from("lighter_lit_grid_live_state").update(out).eq("id", 1);

@@ -1912,6 +1912,77 @@ async def t_cancelled_buy_releases_its_reservation_automatically():
           abs(buckets["profit_bucket_cover_drop_usd"] - 10.0) < 1e-6, buckets)
 
 
+# ── Rest cap + overflow + withdrawals (2026-10-20, direct request) ──────────────────────────────
+
+def _rest_cap_fixture(state_over, prior_rest=0.0, prior_dest="profit_bucket_rest_usd"):
+    buy = {"id": 1, "level": 900, "side": "buy", "status": "filled", "filled_qty": 1.0, "filled_price": 3.00}
+    sell_row = {"id": 2, "level": 901, "side": "sell", "closes_level": 900, "client_order_index": 555,
+                "status": "pending", "limit_price": 3.10, "size": 1.0}
+    old = {"id": 3, "level": 850, "side": "sell", "closes_level": 849, "status": "filled",
+           "realized_profit_usd": prior_rest, "profit_bucket_destination": prior_dest}
+    filled = FakeOrder(555, order_index=77, status="filled",
+                       filled_base_amount=1.0, filled_quote_amount=3.10, remaining_base_amount=0.0)
+    return make_bot(base_state(**state_over), orders=[buy, sell_row, old], orders_by_co={555: filled})
+
+
+async def t_rest_cap_below_cap_profit_stays_in_rest():
+    bot, fake = _rest_cap_fixture({}, prior_rest=5.0)
+    await bot.reconcile_pending_orders(profit_mode="rest", route={"cap": 10, "overflow": "compound"})
+    check("below the cap, profit goes to rest",
+          fake.orders[1]["profit_bucket_destination"] == "profit_bucket_rest_usd", fake.orders[1])
+
+
+async def t_rest_cap_full_rest_overflows_to_chosen_bucket():
+    for overflow, col in (("compound", "profit_bucket_compound_usd"), ("cover_drop", "profit_bucket_cover_drop_usd")):
+        bot, fake = _rest_cap_fixture({}, prior_rest=10.0)
+        await bot.reconcile_pending_orders(profit_mode="rest", route={"cap": 10, "overflow": overflow})
+        check(f"rest at the cap sends new profit to {overflow}",
+              fake.orders[1]["profit_bucket_destination"] == col, fake.orders[1])
+
+
+async def t_rest_cap_withdrawal_reopens_rest():
+    bot, fake = _rest_cap_fixture({}, prior_rest=10.0)
+    await bot.reconcile_pending_orders(profit_mode="rest",
+                                       route={"cap": 10, "overflow": "compound", "withdrawn": 4.0})
+    check("after a withdrawal rest is under the cap again and refills",
+          fake.orders[1]["profit_bucket_destination"] == "profit_bucket_rest_usd", fake.orders[1])
+    buckets = await bot._bucket_balances(rest_withdrawn=4.0)
+    check("rest bucket shows profit minus withdrawals",
+          abs(buckets["profit_bucket_rest_usd"] - (10.0 + 0.10 - 4.0)) < 1e-6, buckets)
+
+
+async def t_rest_cap_ignored_outside_rest_mode_or_without_cap():
+    bot, fake = _rest_cap_fixture({}, prior_rest=10.0)
+    await bot.reconcile_pending_orders(profit_mode="compound", route={"cap": 1, "overflow": "cover_drop"})
+    check("compound mode ignores the rest cap",
+          fake.orders[1]["profit_bucket_destination"] == "profit_bucket_compound_usd", fake.orders[1])
+    bot, fake = _rest_cap_fixture({}, prior_rest=10.0)
+    await bot.reconcile_pending_orders(profit_mode="rest", route={"cap": None, "overflow": "compound"})
+    check("no cap set: rest keeps everything",
+          fake.orders[1]["profit_bucket_destination"] == "profit_bucket_rest_usd", fake.orders[1])
+    bot, fake = _rest_cap_fixture({}, prior_rest=10.0)
+    await bot.reconcile_pending_orders(profit_mode="rest", route={"cap": 5, "overflow": None})
+    check("no destination set: rest keeps everything",
+          fake.orders[1]["profit_bucket_destination"] == "profit_bucket_rest_usd", fake.orders[1])
+
+
+async def t_tick_passes_rest_cap_from_state():
+    bot, fake = _rest_cap_fixture({"rest_cap_usd": 10, "rest_overflow_to": "compound",
+                                   "rest_withdrawn_usd": 0}, prior_rest=10.0)
+    seen = {}
+    orig = bot.reconcile_pending_orders
+    async def spy(profit_mode=None, route=None):
+        seen["route"] = route
+        return True, 0.0, False
+    bot.reconcile_pending_orders = spy
+    bot.check_balance_divergence = lambda: _async_return((True, False))
+    bot.fetch_current_price = lambda: _async_return(None)
+    bot._apply_usdc_delta = lambda d: _async_return(None)
+    await bot._tick()
+    check("tick hands the state's cap/destination/withdrawn to reconcile",
+          seen.get("route") == {"cap": 10, "overflow": "compound", "withdrawn": 0}, seen)
+
+
 # ── Profit allocation (direct request) ──────────────────────────────────────────────────────────
 
 async def t_reconcile_credits_realized_profit_to_the_active_bucket():
@@ -2348,6 +2419,11 @@ async def main():
               t_bucket_balances_recompute_correctly_on_every_call,
               t_reconcile_uses_real_quote_delta_across_multiple_partial_fill_passes,
               t_tick_resizes_immediately_when_compound_bucket_grows,
+              t_rest_cap_below_cap_profit_stays_in_rest,
+              t_rest_cap_full_rest_overflows_to_chosen_bucket,
+              t_rest_cap_withdrawal_reopens_rest,
+              t_rest_cap_ignored_outside_rest_mode_or_without_cap,
+              t_tick_passes_rest_cap_from_state,
               t_maintain_window_uses_hysteresis_guard_for_the_window_center,
               t_lock_heartbeat_touched_after_each_order_placement,
               t_rate_limited_errors_back_off_before_retrying):
