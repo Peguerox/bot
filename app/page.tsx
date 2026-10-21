@@ -1948,14 +1948,14 @@ function LitGridLivePanel({
           <p className="text-gray-600 text-sm">No completed trades yet</p>
         ) : (
           <div className="overflow-auto max-h-64">
-            <table className="w-full text-xs font-mono">
+            <table className="w-full max-w-3xl text-xs font-mono">
               <thead>
                 <tr className="text-gray-500 border-b border-gray-800 sticky top-0 bg-gray-900">
                   <th className="text-left pb-1">Time</th>
                   <th className="text-right pb-1">Bought</th>
                   <th className="text-right pb-1">Sold</th>
                   <th className="text-right pb-1">Qty</th>
-                  <th className="text-right pb-1">Profit</th>
+                  <th className="text-right pb-1 pr-3">Profit</th>
                 </tr>
               </thead>
               <tbody className="divide-y divide-gray-800/50">
@@ -1973,7 +1973,7 @@ function LitGridLivePanel({
                       <td className="py-1.5 text-right text-gray-300">{bought != null ? bought.toFixed(4) : "—"}</td>
                       <td className="py-1.5 text-right text-gray-300">{Number(r.filled_price ?? 0).toFixed(4)}</td>
                       <td className="py-1.5 text-right text-gray-500">{qty.toFixed(2)}</td>
-                      <td className={`py-1.5 text-right font-bold ${pnlColor(profit)}`}>
+                      <td className={`py-1.5 pr-3 text-right font-bold ${pnlColor(profit)}`}>
                         {`${profit >= 0 ? "+" : "-"}$${Math.abs(profit).toFixed(4)}`}
                       </td>
                     </tr>
@@ -6591,7 +6591,7 @@ export default function Dashboard() {
       getSupabase().from("lighter_lit_grid_live_orders").select("id", { count: "exact", head: true })
         .eq("side", "sell").not("realized_profit_usd", "is", null),
       getSupabase().from("lighter_lit_grid_live_orders").select("*").order("id", { ascending: false }).limit(50),
-      getSupabase().from("lighter_lit_grid_live_orders").select("id,filled_at,filled_qty,filled_price,filled_quote,realized_profit_usd").eq("side", "sell").not("realized_profit_usd", "is", null).order("id", { ascending: false }).limit(200),
+      getSupabase().from("lighter_lit_grid_live_orders").select("id,filled_at,filled_qty,filled_price,filled_quote,realized_profit_usd").eq("side", "sell").not("realized_profit_usd", "is", null).order("filled_at", { ascending: false, nullsFirst: false }).order("id", { ascending: false }).limit(200),
       getSupabase().from("lighter_lit_grid_live_orders").select("side,limit_price").in("status", ["open", "pending"]).limit(500),
     ]);
     setSurferState(surferSt ?? null);
