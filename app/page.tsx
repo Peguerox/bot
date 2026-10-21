@@ -1948,14 +1948,14 @@ function LitGridLivePanel({
           <p className="text-gray-600 text-sm">No completed trades yet</p>
         ) : (
           <div className="overflow-auto max-h-64">
-            <table className="w-full max-w-3xl text-xs font-mono">
+            <table className="w-full table-fixed text-xs font-mono">
               <thead>
                 <tr className="text-gray-500 border-b border-gray-800 sticky top-0 bg-gray-900">
-                  <th className="text-left pb-1">Time</th>
-                  <th className="text-right pb-1">Bought</th>
-                  <th className="text-right pb-1">Sold</th>
-                  <th className="text-right pb-1">Qty</th>
-                  <th className="text-right pb-1 pr-3">Profit</th>
+                  <th className="text-left pb-1 w-1/5">Time</th>
+                  <th className="text-left pb-1 w-1/5">Bought</th>
+                  <th className="text-left pb-1 w-1/5">Sold</th>
+                  <th className="text-left pb-1 w-1/5">Qty</th>
+                  <th className="text-left pb-1 w-1/5">Profit</th>
                 </tr>
               </thead>
               <tbody className="divide-y divide-gray-800/50">
@@ -1970,10 +1970,10 @@ function LitGridLivePanel({
                   return (
                     <tr key={r.id} className="hover:bg-gray-800/30">
                       <td className="py-1.5 text-gray-600">{time}</td>
-                      <td className="py-1.5 text-right text-gray-300">{bought != null ? bought.toFixed(4) : "—"}</td>
-                      <td className="py-1.5 text-right text-gray-300">{Number(r.filled_price ?? 0).toFixed(4)}</td>
-                      <td className="py-1.5 text-right text-gray-500">{qty.toFixed(2)}</td>
-                      <td className={`py-1.5 pr-3 text-right font-bold ${pnlColor(profit)}`}>
+                      <td className="py-1.5 text-gray-300">{bought != null ? bought.toFixed(4) : "—"}</td>
+                      <td className="py-1.5 text-gray-300">{Number(r.filled_price ?? 0).toFixed(4)}</td>
+                      <td className="py-1.5 text-gray-500">{qty.toFixed(2)}</td>
+                      <td className={`py-1.5 font-bold ${pnlColor(profit)}`}>
                         {`${profit >= 0 ? "+" : "-"}$${Math.abs(profit).toFixed(4)}`}
                       </td>
                     </tr>
