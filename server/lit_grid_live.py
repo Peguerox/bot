@@ -363,6 +363,16 @@ BALANCE_DIVERGENCE_TOLERANCE_LIT = 0.03
 DYNAMIC_DD_BASE = 10.0
 DYNAMIC_DD_GATES = ((5.0, 20.0), (10.0, 40.0), (20.0, 80.0))
 OPEN_STATUSES = ("pending", "open", "cancel_requested")
+# Gate-dependent spacing growth (toggle `gate_spacing_growth_enabled`, 2026-10-21 research in
+# research/lit-dynamic-drawdown-2026-10-19/lit_gate_spacing.py): spacing widens to
+# base x (1, 2, 3, 4) across the four dynamic-drawdown tiers (10/20/40/80 on today's gates),
+# i.e. the SAME step as the starting spacing itself, not a fixed percentage-point amount --
+# a fixed step only ever looked good because it happened to be tuned around one particular
+# starting spacing. Confirmed on both LIT's and ZEC's own data, at every starting spacing
+# tested: it earns more AND (the bigger reason) fixes orders collapsing below the exchange
+# minimum deep in a drawdown when starting tight -- real LIT data showed a flat 0.125% grid
+# unable to place any order 67.6% of the way through a recent 31-day window.
+DYNAMIC_DD_TIER_ORDER = (DYNAMIC_DD_BASE,) + tuple(t for _, t in DYNAMIC_DD_GATES)
 TERMINAL_STATUS_SUBSTRINGS = ("cancel", "reject", "expir")
 PAGE_SIZE = 500
 # Re-anchored line numbers start this far past every line number already in the ledger.
@@ -422,6 +432,34 @@ def _order_is_terminal(order):
 def _chunks(seq, n):
     for i in range(0, len(seq), n):
         yield seq[i:i + n]
+
+
+def gate_spacing_multiplier(tier):
+    """1, 2, 3, 4 for the 1st/2nd/3rd/4th dynamic-drawdown tier (10/20/40/80 on today's live
+    gates) -- see DYNAMIC_DD_TIER_ORDER's own comment. An unrecognized tier (toggle just
+    switched on, nothing recorded yet) is treated as the first tier: multiplier 1, i.e. no
+    widening -- the safe/inert default."""
+    try:
+        return DYNAMIC_DD_TIER_ORDER.index(tier) + 1
+    except ValueError:
+        return 1
+
+
+def effective_spacing_pct(state):
+    """The spacing actually used for new grid lines this tick: the dashboard's spacing_pct,
+    widened by gate_spacing_multiplier() while gate_spacing_growth_enabled AND dynamic_dd_enabled
+    are both on and a tier has already been recorded. Any one of those false (or no tier yet):
+    the plain dashboard value, unchanged -- byte-for-byte old behavior. The tier used is
+    whatever was last persisted -- up to one tick (~2s) behind a gate switch that happens this
+    same tick, which only delays the resulting re-anchor by one tick; never a correctness or
+    safety issue (see maintain_window's own call site)."""
+    base = float(state["spacing_pct"])
+    if not state.get("gate_spacing_growth_enabled") or not state.get("dynamic_dd_enabled"):
+        return base
+    tier = state.get("dynamic_dd_tier")
+    if tier is None:
+        return base
+    return base * gate_spacing_multiplier(float(tier))
 
 
 def holdings_from_rows(buys, sells):
@@ -1256,7 +1294,7 @@ class LitGridLive:
         return clamp_order_size(float(size))
 
     async def maintain_window(self, state, price, entries_allowed=True):
-        spacing_pct = float(state["spacing_pct"])
+        spacing_pct = effective_spacing_pct(state)
         step = math.log(1 + spacing_pct / 100.0)
         levels_down = max(1, int(state["levels_down"]))
         max_open_buys = state.get("max_open_buys")
@@ -1838,7 +1876,7 @@ class LitGridLive:
         # balance divergence (external audit fix, fifth pass: this used to only be logged).
         entries_allowed = bool(state.get("enabled")) and balance_ok and not has_stale_unresolved
 
-        spacing_pct = float(state["spacing_pct"])
+        spacing_pct = effective_spacing_pct(state)
         persisted_spacing = state.get("internal_spacing_pct")
         if persisted_spacing is not None and float(persisted_spacing) != spacing_pct:
             await self.cancel_all_resting()

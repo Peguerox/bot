@@ -66,6 +66,14 @@ export async function POST(req: NextRequest) {
     out["order_size_lit"] = null;
   }
 
+  // Gate-dependent spacing growth (2026-10-21): spacing widens base x (1,2,3,4) across the four
+  // dynamic-drawdown tiers instead of staying flat. Switching it clears order_size_lit so the
+  // worker re-sizes against whichever effective spacing applies next tick.
+  if (body.gateSpacingGrowth === true || body.gateSpacingGrowth === false) {
+    out["gate_spacing_growth_enabled"] = body.gateSpacingGrowth;
+    out["order_size_lit"] = null;
+  }
+
   for (const [key, col] of [
     ["spacingPct", "spacing_pct"],
     ["levelsUp", "levels_up"],

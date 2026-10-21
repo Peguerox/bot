@@ -1479,6 +1479,15 @@ function LitGridLivePanel({
   const dynTier = st?.dynamic_dd_tier != null ? Number(st.dynamic_dd_tier) : null;
   const dynHigh = st?.dynamic_dd_high != null ? Number(st.dynamic_dd_high) : null;
   const dynDrop = dynHigh != null && livePrice != null ? Math.max(0, (1 - livePrice / dynHigh) * 100) : null;
+  // Gate-dependent spacing growth (2026-10-21): spacing widens base x (1,2,3,4) across the four
+  // dynamic-drawdown tiers (10/20/40/80) instead of staying flat all the way down -- see
+  // server/lit_grid_live.py's effective_spacing_pct(). DYNAMIC_DD_TIER_ORDER mirrored here since
+  // the dashboard has no direct access to the Python constant.
+  const DD_TIER_ORDER = [10, 20, 40, 80];
+  const gateGrowthOn = !!st?.gate_spacing_growth_enabled;
+  const gateMultiplier = dynTier != null ? (DD_TIER_ORDER.indexOf(dynTier) + 1 || 1) : 1;
+  const baseSpacingPct = st?.spacing_pct != null ? Number(st.spacing_pct) : null;
+  const effectiveSpacingPct = baseSpacingPct != null && dynOn && gateGrowthOn ? baseSpacingPct * gateMultiplier : baseSpacingPct;
   const restingPrices = (side: string) => resting.filter((r: any) => r.side === side).map((r: any) => Number(r.limit_price));
   const nearestSell = livePrice != null ? (restingPrices("sell").filter((p: number) => p >= livePrice).sort((a: number, b: number) => a - b)[0] ?? null) : null;
   const nearestBuy = livePrice != null ? (restingPrices("buy").filter((p: number) => p <= livePrice).sort((a: number, b: number) => b - a)[0] ?? null) : null;
@@ -1947,6 +1956,40 @@ function LitGridLivePanel({
           All % are measured from the high. At each switch the <span className="text-gray-300">available balance</span> is spread over every buy line from today's price down to "money lasts to", so new orders get smaller as price falls and the cash never runs out before that price.
           Orders already placed keep their size. When price climbs back above a switch price, orders grow again.
         </p>
+
+        {dynOn && (
+          <div className="rounded-lg border border-gray-700 bg-gray-800/40 p-2 space-y-1.5">
+            <div className="flex items-center justify-between gap-2">
+              <div>
+                <p className="text-gray-200 text-xs font-bold">Gate spacing growth</p>
+                <p className="text-gray-500 text-[10px] leading-snug">
+                  Spacing widens base x(1,2,3,4) across the 4 levels above instead of staying flat
+                  (2026-10-21 research: fixes orders collapsing below the 1 LIT minimum deep in a
+                  drawdown when starting tight, and earns more besides).
+                </p>
+              </div>
+              <button
+                onClick={() => handleDynamicDrawdown({ gateSpacingGrowth: !gateGrowthOn }, gateGrowthOn
+                  ? "Turn gate spacing growth OFF? Spacing goes back to a flat value at every level."
+                  : "Turn gate spacing growth ON? Spacing will widen base x(1,2,3,4) as the bot moves down the levels above. Cancels resting orders and re-anchors the grid.")}
+                disabled={dynSaving}
+                className={`shrink-0 text-xs font-bold px-3 py-1.5 rounded-full border disabled:opacity-40 ${gateGrowthOn
+                  ? "bg-green-500/15 text-green-400 border-green-500/40"
+                  : "bg-gray-800 text-gray-400 border-gray-600 hover:text-gray-200"}`}
+              >
+                {gateGrowthOn ? "● ON" : "○ OFF"}
+              </button>
+            </div>
+            {gateGrowthOn && (
+              <p className="text-[11px] text-gray-400 tabular-nums">
+                Base {baseSpacingPct != null ? `${baseSpacingPct}%` : "—"} × {gateMultiplier} ={" "}
+                <span className="text-blue-300 font-semibold">
+                  {effectiveSpacingPct != null ? `${effectiveSpacingPct.toFixed(3)}%` : "—"} effective spacing right now
+                </span>
+              </p>
+            )}
+          </div>
+        )}
       </div>
 
       <div>

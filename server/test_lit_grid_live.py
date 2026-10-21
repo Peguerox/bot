@@ -2536,11 +2536,113 @@ def t_run_lit_grid_live_signature_defaults_match_worker4_exactly():
     check("tag defaults to empty", p["tag"].default == "")
 
 
+
+# ── Gate-dependent spacing growth (2026-10-21) ────────────────────────────────────────────────
+
+def t_gate_spacing_multiplier_matches_the_tier_order():
+    check("tier 10 (1st/base tier) -> multiplier 1", core.gate_spacing_multiplier(10.0) == 1)
+    check("tier 20 (2nd tier) -> multiplier 2", core.gate_spacing_multiplier(20.0) == 2)
+    check("tier 40 (3rd tier) -> multiplier 3", core.gate_spacing_multiplier(40.0) == 3)
+    check("tier 80 (4th/deepest tier) -> multiplier 4", core.gate_spacing_multiplier(80.0) == 4)
+    check("an unrecognized tier is treated as the first tier (multiplier 1), not an error",
+          core.gate_spacing_multiplier(999.0) == 1)
+
+
+def t_effective_spacing_off_by_default_is_the_plain_dashboard_value():
+    st = base_state(spacing_pct=0.5, dynamic_dd_enabled=True, dynamic_dd_tier=40.0)
+    check("gate_spacing_growth_enabled unset/false: plain spacing_pct, no widening",
+          core.effective_spacing_pct(st) == 0.5, core.effective_spacing_pct(st))
+    st2 = base_state(spacing_pct=0.5, gate_spacing_growth_enabled=True, dynamic_dd_enabled=False, dynamic_dd_tier=40.0)
+    check("dynamic_dd disabled: plain spacing_pct even with the growth flag on",
+          core.effective_spacing_pct(st2) == 0.5, core.effective_spacing_pct(st2))
+    st3 = base_state(spacing_pct=0.5, gate_spacing_growth_enabled=True, dynamic_dd_enabled=True, dynamic_dd_tier=None)
+    check("no tier recorded yet: plain spacing_pct, not an error",
+          core.effective_spacing_pct(st3) == 0.5, core.effective_spacing_pct(st3))
+
+
+def t_effective_spacing_widens_with_the_tier_when_both_flags_are_on():
+    for tier, mult in ((10.0, 1), (20.0, 2), (40.0, 3), (80.0, 4)):
+        st = base_state(spacing_pct=0.125, gate_spacing_growth_enabled=True,
+                         dynamic_dd_enabled=True, dynamic_dd_tier=tier)
+        want = round(0.125 * mult, 6)
+        got = round(core.effective_spacing_pct(st), 6)
+        check(f"tier {tier:g}: 0.125 x{mult} = {want}", got == want, got)
+
+
+async def t_tick_gate_switch_reanchors_to_the_wider_spacing_next_tick():
+    # Direct research finding: starting narrow and staying flat into a deep drawdown gate can
+    # collapse orders below the exchange minimum. With the growth flag on, a dynamic_dd_tier
+    # already persisted at 40 (3rd tier) must make a fresh grid use 3x the dashboard spacing --
+    # same held-lot re-anchor mechanics as t_tick_spacing_change_reanchors_held_lots_and_sells_near_cost,
+    # just driven by a tier switch instead of a raw dashboard spacing edit.
+    A = 2.83365
+    old = math.log(1.00125)
+    P = 3.40
+    held = {146: 3.4006, 147: 3.4048, 148: 3.4091}
+    rows = _reanchor_ledger(A, old, held, closed=range(0, 10))
+    nid = max(r["id"] for r in rows) + 1
+    for j, k in enumerate(held):
+        rows.append({"id": nid + j, "level": k + 1, "side": "sell", "status": "open", "closes_level": k,
+                     "client_order_index": 700 + j, "exchange_order_id": 7000 + j, "size": 2.0,
+                     "limit_price": round(A * math.exp((k + 1) * old), 4)})
+    cancelled = {700 + j: FakeOrder(700 + j, order_index=7000 + j, status="canceled",
+                                    remaining_base_amount=0.0) for j in range(len(held))}
+    bot, fake = make_bot(base_state(
+        spacing_pct=0.125, internal_spacing_pct=0.125, grid_anchor_price=A,
+        gate_spacing_growth_enabled=True, dynamic_dd_enabled=True, dynamic_dd_tier=40.0, dynamic_dd_high=4.0,
+        levels_up=5, levels_down=5, order_size_lit=2.0, usdc_balance=500.0, lit_balance=6.0,
+    ), orders=rows, orders_by_co=cancelled,
+       assets=[FakeAsset("USDC", 500.0, 0.0), FakeAsset("LIT", 6.0, 0.0)])
+    bot.fetch_current_price = lambda: _async_return(P)
+    await bot.tick()
+    check("internal_spacing_pct advances to 0.125 x3 = 0.375 (the 3rd-tier effective spacing)",
+          abs(float(fake.state["internal_spacing_pct"]) - 0.375) < 1e-9, fake.state["internal_spacing_pct"])
+    check("the grid is re-anchored (anchor price changed)", fake.state["grid_anchor_price"] != A, fake.state.get("grid_anchor_price"))
+    force_not_cold_start(bot)
+    n0 = len(fake.orders)
+    await bot.maintain_window(fake.state, P)
+    new_sells = [o for o in fake.orders[n0:] if o["side"] == "sell"]
+    new_buys = [o for o in fake.orders[n0:] if o["side"] == "buy" and o.get("order_kind") != "market"]
+    check("sells exist and are placed", len(new_sells) >= 1, new_sells)
+    check("new sells sit 0.375% apart (not the plain 0.125% dashboard value), not bunched on old 0.125% lines",
+          len(new_sells) >= 2 and all(abs(b / a - 1.00375) < 2e-3 for a, b in
+                                  zip(sorted(float(o["limit_price"]) for o in new_sells),
+                                      sorted(float(o["limit_price"]) for o in new_sells)[1:])),
+          sorted(float(o["limit_price"]) for o in new_sells))
+    check("new buys also sit 0.375% apart",
+          len(new_buys) >= 2 and all(abs(b / a - 1.00375) < 2e-3 for a, b in
+                                 zip(sorted(float(o["limit_price"]) for o in new_buys),
+                                     sorted(float(o["limit_price"]) for o in new_buys)[1:])),
+          sorted(float(o["limit_price"]) for o in new_buys))
+
+
+async def t_tick_gate_spacing_growth_off_keeps_old_behavior_even_with_a_tier_recorded():
+    # Regression guard: a bot with dynamic_dd on and a deep tier already recorded, already
+    # anchored and holding a real lot from an earlier run (not a fresh cold start), but the
+    # growth flag OFF (the default, and every bot before this feature existed) must never
+    # widen or re-anchor because of the tier.
+    A = 2.9
+    held = {"id": 1, "level": 900, "side": "buy", "status": "filled", "filled_qty": 1.70,
+            "filled_price": 2.90, "size": 1.70}
+    bot, fake = make_bot(base_state(
+        spacing_pct=0.125, internal_spacing_pct=0.125, grid_anchor_price=A, dynamic_dd_enabled=True,
+        dynamic_dd_tier=80.0, dynamic_dd_high=4.0, order_size_lit=2.0, usdc_balance=500.0, lit_balance=1.70,
+    ), orders=[held], assets=[FakeAsset("USDC", 500.0, 0.0), FakeAsset("LIT", 1.70, 0.0)])
+    bot.fetch_current_price = lambda: _async_return(3.10)
+    await bot.tick()
+    check("no spacing change is detected -- internal_spacing_pct stays at the plain 0.125",
+          fake.state.get("internal_spacing_pct") == 0.125, fake.state.get("internal_spacing_pct"))
+    check("no reanchor fired (anchor price unchanged)", fake.state.get("grid_anchor_price") == A, fake.state.get("grid_anchor_price"))
+
+
 async def main():
     t_precision_and_minimum_enforcement()
     t_order_fill_amounts_uses_real_human_decimal_units()
     t_order_is_terminal_uses_remaining_amount_primarily()
     t_rounding_does_not_shift_the_real_fill_price_bin()
+    t_gate_spacing_multiplier_matches_the_tier_order()
+    t_effective_spacing_off_by_default_is_the_plain_dashboard_value()
+    t_effective_spacing_widens_with_the_tier_when_both_flags_are_on()
     t_default_init_is_byte_identical_to_worker4s_old_hardcoded_behavior()
     t_overridden_init_uses_its_own_tables_and_tag_not_worker4s()
     t_run_lit_grid_live_signature_defaults_match_worker4_exactly()
@@ -2575,6 +2677,8 @@ async def main():
               t_maintain_window_entries_blocked_still_maintains_existing_sells,
               t_tick_cancels_everything_on_a_spacing_change,
               t_tick_spacing_change_does_not_advance_if_cancel_fails,
+              t_tick_gate_switch_reanchors_to_the_wider_spacing_next_tick,
+              t_tick_gate_spacing_growth_off_keeps_old_behavior_even_with_a_tier_recorded,
               t_two_instances_in_one_process_never_touch_each_others_rows,
               t_tick_spacing_change_reanchors_held_lots_and_sells_near_cost,
               t_tick_spacing_change_without_anchor_keeps_old_behavior,
