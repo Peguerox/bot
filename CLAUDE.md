@@ -253,6 +253,10 @@ project with no git/Render/Vercel link -- never work there.
     follows the fall from the high (<5%→10, 5-10→20, 10-20→40, >20→80); each switch re-sizes on
     the available balance (`_funding()`, includes cover-drop). High = price at switch-on, follows
     new highs, panel "Reset high". Research: `research/lit-dynamic-drawdown-2026-10-19/` (local).
+  - **Spacing change while holding LIT** (2026-10-21, `plan_reanchor`): cancels all, re-anchors
+    the grid at the current price and moves each held lot to the new line nearest its real cost
+    (sell ~1 new spacing above cost). New line numbers start past every number in the ledger so
+    old history never mixes in. Before this, held lots kept old line numbers = wrong prices.
   - Migrations it needs (all applied): `lighter_lit_grid_live_anchor.sql`,
     `_order_kind.sql`, `_drawdown_coverage.sql`, `_dynamic_drawdown.sql`.
     Tests: `python3 server/test_lit_grid_live.py` (203).

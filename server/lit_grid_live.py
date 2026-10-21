@@ -365,6 +365,8 @@ DYNAMIC_DD_GATES = ((5.0, 20.0), (10.0, 40.0), (20.0, 80.0))
 OPEN_STATUSES = ("pending", "open", "cancel_requested")
 TERMINAL_STATUS_SUBSTRINGS = ("cancel", "reject", "expir")
 PAGE_SIZE = 500
+# Re-anchored line numbers start this far past every line number already in the ledger.
+REANCHOR_LEVEL_MARGIN = 2000
 # How long an order can sit unresolved (absent from the exchange's own lookup) before this is
 # logged distinctly rather than silently retried forever (external audit finding -- Lighter's
 # account_orders endpoint has a finite history window, so a long enough outage can genuinely
@@ -420,6 +422,118 @@ def _order_is_terminal(order):
 def _chunks(seq, n):
     for i in range(0, len(seq), n):
         yield seq[i:i + n]
+
+
+def holdings_from_rows(buys, sells):
+    """Per-level held qty / average cost / cover-drop cost from filled buys and the sells that
+    close them (see LitGridLive._compute_holdings for the accounting rules)."""
+    events_by_level = {}
+    for b in (buys or []):
+        requested_size = float(b.get("size") or 0)
+        fill_ratio = (float(b["filled_qty"] or 0) / requested_size) if requested_size > 1e-12 else 1.0
+        events_by_level.setdefault(b["level"], []).append(
+            ("buy", b["id"], float(b["filled_qty"] or 0), float(b["filled_price"] or 0),
+             float(b.get("funded_from_bucket_usd") or 0) * min(1.0, fill_ratio)))
+    for s in (sells or []):
+        lvl = s.get("closes_level")
+        if lvl is None:
+            continue
+        events_by_level.setdefault(lvl, []).append(
+            ("sell", s["id"], float(s["filled_qty"] or 0), None, None))
+    holdings = {}
+    for lvl, events in events_by_level.items():
+        events.sort(key=lambda e: e[1])
+        qty = 0.0
+        cost_total = 0.0
+        bucket_cost_total = 0.0
+        for kind, _id, ev_qty, ev_price, ev_bucket_cost in events:
+            if kind == "buy":
+                cost_total += ev_qty * ev_price
+                bucket_cost_total += ev_bucket_cost
+                qty += ev_qty
+            else:
+                if qty > 1e-12:
+                    avg = cost_total / qty
+                    avg_bucket = bucket_cost_total / qty
+                    take = min(ev_qty, qty)
+                    cost_total -= take * avg
+                    bucket_cost_total -= take * avg_bucket
+                    qty -= take
+        if qty > 1e-9:
+            holdings[lvl] = {"qty": qty, "cost": cost_total / qty, "bucket_cost_total": bucket_cost_total}
+    return holdings
+
+
+def open_segments(buys, sells):
+    """Per held level, the (row id, kind) events making up the position still held there: every
+    event after the last point that level's running quantity was back to zero. Same walk as
+    holdings_from_rows (a sell with nothing held is a no-op there, so it is no part of a lot)."""
+    events = {}
+    for b in buys:
+        events.setdefault(b["level"], []).append((b["id"], "buy", float(b["filled_qty"] or 0)))
+    for s in sells:
+        if s.get("closes_level") is not None:
+            events.setdefault(s["closes_level"], []).append((s["id"], "sell", float(s["filled_qty"] or 0)))
+    out = {}
+    for lvl, evs in events.items():
+        evs.sort()
+        qty, seg = 0.0, []
+        for rid, kind, q in evs:
+            if kind == "buy":
+                qty += q
+                seg.append((rid, kind))
+            elif qty > 1e-12 and q > 0:
+                qty -= min(q, qty)
+                seg.append((rid, kind))
+            if qty <= 1e-9:
+                seg = []
+        if qty > 1e-9:
+            out[lvl] = seg
+    return out
+
+
+def plan_reanchor(buys, sells, all_levels, price, new_spacing_pct):
+    """Spacing change on an anchored grid (direct request 2026-10-20): line numbers only mean a
+    price under the spacing they were made with, so a held lot keyed to an old line would get
+    its sell far from its cost. Re-anchor so the current price is a line of the new grid, and
+    move each held lot to the new line nearest its real cost (its sell, one line up, lands
+    about one new spacing above cost; dust and partly sold lots are placed last so they never
+    displace a whole lot;
+    sells are still never placed below cost). New line numbers start past every number ever used,
+    so moved rows never mix with old closed history at the same number. Lots with a partial
+    sell get a line of their own, so average costs are never blended. Returns
+    (anchor, {row_id: (column, new_line)}, {old_level: new_line}) or None if unsafe."""
+    step = math.log(1 + new_spacing_pct / 100.0)
+    offset = max((abs(int(x)) for x in all_levels), default=0) + REANCHOR_LEVEL_MARGIN
+    if offset * step > 600:
+        return None
+    anchor = price / math.exp(offset * step)
+    held = holdings_from_rows(buys, sells)
+    segs = open_segments(buys, sells)
+    used, moves, mapping = {}, {}, {}
+    if any(not segs.get(l) for l in held):
+        return None
+    is_dust = lambda l: clamp_order_size(held[l]["qty"]) is None
+    has_sells_of = lambda l: any(kind == "sell" for _, kind in segs[l])
+    for lvl in sorted(held, key=lambda l: (is_dust(l), has_sells_of(l), held[l]["cost"], l)):
+        seg = segs[lvl]
+        has_sells = has_sells_of(lvl)
+        line = offset + round(math.log(held[lvl]["cost"] / price) / step)
+        while line in used and (has_sells or used[line]):
+            line += 1
+        used[line] = used.get(line, False) or has_sells
+        mapping[lvl] = line
+        for rid, kind in seg:
+            moves[rid] = ("level" if kind == "buy" else "closes_level", line)
+    after = holdings_from_rows(
+        [dict(b, level=moves[b["id"]][1]) if b["id"] in moves else b for b in buys],
+        [dict(s, closes_level=moves[s["id"]][1]) if s["id"] in moves else s for s in sells])
+    tot = lambda H, f: sum(f(h) for h in H.values())
+    for f, tol in ((lambda h: h["qty"], 1e-6), (lambda h: h["qty"] * h["cost"], 0.01),
+                   (lambda h: h["bucket_cost_total"], 0.01)):
+        if abs(tot(held, f) - tot(after, f)) > tol:
+            return None
+    return anchor, moves, mapping
 
 
 def now_iso():
@@ -1021,46 +1135,16 @@ class LitGridLive:
         before the rest was cancelled has its tag scaled down by filled_qty/size here (external
         audit fix, seventh pass) -- otherwise a partial fill would attribute the WHOLE intended
         reservation to a position that's actually smaller than what was reserved for."""
+        buys, sells = await self._holdings_rows()
+        return holdings_from_rows(buys, sells)
+
+    async def _holdings_rows(self):
         buys = await self.sb_paginate(
             f"{TABLE_ORDERS}?status=eq.filled&side=eq.buy"
             f"&select=id,level,filled_qty,filled_price,size,funded_from_bucket_usd&order=id.asc")
         sells = await self.sb_paginate(
             f"{TABLE_ORDERS}?side=eq.sell&closes_level=not.is.null&filled_qty=not.is.null&select=id,closes_level,filled_qty&order=id.asc")
-        events_by_level = {}
-        for b in (buys or []):
-            requested_size = float(b.get("size") or 0)
-            fill_ratio = (float(b["filled_qty"] or 0) / requested_size) if requested_size > 1e-12 else 1.0
-            events_by_level.setdefault(b["level"], []).append(
-                ("buy", b["id"], float(b["filled_qty"] or 0), float(b["filled_price"] or 0),
-                 float(b.get("funded_from_bucket_usd") or 0) * min(1.0, fill_ratio)))
-        for s in (sells or []):
-            lvl = s.get("closes_level")
-            if lvl is None:
-                continue
-            events_by_level.setdefault(lvl, []).append(
-                ("sell", s["id"], float(s["filled_qty"] or 0), None, None))
-        holdings = {}
-        for lvl, events in events_by_level.items():
-            events.sort(key=lambda e: e[1])
-            qty = 0.0
-            cost_total = 0.0
-            bucket_cost_total = 0.0
-            for kind, _id, ev_qty, ev_price, ev_bucket_cost in events:
-                if kind == "buy":
-                    cost_total += ev_qty * ev_price
-                    bucket_cost_total += ev_bucket_cost
-                    qty += ev_qty
-                else:
-                    if qty > 1e-12:
-                        avg = cost_total / qty
-                        avg_bucket = bucket_cost_total / qty
-                        take = min(ev_qty, qty)
-                        cost_total -= take * avg
-                        bucket_cost_total -= take * avg_bucket
-                        qty -= take
-            if qty > 1e-9:
-                holdings[lvl] = {"qty": qty, "cost": cost_total / qty, "bucket_cost_total": bucket_cost_total}
-        return holdings
+        return buys or [], sells or []
 
     async def resting_orders_by_level(self):
         rows = await self.sb_paginate(
@@ -1757,9 +1841,30 @@ class LitGridLive:
                                     {"old": persisted_spacing, "new": spacing_pct,
                                      "still_resting_levels": list(still_resting.keys())})
                 return  # retry next tick -- don't advance internal_spacing_pct until clean
-            await self.update_state({"internal_spacing_pct": spacing_pct, "order_size_lit": None})
-            await self.log_run("spacing_changed_rearmed",
-                                {"old": persisted_spacing, "new": spacing_pct})
+            patch = {"internal_spacing_pct": spacing_pct, "order_size_lit": None}
+            detail = {"old": persisted_spacing, "new": spacing_pct}
+            if state.get("grid_anchor_price") is not None:
+                buys, sells = await self._holdings_rows()
+                all_rows = await self.sb_paginate(f"{TABLE_ORDERS}?select=id,level,closes_level&order=id.asc")
+                all_levels = [r[k] for r in all_rows for k in ("level", "closes_level") if r.get(k) is not None]
+                plan = plan_reanchor(buys, sells, all_levels, price, spacing_pct)
+                if plan is None:
+                    if not getattr(self, "_reanchor_blocked_logged", False):
+                        self._reanchor_blocked_logged = True
+                        await self.log_run("spacing_change_reanchor_blocked",
+                                            {"old": persisted_spacing, "new": spacing_pct, "price": price})
+                    return  # holds every lot, places nothing; set spacing back to resume
+                anchor, moves, mapping = plan
+                for rid, (col, line) in moves.items():
+                    await self.sb("PATCH", f"{TABLE_ORDERS}?id=eq.{rid}", {col: line})
+                self._holdings_cache = None
+                self._window_center = None
+                patch["grid_anchor_price"] = anchor
+                detail.update({"price": price, "anchor": anchor,
+                               "lots_moved": {str(k): v for k, v in sorted(mapping.items())}})
+            self._reanchor_blocked_logged = False
+            await self.update_state(patch)
+            await self.log_run("spacing_changed_rearmed", detail)
             return
         if persisted_spacing is None:
             await self.update_state({"internal_spacing_pct": spacing_pct})

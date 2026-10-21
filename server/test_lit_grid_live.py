@@ -2313,11 +2313,164 @@ async def t_rate_limited_errors_back_off_before_retrying():
           len(sleeps) >= 2 and sleeps[1] > sleeps[0], sleeps)
 
 
+
+# ── Spacing change re-anchors held lots (2026-10-20) ─────────────────────────────────────────────
+
+def _reanchor_ledger(A, step, lots, closed=()):
+    """Filled buys at old lines `lots` (line -> cost) plus fully closed history at `closed` lines."""
+    rows, i = [], 1
+    for k in closed:
+        px = round(A * math.exp(k * step), 4)
+        rows.append({"id": i, "level": k, "side": "buy", "status": "filled", "filled_qty": 2.0,
+                     "filled_price": px, "size": 2.0}); i += 1
+        rows.append({"id": i, "level": k + 1, "side": "sell", "status": "filled", "closes_level": k,
+                     "filled_qty": 2.0, "filled_price": px * 1.00125, "realized_profit_usd": 0.01}); i += 1
+    for k, cost in lots.items():
+        rows.append({"id": i, "level": k, "side": "buy", "status": "filled", "filled_qty": 2.0,
+                     "filled_price": cost, "size": 2.0}); i += 1
+    return rows
+
+
+def _split(rows):
+    buys = [r for r in rows if r["side"] == "buy" and r["status"] == "filled"]
+    sells = [r for r in rows if r["side"] == "sell" and r.get("closes_level") is not None
+             and r.get("filled_qty") is not None]
+    return buys, sells
+
+
+def t_plan_reanchor_puts_each_lot_near_its_cost_on_the_new_grid():
+    A, old = 2.83365, math.log(1.00125)
+    P = 3.40
+    lots = {146: 3.4006, 147: 3.4048, 150: 3.4176, 140: 3.3752}
+    rows = _reanchor_ledger(A, old, lots, closed=range(0, 30))
+    buys, sells = _split(rows)
+    levels = [r[k] for r in rows for k in ("level", "closes_level") if r.get(k) is not None]
+    plan = core.plan_reanchor(buys, sells, levels, P, 0.5)
+    check("a plan is produced", plan is not None)
+    anchor, moves, mapping = plan
+    new = math.log(1.005)
+    check("the current price is exactly a line of the new grid",
+          abs(anchor * math.exp(round(math.log(P / anchor) / new) * new) / P - 1) < 1e-9)
+    check("every new line number is above every line number already in the ledger",
+          min(mapping.values()) > max(abs(x) for x in levels), (mapping, max(levels)))
+    for k, cost in lots.items():
+        sell = anchor * math.exp((mapping[k] + 1) * new)
+        check(f"lot bought at {cost} sells 0.25%-0.75% above cost on the new grid",
+              0.0025 - 1e-9 <= sell / cost - 1 <= 0.0075 + 1e-9, sell / cost - 1)
+    after = core.holdings_from_rows(
+        [dict(b, level=moves[b["id"]][1]) if b["id"] in moves else b for b in buys], sells)
+    check("total LIT held is unchanged", abs(sum(h["qty"] for h in after.values()) - 8.0) < 1e-9, after)
+    check("total cost basis is unchanged",
+          abs(sum(h["qty"] * h["cost"] for h in after.values()) - sum(2.0 * c for c in lots.values())) < 1e-9)
+    check("only the held lots' rows move, closed history keeps its old line numbers",
+          set(moves) == {r["id"] for r in rows if r["level"] in lots and r["side"] == "buy"}, moves)
+
+
+def t_plan_reanchor_keeps_a_partly_sold_lot_on_its_own_line():
+    A, old = 2.83365, math.log(1.00125)
+    rows = _reanchor_ledger(A, old, {146: 3.4006, 147: 3.4010})
+    rows.append({"id": 50, "level": 147, "side": "sell", "status": "cancelled", "closes_level": 146,
+                 "filled_qty": 0.5, "filled_price": 3.4048})
+    rows.append({"id": 51, "level": 146, "side": "buy", "status": "filled", "filled_qty": 1.0,
+                 "filled_price": 3.3990, "size": 2.0})
+    buys, sells = _split(rows)
+    before = core.holdings_from_rows(buys, sells)
+    levels = [r[k] for r in rows for k in ("level", "closes_level") if r.get(k) is not None]
+    anchor, moves, mapping = core.plan_reanchor(buys, sells, levels, 3.40, 0.5)
+    check("the partly sold lot and the whole lot get different lines", mapping[146] != mapping[147], mapping)
+    check("the partial sell row follows its lot", moves.get(50) == ("closes_level", mapping[146]), moves)
+    after = core.holdings_from_rows(
+        [dict(b, level=moves[b["id"]][1]) if b["id"] in moves else b for b in buys],
+        [dict(s, closes_level=moves[s["id"]][1]) if s["id"] in moves else s for s in sells])
+    check("the partly sold lot keeps exactly its qty and cost",
+          abs(after[mapping[146]]["qty"] - before[146]["qty"]) < 1e-9
+          and abs(after[mapping[146]]["cost"] - before[146]["cost"]) < 1e-9, (before, after))
+
+
+def t_plan_reanchor_places_dust_after_real_lots():
+    A, old = 2.83365, math.log(1.00125)
+    rows = _reanchor_ledger(A, old, {146: 3.4006})
+    rows.append({"id": 40, "level": 145, "side": "buy", "status": "filled", "filled_qty": 1.2,
+                 "filled_price": 3.4000, "size": 1.2})
+    rows.append({"id": 41, "level": 146, "side": "sell", "status": "cancelled", "closes_level": 145,
+                 "filled_qty": 1.0, "filled_price": 3.4040})
+    buys, sells = _split(rows)
+    levels = [r[k] for r in rows for k in ("level", "closes_level") if r.get(k) is not None]
+    anchor, moves, mapping = core.plan_reanchor(buys, sells, levels, 3.40, 0.5)
+    new = math.log(1.005)
+    want = round(math.log(3.4006 / anchor) / new)
+    check("the real lot gets its own nearest line even though dust sits next to it",
+          mapping[146] == want, (mapping, want))
+    check("the dust lot is moved off that line", mapping[145] != mapping[146], mapping)
+
+
+async def t_tick_spacing_change_reanchors_held_lots_and_sells_near_cost():
+    A = 2.83365
+    old = math.log(1.00125)
+    P = 3.40
+    held = {146: 3.4006, 147: 3.4048, 148: 3.4091}
+    rows = _reanchor_ledger(A, old, held, closed=range(0, 10))
+    nid = max(r["id"] for r in rows) + 1
+    for j, k in enumerate(held):
+        rows.append({"id": nid + j, "level": k + 1, "side": "sell", "status": "open", "closes_level": k,
+                     "client_order_index": 700 + j, "exchange_order_id": 7000 + j, "size": 2.0,
+                     "limit_price": round(A * math.exp((k + 1) * old), 4)})
+    cancelled = {700 + j: FakeOrder(700 + j, order_index=7000 + j, status="canceled",
+                                    remaining_base_amount=0.0) for j in range(len(held))}
+    bot, fake = make_bot(base_state(spacing_pct=0.5, internal_spacing_pct=0.125, grid_anchor_price=A,
+                                     levels_up=5, levels_down=5, order_size_lit=2.0, usdc_balance=500.0),
+                          orders=rows, orders_by_co=cancelled)
+    bot.fetch_current_price = lambda: _async_return(P)
+    before = await bot._compute_holdings()
+    await bot.tick()
+    check("internal_spacing_pct advances to the new spacing", fake.state["internal_spacing_pct"] == 0.5, fake.state)
+    check("the grid is re-anchored", fake.state["grid_anchor_price"] != A, fake.state.get("grid_anchor_price"))
+    check("the change is logged with the lots moved",
+          any(r["action"] == "spacing_changed_rearmed" and r["detail"].get("lots_moved") for r in fake.runs),
+          fake.runs)
+    after = await bot._compute_holdings()
+    check("same LIT held after re-anchoring",
+          abs(sum(h["qty"] for h in after.values()) - sum(h["qty"] for h in before.values())) < 1e-9)
+    check("same cost basis after re-anchoring",
+          abs(sum(h["qty"] * h["cost"] for h in after.values())
+              - sum(h["qty"] * h["cost"] for h in before.values())) < 1e-9)
+    force_not_cold_start(bot)
+    n0 = len(fake.orders)
+    await bot.maintain_window(fake.state, P)
+    new_sells = [o for o in fake.orders[n0:] if o["side"] == "sell"]
+    new_buys = [o for o in fake.orders[n0:] if o["side"] == "buy" and o.get("order_kind") != "market"]
+    lot_cost = {lv: h["cost"] for lv, h in after.items()}
+    check("sells are re-placed for the held LIT", sum(o["size"] for o in new_sells) >= 6.0 - 1e-9, new_sells)
+    check("every sell sits 0.25%-0.75% above its lot's cost (not at an old-line price)",
+          new_sells and all(0.0025 - 1e-4 <= float(o["limit_price"]) / lot_cost[o["closes_level"]] - 1 <= 0.0075 + 1e-4
+                            for o in new_sells),
+          [(o["limit_price"], lot_cost.get(o["closes_level"])) for o in new_sells])
+    check("every new resting buy is below price", all(float(o["limit_price"]) < P for o in new_buys),
+          [o["limit_price"] for o in new_buys])
+    check("new buys are 0.5% apart",
+          all(abs(b / a - 1.005) < 1e-3 for a, b in zip(sorted(float(o["limit_price"]) for o in new_buys),
+                                                         sorted(float(o["limit_price"]) for o in new_buys)[1:])),
+          sorted(float(o["limit_price"]) for o in new_buys))
+
+
+async def t_tick_spacing_change_without_anchor_keeps_old_behavior():
+    rows = _reanchor_ledger(1.0, math.log(1.00125), {900: 3.10})
+    bot, fake = make_bot(base_state(spacing_pct=0.5, internal_spacing_pct=0.125), orders=rows)
+    bot.fetch_current_price = lambda: _async_return(3.10)
+    await bot.tick()
+    check("unanchored grid: spacing advances", fake.state["internal_spacing_pct"] == 0.5, fake.state)
+    check("unanchored grid: no anchor is invented and no row is moved",
+          fake.state.get("grid_anchor_price") is None and fake.orders[-1]["level"] == 900)
+
+
 async def main():
     t_precision_and_minimum_enforcement()
     t_order_fill_amounts_uses_real_human_decimal_units()
     t_order_is_terminal_uses_remaining_amount_primarily()
     t_rounding_does_not_shift_the_real_fill_price_bin()
+    t_plan_reanchor_puts_each_lot_near_its_cost_on_the_new_grid()
+    t_plan_reanchor_keeps_a_partly_sold_lot_on_its_own_line()
+    t_plan_reanchor_places_dust_after_real_lots()
     for t in (t_place_grid_order_writes_ledger_before_sending,
               t_place_grid_order_records_explicit_closes_level,
               t_place_grid_order_rejected_by_exchange,
@@ -2346,6 +2499,8 @@ async def main():
               t_maintain_window_entries_blocked_still_maintains_existing_sells,
               t_tick_cancels_everything_on_a_spacing_change,
               t_tick_spacing_change_does_not_advance_if_cancel_fails,
+              t_tick_spacing_change_reanchors_held_lots_and_sells_near_cost,
+              t_tick_spacing_change_without_anchor_keeps_old_behavior,
               t_tick_does_not_rewrite_an_unchanged_resting_order,
         t_tick_fill_is_recorded_and_its_sell_placed_in_the_same_tick,
         t_tick_skips_new_decisions_when_reconciliation_fails,
