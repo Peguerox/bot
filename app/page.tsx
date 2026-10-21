@@ -1416,11 +1416,18 @@ function LitGridLivePanel({
   enabled, onToggle, toggling,
   onFlatten, flattening,
   onClearHistory, clearingHistory,
+  apiBase = "/api/lighter-lit-grid-live",
+  title = "LIT/USDC Grid Bot",
+  subaccountNote = "same sub-account Worker 4 used",
 }: {
   state: any; orders: any[]; sells: any[]; sellCount: number; resting: any[]; loading: boolean;
   enabled: boolean; onToggle: () => void; toggling: boolean;
   onFlatten: () => void; flattening: boolean;
   onClearHistory: () => void; clearingHistory: boolean;
+  // 2026-10-21: Worker 3 twin reuses this exact component (same careful real-money logic,
+  // never duplicated) pointed at its own API routes/account via these three overrides --
+  // Worker 4's own call site passes none of them, so its behavior is byte-for-byte unchanged.
+  apiBase?: string; title?: string; subaccountNote?: string;
 }) {
   const st = state;
 
@@ -1496,7 +1503,7 @@ function LitGridLivePanel({
     const secret = litGridLiveAdminSecret();
     if (!secret) return;
     setProfitModeSaving(true);
-    const res = await fetch("/api/lighter-lit-grid-live/settings", {
+    const res = await fetch(`${apiBase}/settings`, {
       method: "POST",
       headers: { "Content-Type": "application/json", "x-admin-secret": secret },
       body: JSON.stringify({ profitMode: mode }),
@@ -1517,7 +1524,7 @@ function LitGridLivePanel({
     const secret = litGridLiveAdminSecret();
     if (!secret) return;
     setRestSaving(true);
-    const res = await fetch("/api/lighter-lit-grid-live/settings", {
+    const res = await fetch(`${apiBase}/settings`, {
       method: "POST",
       headers: { "Content-Type": "application/json", "x-admin-secret": secret },
       body: JSON.stringify(body),
@@ -1536,7 +1543,7 @@ function LitGridLivePanel({
     const secret = litGridLiveAdminSecret();
     if (!secret) return;
     setDynSaving(true);
-    const res = await fetch("/api/lighter-lit-grid-live/settings", {
+    const res = await fetch(`${apiBase}/settings`, {
       method: "POST",
       headers: { "Content-Type": "application/json", "x-admin-secret": secret },
       body: JSON.stringify(body),
@@ -1563,7 +1570,7 @@ function LitGridLivePanel({
     if (!secret) return;
     setSaving(true);
     setSaveError(null);
-    const res = await fetch("/api/lighter-lit-grid-live/settings", {
+    const res = await fetch(`${apiBase}/settings`, {
       method: "POST",
       headers: { "Content-Type": "application/json", "x-admin-secret": secret },
       body: JSON.stringify(body),
@@ -1589,7 +1596,7 @@ function LitGridLivePanel({
       <div className="space-y-1.5">
         <div className="flex flex-wrap items-center justify-between gap-2">
           <div className="flex flex-wrap items-center gap-2">
-            <h2 className="text-white font-bold text-lg">LIT/USDC Grid Bot</h2>
+            <h2 className="text-white font-bold text-lg">{title}</h2>
             <span className="text-xs font-bold px-2 py-0.5 rounded-full bg-red-500/20 text-red-400">LIVE — REAL MONEY</span>
             <span className={`text-xs font-bold px-2 py-0.5 rounded-full ${workerAlive ? "bg-green-500/20 text-green-400" : "bg-gray-700/40 text-gray-500"}`}>
               {workerAlive ? "worker alive" : "worker offline"}
@@ -1625,7 +1632,7 @@ function LitGridLivePanel({
           </div>
         </div>
         <p className="text-gray-500 text-xs">
-          Real resting LIMIT/POST_ONLY orders on Lighter, same sub-account Worker 4 used · durable
+          Real resting LIMIT/POST_ONLY orders on Lighter, {subaccountNote} · durable
           order ledger survives restarts (every order's real fill price comes from the exchange,
           never assumed) · balance-divergence check pauses new orders if the ledger ever disagrees
           with the real exchange balance
@@ -6494,6 +6501,17 @@ export default function Dashboard() {
   const [litGridLiveToggling,  setLitGridLiveToggling]  = useState(false);
   const [litGridLiveFlattening, setLitGridLiveFlattening] = useState(false);
   const [litGridLiveClearing, setLitGridLiveClearing] = useState(false);
+  // Worker 3 twin of the LIT grid (2026-10-21, direct request) -- same bot, own sub-account/
+  // tables, running alongside Worker 4 at a different spacing for a real-money A/B comparison.
+  // See server/lighter_lit_grid_dual_twin.py.
+  const [litGridWorker3State,     setLitGridWorker3State]     = useState<any>(null);
+  const [litGridWorker3Orders,    setLitGridWorker3Orders]    = useState<any[]>([]);
+  const [litGridWorker3Sells,     setLitGridWorker3Sells]     = useState<any[]>([]);
+  const [litGridWorker3Resting,   setLitGridWorker3Resting]   = useState<any[]>([]);
+  const [litGridWorker3SellCount, setLitGridWorker3SellCount] = useState(0);
+  const [litGridWorker3Toggling,  setLitGridWorker3Toggling]  = useState(false);
+  const [litGridWorker3Flattening, setLitGridWorker3Flattening] = useState(false);
+  const [litGridWorker3Clearing, setLitGridWorker3Clearing] = useState(false);
   // True lifetime trade/win counts -- the trades arrays above are capped at 200 rows for
   // display purposes, which silently froze the win-rate % and trade count once any worker
   // passed 200 real trades (Worker 2 hit this first, at 606 real trades and counting).
@@ -6544,6 +6562,11 @@ export default function Dashboard() {
       { data: litGridLiveOr },
       { data: litGridLiveSells },
       { data: litGridLiveResting },
+      { data: litGridWorker3St },
+      { count: litGridWorker3SellCount },
+      { data: litGridWorker3Or },
+      { data: litGridWorker3Sells },
+      { data: litGridWorker3Resting },
     ] = await Promise.all([
       getSupabase().from("surfer_state").select("*").eq("id", 1).single(),
       getSupabase().from("surfer_trades").select("*").order("exit_time", { ascending: false }).limit(5000),
@@ -6593,6 +6616,12 @@ export default function Dashboard() {
       getSupabase().from("lighter_lit_grid_live_orders").select("*").order("id", { ascending: false }).limit(50),
       getSupabase().from("lighter_lit_grid_live_orders").select("id,filled_at,filled_qty,filled_price,filled_quote,realized_profit_usd").eq("side", "sell").not("realized_profit_usd", "is", null).order("filled_at", { ascending: false, nullsFirst: false }).order("id", { ascending: false }).limit(200),
       getSupabase().from("lighter_lit_grid_live_orders").select("side,limit_price").in("status", ["open", "pending"]).limit(500),
+      getSupabase().from("lighter_lit_grid_live_worker3_state").select("*").eq("id", 1).single(),
+      getSupabase().from("lighter_lit_grid_live_worker3_orders").select("id", { count: "exact", head: true })
+        .eq("side", "sell").not("realized_profit_usd", "is", null),
+      getSupabase().from("lighter_lit_grid_live_worker3_orders").select("*").order("id", { ascending: false }).limit(50),
+      getSupabase().from("lighter_lit_grid_live_worker3_orders").select("id,filled_at,filled_qty,filled_price,filled_quote,realized_profit_usd").eq("side", "sell").not("realized_profit_usd", "is", null).order("filled_at", { ascending: false, nullsFirst: false }).order("id", { ascending: false }).limit(200),
+      getSupabase().from("lighter_lit_grid_live_worker3_orders").select("side,limit_price").in("status", ["open", "pending"]).limit(500),
     ]);
     setSurferState(surferSt ?? null);
     setSurferTrades(surferTr ?? []);
@@ -6625,6 +6654,11 @@ export default function Dashboard() {
     setLitGridLiveSells(litGridLiveSells ?? []);
     setLitGridLiveSellCount(litGridLiveSellCount ?? 0);
     setLitGridLiveResting(litGridLiveResting ?? []);
+    setLitGridWorker3State(litGridWorker3St ?? null);
+    setLitGridWorker3Orders(litGridWorker3Or ?? []);
+    setLitGridWorker3Sells(litGridWorker3Sells ?? []);
+    setLitGridWorker3SellCount(litGridWorker3SellCount ?? 0);
+    setLitGridWorker3Resting(litGridWorker3Resting ?? []);
     setDcaBtcStats({ total: dcaBtcTotal ?? 0, wins: dcaBtcWins ?? 0 });
     setInitialBtcStats({ total: initialBtcTotal ?? 0, wins: initialBtcWins ?? 0 });
     setOptimalBtcStats({ total: optimalBtcTotal ?? 0, wins: optimalBtcWins ?? 0 });
@@ -6789,6 +6823,52 @@ export default function Dashboard() {
     setLitGridLiveClearing(false);
   }
 
+  async function handleLitGridWorker3Toggle() {
+    const turningOn = !litGridWorker3State?.enabled;
+    if (turningOn && !confirm("Turn ON the LIVE LIT grid bot (Worker 3)? This places REAL orders with REAL money.")) return;
+    const secret = litGridLiveAdminSecret();
+    if (!secret) return;
+    setLitGridWorker3Toggling(true);
+    const res = await fetch("/api/lighter-lit-grid-live-worker3/toggle", { method: "POST", headers: { "x-admin-secret": secret } });
+    if (!res.ok) {
+      const body = await res.json().catch(() => ({}));
+      alert(body.error ?? "Failed to toggle.");
+      if (res.status === 401) localStorage.removeItem("litGridLiveAdminSecret");
+    }
+    await load();
+    setLitGridWorker3Toggling(false);
+  }
+
+  async function handleLitGridWorker3Flatten() {
+    if (!confirm("EMERGENCY FLATTEN (Worker 3): cancel every resting order and market-sell all held LIT back to USDC, then disable. Continue?")) return;
+    const secret = litGridLiveAdminSecret();
+    if (!secret) return;
+    setLitGridWorker3Flattening(true);
+    const res = await fetch("/api/lighter-lit-grid-live-worker3/flatten", { method: "POST", headers: { "x-admin-secret": secret } });
+    if (!res.ok) {
+      const body = await res.json().catch(() => ({}));
+      alert(body.error ?? "Failed to request flatten.");
+      if (res.status === 401) localStorage.removeItem("litGridLiveAdminSecret");
+    }
+    await load();
+    setLitGridWorker3Flattening(false);
+  }
+
+  async function handleLitGridWorker3ClearHistory() {
+    if (!confirm("Clear Worker 3's order ledger and reset the lifetime buy counter? Only allowed while disabled and flat.")) return;
+    const secret = litGridLiveAdminSecret();
+    if (!secret) return;
+    setLitGridWorker3Clearing(true);
+    const res = await fetch("/api/lighter-lit-grid-live-worker3/clear-history", { method: "POST", headers: { "x-admin-secret": secret } });
+    if (!res.ok) {
+      const body = await res.json().catch(() => ({}));
+      alert(body.error ?? "Failed to clear history.");
+      if (res.status === 401) localStorage.removeItem("litGridLiveAdminSecret");
+    }
+    await load();
+    setLitGridWorker3Clearing(false);
+  }
+
   const [healthTick, setHealthTick] = useState(Date.now());
   useEffect(() => {
     const id = setInterval(() => setHealthTick(Date.now()), 15_000);
@@ -6848,6 +6928,8 @@ export default function Dashboard() {
     const ch8 = sb.channel("lighter-lit-grid-live")
       .on("postgres_changes", { event: "*", schema: "public", table: "lighter_lit_grid_live_state" }, debouncedLoad)
       .on("postgres_changes", { event: "*", schema: "public", table: "lighter_lit_grid_live_orders" }, debouncedLoad)
+      .on("postgres_changes", { event: "*", schema: "public", table: "lighter_lit_grid_live_worker3_state" }, debouncedLoad)
+      .on("postgres_changes", { event: "*", schema: "public", table: "lighter_lit_grid_live_worker3_orders" }, debouncedLoad)
       .subscribe();
     // The three live Lighter state tables aren't on realtime at all (every tick would fire a
     // reload -- too chatty), so a plain metrics write (live_schedule_*, live_wiggle, etc.) with
@@ -6884,10 +6966,10 @@ export default function Dashboard() {
           onToggled={load}
         />
 
-        {/* ── Lighter BTC Stochastic5: Worker 1, hedge (Worker 2, center), Worker 4 -- one row,
-            no scrolling to see all three. Descriptions are now clamped to 2 lines each (see
-            showDetails above), so grid stretch keeps all three a consistent height here. */}
-        <div className="grid grid-cols-1 lg:grid-cols-2 gap-3 items-stretch">
+        {/* Worker 1 alone (2026-10-21: hedge panel removed below -- Worker 2/3's sub-accounts are
+            being repurposed off the BTC hedge; the hedge backend/state fetching is left in place
+            since MasterSchedulePanel still reads it and Worker 3 reuses this same account). */}
+        <div className="grid grid-cols-1 gap-3 items-stretch">
           <CompactStochBtcPanel
             title="Worker 1 · Stochastic + Color-Balance Index"
             subtitle="2026-10-01 v4: enters ONLY on a fresh 25/75 stochastic signal (window 5) while the color-weighted balance index is 65-75 (each of the last 5 closed 1-min candles casts a size-weighted color vote; 100 = perfectly balanced, 0 = one color dominates) -- back to a band after a brief floor-only (70+) run showed both real losses landing above 80. Exits: SL 0.06% / TP 0.10% / profit lock at +0.06% (exits on first tick down). SL tightened from 0.10% same day after a sweep against real data: 0.06 beat 0.10 on both the full 644-trade history (+$2.41 vs +$1.80) and the live 20-trade window since the trigger change (+$0.38 vs +$0.11). A 3-stage ratchet SL (0.10->0.05->0 as the trade goes positive) was tested and rejected -- looked good on a small window, lost badly on the full history. One trade per signal; after a REVERSAL close specifically, a 2-minute cooldown before any new entry (fresh or another reversal) -- the close itself is never delayed. A GREEN position closes immediately (INDEX_EXIT) if the index leaves 65-75; a RED position is never touched by this. Self-lock, hour ban, dispersion and saving lock all OFF."
@@ -6907,18 +6989,29 @@ export default function Dashboard() {
             // 2026-10-01: hour ban OFF (trading_hours_utc=None in the live config). Pass
             // tradingHoursUtc={WORKER1_TRADING_HOURS} again when the schedule is restored.
           />
-          <HedgeDualLegPanel
-            environmentRun={hedgeEnvironmentRun}
-            now={healthTick}
-            longState={optimalBtcState}
-            longTrades={optimalBtcTrades.filter((t: any) => Date.parse(t.closed_at) >= Date.parse(optimalBtcState?.history_reset_at ?? WORKER2_RESET_AT))}
-            shortState={dcaBtcState}
-            shortTrades={dcaBtcTrades.filter((t: any) => Date.parse(t.closed_at) >= Date.parse(dcaBtcState?.history_reset_at ?? WORKER2_RESET_AT))}
-            currentPrice={hedgeCoinPrice}
-            loading={loading}
-            onToggled={load}
-          />
         </div>
+
+        {/* Worker 3 twin of the LIT grid, own full-width row ABOVE Worker 4's (2026-10-21,
+            direct request: real-money A/B test of two spacings, same component reused with
+            its own account/table/API overrides -- see LitGridLivePanel's own props comment). */}
+        <LitGridLivePanel
+          state={litGridWorker3State}
+          orders={litGridWorker3Orders}
+          sells={litGridWorker3Sells}
+          sellCount={litGridWorker3SellCount}
+          resting={litGridWorker3Resting}
+          loading={loading}
+          enabled={litGridWorker3State?.enabled ?? false}
+          onToggle={handleLitGridWorker3Toggle}
+          toggling={litGridWorker3Toggling}
+          onFlatten={handleLitGridWorker3Flatten}
+          flattening={litGridWorker3Flattening}
+          onClearHistory={handleLitGridWorker3ClearHistory}
+          clearingHistory={litGridWorker3Clearing}
+          apiBase="/api/lighter-lit-grid-live-worker3"
+          title="LIT/USDC Grid Bot — Worker 3"
+          subaccountNote="Worker 3's own sub-account, twin of Worker 4 below at a different spacing"
+        />
 
         {/* LIT grid bot on its own full-width row below Worker 1 and the hedge (direct request). */}
         <LitGridLivePanel
@@ -6935,6 +7028,7 @@ export default function Dashboard() {
           flattening={litGridLiveFlattening}
           onClearHistory={handleLitGridLiveClearHistory}
           clearingHistory={litGridLiveClearing}
+          title="LIT/USDC Grid Bot — Worker 4"
         />
 
       </div>

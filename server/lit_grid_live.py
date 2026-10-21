@@ -560,9 +560,18 @@ class LiveSnapshot:
 
 
 class LitGridLive:
-    def __init__(self, http: aiohttp.ClientSession):
+    def __init__(self, http: aiohttp.ClientSession, table_state=TABLE_STATE,
+                 table_orders=TABLE_ORDERS, table_runs=TABLE_RUNS, tag=""):
+        # Table names and a log tag are constructor params (not the bare module constants used
+        # directly, as before) so one process can run more than one instance against different
+        # Lighter sub-accounts/Supabase tables at once (2026-10-21, direct request: twin Worker
+        # 3/Worker 4 LIT grids on one Render service, same pattern as lighter_hedge_dual_leg.py's
+        # two StochBot instances) -- every in-class reference below reads self.TABLE_* now.
+        # Calling LitGridLive(http) with no overrides is byte-for-byte Worker 4's old behavior.
         self.http = http
-        self._lock_id = f"{os.environ.get('RENDER_INSTANCE_ID', 'local')}:lit-grid-live"
+        self.TABLE_STATE, self.TABLE_ORDERS, self.TABLE_RUNS = table_state, table_orders, table_runs
+        self._tag = tag
+        self._lock_id = f"{os.environ.get('RENDER_INSTANCE_ID', 'local')}:lit-grid-live{tag}"
         self._lock_held = False
         self._lock_checked_at = 0.0
         self._lock_blocked_logged = False
@@ -617,16 +626,16 @@ class LitGridLive:
         return out
 
     async def get_state(self):
-        rows = await self.sb("GET", f"{TABLE_STATE}?id=eq.1")
+        rows = await self.sb("GET", f"{self.TABLE_STATE}?id=eq.1")
         return rows[0]
 
     async def update_state(self, patch):
-        await self.sb("PATCH", f"{TABLE_STATE}?id=eq.1", patch)
+        await self.sb("PATCH", f"{self.TABLE_STATE}?id=eq.1", patch)
 
     async def log_run(self, action, detail):
-        print(f"[lit-grid-live:{action}] {detail}", flush=True)
+        print(f"[lit-grid-live{self._tag}:{action}] {detail}", flush=True)
         try:
-            await self.sb("POST", TABLE_RUNS, {"action": action, "detail": detail})
+            await self.sb("POST", self.TABLE_RUNS, {"action": action, "detail": detail})
         except Exception as e:
             print(f"  (lit-grid-live log_run failed: {e})", flush=True)
 
@@ -648,7 +657,7 @@ class LitGridLive:
             # thought was still free.
             "funded_from_bucket_usd": round(funded_from_bucket_usd, 8),
         }
-        inserted = await self.sb("POST", TABLE_ORDERS, row)
+        inserted = await self.sb("POST", self.TABLE_ORDERS, row)
         row_id = inserted[0]["id"]
         is_ask = (side == "sell")
         price_int = price_to_int(limit_price)
@@ -665,13 +674,13 @@ class LitGridLive:
                 timeout=ORDER_TIMEOUT,
             )
             if err:
-                await self.sb("PATCH", f"{TABLE_ORDERS}?id=eq.{row_id}",
+                await self.sb("PATCH", f"{self.TABLE_ORDERS}?id=eq.{row_id}",
                                {"status": "rejected", "error": str(err)[:200]})
                 return None
         except Exception as e:
             await self.log_run("order_place_unknown", {"row_id": row_id, "error": str(e)[:200]})
             return row_id
-        await self.sb("PATCH", f"{TABLE_ORDERS}?id=eq.{row_id}", {"status": "open"})
+        await self.sb("PATCH", f"{self.TABLE_ORDERS}?id=eq.{row_id}", {"status": "open"})
         return row_id
 
     async def cancel_order_row(self, row):
@@ -694,7 +703,7 @@ class LitGridLive:
         except Exception as e:
             await self.log_run("cancel_order_failed", {"row_id": row["id"], "error": str(e)[:200]})
             return False
-        await self.sb("PATCH", f"{TABLE_ORDERS}?id=eq.{row['id']}", {"status": "cancel_requested"})
+        await self.sb("PATCH", f"{self.TABLE_ORDERS}?id=eq.{row['id']}", {"status": "cancel_requested"})
         return True
 
     async def cancel_all_resting(self):
@@ -710,7 +719,7 @@ class LitGridLive:
 
     async def _rest_net(self, withdrawn):
         sells = await self.sb_paginate(
-            f"{TABLE_ORDERS}?side=eq.sell&realized_profit_usd=not.is.null"
+            f"{self.TABLE_ORDERS}?side=eq.sell&realized_profit_usd=not.is.null"
             f"&select=realized_profit_usd,profit_bucket_destination")
         gross = sum(float(s.get("realized_profit_usd") or 0) for s in (sells or [])
                     if (s.get("profit_bucket_destination") or "profit_bucket_rest_usd") == "profit_bucket_rest_usd")
@@ -739,7 +748,7 @@ class LitGridLive:
         the moment that inventory sells -- so cover_drop's spendable room rises back up on its
         own, with no separate 'return principal' step to get out of sync)."""
         sells = await self.sb_paginate(
-            f"{TABLE_ORDERS}?side=eq.sell&realized_profit_usd=not.is.null"
+            f"{self.TABLE_ORDERS}?side=eq.sell&realized_profit_usd=not.is.null"
             f"&select=realized_profit_usd,profit_bucket_destination")
         gross = {"profit_bucket_rest_usd": 0.0, "profit_bucket_cover_drop_usd": 0.0,
                  "profit_bucket_compound_usd": 0.0}
@@ -747,7 +756,7 @@ class LitGridLive:
             dest = s.get("profit_bucket_destination") or "profit_bucket_rest_usd"
             gross[dest] = gross.get(dest, 0.0) + float(s.get("realized_profit_usd") or 0)
         open_buys = await self.sb_paginate(
-            f"{TABLE_ORDERS}?side=eq.buy&status=in.({','.join(OPEN_STATUSES)})"
+            f"{self.TABLE_ORDERS}?side=eq.buy&status=in.({','.join(OPEN_STATUSES)})"
             f"&select=funded_from_bucket_usd")
         reserved = sum(float(r.get("funded_from_bucket_usd") or 0) for r in (open_buys or []))
         holdings = await self.current_holdings()
@@ -766,7 +775,7 @@ class LitGridLive:
         ledger, reads as never-bought again, which is exactly the point: each genuinely fresh
         start gets the eager initial fill; every tick after that first fill goes through the
         normal resting-limit ladder."""
-        rows = await self.sb("GET", f"{TABLE_ORDERS}?side=eq.buy&status=eq.filled&select=id&limit=1")
+        rows = await self.sb("GET", f"{self.TABLE_ORDERS}?side=eq.buy&status=eq.filled&select=id&limit=1")
         return bool(rows)
 
     async def reconcile_pending_orders(self, profit_mode=None, route=None):
@@ -796,7 +805,7 @@ class LitGridLive:
         counted once its OWN write is confirmed; an uncounted row is simply recomputed correctly
         on the next pass, since its filled_qty was never actually persisted."""
         pending = await self.sb_paginate(
-            f"{TABLE_ORDERS}?status=in.({','.join(OPEN_STATUSES)})&select=*&order=id.asc")
+            f"{self.TABLE_ORDERS}?status=in.({','.join(OPEN_STATUSES)})&select=*&order=id.asc")
         if not pending:
             return True, 0.0, False
         self._holdings_cache = None
@@ -900,7 +909,7 @@ class LitGridLive:
                 if not changed:
                     continue
                 try:
-                    await self.sb("PATCH", f"{TABLE_ORDERS}?id=eq.{r['id']}", patch)
+                    await self.sb("PATCH", f"{self.TABLE_ORDERS}?id=eq.{r['id']}", patch)
                 except Exception as e:
                     # The write may have actually committed and only the HTTP response was
                     # lost -- NOT proof that nothing persisted (external audit fix, eighth
@@ -967,7 +976,7 @@ class LitGridLive:
             # holdings only count a buy once it's fully filled -- count those partial fills
             # here too, or one partial fill pauses the whole grid (live, 2026-10-18 20:30).
             open_buy_fills = await self.sb_paginate(
-                f"{TABLE_ORDERS}?side=eq.buy&status=in.({','.join(OPEN_STATUSES)})"
+                f"{self.TABLE_ORDERS}?side=eq.buy&status=in.({','.join(OPEN_STATUSES)})"
                 f"&filled_qty=not.is.null&select=filled_qty")
             real_usdc, real_lit = await self.real_balances()
             await self.update_state({"usdc_balance": real_usdc, "lit_balance": real_lit})
@@ -1012,7 +1021,7 @@ class LitGridLive:
                  f"lock_owner.eq.{self._lock_id},lock_heartbeat.lt.{stale_iso})")
         try:
             rows = await self.sb(
-                "PATCH", f"{TABLE_STATE}?id=eq.1&{guard}",
+                "PATCH", f"{self.TABLE_STATE}?id=eq.1&{guard}",
                 {"lock_owner": self._lock_id, "lock_heartbeat": now_iso()},
             )
         except Exception as e:
@@ -1038,7 +1047,7 @@ class LitGridLive:
             return
         self._lock_held = False
         try:
-            await self.sb("PATCH", f"{TABLE_STATE}?id=eq.1&lock_owner=eq.{self._lock_id}",
+            await self.sb("PATCH", f"{self.TABLE_STATE}?id=eq.1&lock_owner=eq.{self._lock_id}",
                            {"lock_owner": None, "lock_heartbeat": None})
         except Exception:
             pass
@@ -1054,7 +1063,7 @@ class LitGridLive:
         if not self._lock_held:
             return False
         try:
-            rows = await self.sb("PATCH", f"{TABLE_STATE}?id=eq.1&lock_owner=eq.{self._lock_id}",
+            rows = await self.sb("PATCH", f"{self.TABLE_STATE}?id=eq.1&lock_owner=eq.{self._lock_id}",
                                   {"lock_heartbeat": now_iso()})
         except Exception as e:
             self._lock_held = False
@@ -1140,15 +1149,15 @@ class LitGridLive:
 
     async def _holdings_rows(self):
         buys = await self.sb_paginate(
-            f"{TABLE_ORDERS}?status=eq.filled&side=eq.buy"
+            f"{self.TABLE_ORDERS}?status=eq.filled&side=eq.buy"
             f"&select=id,level,filled_qty,filled_price,size,funded_from_bucket_usd&order=id.asc")
         sells = await self.sb_paginate(
-            f"{TABLE_ORDERS}?side=eq.sell&closes_level=not.is.null&filled_qty=not.is.null&select=id,closes_level,filled_qty&order=id.asc")
+            f"{self.TABLE_ORDERS}?side=eq.sell&closes_level=not.is.null&filled_qty=not.is.null&select=id,closes_level,filled_qty&order=id.asc")
         return buys or [], sells or []
 
     async def resting_orders_by_level(self):
         rows = await self.sb_paginate(
-            f"{TABLE_ORDERS}?status=in.({','.join(OPEN_STATUSES)})&select=*")
+            f"{self.TABLE_ORDERS}?status=in.({','.join(OPEN_STATUSES)})&select=*")
         by_level = {}
         for r in (rows or []):
             by_level.setdefault(r["level"], []).append(r)
@@ -1162,7 +1171,7 @@ class LitGridLive:
         incremented by the time the order is attempted. Returns the new count, or None if
         another instance/tick already consumed it."""
         rows = await self.sb(
-            "PATCH", f"{TABLE_STATE}?id=eq.1&lifetime_buy_count=eq.{expected_count}",
+            "PATCH", f"{self.TABLE_STATE}?id=eq.1&lifetime_buy_count=eq.{expected_count}",
             {"lifetime_buy_count": expected_count + 1},
         )
         if not rows:
@@ -1625,7 +1634,7 @@ class LitGridLive:
         co_idx = int(time.time() * 1000) % 500_000_000
         row = {"level": level, "side": "sell", "closes_level": level, "client_order_index": co_idx,
                "status": "pending", "limit_price": band_price, "size": sized, "placed_at": now_iso()}
-        inserted = await self.sb("POST", TABLE_ORDERS, row)
+        inserted = await self.sb("POST", self.TABLE_ORDERS, row)
         row_id = inserted[0]["id"]
         try:
             _o, _r, err = await asyncio.wait_for(
@@ -1637,13 +1646,13 @@ class LitGridLive:
                 timeout=ORDER_TIMEOUT,
             )
             if err:
-                await self.sb("PATCH", f"{TABLE_ORDERS}?id=eq.{row_id}",
+                await self.sb("PATCH", f"{self.TABLE_ORDERS}?id=eq.{row_id}",
                                {"status": "rejected", "error": str(err)[:200]})
                 return None
         except Exception as e:
             await self.log_run("flatten_sell_unknown", {"row_id": row_id, "error": str(e)[:200]})
             return row_id
-        await self.sb("PATCH", f"{TABLE_ORDERS}?id=eq.{row_id}", {"status": "open"})
+        await self.sb("PATCH", f"{self.TABLE_ORDERS}?id=eq.{row_id}", {"status": "open"})
         return row_id
 
     async def market_buy_level(self, level, qty, funded_from_bucket_usd=0.0):
@@ -1665,7 +1674,7 @@ class LitGridLive:
         row = {"level": level, "side": "buy", "client_order_index": co_idx,
                "status": "pending", "limit_price": band_price, "size": sized, "placed_at": now_iso(),
                "funded_from_bucket_usd": round(funded_from_bucket_usd, 8), "order_kind": "market"}
-        inserted = await self.sb("POST", TABLE_ORDERS, row)
+        inserted = await self.sb("POST", self.TABLE_ORDERS, row)
         row_id = inserted[0]["id"]
         try:
             _o, _r, err = await asyncio.wait_for(
@@ -1677,13 +1686,13 @@ class LitGridLive:
                 timeout=ORDER_TIMEOUT,
             )
             if err:
-                await self.sb("PATCH", f"{TABLE_ORDERS}?id=eq.{row_id}",
+                await self.sb("PATCH", f"{self.TABLE_ORDERS}?id=eq.{row_id}",
                                {"status": "rejected", "error": str(err)[:200]})
                 return None
         except Exception as e:
             await self.log_run("initial_fill_buy_unknown", {"row_id": row_id, "error": str(e)[:200]})
             return row_id
-        await self.sb("PATCH", f"{TABLE_ORDERS}?id=eq.{row_id}", {"status": "open"})
+        await self.sb("PATCH", f"{self.TABLE_ORDERS}?id=eq.{row_id}", {"status": "open"})
         return row_id
 
     async def flatten_all(self, profit_mode=None, route=None):
@@ -1845,7 +1854,7 @@ class LitGridLive:
             detail = {"old": persisted_spacing, "new": spacing_pct}
             if state.get("grid_anchor_price") is not None:
                 buys, sells = await self._holdings_rows()
-                all_rows = await self.sb_paginate(f"{TABLE_ORDERS}?select=id,level,closes_level&order=id.asc")
+                all_rows = await self.sb_paginate(f"{self.TABLE_ORDERS}?select=id,level,closes_level&order=id.asc")
                 all_levels = [r[k] for r in all_rows for k in ("level", "closes_level") if r.get(k) is not None]
                 plan = plan_reanchor(buys, sells, all_levels, price, spacing_pct)
                 if plan is None:
@@ -1856,7 +1865,7 @@ class LitGridLive:
                     return  # holds every lot, places nothing; set spacing back to resume
                 anchor, moves, mapping = plan
                 for rid, (col, line) in moves.items():
-                    await self.sb("PATCH", f"{TABLE_ORDERS}?id=eq.{rid}", {col: line})
+                    await self.sb("PATCH", f"{self.TABLE_ORDERS}?id=eq.{rid}", {col: line})
                 self._holdings_cache = None
                 self._window_center = None
                 patch["grid_anchor_price"] = anchor
@@ -1887,7 +1896,7 @@ async def _run_tick_loop(bot):
                 try:
                     await bot.log_run("tick_error", {"error": msg[:300]})
                 except Exception:
-                    print(f"[lit-grid-live] tick_error (and log_run also failed): {e}", flush=True)
+                    print(f"[lit-grid-live{bot._tag}] tick_error (and log_run also failed): {e}", flush=True)
                 if "429" in msg or "Too Many Requests" in msg:
                     sleep_for = backoff
                     backoff = min(backoff * 2, RATE_LIMIT_BACKOFF_MAX)
@@ -1896,12 +1905,20 @@ async def _run_tick_loop(bot):
         await bot.release_lock()
 
 
-async def run_lit_grid_live():
+async def run_lit_grid_live(table_state=TABLE_STATE, table_orders=TABLE_ORDERS,
+                             table_runs=TABLE_RUNS, env_prefix="", tag=""):
+    """Runs one LIT grid instance to completion (its own http session, its own tick loop).
+    Zero args = Worker 4's exact original behavior (this service's own LIGHTER_* env vars,
+    the original table names). A second instance on a different sub-account passes env_prefix
+    (e.g. "WORKER3_" to read WORKER3_LIGHTER_ACCOUNT_INDEX etc, same convention
+    lighter_hedge_dual_leg.py already uses) and its own table_state/table_orders/table_runs +
+    tag so it never touches Worker 4's rows or Worker 4's heartbeat/log lines."""
     async with aiohttp.ClientSession() as http:
-        bot = LitGridLive(http)
-        bot.account_index = int(os.environ["LIGHTER_ACCOUNT_INDEX"])
-        api_key_index = int(os.environ["LIGHTER_API_KEY_INDEX"])
-        api_private_key = os.environ["LIGHTER_API_PRIVATE_KEY"]
+        bot = LitGridLive(http, table_state=table_state, table_orders=table_orders,
+                           table_runs=table_runs, tag=tag)
+        bot.account_index = int(os.environ[f"{env_prefix}LIGHTER_ACCOUNT_INDEX"])
+        api_key_index = int(os.environ[f"{env_prefix}LIGHTER_API_KEY_INDEX"])
+        api_private_key = os.environ[f"{env_prefix}LIGHTER_API_PRIVATE_KEY"]
         bot.client = lighter.SignerClient(
             url=LIGHTER_URL, account_index=bot.account_index,
             api_private_keys={api_key_index: api_private_key},

@@ -243,6 +243,8 @@ def base_state(**over):
 def make_bot(state, orders=None, signer_fail=False, signer_err=None, cancel_err=None,
              orders_by_co=None, assets=None, order_api_fail=False, account_api_fail=False):
     bot = LitGridLive.__new__(LitGridLive)
+    bot.TABLE_STATE, bot.TABLE_ORDERS, bot.TABLE_RUNS = core.TABLE_STATE, core.TABLE_ORDERS, core.TABLE_RUNS
+    bot._tag = ""
     bot._lock_id = "test"
     bot._lock_held = True
     bot._lock_checked_at = 0.0
@@ -2463,11 +2465,85 @@ async def t_tick_spacing_change_without_anchor_keeps_old_behavior():
           fake.state.get("grid_anchor_price") is None and fake.orders[-1]["level"] == 900)
 
 
+
+# ── Twin-instance parameterization (2026-10-21, Worker 3/Worker 4 same-process twins) ─────────────
+
+def t_default_init_is_byte_identical_to_worker4s_old_hardcoded_behavior():
+    import aiohttp
+    bot = core.LitGridLive(None)
+    check("default table_state is the original Worker 4 constant",
+          bot.TABLE_STATE == core.TABLE_STATE, bot.TABLE_STATE)
+    check("default table_orders is the original Worker 4 constant",
+          bot.TABLE_ORDERS == core.TABLE_ORDERS, bot.TABLE_ORDERS)
+    check("default table_runs is the original Worker 4 constant",
+          bot.TABLE_RUNS == core.TABLE_RUNS, bot.TABLE_RUNS)
+    check("default tag is empty (log lines unchanged: '[lit-grid-live:action]')", bot._tag == "", bot._tag)
+    check("default lock id has no tag suffix", bot._lock_id.endswith(":lit-grid-live"), bot._lock_id)
+
+
+def t_overridden_init_uses_its_own_tables_and_tag_not_worker4s():
+    bot = core.LitGridLive(None, table_state="w3_state", table_orders="w3_orders",
+                            table_runs="w3_runs", tag="-worker3")
+    check("overridden table_state is used, not the Worker 4 constant",
+          bot.TABLE_STATE == "w3_state" and bot.TABLE_STATE != core.TABLE_STATE, bot.TABLE_STATE)
+    check("overridden table_orders is used, not the Worker 4 constant",
+          bot.TABLE_ORDERS == "w3_orders" and bot.TABLE_ORDERS != core.TABLE_ORDERS, bot.TABLE_ORDERS)
+    check("overridden table_runs is used, not the Worker 4 constant",
+          bot.TABLE_RUNS == "w3_runs" and bot.TABLE_RUNS != core.TABLE_RUNS, bot.TABLE_RUNS)
+    check("lock id carries the tag so it never collides in logs with Worker 4's",
+          bot._lock_id.endswith(":lit-grid-live-worker3"), bot._lock_id)
+
+
+async def t_two_instances_in_one_process_never_touch_each_others_rows():
+    # Real __init__ (not the __new__-bypass make_bot() harness), real place_grid_order() body,
+    # a plain recording stub standing in for the network call -- proving the SAME in-memory
+    # process can run a Worker 4 instance and a Worker 3 instance side by side with every write
+    # going to each one's own table, never the other's (the exact property the live twin needs).
+    calls = []
+
+    async def record(method, path, body=None):
+        calls.append((method, path))
+        return [dict(body or {}, id=len(calls))]
+
+    w4 = core.LitGridLive(None)
+    w3 = core.LitGridLive(None, table_state="lighter_lit_grid_live_worker3_state",
+                           table_orders="lighter_lit_grid_live_worker3_orders",
+                           table_runs="lighter_lit_grid_live_worker3_runs", tag="-worker3")
+    w4.sb = w3.sb = record
+    w4._lock_held = w3._lock_held = True
+    await w4.place_grid_order(900, "buy", 3.10, 1.70)
+    await w3.place_grid_order(900, "buy", 3.10, 2.0)
+    w4_calls = [c for c in calls if c[1] == core.TABLE_ORDERS]
+    w3_calls = [c for c in calls if c[1] == "lighter_lit_grid_live_worker3_orders"]
+    check("Worker 4's order went to Worker 4's own table", len(w4_calls) == 1, calls)
+    check("Worker 3's order went to Worker 3's own table, never Worker 4's", len(w3_calls) == 1, calls)
+    check("Worker 4's calls (lock/order/run) never mention 'worker3'",
+          all("worker3" not in c[1] for c in calls[:3]), calls[:3])
+    check("Worker 3's calls (lock/order/run) all stay on its own 'worker3' tables",
+          all("worker3" in c[1] for c in calls[3:]), calls[3:])
+    check("the two bots' lock ids differ (never collide in logs or lock ownership)",
+          w4._lock_id != w3._lock_id, (w4._lock_id, w3._lock_id))
+
+
+def t_run_lit_grid_live_signature_defaults_match_worker4_exactly():
+    import inspect
+    sig = inspect.signature(core.run_lit_grid_live)
+    p = sig.parameters
+    check("table_state defaults to Worker 4's real table", p["table_state"].default == core.TABLE_STATE)
+    check("table_orders defaults to Worker 4's real table", p["table_orders"].default == core.TABLE_ORDERS)
+    check("table_runs defaults to Worker 4's real table", p["table_runs"].default == core.TABLE_RUNS)
+    check("env_prefix defaults to empty (reads LIGHTER_* env vars, not WORKER3_LIGHTER_*)", p["env_prefix"].default == "")
+    check("tag defaults to empty", p["tag"].default == "")
+
+
 async def main():
     t_precision_and_minimum_enforcement()
     t_order_fill_amounts_uses_real_human_decimal_units()
     t_order_is_terminal_uses_remaining_amount_primarily()
     t_rounding_does_not_shift_the_real_fill_price_bin()
+    t_default_init_is_byte_identical_to_worker4s_old_hardcoded_behavior()
+    t_overridden_init_uses_its_own_tables_and_tag_not_worker4s()
+    t_run_lit_grid_live_signature_defaults_match_worker4_exactly()
     t_plan_reanchor_puts_each_lot_near_its_cost_on_the_new_grid()
     t_plan_reanchor_keeps_a_partly_sold_lot_on_its_own_line()
     t_plan_reanchor_places_dust_after_real_lots()
@@ -2499,6 +2575,7 @@ async def main():
               t_maintain_window_entries_blocked_still_maintains_existing_sells,
               t_tick_cancels_everything_on_a_spacing_change,
               t_tick_spacing_change_does_not_advance_if_cancel_fails,
+              t_two_instances_in_one_process_never_touch_each_others_rows,
               t_tick_spacing_change_reanchors_held_lots_and_sells_near_cost,
               t_tick_spacing_change_without_anchor_keeps_old_behavior,
               t_tick_does_not_rewrite_an_unchanged_resting_order,

@@ -3,9 +3,13 @@ import type { SupabaseClient } from "@supabase/supabase-js";
 // The investment (capital_usd) can never be more than the money actually in the account.
 // Real balances come from the running worker, which re-reads them from the exchange every ~10s
 // and stamps updated_at each tick; if it hasn't reported recently we can't verify, so refuse.
-export async function investmentShortfallError(sb: SupabaseClient, capitalUsd: number): Promise<string | null> {
+export async function investmentShortfallError(
+  sb: SupabaseClient,
+  capitalUsd: number,
+  table: string = "lighter_lit_grid_live_state"
+): Promise<string | null> {
   const { data, error } = await sb
-    .from("lighter_lit_grid_live_state")
+    .from(table)
     .select("usdc_balance,lit_balance,live_price,updated_at")
     .eq("id", 1)
     .single();
