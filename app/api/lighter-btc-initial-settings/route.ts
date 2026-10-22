@@ -1,5 +1,6 @@
 import { NextRequest, NextResponse } from "next/server";
 import { getSupabaseAdmin } from "@/lib/supabase-admin";
+import { checkLitGridLiveAuth } from "@/lib/lit-grid-live-auth";
 
 // Manual exit levers for Worker 1 only (lighter_btc_initial_state) -- same mechanism as the hedge's
 // lighter-hedge-settings, one row instead of two. The worker reads these every tick
@@ -68,6 +69,8 @@ const LIMITS = {
 const ALLOWED_TABLES = new Set(["lighter_btc_initial_state", "lighter_btc_worker4_state"]);
 
 export async function POST(req: NextRequest) {
+  const authError = checkLitGridLiveAuth(req);
+  if (authError) return authError;
   const body = await req.json();
   const table = ALLOWED_TABLES.has(body.table) ? body.table : "lighter_btc_initial_state";
   const out: Record<string, number | boolean | string | null> = {};

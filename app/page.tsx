@@ -2099,6 +2099,27 @@ function litGridLiveAdminSecret(): string | null {
   }
 }
 
+// Worker 1's real-money control routes (toggle/settings/reset/close-position) got the same
+// admin-secret gate as the LIT grid bots (2026-10-21) -- same reused secret/prompt, since it's
+// one dashboard behind one login already. If the user cancels the prompt, this resolves to a
+// synthetic 401 Response instead of throwing, so every existing `res.ok`/`res.json()` call site
+// below keeps working unchanged.
+async function btcAdminPost(url: string, body: Record<string, unknown>): Promise<Response> {
+  const secret = litGridLiveAdminSecret();
+  if (!secret) {
+    return new Response(JSON.stringify({ error: "Admin secret required." }), { status: 401 });
+  }
+  const res = await fetch(url, {
+    method: "POST",
+    headers: { "Content-Type": "application/json", "x-admin-secret": secret },
+    body: JSON.stringify(body),
+  });
+  if (res.status === 401) {
+    try { localStorage.removeItem("litGridLiveAdminSecret"); } catch {}
+  }
+  return res;
+}
+
 function currentSessionStart(nowUtc: Date): Date {
   // Mirrors stoch_bot_core.py's _current_session_start: 3 fixed 8h sessions,
   // 15:00-23:00 / 23:00-07:00 / 07:00-15:00 UTC (11am-7pm / 7pm-3am / 3am-11am ET).
@@ -2289,10 +2310,7 @@ function CompactStochBtcPanel({
         : `Switch ${title} back to trail mode? Literal TP is disabled again; the profit-lock trail governs winners, same as before. Takes effect immediately, including on an open position.`
     )) return;
     setSavingExitMode(true);
-    const res = await fetch("/api/lighter-btc-initial-settings", {
-      method: "POST", headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ table, exitMode: mode }),
-    });
+    const res = await btcAdminPost("/api/lighter-btc-initial-settings", { table, exitMode: mode });
     if (!res.ok) {
       const b = await res.json().catch(() => ({}));
       alert(b.error || "Could not switch exit mode.");
@@ -2317,10 +2335,7 @@ function CompactStochBtcPanel({
         : `Turn OFF escalated SL? Goes back to the plain SL/Trigger/Trail boxes below. Takes effect immediately, including on an open position.`
     )) return;
     setSavingEscalatedSl(true);
-    const res = await fetch("/api/lighter-btc-initial-settings", {
-      method: "POST", headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ table, escalatedSlEnabled: next }),
-    });
+    const res = await btcAdminPost("/api/lighter-btc-initial-settings", { table, escalatedSlEnabled: next });
     if (!res.ok) {
       const b = await res.json().catch(() => ({}));
       alert(b.error || "Could not toggle escalated SL.");
@@ -2341,10 +2356,7 @@ function CompactStochBtcPanel({
         : `Turn OFF require-fresh-signal for ${title}? Will enter on a signal even if it's been active for a while, not just the fresh flip. Takes effect immediately.`
     )) return;
     setSavingRequireFreshSignal(true);
-    const res = await fetch("/api/lighter-btc-initial-settings", {
-      method: "POST", headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ table, requireFreshSignal: next }),
-    });
+    const res = await btcAdminPost("/api/lighter-btc-initial-settings", { table, requireFreshSignal: next });
     if (!res.ok) {
       const b = await res.json().catch(() => ({}));
       alert(b.error || "Could not toggle require-fresh-signal.");
@@ -2382,10 +2394,7 @@ function CompactStochBtcPanel({
     if (!stochWindowIn.trim()) return;
     if (!confirm(`Set the stochastic window to ${stochWindowIn.trim()} candles for ${title}? Takes effect immediately.`)) return;
     setSavingSignal("stochWindow");
-    const res = await fetch("/api/lighter-btc-initial-settings", {
-      method: "POST", headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ table, stochWindow: stochWindowIn.trim() }),
-    });
+    const res = await btcAdminPost("/api/lighter-btc-initial-settings", { table, stochWindow: stochWindowIn.trim() });
     if (!res.ok) {
       const b = await res.json().catch(() => ({}));
       alert(b.error || "Could not apply the change.");
@@ -2408,10 +2417,7 @@ function CompactStochBtcPanel({
     const hiKey = kind === "entry" ? "bandHi" : "reversalHi";
     if (loIn.trim()) payload[loKey] = loIn.trim();
     if (hiIn.trim()) payload[hiKey] = hiIn.trim();
-    const res = await fetch("/api/lighter-btc-initial-settings", {
-      method: "POST", headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ table, ...payload }),
-    });
+    const res = await btcAdminPost("/api/lighter-btc-initial-settings", { table, ...payload });
     if (!res.ok) {
       const b = await res.json().catch(() => ({}));
       alert(b.error || "Could not apply the change.");
@@ -2438,10 +2444,7 @@ function CompactStochBtcPanel({
   async function handleToggleJumpGuard(next: boolean) {
     if (!confirm(`Turn the volume-jump guard ${next ? "ON" : "OFF"} for ${title}? Takes effect immediately.`)) return;
     setSavingSignal("jumpGuardEnabled");
-    const res = await fetch("/api/lighter-btc-initial-settings", {
-      method: "POST", headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ table, jumpGuardEnabled: next }),
-    });
+    const res = await btcAdminPost("/api/lighter-btc-initial-settings", { table, jumpGuardEnabled: next });
     if (!res.ok) {
       const b = await res.json().catch(() => ({}));
       alert(b.error || "Could not apply the change.");
@@ -2468,10 +2471,7 @@ function CompactStochBtcPanel({
     if (mode === curReleaseMode) return;
     if (!confirm(`Set the volume-jump pause's early release to "${mode}" for ${title}? Takes effect immediately.`)) return;
     setSavingRelease(true);
-    const res = await fetch("/api/lighter-btc-initial-settings", {
-      method: "POST", headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ table, releaseMode: mode }),
-    });
+    const res = await btcAdminPost("/api/lighter-btc-initial-settings", { table, releaseMode: mode });
     if (!res.ok) {
       const b = await res.json().catch(() => ({}));
       alert(b.error || "Could not apply the change.");
@@ -2507,10 +2507,7 @@ function CompactStochBtcPanel({
     const payload: Record<string, string> = {};
     if (jumpRatioIn.trim()) payload.jumpRatio = jumpRatioIn.trim();
     if (jumpPauseIn.trim()) payload.jumpPause = jumpPauseIn.trim();
-    const res = await fetch("/api/lighter-btc-initial-settings", {
-      method: "POST", headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ table, ...payload }),
-    });
+    const res = await btcAdminPost("/api/lighter-btc-initial-settings", { table, ...payload });
     if (!res.ok) {
       const b = await res.json().catch(() => ({}));
       alert(b.error || "Could not apply the change.");
@@ -2527,10 +2524,7 @@ function CompactStochBtcPanel({
   async function handleClearVolumeJump() {
     if (!confirm(`Clear the current volume-jump pause for ${title}? A new spike will still re-arm it normally.`)) return;
     setSavingSignal("jumpClear");
-    const res = await fetch("/api/lighter-btc-initial-settings", {
-      method: "POST", headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ table, clearVolumeJump: true }),
-    });
+    const res = await btcAdminPost("/api/lighter-btc-initial-settings", { table, clearVolumeJump: true });
     if (!res.ok) {
       const b = await res.json().catch(() => ({}));
       alert(b.error || "Could not clear the pause.");
@@ -2559,10 +2553,7 @@ function CompactStochBtcPanel({
     if (!wiggleLockThresholdIn.trim()) return;
     if (!confirm(`Set the volume/wiggle lock threshold to ${wiggleLockThresholdIn.trim()} for ${title}? Takes effect immediately.`)) return;
     setSavingSignal("wiggleLock");
-    const res = await fetch("/api/lighter-btc-initial-settings", {
-      method: "POST", headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ table, wiggleLock: wiggleLockThresholdIn.trim() }),
-    });
+    const res = await btcAdminPost("/api/lighter-btc-initial-settings", { table, wiggleLock: wiggleLockThresholdIn.trim() });
     if (!res.ok) {
       const b = await res.json().catch(() => ({}));
       alert(b.error || "Could not apply the change.");
@@ -2576,10 +2567,7 @@ function CompactStochBtcPanel({
   async function handleToggleWiggleLock(next: boolean) {
     if (!confirm(`Turn the volume/wiggle lock ${next ? "ON" : "OFF"} for ${title}? Takes effect immediately.`)) return;
     setSavingSignal("wiggleLockEnabled");
-    const res = await fetch("/api/lighter-btc-initial-settings", {
-      method: "POST", headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ table, wiggleLockEnabled: next }),
-    });
+    const res = await btcAdminPost("/api/lighter-btc-initial-settings", { table, wiggleLockEnabled: next });
     if (!res.ok) {
       const b = await res.json().catch(() => ({}));
       alert(b.error || "Could not apply the change.");
@@ -2601,10 +2589,7 @@ function CompactStochBtcPanel({
     if (!wiggleVolRisePctIn.trim()) return;
     if (!confirm(`Set the wiggle/vol RISE exit to ${wiggleVolRisePctIn.trim()}% for ${title}? Closes a position the moment its own wig/vol ratio rises this much from entry. Takes effect immediately, including on an open position.`)) return;
     setSavingSignal("wiggleVolRiseExit");
-    const res = await fetch("/api/lighter-btc-initial-settings", {
-      method: "POST", headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ table, wiggleVolRiseExit: wiggleVolRisePctIn.trim() }),
-    });
+    const res = await btcAdminPost("/api/lighter-btc-initial-settings", { table, wiggleVolRiseExit: wiggleVolRisePctIn.trim() });
     if (!res.ok) {
       const b = await res.json().catch(() => ({}));
       alert(b.error || "Could not apply the change.");
@@ -2618,10 +2603,7 @@ function CompactStochBtcPanel({
   async function handleToggleWiggleVolRise(next: boolean) {
     if (!confirm(`Turn the wiggle/vol RISE exit ${next ? "ON" : "OFF"} for ${title}? Takes effect immediately.`)) return;
     setSavingSignal("wiggleVolRiseExitEnabled");
-    const res = await fetch("/api/lighter-btc-initial-settings", {
-      method: "POST", headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ table, wiggleVolRiseExitEnabled: next }),
-    });
+    const res = await btcAdminPost("/api/lighter-btc-initial-settings", { table, wiggleVolRiseExitEnabled: next });
     if (!res.ok) {
       const b = await res.json().catch(() => ({}));
       alert(b.error || "Could not apply the change.");
@@ -2641,10 +2623,7 @@ function CompactStochBtcPanel({
     if (tf === curHtfTimeframe) return;
     if (!confirm(`Set the higher-timeframe alignment block to "${tf}" for ${title}? Blocks a fresh entry whenever that timeframe's stochastic agrees with the 1-min signal. Takes effect immediately.`)) return;
     setSavingHtf(true);
-    const res = await fetch("/api/lighter-btc-initial-settings", {
-      method: "POST", headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ table, htfBlockTimeframe: tf }),
-    });
+    const res = await btcAdminPost("/api/lighter-btc-initial-settings", { table, htfBlockTimeframe: tf });
     if (!res.ok) {
       const b = await res.json().catch(() => ({}));
       alert(b.error || "Could not apply the change.");
@@ -2668,10 +2647,7 @@ function CompactStochBtcPanel({
     if (!rateGuardThresholdIn.trim()) return;
     if (!confirm(`Set the volume-rate guard threshold to ${rateGuardThresholdIn.trim()}% for ${title}? Takes effect immediately.`)) return;
     setSavingSignal("rateGuard");
-    const res = await fetch("/api/lighter-btc-initial-settings", {
-      method: "POST", headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ table, rateGuard: rateGuardThresholdIn.trim() }),
-    });
+    const res = await btcAdminPost("/api/lighter-btc-initial-settings", { table, rateGuard: rateGuardThresholdIn.trim() });
     if (!res.ok) {
       const b = await res.json().catch(() => ({}));
       alert(b.error || "Could not apply the change.");
@@ -2685,10 +2661,7 @@ function CompactStochBtcPanel({
   async function handleToggleRateGuard(next: boolean) {
     if (!confirm(`Turn the volume-rate guard ${next ? "ON" : "OFF"} for ${title}? Takes effect immediately.`)) return;
     setSavingSignal("rateGuardEnabled");
-    const res = await fetch("/api/lighter-btc-initial-settings", {
-      method: "POST", headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ table, rateGuardEnabled: next }),
-    });
+    const res = await btcAdminPost("/api/lighter-btc-initial-settings", { table, rateGuardEnabled: next });
     if (!res.ok) {
       const b = await res.json().catch(() => ({}));
       alert(b.error || "Could not apply the change.");
@@ -2716,10 +2689,7 @@ function CompactStochBtcPanel({
   async function handleToggleEntryWiggleRatio(next: boolean) {
     if (!confirm(`Turn the entry wiggle/vol ratio gate ${next ? "ON" : "OFF"} for ${title}? Takes effect immediately.`)) return;
     setSavingSignal("entryWiggleRatioEnabled");
-    const res = await fetch("/api/lighter-btc-initial-settings", {
-      method: "POST", headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ table, entryWiggleRatioEnabled: next }),
-    });
+    const res = await btcAdminPost("/api/lighter-btc-initial-settings", { table, entryWiggleRatioEnabled: next });
     if (!res.ok) {
       const b = await res.json().catch(() => ({}));
       alert(b.error || "Could not apply the change.");
@@ -2737,10 +2707,7 @@ function CompactStochBtcPanel({
     const payload: Record<string, string> = {};
     if (entryWiggleRatioMinIn.trim()) payload.entryWiggleRatioMin = entryWiggleRatioMinIn.trim();
     if (entryWiggleRatioMaxIn.trim()) payload.entryWiggleRatioMax = entryWiggleRatioMaxIn.trim();
-    const res = await fetch("/api/lighter-btc-initial-settings", {
-      method: "POST", headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ table, ...payload }),
-    });
+    const res = await btcAdminPost("/api/lighter-btc-initial-settings", { table, ...payload });
     if (!res.ok) {
       const b = await res.json().catch(() => ({}));
       alert(b.error || "Could not apply the change.");
@@ -2775,10 +2742,7 @@ function CompactStochBtcPanel({
     const next = !curPeakWindowEnabled;
     if (!confirm(`Turn the peak window ${next ? "ON" : "OFF"} for ${title}? When ON, only allowed to enter in the configured window after a confirmed peak -- blocks entirely until the first peak confirms. Takes effect immediately.`)) return;
     setSavingPeakWindow(true);
-    const res = await fetch("/api/lighter-btc-initial-settings", {
-      method: "POST", headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ table, peakWindowEnabled: next }),
-    });
+    const res = await btcAdminPost("/api/lighter-btc-initial-settings", { table, peakWindowEnabled: next });
     if (!res.ok) {
       const b = await res.json().catch(() => ({}));
       alert(b.error || "Could not toggle the peak window.");
@@ -2795,10 +2759,7 @@ function CompactStochBtcPanel({
     if (peakFloorIn.trim()) payload.peakWindowFloor = peakFloorIn.trim();
     if (peakConfirmIn.trim()) payload.peakWindowConfirmMinutes = peakConfirmIn.trim();
     if (peakSeparationIn.trim()) payload.peakWindowSeparationHours = peakSeparationIn.trim();
-    const res = await fetch("/api/lighter-btc-initial-settings", {
-      method: "POST", headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ table, ...payload }),
-    });
+    const res = await btcAdminPost("/api/lighter-btc-initial-settings", { table, ...payload });
     if (!res.ok) {
       const b = await res.json().catch(() => ({}));
       alert(b.error || "Could not apply the change.");
@@ -2818,10 +2779,7 @@ function CompactStochBtcPanel({
     const payload: Record<string, string> = {};
     if (peakStartIn.trim()) payload.peakWindowStartHours = peakStartIn.trim();
     if (peakEndIn.trim()) payload.peakWindowEndHours = peakEndIn.trim();
-    const res = await fetch("/api/lighter-btc-initial-settings", {
-      method: "POST", headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ table, ...payload }),
-    });
+    const res = await btcAdminPost("/api/lighter-btc-initial-settings", { table, ...payload });
     if (!res.ok) {
       const b = await res.json().catch(() => ({}));
       alert(b.error || "Could not apply the change.");
@@ -2835,10 +2793,7 @@ function CompactStochBtcPanel({
   async function handleToggleSignal(key: "stochastic" | "zebra" | "flip", label: string, next: boolean) {
     if (!confirm(`Turn ${label} ${next ? "ON" : "OFF"} for ${title}? Takes effect immediately.`)) return;
     setSavingSignal(key);
-    const res = await fetch("/api/lighter-btc-initial-settings", {
-      method: "POST", headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ table, [key]: next }),
-    });
+    const res = await btcAdminPost("/api/lighter-btc-initial-settings", { table, [key]: next });
     if (!res.ok) {
       const b = await res.json().catch(() => ({}));
       alert(b.error || "Could not apply the change.");
@@ -2851,10 +2806,7 @@ function CompactStochBtcPanel({
     if (!volThresholdIn.trim()) return;
     if (!confirm(`Set the volume switch threshold to ${volThresholdIn.trim()} BTC for ${title}? Takes effect immediately.`)) return;
     setSavingSignal("volThreshold");
-    const res = await fetch("/api/lighter-btc-initial-settings", {
-      method: "POST", headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ table, volThreshold: volThresholdIn.trim() }),
-    });
+    const res = await btcAdminPost("/api/lighter-btc-initial-settings", { table, volThreshold: volThresholdIn.trim() });
     if (!res.ok) {
       const b = await res.json().catch(() => ({}));
       alert(b.error || "Could not apply the change.");
@@ -2885,10 +2837,7 @@ function CompactStochBtcPanel({
       + `Takes effect immediately, including on an open position.`
     )) return;
     setSavingSettings(true);
-    const res = await fetch("/api/lighter-btc-initial-settings", {
-      method: "POST", headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ table, ...payload }),
-    });
+    const res = await btcAdminPost("/api/lighter-btc-initial-settings", { table, ...payload });
     if (!res.ok) {
       const b = await res.json().catch(() => ({}));
       alert(b.error || "Could not apply settings.");
@@ -2900,10 +2849,7 @@ function CompactStochBtcPanel({
   async function handleReset() {
     if (!confirm(`Reset ${title}? Rolls PnL into equity and hides trades before now -- nothing is deleted, all trades stay in the database for research. Only works while flat.`)) return;
     setResetting(true);
-    const res = await fetch("/api/lighter-btc-initial-reset", {
-      method: "POST", headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ table }),
-    });
+    const res = await btcAdminPost("/api/lighter-btc-initial-reset", { table });
     if (!res.ok) {
       const body = await res.json().catch(() => ({}));
       alert(body.error ?? "Reset failed.");
@@ -2919,10 +2865,7 @@ function CompactStochBtcPanel({
     if (!confirm(question)) return;
     setToggling(true);
     try {
-      const res = await fetch("/api/lighter-btc-toggle", {
-        method: "POST", headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ table }),
-      });
+      const res = await btcAdminPost("/api/lighter-btc-toggle", { table });
       if (!res.ok) {
         const body = await res.json().catch(() => null);
         alert(body?.error ?? "Could not confirm the ON/OFF change. Check the current state before trying again.");
@@ -2938,10 +2881,7 @@ function CompactStochBtcPanel({
   async function handleClosePosition() {
     if (!confirm(`Close the real ${side?.toUpperCase()} position on ${title} now? This places a real market order.`)) return;
     setClosing(true);
-    await fetch("/api/lighter-btc-close-position", {
-      method: "POST", headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ table }),
-    });
+    await btcAdminPost("/api/lighter-btc-close-position", { table });
     await onToggled();
     setClosing(false);
   }
@@ -5820,10 +5760,7 @@ function MasterSchedulePanel({
     if (!confirm("Turn BOTH Worker 1 and the hedge ON?")) return;
     setTogglingBoth(true);
     const calls = [];
-    if (!worker1On) calls.push(fetch("/api/lighter-btc-toggle", {
-      method: "POST", headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ table: "lighter_btc_initial_state" }),
-    }));
+    if (!worker1On) calls.push(btcAdminPost("/api/lighter-btc-toggle", { table: "lighter_btc_initial_state" }));
     if (!hedgeOn) calls.push(fetch("/api/lighter-hedge-toggle", { method: "POST" }));
     await Promise.all(calls);
     await onToggled();
@@ -5834,10 +5771,7 @@ function MasterSchedulePanel({
     if (!confirm("Turn BOTH Worker 1 and the hedge OFF? This only blocks new entries, it never closes an open position.")) return;
     setTogglingBoth(true);
     const calls = [];
-    if (worker1On) calls.push(fetch("/api/lighter-btc-toggle", {
-      method: "POST", headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ table: "lighter_btc_initial_state" }),
-    }));
+    if (worker1On) calls.push(btcAdminPost("/api/lighter-btc-toggle", { table: "lighter_btc_initial_state" }));
     if (hedgeOn) calls.push(fetch("/api/lighter-hedge-toggle", { method: "POST" }));
     await Promise.all(calls);
     await onToggled();

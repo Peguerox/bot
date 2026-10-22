@@ -1,5 +1,6 @@
 import { NextRequest, NextResponse } from "next/server";
 import { getSupabaseAdmin } from "@/lib/supabase-admin";
+import { checkLitGridLiveAuth } from "@/lib/lit-grid-live-auth";
 
 const ALLOWED_TABLES = new Set([
   "lighter_stoch_dca_btc_state",
@@ -14,6 +15,8 @@ const ALLOWED_TABLES = new Set([
 // is Python-only, so there is no safe way to place an order from this Next.js route without
 // duplicating private keys into a second runtime.
 export async function POST(req: NextRequest) {
+  const authError = checkLitGridLiveAuth(req);
+  if (authError) return authError;
   const { table } = await req.json();
   if (!ALLOWED_TABLES.has(table)) {
     return NextResponse.json({ error: "invalid table" }, { status: 400 });
