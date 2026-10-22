@@ -227,6 +227,14 @@ class FakeSignerClient:
             return None, None, self.cancel_err
         return object(), object(), None
 
+    CANCEL_ALL_TIF_IMMEDIATE = 0
+
+    async def cancel_all_orders(self, time_in_force, timestamp_ms):
+        self.cancel_all_calls = getattr(self, "cancel_all_calls", 0) + 1
+        if self.cancel_err:
+            return None, None, self.cancel_err
+        return object(), object(), None
+
     def create_auth_token_with_expiry(self):
         return "fake-token", None
 
@@ -275,6 +283,7 @@ def make_bot(state, orders=None, signer_fail=False, signer_err=None, cancel_err=
     bot._balance_paused = False
     bot._exchange_backoff_until = 0.0
     bot._exchange_backoff_s = core.RATE_LIMIT_BACKOFF_START
+    bot._last_cancel_all_at = 0.0
     bot.client = FakeSignerClient(fail=signer_fail, err=signer_err, cancel_err=cancel_err)
     bot._order_api = FakeOrderApi(orders_by_co, fail=order_api_fail, client=bot.client,
                                    active_orders_by_co=active_orders_by_co,
@@ -385,6 +394,104 @@ async def t_place_grid_order_does_not_backoff_on_an_unrelated_rejection():
     await bot.place_grid_order(900, "buy", 3.10, 1.70)
     check("an unrelated rejection never triggers the exchange backoff",
           bot._exchange_rate_limited() is False, bot._exchange_backoff_until)
+
+
+
+async def t_passed_level_market_sell_is_floored_at_the_lots_cost():
+    # 2026-10-22: the 0.5% slippage band is wider than a 0.125% step, so without a floor a
+    # passed-level market sell could in principle fill below what the lot cost.
+    bot, fake = make_bot(base_state())
+    bot.live.best_mid = lambda max_age=core.BOOK_MAX_AGE: 3.4500
+    await bot.market_sell_level(10, 5.0, min_price=3.4480)
+    sent = bot.client.placed[-1]
+    check("worst allowed fill price is the lot's cost (rounded up), not mid - 0.5%",
+          sent["avg_execution_price"] == price_to_int(3.4480), sent["avg_execution_price"])
+    await bot.market_sell_level(11, 5.0)
+    sent2 = bot.client.placed[-1]
+    check("with no floor (flatten), the plain 0.5% band is unchanged",
+          sent2["avg_execution_price"] == price_to_int(round_price(3.45 * 0.995)), sent2["avg_execution_price"])
+
+# ── Grid reset (one cancel-all tx, then re-anchor) ─────────────────────────────────────────────
+
+def _reset_fixture(active=None, lit_real=6.0, **state_over):
+    held = {"id": 1, "level": 10, "side": "buy", "status": "filled", "filled_qty": 6.0,
+            "filled_price": 3.40, "size": 6.0, "closes_level": None}
+    resting = {"id": 2, "level": 11, "side": "sell", "status": "open", "closes_level": 10,
+               "client_order_index": 501, "exchange_order_id": 5001, "limit_price": 3.42, "size": 6.0}
+    ghost = {"id": 3, "level": 9, "side": "buy", "status": "pending", "client_order_index": 502,
+             "exchange_order_id": None, "limit_price": 3.38, "size": 6.0,
+             "placed_at": core.now_iso()}
+    st = base_state(grid_reset_requested=True, grid_anchor_price=3.30, internal_spacing_pct=0.125,
+                    lit_balance=lit_real, **state_over)
+    bot, fake = make_bot(st, orders=[held, resting, ghost], active_orders_by_co=active or {},
+                         assets=[FakeAsset("USDC", 500.0, 0.0), FakeAsset("LIT", lit_real, 0.0)])
+    bot.fetch_current_price = lambda: _async_return(3.45)
+    return bot, fake
+
+
+async def t_reset_grid_sends_one_cancel_all_while_orders_rest_on_the_exchange():
+    bot, fake = _reset_fixture(active={501: FakeOrder(501, order_index=5001, status="open"),
+                                       777: FakeOrder(777, order_index=7777, status="open")})
+    await bot.tick()
+    check("exactly one cancel-all transaction is sent (not one cancel per order)",
+          getattr(bot.client, "cancel_all_calls", 0) == 1 and bot.client.cancelled == [],
+          (getattr(bot.client, "cancel_all_calls", 0), bot.client.cancelled))
+    check("no order is placed during the reset", bot.client.placed == [], bot.client.placed)
+    check("the reset flag stays set until the exchange is actually clear",
+          fake.state.get("grid_reset_requested") is True, fake.state.get("grid_reset_requested"))
+    await bot.tick()
+    check("a second tick inside the retry window does not resend the cancel-all",
+          bot.client.cancel_all_calls == 1, bot.client.cancel_all_calls)
+
+
+async def t_reset_grid_reanchors_once_the_exchange_is_clear():
+    bot, fake = _reset_fixture(active={})
+    await bot.tick()
+    rows = {r["id"]: r for r in fake.orders}
+    check("open/pending ledger rows not resting on the exchange are closed as cancelled",
+          rows[2]["status"] == "cancelled" and rows[3]["status"] == "cancelled",
+          (rows[2]["status"], rows[3]["status"]))
+    check("the held lot keeps its real fill price (cost basis untouched)",
+          rows[1]["filled_price"] == 3.40 and rows[1]["status"] == "filled", rows[1])
+    check("the grid is re-anchored (new anchor) and the flag cleared",
+          fake.state.get("grid_anchor_price") not in (None, 3.30)
+          and fake.state.get("grid_reset_requested") is False, fake.state)
+    check("order size is cleared so the next tick resizes", fake.state.get("order_size_lit") is None,
+          fake.state.get("order_size_lit"))
+    check("nothing is sold or placed by the reset itself", bot.client.placed == [], bot.client.placed)
+    check("completion is logged", any(r["action"] == "grid_reset_completed" for r in fake.runs), fake.runs)
+
+
+async def t_reset_grid_never_reanchors_on_a_balance_mismatch():
+    bot, fake = _reset_fixture(active={}, lit_real=9.0)
+    await bot.tick()
+    check("no re-anchor when ledger LIT (6) != real LIT (9)",
+          fake.state.get("grid_anchor_price") == 3.30, fake.state.get("grid_anchor_price"))
+    check("the flag stays set so a human can look",
+          fake.state.get("grid_reset_requested") is True, fake.state.get("grid_reset_requested"))
+    check("the block is logged",
+          any(r["action"] == "grid_reset_blocked_balance_mismatch" for r in fake.runs), fake.runs)
+
+
+async def t_reset_grid_does_nothing_when_the_active_orders_read_fails():
+    bot, fake = _reset_fixture(active={})
+    bot._order_api.active_orders_fail = True
+    await bot.tick()
+    rows = {r["id"]: r for r in fake.orders}
+    check("a failed exchange read never counts as 'book is clear' -- nothing is closed",
+          rows[2]["status"] == "open" and rows[3]["status"] == "pending", (rows[2]["status"], rows[3]["status"]))
+    check("no cancel-all and no re-anchor", getattr(bot.client, "cancel_all_calls", 0) == 0
+          and fake.state.get("grid_anchor_price") == 3.30, fake.state.get("grid_anchor_price"))
+
+
+async def t_reset_grid_respects_the_rate_limit_backoff():
+    bot, fake = _reset_fixture(active={501: FakeOrder(501, order_index=5001, status="open")})
+    bot.client.cancel_err = "(429)\nReason: Too Many Requests"
+    await bot.tick()
+    check("a 429 on the cancel-all starts the backoff", bot._exchange_rate_limited() is True)
+    bot._last_cancel_all_at = 0.0
+    await bot.tick()
+    check("no retry while the backoff is active", bot.client.cancel_all_calls == 1, bot.client.cancel_all_calls)
 
 
 def t_rounding_does_not_shift_the_real_fill_price_bin():
@@ -2999,6 +3106,12 @@ async def main():
               t_cancel_order_row_enters_backoff_on_invalid_nonce_and_skips_the_next_attempt,
               t_exchange_backoff_resets_on_a_clean_success,
               t_place_grid_order_does_not_backoff_on_an_unrelated_rejection,
+              t_reset_grid_sends_one_cancel_all_while_orders_rest_on_the_exchange,
+              t_reset_grid_reanchors_once_the_exchange_is_clear,
+              t_reset_grid_never_reanchors_on_a_balance_mismatch,
+              t_reset_grid_does_nothing_when_the_active_orders_read_fails,
+              t_reset_grid_respects_the_rate_limit_backoff,
+              t_passed_level_market_sell_is_floored_at_the_lots_cost,
               t_cancel_marks_cancel_requested_not_cancelled_directly,
               t_cancel_requested_resolves_to_filled_if_a_fill_raced_it,
               t_cancel_order_row_checks_the_sdk_error,
