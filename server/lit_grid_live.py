@@ -692,6 +692,13 @@ class LitGridLive:
         self._balance_paused = False
         self._holdings_cache = None
         self._holdings_cache_on = False
+        # Exchange-request backoff (2026-10-22, real incident): place_grid_order/cancel_order_row
+        # each catch their own errors and never raise, so a 429/nonce storm never reached
+        # _run_tick_loop's own backoff -- the spacing-change cancel loop just retried every tick
+        # forever, hammering the exchange and extending its own rate limit instead of letting it
+        # clear. See _exchange_rate_limited()'s docstring.
+        self._exchange_backoff_until = 0.0
+        self._exchange_backoff_s = RATE_LIMIT_BACKOFF_START
 
     # ── Supabase ─────────────────────────────────────────────────────────────────────────────
     async def sb(self, method, path, body=None):
@@ -742,11 +749,38 @@ class LitGridLive:
             print(f"  (lit-grid-live log_run failed: {e})", flush=True)
 
     # ── Order ledger ─────────────────────────────────────────────────────────────────────────
+    @staticmethod
+    def _is_rate_limit_error(msg):
+        """429/Too-Many-Requests and invalid-nonce are both signals to slow down -- a nonce error
+        can come from two instances briefly overlapping during a deploy (Render keeps the old
+        container alive ~30-60s after the new one starts) as much as from pure request volume,
+        but the right response is the same either way: back off and let it clear. Any OTHER
+        rejection reason (bad price, insufficient margin, etc.) must never trigger this -- those
+        are real decisions, not pacing problems."""
+        return "429" in msg or "Too Many Requests" in msg or "invalid nonce" in msg.lower()
+
+    def _exchange_rate_limited(self):
+        """True while a 429/nonce backoff window is active -- callers must skip the real SDK call
+        entirely (not just retry faster) so a rate-limit storm can actually clear instead of being
+        perpetuated by our own repeated hammering. place_grid_order/cancel_order_row each catch
+        their own errors and never raise, so this can't rely on _run_tick_loop's own backoff --
+        that only ever sees an exception that escapes all the way out of tick()."""
+        return time.time() < self._exchange_backoff_until
+
+    def _register_exchange_rate_limit(self):
+        self._exchange_backoff_until = time.time() + self._exchange_backoff_s
+        self._exchange_backoff_s = min(self._exchange_backoff_s * 2, RATE_LIMIT_BACKOFF_MAX)
+
+    def _register_exchange_success(self):
+        self._exchange_backoff_s = RATE_LIMIT_BACKOFF_START
+
     async def place_grid_order(self, level, side, limit_price, size, closes_level=None,
                                 funded_from_bucket_usd=0.0):
         # Lock validated BEFORE anything else (external audit fix, fifth pass): checking AFTER
         # the send let exactly one action slip through per lock-loss event.
         if not await self._touch_lock_heartbeat():
+            return None
+        if self._exchange_rate_limited():
             return None
         co_idx = int(time.time() * 1000) % 500_000_000
         row = {
@@ -776,12 +810,17 @@ class LitGridLive:
                 timeout=ORDER_TIMEOUT,
             )
             if err:
+                if self._is_rate_limit_error(str(err)):
+                    self._register_exchange_rate_limit()
                 await self.sb("PATCH", f"{self.TABLE_ORDERS}?id=eq.{row_id}",
                                {"status": "rejected", "error": str(err)[:200]})
                 return None
         except Exception as e:
+            if self._is_rate_limit_error(str(e)):
+                self._register_exchange_rate_limit()
             await self.log_run("order_place_unknown", {"row_id": row_id, "error": str(e)[:200]})
             return row_id
+        self._register_exchange_success()
         await self.sb("PATCH", f"{self.TABLE_ORDERS}?id=eq.{row_id}", {"status": "open"})
         return row_id
 
@@ -794,17 +833,24 @@ class LitGridLive:
         order_index = row.get("exchange_order_id")
         if order_index is None:
             return False
+        if self._exchange_rate_limited():
+            return False
         try:
             _tx, _resp, err = await asyncio.wait_for(
                 self.client.cancel_order(market_index=MARKET_ID, order_index=int(order_index)),
                 timeout=ORDER_TIMEOUT,
             )
             if err:
+                if self._is_rate_limit_error(str(err)):
+                    self._register_exchange_rate_limit()
                 await self.log_run("cancel_order_failed", {"row_id": row["id"], "error": str(err)[:200]})
                 return False
         except Exception as e:
+            if self._is_rate_limit_error(str(e)):
+                self._register_exchange_rate_limit()
             await self.log_run("cancel_order_failed", {"row_id": row["id"], "error": str(e)[:200]})
             return False
+        self._register_exchange_success()
         await self.sb("PATCH", f"{self.TABLE_ORDERS}?id=eq.{row['id']}", {"status": "cancel_requested"})
         return True
 

@@ -273,6 +273,8 @@ def make_bot(state, orders=None, signer_fail=False, signer_err=None, cancel_err=
     bot._auth_token_expiry_at = 0.0
     bot._last_balance_check = 0.0
     bot._balance_paused = False
+    bot._exchange_backoff_until = 0.0
+    bot._exchange_backoff_s = core.RATE_LIMIT_BACKOFF_START
     bot.client = FakeSignerClient(fail=signer_fail, err=signer_err, cancel_err=cancel_err)
     bot._order_api = FakeOrderApi(orders_by_co, fail=order_api_fail, client=bot.client,
                                    active_orders_by_co=active_orders_by_co,
@@ -319,6 +321,70 @@ def t_order_is_terminal_uses_remaining_amount_primarily():
           _order_is_terminal(FakeOrder(1, status="open", remaining_base_amount=0.7)) is False)
     check("a canceled-post-only style status is terminal even with remaining reported",
           _order_is_terminal(FakeOrder(1, status="canceled-post-only", remaining_base_amount=1.2)) is True)
+
+
+# ── Exchange-request backoff (2026-10-22 real incident) ────────────────────────────────────────
+
+def t_is_rate_limit_error_matches_429_and_nonce_not_unrelated_errors():
+    check("a 429 message matches", core.LitGridLive._is_rate_limit_error(
+        "(429)\nReason: Too Many Requests"))
+    check("an 'invalid nonce' message matches, case-insensitively", core.LitGridLive._is_rate_limit_error(
+        "HTTP response body: code=21104 message='Invalid Nonce'"))
+    check("an unrelated rejection (bad price) does NOT match", not core.LitGridLive._is_rate_limit_error(
+        "code=21101 message='invalid price'"))
+    check("an unrelated rejection (insufficient margin) does NOT match", not core.LitGridLive._is_rate_limit_error(
+        "insufficient margin for this order"))
+
+
+async def t_place_grid_order_enters_backoff_on_a_429_and_skips_the_next_attempt():
+    bot, fake = make_bot(base_state(), signer_err="(429)\nReason: Too Many Requests")
+    row_id = await bot.place_grid_order(900, "buy", 3.10, 1.70)
+    check("the first (rate-limited) attempt still reaches the exchange once",
+          len(bot.client.placed) == 1, bot.client.placed)
+    check("that attempt is rejected (row_id is None, same as any other clean rejection)",
+          row_id is None, row_id)
+    check("backoff is now active", bot._exchange_rate_limited() is True)
+    n_orders_before = len(fake.orders)
+    row_id_2 = await bot.place_grid_order(901, "buy", 3.05, 1.70)
+    check("a second attempt during backoff never reaches the exchange at all",
+          len(bot.client.placed) == 1, bot.client.placed)
+    check("no new ledger row is written for a skipped-during-backoff attempt",
+          len(fake.orders) == n_orders_before, fake.orders)
+    check("the skipped attempt returns None", row_id_2 is None, row_id_2)
+
+
+async def t_cancel_order_row_enters_backoff_on_invalid_nonce_and_skips_the_next_attempt():
+    resting_a = {"id": 1, "level": 900, "side": "buy", "status": "open", "client_order_index": 1,
+                 "exchange_order_id": 50, "limit_price": 3.00, "size": 1.70}
+    resting_b = {"id": 2, "level": 901, "side": "buy", "status": "open", "client_order_index": 2,
+                 "exchange_order_id": 51, "limit_price": 3.01, "size": 1.70}
+    bot, fake = make_bot(base_state(), orders=[resting_a, resting_b],
+                          cancel_err="code=21104 message='invalid nonce'")
+    ok1 = await bot.cancel_order_row(resting_a)
+    check("the first (rate-limited) cancel still reaches the exchange once",
+          len(bot.client.cancelled) == 1, bot.client.cancelled)
+    check("that cancel is reported as failed", ok1 is False, ok1)
+    check("backoff is now active", bot._exchange_rate_limited() is True)
+    ok2 = await bot.cancel_order_row(resting_b)
+    check("a second cancel during backoff never reaches the exchange at all",
+          len(bot.client.cancelled) == 1, bot.client.cancelled)
+    check("the skipped cancel is also reported as failed (never claims success)", ok2 is False, ok2)
+
+
+async def t_exchange_backoff_resets_on_a_clean_success():
+    bot, fake = make_bot(base_state())
+    bot._exchange_backoff_s = 60.0  # pretend we already backed off once before
+    row_id = await bot.place_grid_order(900, "buy", 3.10, 1.70)
+    check("a clean placement succeeds", row_id is not None, row_id)
+    check("the backoff duration resets back to the starting value on success",
+          bot._exchange_backoff_s == core.RATE_LIMIT_BACKOFF_START, bot._exchange_backoff_s)
+
+
+async def t_place_grid_order_does_not_backoff_on_an_unrelated_rejection():
+    bot, fake = make_bot(base_state(), signer_err="insufficient margin for this order")
+    await bot.place_grid_order(900, "buy", 3.10, 1.70)
+    check("an unrelated rejection never triggers the exchange backoff",
+          bot._exchange_rate_limited() is False, bot._exchange_backoff_until)
 
 
 def t_rounding_does_not_shift_the_real_fill_price_bin():
@@ -2906,6 +2972,7 @@ async def main():
     t_precision_and_minimum_enforcement()
     t_order_fill_amounts_uses_real_human_decimal_units()
     t_order_is_terminal_uses_remaining_amount_primarily()
+    t_is_rate_limit_error_matches_429_and_nonce_not_unrelated_errors()
     t_rounding_does_not_shift_the_real_fill_price_bin()
     t_cover_for_tier_matches_the_live_gates()
     t_capital_corrected_spacing_multiplier_matches_verified_values()
@@ -2928,6 +2995,10 @@ async def main():
               t_place_grid_order_records_explicit_closes_level,
               t_place_grid_order_rejected_by_exchange,
               t_place_grid_order_unknown_outcome_stays_pending,
+              t_place_grid_order_enters_backoff_on_a_429_and_skips_the_next_attempt,
+              t_cancel_order_row_enters_backoff_on_invalid_nonce_and_skips_the_next_attempt,
+              t_exchange_backoff_resets_on_a_clean_success,
+              t_place_grid_order_does_not_backoff_on_an_unrelated_rejection,
               t_cancel_marks_cancel_requested_not_cancelled_directly,
               t_cancel_requested_resolves_to_filled_if_a_fill_raced_it,
               t_cancel_order_row_checks_the_sdk_error,
