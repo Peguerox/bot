@@ -816,6 +816,26 @@ class LitGridLive:
         rows = await self.sb("GET", f"{self.TABLE_ORDERS}?side=eq.buy&status=eq.filled&select=id&limit=1")
         return bool(rows)
 
+    async def _fetch_active_orders_by_co(self, auth):
+        """Fallback for a row account_orders() can't find by client_order_index (that lookup has
+        a finite history window -- see UNRESOLVED_ORDER_STALE_AFTER_S's docstring). This lists
+        every currently-resting order for the account/market with no per-ID lookup limitation, so
+        it's authoritative for "is this still resting on the exchange" even on an order that
+        lookup has lost track of. Returns {} on any read failure -- callers just fall through to
+        the stale-unresolved path unchanged, never raise mid-reconcile."""
+        try:
+            resp = await asyncio.wait_for(
+                self._order_api.account_active_orders(
+                    authorization=auth, account_index=self.account_index, market_id=MARKET_ID,
+                    _request_timeout=REST_TIMEOUT,
+                ),
+                timeout=REST_TIMEOUT + 2.0,
+            )
+        except Exception as e:
+            await self.log_run("active_orders_read_failed", {"error": str(e)[:200]})
+            return {}
+        return {int(o.client_order_index): o for o in (resp.orders or [])}
+
     async def reconcile_pending_orders(self, profit_mode=None, route=None):
         """Checks every non-terminal ledger row against the exchange's own account_orders().
         Returns (all_ok, usdc_delta, has_stale_unresolved): all_ok is True only if every batch
@@ -855,6 +875,7 @@ class LitGridLive:
         usdc_delta = 0.0
         has_stale_unresolved = False
         now = datetime.now(timezone.utc)
+        active_by_co = None
         # Rest cap (2026-10-20): in rest mode, once Rest (net of withdrawals) reaches the cap,
         # new profit goes to the chosen overflow bucket instead. A whole trade's profit goes to
         # one bucket, so Rest can end a few cents over the cap.
@@ -881,11 +902,39 @@ class LitGridLive:
             for r in batch:
                 o = by_co.get(r["client_order_index"])
                 if o is None:
+                    # account_orders()'s lookup can lose visibility (finite history window, see
+                    # UNRESOLVED_ORDER_STALE_AFTER_S's docstring) even for an order that's really
+                    # still resting. account_active_orders() lists the whole account/market with
+                    # no per-ID lookup limitation -- fetched at most once per reconcile pass,
+                    # lazily, only when a row is actually missing.
+                    if active_by_co is None:
+                        active_by_co = await self._fetch_active_orders_by_co(auth)
+                    o = active_by_co.get(r["client_order_index"])
+                if o is None:
                     placed_at = _parse_iso(r.get("placed_at"))
                     if placed_at and (now - placed_at).total_seconds() > UNRESOLVED_ORDER_STALE_AFTER_S:
                         await self.log_run("order_unresolved_stale", {
                             "row_id": r["id"], "age_s": (now - placed_at).total_seconds()})
                         has_stale_unresolved = True
+                        # Confirmed absent from BOTH the targeted co-index lookup AND the
+                        # account's full active-orders listing -- it is definitively NOT resting
+                        # on the exchange anymore, whatever its real fate (filled/cancelled/
+                        # rejected/never-placed; account_active_orders has no ID-lookup
+                        # limitation, so this is authoritative for "still resting," even though it
+                        # can't tell us which terminal state). Marking it terminal here is what
+                        # unsticks a spacing-change cancel that would otherwise wait on it forever
+                        # (the stuck-order incident, Worker 3, 2026-10-22, row 846 -- placed_at
+                        # 03:37:59, never resolved). We never claim it filled: if it secretly did,
+                        # check_balance_divergence (real exchange balance is ground truth) catches
+                        # the ledger/exchange mismatch next tick and pauses new entries, same
+                        # fail-safe as every other bookkeeping gap in this file.
+                        try:
+                            await self.sb("PATCH", f"{self.TABLE_ORDERS}?id=eq.{r['id']}",
+                                           {"status": "rejected", "error": "vanished_from_exchange_lookup"})
+                            await self.log_run("order_vanished_marked_rejected", {"row_id": r["id"]})
+                        except Exception as e:
+                            await self.log_run("reconcile_row_write_failed", {"row_id": r["id"], "error": str(e)[:200]})
+                            all_ok = False
                     continue
                 filled_qty, filled_price = _order_fill_amounts(o)
                 filled_quote = float(getattr(o, "filled_quote_amount", 0) or 0)

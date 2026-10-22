@@ -126,10 +126,18 @@ class FakeOrdersResp:
 
 
 class FakeOrderApi:
-    def __init__(self, orders_by_co=None, fail=False, client=None):
+    def __init__(self, orders_by_co=None, fail=False, client=None,
+                 active_orders_by_co=None, active_orders_fail=False):
         self.orders_by_co = orders_by_co or {}
         self.fail = fail
         self.client = client
+        # Fallback lookup for a row account_orders() can't find by ID (2026-10-22, the Worker 3
+        # stuck-order incident) -- lists everything resting for the account/market, no per-ID
+        # limitation. Separate fixture from orders_by_co so a test can show the two lookups
+        # disagreeing (e.g. account_orders misses it, account_active_orders still has it).
+        self.active_orders_by_co = active_orders_by_co or {}
+        self.active_orders_fail = active_orders_fail
+        self.active_orders_calls = 0
 
     async def account_orders(self, authorization, client_order_indexes, account_index, _request_timeout=None):
         if self.fail:
@@ -148,6 +156,12 @@ class FakeOrderApi:
                                       filled_base_amount=base, filled_quote_amount=base * price,
                                       remaining_base_amount=0.0))
         return FakeOrdersResp(out)
+
+    async def account_active_orders(self, authorization, account_index, market_id, _request_timeout=None):
+        self.active_orders_calls += 1
+        if self.active_orders_fail:
+            raise RuntimeError("simulated active-orders read failure")
+        return FakeOrdersResp(list(self.active_orders_by_co.values()))
 
 
 class FakeAsset:
@@ -241,7 +255,8 @@ def base_state(**over):
 
 
 def make_bot(state, orders=None, signer_fail=False, signer_err=None, cancel_err=None,
-             orders_by_co=None, assets=None, order_api_fail=False, account_api_fail=False):
+             orders_by_co=None, assets=None, order_api_fail=False, account_api_fail=False,
+             active_orders_by_co=None, active_orders_fail=False):
     bot = LitGridLive.__new__(LitGridLive)
     bot.TABLE_STATE, bot.TABLE_ORDERS, bot.TABLE_RUNS = core.TABLE_STATE, core.TABLE_ORDERS, core.TABLE_RUNS
     bot._tag = ""
@@ -259,7 +274,9 @@ def make_bot(state, orders=None, signer_fail=False, signer_err=None, cancel_err=
     bot._last_balance_check = 0.0
     bot._balance_paused = False
     bot.client = FakeSignerClient(fail=signer_fail, err=signer_err, cancel_err=cancel_err)
-    bot._order_api = FakeOrderApi(orders_by_co, fail=order_api_fail, client=bot.client)
+    bot._order_api = FakeOrderApi(orders_by_co, fail=order_api_fail, client=bot.client,
+                                   active_orders_by_co=active_orders_by_co,
+                                   active_orders_fail=active_orders_fail)
     bot._account_api = FakeAccountApi(assets, fail=account_api_fail)
     fake = FakeDb(state, orders)
     bot.sb = fake.sb
@@ -967,6 +984,89 @@ async def t_tick_blocks_new_entries_while_an_order_is_stale_unresolved():
     new_buys = [o for o in fake.orders if o["side"] == "buy" and o["id"] != 1]
     check("no new buys are placed elsewhere while an order sits stale-unresolved",
           len(new_buys) == 0, new_buys)
+
+
+async def t_reconcile_falls_back_to_active_orders_when_the_co_index_lookup_misses():
+    # 2026-10-22: account_orders()'s lookup can lose visibility even for an order that's really
+    # still resting (finite history window). account_active_orders() lists everything resting for
+    # the account/market with no per-ID limitation -- it should still find and correctly process
+    # a partial fill even when account_orders() itself returns nothing for this client_order_index.
+    still_open = {"id": 1, "level": 900, "side": "buy", "client_order_index": 999,
+                  "status": "pending", "limit_price": 3.10, "size": 1.70,
+                  "placed_at": core.now_iso()}
+    resting = FakeOrder(999, order_index=77, status="open",
+                        filled_base_amount=0.80, filled_quote_amount=0.80 * 3.10,
+                        remaining_base_amount=0.90)
+    bot, fake = make_bot(base_state(), orders=[still_open], active_orders_by_co={999: resting})
+    all_ok, _usdc_delta, has_stale_unresolved = await bot.reconcile_pending_orders()
+    check("reconcile succeeds using the active-orders fallback", all_ok is True, all_ok)
+    check("the row is NOT treated as stale/vanished -- the fallback found it resting",
+          has_stale_unresolved is False, has_stale_unresolved)
+    row = next(r for r in fake.orders if r["id"] == 1)
+    check("the row's real exchange id and partial fill are picked up from the fallback lookup",
+          row.get("exchange_order_id") == 77 and abs(row.get("filled_qty") - 0.80) < 1e-9,
+          row)
+    check("the row stays open (not yet terminal)", row.get("status") == "open", row)
+
+
+async def t_reconcile_checks_active_orders_at_most_once_per_pass():
+    # Fetched lazily, only when a row is actually missing from account_orders() -- and cached for
+    # the rest of this same reconcile pass rather than re-fetched per row.
+    a = {"id": 1, "level": 900, "side": "buy", "client_order_index": 1,
+         "status": "pending", "limit_price": 3.10, "size": 1.70, "placed_at": core.now_iso()}
+    b = {"id": 2, "level": 901, "side": "buy", "client_order_index": 2,
+         "status": "pending", "limit_price": 3.09, "size": 1.70, "placed_at": core.now_iso()}
+    bot, fake = make_bot(base_state(), orders=[a, b])
+    await bot.reconcile_pending_orders()
+    check("account_active_orders is called at most once for two misses in the same pass",
+          bot._order_api.active_orders_calls == 1, bot._order_api.active_orders_calls)
+
+
+async def t_reconcile_marks_a_row_vanished_from_both_lookups_as_rejected_once_stale():
+    # The Worker 3 stuck-order incident (2026-10-22, real money): a sell order (row 846, level
+    # 2056) got written to the ledger but never confirmed by the exchange -- absent from BOTH
+    # account_orders() and account_active_orders() for hours, it blocked every spacing-change
+    # cancel-and-reanchor forever (cancel_order_row refuses to act with no exchange_order_id, and
+    # the row never left OPEN_STATUSES). Once confirmed absent from BOTH lookups past the stale
+    # threshold, it must resolve to a terminal status instead of looping forever.
+    vanished = {"id": 846, "level": 2056, "side": "sell", "client_order_index": 999,
+                "status": "pending", "limit_price": 3.9489, "size": 33.39,
+                "placed_at": "2020-01-01T00:00:00+00:00"}
+    bot, fake = make_bot(base_state(), orders=[vanished])
+    all_ok, _usdc_delta, has_stale_unresolved = await bot.reconcile_pending_orders()
+    check("reconcile still succeeds (no read failures, just a confirmed absence)", all_ok is True, all_ok)
+    check("the stale-unresolved condition is still reported for this pass",
+          has_stale_unresolved is True, has_stale_unresolved)
+    check("the vanished order is logged distinctly",
+          any(r["action"] == "order_vanished_marked_rejected" for r in fake.runs), fake.runs)
+    row = next(r for r in fake.orders if r["id"] == 846)
+    check("the row resolves to rejected instead of looping forever",
+          row.get("status") == "rejected", row)
+
+
+async def t_tick_spacing_change_unsticks_once_the_vanished_order_resolves():
+    # The actual symptom this fixes: a spacing change (e.g. gate-spacing-growth easing the tier)
+    # cannot complete -- and therefore the bot never places anything else, forever -- while a
+    # vanished order sits unresolved at a level the new grid needs to cancel through.
+    held = {"id": 1, "level": 10, "side": "buy", "status": "filled",
+            "filled_qty": 6.0, "filled_price": 3.70, "closes_level": None}
+    vanished = {"id": 846, "level": 2056, "side": "sell", "client_order_index": 999,
+                "status": "pending", "limit_price": 3.9489, "size": 33.39,
+                "closes_level": 10, "placed_at": "2020-01-01T00:00:00+00:00"}
+    bot, fake = make_bot(
+        base_state(spacing_pct=0.125, internal_spacing_pct=0.25, lit_balance=6.0,
+                   grid_anchor_price=3.80205, gate_spacing_growth_enabled=True,
+                   dynamic_dd_enabled=True, dynamic_dd_tier=10),
+        orders=[held, vanished],
+        assets=[FakeAsset("USDC", 500.0, 0.0), FakeAsset("LIT", 6.0, 0.0)],
+    )
+    bot.fetch_current_price = lambda: _async_return(3.78)
+    await bot.tick()
+    check("the previously-vanished order is resolved, not still resting",
+          next(r for r in fake.orders if r["id"] == 846)["status"] == "rejected",
+          fake.orders)
+    check("the spacing change completes instead of retrying forever",
+          fake.state.get("internal_spacing_pct") == 0.125, fake.state)
 
 
 # ── Lock-aware flatten (never acts after a confirmed handover) ──────────────────────────────────
@@ -2698,6 +2798,10 @@ async def main():
               t_tick_applies_fresh_fill_cash_delta_when_balance_refresh_is_skipped,
               t_reconcile_logs_a_warning_for_a_long_unresolved_order,
               t_tick_blocks_new_entries_while_an_order_is_stale_unresolved,
+              t_reconcile_falls_back_to_active_orders_when_the_co_index_lookup_misses,
+              t_reconcile_checks_active_orders_at_most_once_per_pass,
+              t_reconcile_marks_a_row_vanished_from_both_lookups_as_rejected_once_stale,
+              t_tick_spacing_change_unsticks_once_the_vanished_order_resolves,
               t_flatten_aborts_if_the_lock_is_lost_during_the_cancel_loop,
               t_flatten_aborts_if_the_lock_is_lost_during_the_sell_loop,
               t_market_sell_level_refuses_without_the_lock,
