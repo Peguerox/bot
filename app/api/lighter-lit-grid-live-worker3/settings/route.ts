@@ -72,6 +72,11 @@ export async function POST(req: NextRequest) {
   if (body.gateSpacingGrowth === true || body.gateSpacingGrowth === false) {
     out["gate_spacing_growth_enabled"] = body.gateSpacingGrowth;
     out["order_size_lit"] = null;
+    // The stored multiplier was computed for whatever tier applied the last time growth was on.
+    // Clearing it (and the tier) makes the worker recompute a fresh one for the current tier,
+    // instead of re-anchoring to a stale spacing on the first tick (2026-10-22 audit).
+    out["gate_spacing_multiplier_value"] = null;
+    out["dynamic_dd_tier"] = null;
   }
 
   for (const [key, col] of [

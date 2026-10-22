@@ -318,16 +318,18 @@ Starts disabled, max_open_buys defaults to 1. Nothing here ever places a real or
 enabled=true is set from the dashboard -- explicitly the user's call.
 """
 import asyncio
+import collections
 import contextlib
 import math
 import os
 import time
 import json as jsonlib
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 
 import aiohttp
 import lighter
 
+import grid_engine
 from lit_grid_paper import (
     level_of, compute_order_size_lit, levels_for_drawdown, LiveBook,
     STREAM_URL, BOOK_MAX_AGE, BOOK_WS_RECONNECT_AFTER,
@@ -351,13 +353,34 @@ REST_TIMEOUT = 8.0
 ORDER_TIMEOUT = 12.0
 # Minimum gap between cancel-all attempts during a grid reset (one tx each, see reset_grid).
 GRID_RESET_CANCEL_RETRY_S = 10.0
+# Exchange requests per minute shared by every bot in this process (Worker 3 and Worker 4 are
+# sub-accounts of one wallet; Lighter meters a standard account at 60/min per wallet). Kept under
+# the cap so a burst from one bot can never trip the limit for both.
+REQUEST_BUDGET_PER_MIN = 40.0
+# A pending row absent from the exchange this long, confirmed by a successful full read, was never
+# placed (or is already gone) -- resolved instead of blocking its slot. Lighter shows new orders
+# 3-4s late, so 60s is far past any honest delay.
+GHOST_RESOLVE_S = 60.0
+# Engine v2 (grid_engine.py): reconcile + book read at most this often (each is one read);
+# orders sent recently and not yet visible are not re-sent for INFLIGHT_S; a price that was
+# rejected for a non-rate-limit reason is not retried for REJECT_COOLDOWN_S; one batch carries at
+# most BATCH_MAX transactions; a diff wanting more than BULK_CANCEL cancels uses one cancel-all
+# instead; trailing-up market buys are spaced at least TRAIL_COOLDOWN_S apart.
+RECONCILE_EVERY = 5.0
+INFLIGHT_S = 12.0
+REJECT_COOLDOWN_S = 60.0
+BATCH_MAX = 20
+BULK_CANCEL = 8
+TRAIL_COOLDOWN_S = 10.0
+VISIBILITY_GRACE_S = 6.0        # a just-sent order is not visible to any read before this
+SETTLE_S = 30.0                 # a just-vanished order may explain a balance mismatch this long
 AUTH_TOKEN_LIFETIME_S = 10 * 60
 AUTH_TOKEN_REFRESH_MARGIN_S = 60.0
 LOCK_REFRESH_EVERY = 5.0
 LOCK_STALE_AFTER = 30.0
 RATE_LIMIT_BACKOFF_START = 15.0
-RATE_LIMIT_BACKOFF_MAX = 120.0
-BALANCE_RECONCILE_EVERY = 10.0
+RATE_LIMIT_BACKOFF_MAX = 60.0  # Lighter documents a 60s static firewall cooldown
+BALANCE_RECONCILE_EVERY = 30.0
 BALANCE_DIVERGENCE_TOLERANCE_LIT = 0.03
 # Dynamic drawdown (toggle `dynamic_dd_enabled`, 2026-10-19 research in
 # research/lit-dynamic-drawdown-2026-10-19/): Drawdown follows how far price is below its
@@ -390,6 +413,44 @@ PROFIT_BUCKET_COLUMN = {
     "cover_drop": "profit_bucket_cover_drop_usd",
     "compound": "profit_bucket_compound_usd",
 }
+
+
+class ExchangeLimiter:
+    """One request budget and one backoff for every bot in the process (2026-10-22). Both bots
+    draw from the same wallet's limit, so one bot's 429 must slow both -- per-instance backoff let
+    Worker 4 keep firing while Worker 3 was already rate-limited, extending the lockout for both."""
+
+    def __init__(self, per_minute=REQUEST_BUDGET_PER_MIN):
+        # A sliding 60s window, not a token bucket: a full bucket plus a minute of refill let 80
+        # requests through in one minute against Lighter's 60 (found by the engine simulator).
+        self.capacity = int(per_minute)
+        self._sent = collections.deque()
+        self.backoff_until = 0.0
+        self.backoff_s = RATE_LIMIT_BACKOFF_START
+
+    def blocked(self):
+        return time.time() < self.backoff_until
+
+    def try_take(self, n=1):
+        if self.blocked():
+            return False
+        now = time.time()
+        while self._sent and now - self._sent[0] >= 60.0:
+            self._sent.popleft()
+        if len(self._sent) + n > self.capacity:
+            return False
+        self._sent.extend([now] * n)
+        return True
+
+    def hit(self):
+        self.backoff_until = time.time() + self.backoff_s
+        self.backoff_s = min(self.backoff_s * 2, RATE_LIMIT_BACKOFF_MAX)
+
+    def ok(self):
+        self.backoff_s = RATE_LIMIT_BACKOFF_START
+
+
+SHARED_LIMITER = ExchangeLimiter()
 
 
 def round_price(price):
@@ -470,9 +531,11 @@ def capital_corrected_spacing_multiplier(tier, available_usdc, base_capital_usdc
     capital/spacing settings. An unrecognized tier (toggle just switched on, nothing recorded
     yet) is treated as the base tier: multiplier 1, the safe/inert default."""
     cover = cover_for_tier(tier)
-    Kg = max(float(available_usdc), 1e-9)
-    K0 = float(base_capital_usdc) if base_capital_usdc is not None else Kg
-    return math.sqrt((cover / BASE_COVER) * (K0 / Kg))
+    K0 = float(base_capital_usdc) if base_capital_usdc is not None else max(float(available_usdc), 1e-9)
+    # Floor Kg at a quarter of K0 and cap the result at 1x-4x (independent audit, 2026-10-22): an
+    # available-cash reading near zero at a tier switch used to blow the multiplier up to ~10^6.
+    Kg = max(float(available_usdc), 0.25 * K0, 1e-9)
+    return min(max(math.sqrt((cover / BASE_COVER) * (K0 / Kg)), 1.0), 4.0)
 
 
 DEESCALATE_HYSTERESIS_PTS = 1.0
@@ -612,6 +675,30 @@ def plan_reanchor(buys, sells, all_levels, price, new_spacing_pct):
     if offset * step > 600:
         return None
     anchor = price / math.exp(offset * step)
+    planned = _reanchor_moves(buys, sells, offset, price, step)
+    if planned is None:
+        return None
+    moves, mapping = planned
+    return anchor, moves, mapping
+
+
+def plan_reanchor_log(buys, sells, all_levels, price, new_spacing_pct):
+    """plan_reanchor for engine v2: the anchor is returned as ln(anchor), so line prices are
+    exp(anchor_log + line*step) and there is no overflow limit at any spacing -- v1's
+    price / exp(offset*step) refused past offset*step > 600, and every re-anchor adds ~2000 lines,
+    so Worker 4 was a few re-anchors (or one spacing >= ~1.76%) away from cancelling its whole book
+    and then refusing to rebuild (independent audit, 2026-10-22). Returns
+    (anchor_log, {row_id: (column, new_line)}, {old_level: new_line}) or None if unsafe."""
+    step = math.log(1 + new_spacing_pct / 100.0)
+    offset = max((abs(int(x)) for x in all_levels), default=0) + REANCHOR_LEVEL_MARGIN
+    planned = _reanchor_moves(buys, sells, offset, price, step)
+    if planned is None:
+        return None
+    moves, mapping = planned
+    return math.log(price) - offset * step, moves, mapping
+
+
+def _reanchor_moves(buys, sells, offset, price, step):
     held = holdings_from_rows(buys, sells)
     segs = open_segments(buys, sells)
     used, moves, mapping = {}, {}, {}
@@ -637,7 +724,7 @@ def plan_reanchor(buys, sells, all_levels, price, new_spacing_pct):
                    (lambda h: h["bucket_cost_total"], 0.01)):
         if abs(tot(held, f) - tot(after, f)) > tol:
             return None
-    return anchor, moves, mapping
+    return moves, mapping
 
 
 def now_iso():
@@ -699,9 +786,16 @@ class LitGridLive:
         # _run_tick_loop's own backoff -- the spacing-change cancel loop just retried every tick
         # forever, hammering the exchange and extending its own rate limit instead of letting it
         # clear. See _exchange_rate_limited()'s docstring.
-        self._exchange_backoff_until = 0.0
-        self._exchange_backoff_s = RATE_LIMIT_BACKOFF_START
+        self._limiter = SHARED_LIMITER
         self._last_cancel_all_at = 0.0
+        self._snapshot = None           # last successful full read of resting orders (engine v2)
+        self._snapshot_at = 0.0
+        self._last_reconcile_at = 0.0
+        self._inflight = {}             # (side, price_int) -> sent_at
+        self._missing_since = {}        # client_order_index -> first time a read did not show it
+        self._reject_until = {}         # (side, price_int) -> retry_after
+        self._last_trail_at = 0.0
+        self._engine_snapshot_at = 0.0  # the read the engine last acted on (one action per read)
 
     # ── Supabase ─────────────────────────────────────────────────────────────────────────────
     async def sb(self, method, path, body=None):
@@ -754,13 +848,40 @@ class LitGridLive:
     # ── Order ledger ─────────────────────────────────────────────────────────────────────────
     @staticmethod
     def _is_rate_limit_error(msg):
-        """429/Too-Many-Requests and invalid-nonce are both signals to slow down -- a nonce error
-        can come from two instances briefly overlapping during a deploy (Render keeps the old
-        container alive ~30-60s after the new one starts) as much as from pure request volume,
-        but the right response is the same either way: back off and let it clear. Any OTHER
-        rejection reason (bad price, insufficient margin, etc.) must never trigger this -- those
-        are real decisions, not pacing problems."""
-        return "429" in msg or "Too Many Requests" in msg or "invalid nonce" in msg.lower()
+        """Signals to slow down: 429/405 from the rate limiter or WAF, and "invalid nonce" (after a
+        refused send, or two instances overlapping during a deploy). Matches the transport markers
+        only -- a price like 3.4290 in an error message must never read as a rate limit. Any OTHER
+        rejection (bad price, insufficient funds) is a real decision, not a pacing problem."""
+        m = str(msg)
+        return ("(429)" in m or "Too Many Requests" in m or "(405)" in m or "Not Allowed" in m
+                or "invalid nonce" in m.lower())
+
+    async def _resync_nonce(self, hard):
+        """The SDK only repairs its optimistic nonce on a BadRequestException. A 429/405 or a
+        timeout escapes that handler with the nonce already advanced, so the next transaction was
+        guaranteed to fail with "invalid nonce". Soft: roll back one (the request was refused).
+        Hard: re-read the next nonce from the exchange (a timeout may or may not have landed)."""
+        nm = getattr(self.client, "nonce_manager", None)
+        if nm is None:
+            return
+        for key in list(getattr(nm, "api_keys_list", []) or []):
+            try:
+                if hard:
+                    await nm.async_hard_refresh_nonce(key)
+                else:
+                    nm.acknowledge_failure(key)
+            except Exception as e:
+                await self.log_run("nonce_resync_failed", {"error": str(e)[:200]})
+
+    async def _on_send_exception(self, e):
+        """Shared handling for an exception out of any signed send. Returns True if it was a
+        rate-limit refusal (definitely not placed), False if the outcome is unknown."""
+        if self._is_rate_limit_error(str(e)):
+            self._register_exchange_rate_limit()
+            await self._resync_nonce(hard=False)
+            return True
+        await self._resync_nonce(hard=True)
+        return False
 
     def _exchange_rate_limited(self):
         """True while a 429/nonce backoff window is active -- callers must skip the real SDK call
@@ -768,14 +889,17 @@ class LitGridLive:
         perpetuated by our own repeated hammering. place_grid_order/cancel_order_row each catch
         their own errors and never raise, so this can't rely on _run_tick_loop's own backoff --
         that only ever sees an exception that escapes all the way out of tick()."""
-        return time.time() < self._exchange_backoff_until
+        return self._limiter.blocked()
+
+    def _take_request(self):
+        """Budget gate for every exchange request (reads and sends). False = skip this one now."""
+        return self._limiter.try_take()
 
     def _register_exchange_rate_limit(self):
-        self._exchange_backoff_until = time.time() + self._exchange_backoff_s
-        self._exchange_backoff_s = min(self._exchange_backoff_s * 2, RATE_LIMIT_BACKOFF_MAX)
+        self._limiter.hit()
 
     def _register_exchange_success(self):
-        self._exchange_backoff_s = RATE_LIMIT_BACKOFF_START
+        self._limiter.ok()
 
     async def place_grid_order(self, level, side, limit_price, size, closes_level=None,
                                 funded_from_bucket_usd=0.0):
@@ -783,9 +907,9 @@ class LitGridLive:
         # the send let exactly one action slip through per lock-loss event.
         if not await self._touch_lock_heartbeat():
             return None
-        if self._exchange_rate_limited():
+        if not self._take_request():
             return None
-        co_idx = int(time.time() * 1000) % 500_000_000
+        co_idx = self._next_co_idx()
         row = {
             "level": level, "side": side, "client_order_index": co_idx,
             "status": "pending", "limit_price": limit_price, "size": size,
@@ -819,13 +943,12 @@ class LitGridLive:
                                {"status": "rejected", "error": str(err)[:200]})
                 return None
         except Exception as e:
-            if self._is_rate_limit_error(str(e)):
+            if await self._on_send_exception(e):
                 # Refused by the rate limiter before reaching the sequencer -- a definite
                 # rejection, not an unknown outcome. Left 'pending' it became a ghost row that
                 # held its slot (no real order, and the bot would not re-place one) until the
                 # 1h stale sweep: live 2026-10-22 it kept the sell for a just-bought lot off the
                 # book, right at price.
-                self._register_exchange_rate_limit()
                 await self.sb("PATCH", f"{self.TABLE_ORDERS}?id=eq.{row_id}",
                                {"status": "rejected", "error": ("rate_limited: " + str(e))[:200]})
                 return None
@@ -844,7 +967,7 @@ class LitGridLive:
         order_index = row.get("exchange_order_id")
         if order_index is None:
             return False
-        if self._exchange_rate_limited():
+        if not self._take_request():
             return False
         try:
             _tx, _resp, err = await asyncio.wait_for(
@@ -857,8 +980,7 @@ class LitGridLive:
                 await self.log_run("cancel_order_failed", {"row_id": row["id"], "error": str(err)[:200]})
                 return False
         except Exception as e:
-            if self._is_rate_limit_error(str(e)):
-                self._register_exchange_rate_limit()
+            await self._on_send_exception(e)
             await self.log_run("cancel_order_failed", {"row_id": row["id"], "error": str(e)[:200]})
             return False
         self._register_exchange_success()
@@ -939,8 +1061,11 @@ class LitGridLive:
 
     async def _fetch_active_orders_list(self, auth):
         """Every order resting on the exchange for this account/market, or None if the read
-        failed -- unlike _fetch_active_orders_by_co, a failed read must never look like "nothing
-        resting" here, since reset_grid treats an empty list as proof the book is clear."""
+        failed or the request budget is spent. A failed read must never look like "nothing
+        resting": reset_grid treats an empty list as proof the book is clear, and reconcile only
+        resolves a missing row when this read succeeded."""
+        if not self._take_request():
+            return None
         try:
             resp = await asyncio.wait_for(
                 self._order_api.account_active_orders(
@@ -954,7 +1079,40 @@ class LitGridLive:
                 self._register_exchange_rate_limit()
             await self.log_run("active_orders_read_failed", {"error": str(e)[:200]})
             return None
-        return list(resp.orders or [])
+        orders = list(resp.orders or [])
+        self._snapshot, self._snapshot_at = orders, time.time()
+        return orders
+
+    async def _cancel_all_on_exchange(self, context):
+        """ONE cancel-all transaction for this sub-account (it trades nothing but this grid), at
+        most every GRID_RESET_CANCEL_RETRY_S and inside the request budget. Cancelling one signed
+        request per order is what tripped the rate limit on 2026-10-22. True if sent cleanly."""
+        if not await self._touch_lock_heartbeat():
+            return False
+        if time.time() - self._last_cancel_all_at < GRID_RESET_CANCEL_RETRY_S:
+            return False
+        if not self._take_request():
+            return False
+        self._last_cancel_all_at = time.time()
+        try:
+            _tx, _resp, err = await asyncio.wait_for(
+                self.client.cancel_all_orders(
+                    time_in_force=self.client.CANCEL_ALL_TIF_IMMEDIATE, timestamp_ms=0),
+                timeout=ORDER_TIMEOUT,
+            )
+        except Exception as e:
+            await self._on_send_exception(e)
+            _resp, err = None, str(e)
+        code = getattr(_resp, "code", 200)
+        if not err and code != 200:
+            err = f"send_tx code {code}: {getattr(_resp, 'message', '')}"
+        if err:
+            if self._is_rate_limit_error(str(err)):
+                self._register_exchange_rate_limit()
+            await self.log_run(f"{context}_cancel_all_failed", {"error": str(err)[:200]})
+            return False
+        self._register_exchange_success()
+        return True
 
     async def reset_grid(self, profit_mode=None, route=None):
         """Clean re-anchor (grid_reset_requested, 2026-10-22). The spacing-change re-anchor
@@ -983,46 +1141,27 @@ class LitGridLive:
         if active is None:
             return
         if active:
-            if self._exchange_rate_limited():
-                return
-            if time.time() - self._last_cancel_all_at < GRID_RESET_CANCEL_RETRY_S:
-                return
-            self._last_cancel_all_at = time.time()
-            try:
-                _tx, _resp, err = await asyncio.wait_for(
-                    self.client.cancel_all_orders(
-                        time_in_force=self.client.CANCEL_ALL_TIF_IMMEDIATE, timestamp_ms=0),
-                    timeout=ORDER_TIMEOUT,
-                )
-            except Exception as e:
-                _resp, err = None, str(e)
-            code = getattr(_resp, "code", 200)
-            if not err and code != 200:
-                err = f"send_tx code {code}: {getattr(_resp, 'message', '')}"
-            if err:
-                if self._is_rate_limit_error(str(err)):
-                    self._register_exchange_rate_limit()
-                await self.log_run("grid_reset_cancel_all_failed",
-                                    {"error": str(err)[:200], "active_orders": len(active)})
-                return
-            self._register_exchange_success()
-            await self.log_run("grid_reset_cancel_all_sent", {"active_orders": len(active)})
+            if await self._cancel_all_on_exchange("grid_reset"):
+                await self.log_run("grid_reset_cancel_all_sent", {"active_orders": len(active)})
             return
 
         ok, delta, _stale = await self.reconcile_pending_orders(profit_mode=profit_mode, route=route)
         await self._apply_usdc_delta(delta)
         if not ok:
             return
+        # Rows the exchange no longer shows but reconcile could not settle yet (younger than
+        # GHOST_RESOLVE_S, i.e. maybe a fill Lighter has not published) are waited on, never
+        # force-closed: closing one that actually filled would lose that LIT from the ledger.
         leftover = await self.sb_paginate(
             f"{self.TABLE_ORDERS}?status=in.({','.join(OPEN_STATUSES)})&select=id")
-        for r in leftover:
-            await self.sb("PATCH", f"{self.TABLE_ORDERS}?id=eq.{r['id']}",
-                           {"status": "cancelled",
-                            "error": "grid_reset: not resting on exchange after cancel-all"})
+        if leftover:
+            return
         self._holdings_cache = None
 
         self._last_balance_check = 0.0
-        balance_ok, _ = await self.check_balance_divergence()
+        balance_ok, refreshed = await self.check_balance_divergence()
+        if not refreshed:
+            return
         if not balance_ok:
             if not getattr(self, "_reset_balance_logged", False):
                 self._reset_balance_logged = True
@@ -1035,45 +1174,25 @@ class LitGridLive:
             return
         state = await self.get_state()
         spacing_pct = effective_spacing_pct(state)
-        patch = {"internal_spacing_pct": spacing_pct, "order_size_lit": None,
-                 "grid_reset_requested": False}
-        detail = {"price": price, "spacing": spacing_pct, "rows_closed": len(leftover)}
+        detail = {"price": price, "spacing": spacing_pct}
         buys, sells = await self._holdings_rows()
         all_rows = await self.sb_paginate(f"{self.TABLE_ORDERS}?select=id,level,closes_level&order=id.asc")
         all_levels = [r[k] for r in all_rows for k in ("level", "closes_level") if r.get(k) is not None]
-        plan = plan_reanchor(buys, sells, all_levels, price, spacing_pct)
+        plan = plan_reanchor_log(buys, sells, all_levels, price, spacing_pct)
         if plan is None:
             await self.log_run("grid_reset_reanchor_blocked", detail)
             return
-        anchor, moves, mapping = plan
-        for rid, (col, line) in moves.items():
-            await self.sb("PATCH", f"{self.TABLE_ORDERS}?id=eq.{rid}", {col: line})
-        self._holdings_cache = None
+        anchor_log, moves, mapping = plan
+        # Through the journal (audit 2026-10-22): a crash between row moves replays the same
+        # moves on the next tick instead of leaving a lot split across two line numbers.
+        journal = {"anchor_log": anchor_log, "spacing": spacing_pct, "price": price,
+                   "moves": {str(rid): [col, line] for rid, (col, line) in moves.items()},
+                   "extra": {"grid_reset_requested": False}}
+        await self.update_state({"reanchor_journal": journal})
+        await self._apply_reanchor_journal(journal)
         self._window_center = None
-        patch["grid_anchor_price"] = anchor
-        detail.update({"anchor": anchor, "lots_moved": len(mapping)})
-        await self.update_state(patch)
+        detail.update({"anchor_log": anchor_log, "lots_moved": len(mapping)})
         await self.log_run("grid_reset_completed", detail)
-
-    async def _fetch_active_orders_by_co(self, auth):
-        """Fallback for a row account_orders() can't find by client_order_index (that lookup has
-        a finite history window -- see UNRESOLVED_ORDER_STALE_AFTER_S's docstring). This lists
-        every currently-resting order for the account/market with no per-ID lookup limitation, so
-        it's authoritative for "is this still resting on the exchange" even on an order that
-        lookup has lost track of. Returns {} on any read failure -- callers just fall through to
-        the stale-unresolved path unchanged, never raise mid-reconcile."""
-        try:
-            resp = await asyncio.wait_for(
-                self._order_api.account_active_orders(
-                    authorization=auth, account_index=self.account_index, market_id=MARKET_ID,
-                    _request_timeout=REST_TIMEOUT,
-                ),
-                timeout=REST_TIMEOUT + 2.0,
-            )
-        except Exception as e:
-            await self.log_run("active_orders_read_failed", {"error": str(e)[:200]})
-            return {}
-        return {int(o.client_order_index): o for o in (resp.orders or [])}
 
     async def reconcile_pending_orders(self, profit_mode=None, route=None):
         """Checks every non-terminal ledger row against the exchange's own account_orders().
@@ -1104,6 +1223,9 @@ class LitGridLive:
         pending = await self.sb_paginate(
             f"{self.TABLE_ORDERS}?status=in.({','.join(OPEN_STATUSES)})&select=*&order=id.asc")
         if not pending:
+            # Still read the book: engine v2 acts only on a fresh read, and orders the ledger
+            # does not know about (orphans) can be resting even when nothing is open here.
+            await self._fetch_active_orders_list(self._get_auth_token())
             return True, 0.0, False
         self._holdings_cache = None
         holdings_before = None
@@ -1123,58 +1245,87 @@ class LitGridLive:
         overflow_col = PROFIT_BUCKET_COLUMN.get(route.get("overflow")) if route.get("overflow") in ("compound", "cover_drop") else None
         capped = profit_mode in (None, "rest") and overflow_col is not None and rest_cap is not None and float(rest_cap) > 0
         rest_now = None
-        for batch in _chunks(pending, 20):
-            co_idxs = ",".join(str(r["client_order_index"]) for r in batch)
+        # One full read of what is resting (2026-10-22): rows still on the book are answered by it
+        # (including partial fills), and only rows that LEFT the book -- normally zero or one per
+        # pass -- need a per-order lookup. v1 looked up every open row every tick (5 requests per
+        # tick on Worker 3, ~210/min across both bots), the main load behind that day's 429s.
+        snapshot = await self._fetch_active_orders_list(auth)
+        active_by_co = ({int(o.client_order_index): o for o in snapshot}
+                        if snapshot is not None else None)
+        missing = [r for r in pending
+                   if active_by_co is None or int(r["client_order_index"]) not in active_by_co]
+        # A row sent moments ago is not visible yet anywhere; looking it up only spends budget
+        # (half of all requests in the simulator). It is looked up once it is old enough.
+        young = {int(r["client_order_index"]) for r in missing
+                 if _parse_iso(r.get("placed_at")) is not None
+                 and _parse_iso(r.get("placed_at")) > now - timedelta(seconds=VISIBILITY_GRACE_S)}
+        missing = [r for r in missing if int(r["client_order_index"]) not in young]
+        open_cos = {int(r["client_order_index"]) for r in pending}
+        for co in [c for c in self._missing_since if c not in open_cos]:
+            del self._missing_since[co]
+        lookup_by_co, lookup_failed = {}, set()
+        for chunk in _chunks(missing, 20):
+            chunk_cos = {int(r["client_order_index"]) for r in chunk}
+            if not self._take_request():
+                all_ok = False
+                lookup_failed |= chunk_cos
+                continue
             try:
                 resp = await asyncio.wait_for(
                     self._order_api.account_orders(
-                        authorization=auth, client_order_indexes=co_idxs,
+                        authorization=auth,
+                        client_order_indexes=",".join(str(c) for c in sorted(chunk_cos)),
                         account_index=self.account_index, _request_timeout=REST_TIMEOUT,
                     ),
                     timeout=REST_TIMEOUT + 2.0,
                 )
             except Exception as e:
+                if self._is_rate_limit_error(str(e)):
+                    self._register_exchange_rate_limit()
                 await self.log_run("reconcile_read_failed", {"error": str(e)[:200]})
                 all_ok = False
+                lookup_failed |= chunk_cos
                 continue
-            by_co = {int(o.client_order_index): o for o in (resp.orders or [])}
+            lookup_by_co.update({int(o.client_order_index): o for o in (resp.orders or [])})
+        for batch in (pending,):
             for r in batch:
-                o = by_co.get(r["client_order_index"])
-                if o is None:
-                    # account_orders()'s lookup can lose visibility (finite history window, see
-                    # UNRESOLVED_ORDER_STALE_AFTER_S's docstring) even for an order that's really
-                    # still resting. account_active_orders() lists the whole account/market with
-                    # no per-ID lookup limitation -- fetched at most once per reconcile pass,
-                    # lazily, only when a row is actually missing.
-                    if active_by_co is None:
-                        active_by_co = await self._fetch_active_orders_by_co(auth)
-                    o = active_by_co.get(r["client_order_index"])
+                co = int(r["client_order_index"])
+                o = (active_by_co or {}).get(co) or lookup_by_co.get(co)
+                if o is None and co in young:
+                    continue
                 if o is None:
                     placed_at = _parse_iso(r.get("placed_at"))
-                    if placed_at and (now - placed_at).total_seconds() > UNRESOLVED_ORDER_STALE_AFTER_S:
-                        await self.log_run("order_unresolved_stale", {
-                            "row_id": r["id"], "age_s": (now - placed_at).total_seconds()})
+                    age = (now - placed_at).total_seconds() if placed_at else 0.0
+                    missing_since = self._missing_since.setdefault(co, time.time())
+                    missing_for = time.time() - missing_since
+                    if age > UNRESOLVED_ORDER_STALE_AFTER_S:
+                        await self.log_run("order_unresolved_stale", {"row_id": r["id"], "age_s": age})
                         has_stale_unresolved = True
-                        # Confirmed absent from BOTH the targeted co-index lookup AND the
-                        # account's full active-orders listing -- it is definitively NOT resting
-                        # on the exchange anymore, whatever its real fate (filled/cancelled/
-                        # rejected/never-placed; account_active_orders has no ID-lookup
-                        # limitation, so this is authoritative for "still resting," even though it
-                        # can't tell us which terminal state). Marking it terminal here is what
-                        # unsticks a spacing-change cancel that would otherwise wait on it forever
-                        # (the stuck-order incident, Worker 3, 2026-10-22, row 846 -- placed_at
-                        # 03:37:59, never resolved). We never claim it filled: if it secretly did,
-                        # check_balance_divergence (real exchange balance is ground truth) catches
-                        # the ledger/exchange mismatch next tick and pauses new entries, same
-                        # fail-safe as every other bookkeeping gap in this file.
+                    # Absent from a SUCCESSFUL full read and from its own lookup, well past any
+                    # honest visibility delay: it is not resting, whatever its fate (refused,
+                    # cancelled, never placed). Resolving it frees the slot; v1 waited an hour,
+                    # during which the ghost blocked a real order (2026-10-22). Never claims a fill:
+                    # if one secretly happened, check_balance_divergence (real balance is ground
+                    # truth) catches it and pauses new entries. Never resolved on a failed read.
+                    # Resolved only after a full GHOST_RESOLVE_S of being missing, timed from when
+                    # it was FIRST seen missing -- not from placement (audit 2026-10-22: a sell that
+                    # rested for hours, then filled, was marked rejected the moment it left the
+                    # book, losing the fill). A row the exchange never showed (no
+                    # exchange_order_id) is a ghost after GHOST_RESOLVE_S; one it did show keeps
+                    # v1's one-hour rule.
+                    limit_age = (GHOST_RESOLVE_S if r.get("exchange_order_id") is None
+                                 else UNRESOLVED_ORDER_STALE_AFTER_S)
+                    if (active_by_co is not None and co not in lookup_failed
+                            and age > limit_age and missing_for > GHOST_RESOLVE_S):
                         try:
                             await self.sb("PATCH", f"{self.TABLE_ORDERS}?id=eq.{r['id']}",
                                            {"status": "rejected", "error": "vanished_from_exchange_lookup"})
-                            await self.log_run("order_vanished_marked_rejected", {"row_id": r["id"]})
+                            await self.log_run("order_vanished_marked_rejected", {"row_id": r["id"], "age_s": age})
                         except Exception as e:
                             await self.log_run("reconcile_row_write_failed", {"row_id": r["id"], "error": str(e)[:200]})
                             all_ok = False
                     continue
+                self._missing_since.pop(co, None)
                 filled_qty, filled_price = _order_fill_amounts(o)
                 filled_quote = float(getattr(o, "filled_quote_amount", 0) or 0)
                 terminal = _order_is_terminal(o)
@@ -1282,7 +1433,21 @@ class LitGridLive:
                 usdc = total
         return usdc, lit
 
-    async def check_balance_divergence(self):
+    async def _read_balance_for_check(self):
+        """Engine v2: the real balance read BEFORE this tick's reconcile, so every fill the balance
+        already shows has left the book by the time the ledger is compared -- either recorded by
+        that reconcile or tracked as settling. None if not due or not readable now."""
+        if time.time() - self._last_balance_check < BALANCE_RECONCILE_EVERY:
+            return None
+        if not self._take_request():
+            return None
+        try:
+            return await self.real_balances()
+        except Exception as e:
+            await self.log_run("balance_check_failed", {"error": str(e)[:200]})
+            return None
+
+    async def check_balance_divergence(self, confirm=False, pre_read=None):
         """Returns (safe_to_trade, did_refresh). did_refresh tells the caller whether this call
         actually re-read the real exchange balance (vs. returning the cached pause-state because
         the periodic interval hadn't elapsed) -- callers use it to know whether a locally-tracked
@@ -1296,6 +1461,11 @@ class LitGridLive:
         now = time.time()
         if now - self._last_balance_check < BALANCE_RECONCILE_EVERY:
             return not self._balance_paused, False
+        if confirm and pre_read is None:
+            # v2 compares only a balance read before the reconcile (see _read_balance_for_check).
+            return not self._balance_paused, False
+        if pre_read is None and not self._take_request():
+            return not self._balance_paused, False
         try:
             holdings = await self.current_holdings()
             # A resting buy that has PARTLY filled already put real LIT in the account, but
@@ -1304,7 +1474,7 @@ class LitGridLive:
             open_buy_fills = await self.sb_paginate(
                 f"{self.TABLE_ORDERS}?side=eq.buy&status=in.({','.join(OPEN_STATUSES)})"
                 f"&filled_qty=not.is.null&select=filled_qty")
-            real_usdc, real_lit = await self.real_balances()
+            real_usdc, real_lit = pre_read if pre_read is not None else await self.real_balances()
             await self.update_state({"usdc_balance": real_usdc, "lit_balance": real_lit})
         except Exception as e:
             await self.log_run("balance_check_failed", {"error": str(e)[:200]})
@@ -1314,6 +1484,23 @@ class LitGridLive:
         ledger_lit = (sum(h["qty"] for h in holdings.values())
                       + sum(float(r.get("filled_qty") or 0) for r in (open_buy_fills or [])))
         diverged = abs(ledger_lit - real_lit) > BALANCE_DIVERGENCE_TOLERANCE_LIT
+        if confirm:
+            # Engine v2 (2026-10-22): a fill moves the real balance at once but reaches the ledger a
+            # few seconds later, so one mismatched reading is usually a fill in flight. Pause only
+            # if the mismatch is still there on a second reading ~2 reconcile passes later; while
+            # unsure or paused, re-check that soon instead of waiting the full interval.
+            # An order that just left the book with its fill not yet in the lookup explains a
+            # mismatch by itself: stay unsure (no pause) until reconcile has resolved it.
+            # Bounded: a row missing for longer than SETTLE_S no longer excuses a mismatch.
+            settling = any(time.time() - t0 < SETTLE_S for t0 in self._missing_since.values())
+            if diverged and not self._balance_paused and (
+                    settling or not getattr(self, "_divergence_pending", False)):
+                self._divergence_pending = True
+                self._last_balance_check = now - BALANCE_RECONCILE_EVERY + 2 * RECONCILE_EVERY
+                return True, True
+            self._divergence_pending = False
+            if diverged:
+                self._last_balance_check = now - BALANCE_RECONCILE_EVERY + 2 * RECONCILE_EVERY
         if diverged and not self._balance_paused:
             await self.log_run("balance_divergence_paused",
                                 {"ledger_lit": ledger_lit, "real_lit": real_lit})
@@ -1601,6 +1788,374 @@ class LitGridLive:
             state.update(patch)
         return clamp_order_size(float(size))
 
+    # ── Engine v2: desired-state order management (grid_engine.py) ───────────────────────────
+    def _next_co_idx(self):
+        """Unique client_order_index per order. Deriving it from the current millisecond gave two
+        orders created in the same millisecond the same id (found by the engine simulator,
+        2026-10-22: a trailing market buy and the first batched order collided, and the fill was
+        credited to the wrong row). Strictly increasing within the process, still seeded from the
+        clock so a restart does not reuse a recent id."""
+        co = max(int(time.time() * 1000) % 500_000_000, getattr(self, "_last_co_idx", 0) + 1)
+        self._last_co_idx = co
+        return co
+
+    def _anchor_log(self, state):
+        a = state.get("grid_anchor_log")
+        if a is not None:
+            return float(a)
+        p = state.get("grid_anchor_price")
+        if p is not None and float(p) > 0:
+            return math.log(float(p))
+        return None
+
+    def _actual_from_snapshot(self):
+        out = []
+        for o in self._snapshot or []:
+            side = "sell" if getattr(o, "is_ask", False) else "buy"
+            try:
+                price = float(getattr(o, "price"))
+            except (TypeError, ValueError):
+                continue
+            out.append({"side": side, "price": price, "order_index": getattr(o, "order_index", None),
+                        "client_order_index": int(getattr(o, "client_order_index", 0) or 0)})
+        return out
+
+    async def _send_batch(self, cancels, creates, anchor_log, step):
+        """ONE signed request carrying every cancel and create (cancels first, so a buy and a
+        sell trading places never cross each other). Ledger rows for creates are written before
+        sending. A rate-limit refusal or a non-200 reply rejects them all (nothing was placed); a
+        timeout leaves them pending, and reconcile settles each against the real book within
+        GHOST_RESOLVE_S. Returns the number of transactions accepted."""
+        if not cancels and not creates:
+            return 0
+        if not await self._touch_lock_heartbeat():
+            return 0
+        if not self._take_request():
+            return 0
+        nm = getattr(self.client, "nonce_manager", None)
+        key = (getattr(nm, "api_keys_list", None) or [None])[0]
+        tx_types, tx_infos, rows = [], [], []
+        lock = nm.lock(key) if nm is not None else None
+        if lock is not None:
+            await lock.acquire()
+        try:
+            async def next_nonce():
+                if nm is None:
+                    return -1
+                _, n = await nm.async_next_nonce(key)
+                return n
+            for o in cancels:
+                if o.get("order_index") is None:
+                    continue
+                n = await next_nonce()
+                tx_type, tx_info, _h, err = self.client.sign_cancel_order(
+                    MARKET_ID, int(o["order_index"]), nonce=n, api_key_index=key)
+                if err:
+                    await self._resync_nonce(hard=True)
+                    await self.log_run("engine_sign_failed", {"error": str(err)[:200]})
+                    return 0
+                tx_types.append(tx_type)
+                tx_infos.append(tx_info)
+            for w in creates:
+                co_idx = self._next_co_idx()
+                level = (w.line if w.side == "buy"
+                         else int(round((math.log(w.price) - anchor_log) / step)))
+                inserted = await self.sb("POST", self.TABLE_ORDERS, {
+                    "level": level, "side": w.side, "client_order_index": co_idx,
+                    "status": "pending", "limit_price": w.price, "size": w.size,
+                    "placed_at": now_iso(), "closes_level": w.closes_line,
+                    "funded_from_bucket_usd": round(w.funded or 0.0, 8)})
+                n = await next_nonce()
+                tx_type, tx_info, _h, err = self.client.sign_create_order(
+                    MARKET_ID, co_idx, size_to_int(w.size), price_to_int(w.price),
+                    int(w.side == "sell"), self.client.ORDER_TYPE_LIMIT,
+                    self.client.ORDER_TIME_IN_FORCE_POST_ONLY, nonce=n, api_key_index=key)
+                if err:
+                    await self.sb("PATCH", f"{self.TABLE_ORDERS}?id=eq.{inserted[0]['id']}",
+                                   {"status": "rejected", "error": str(err)[:200]})
+                    await self._resync_nonce(hard=True)
+                    return 0
+                rows.append((inserted[0]["id"], w))
+                tx_types.append(tx_type)
+                tx_infos.append(tx_info)
+            if not tx_types:
+                return 0
+            try:
+                resp = await asyncio.wait_for(self.client.send_tx_batch(tx_types, tx_infos),
+                                              timeout=ORDER_TIMEOUT)
+                err = None
+                code = getattr(resp, "code", 200)
+                if code != 200:
+                    err = f"send_tx_batch code {code}: {getattr(resp, 'message', '')}"
+            except Exception as e:
+                err = str(e)
+                refused = self._is_rate_limit_error(err)
+                if refused:
+                    self._register_exchange_rate_limit()
+                await self._resync_nonce(hard=True)
+                if not refused:
+                    await self.log_run("engine_batch_unknown", {"error": err[:200], "txs": len(tx_types)})
+                    for rid, w in rows:
+                        self._inflight[(w.side, price_to_int(w.price))] = time.time()
+                    return 0
+            if err:
+                if self._is_rate_limit_error(err):
+                    self._register_exchange_rate_limit()
+                await self._resync_nonce(hard=True)
+                for rid, w in rows:
+                    await self.sb("PATCH", f"{self.TABLE_ORDERS}?id=eq.{rid}",
+                                   {"status": "rejected", "error": ("batch: " + err)[:200]})
+                    if not self._is_rate_limit_error(err):
+                        self._reject_until[(w.side, price_to_int(w.price))] = time.time() + REJECT_COOLDOWN_S
+                await self.log_run("engine_batch_rejected", {"error": err[:200], "txs": len(tx_types)})
+                return 0
+        finally:
+            if lock is not None:
+                lock.release()
+        self._register_exchange_success()
+        now = time.time()
+        for rid, w in rows:
+            await self.sb("PATCH", f"{self.TABLE_ORDERS}?id=eq.{rid}", {"status": "open"})
+            self._inflight[(w.side, price_to_int(w.price))] = now
+        await self.log_run("engine_batch_sent", {
+            "cancels": len(tx_types) - len(rows), "creates": len(rows),
+            "quota_remaining": getattr(resp, "volume_quota_remaining", None)})
+        return len(tx_types)
+
+    async def engine_cycle(self, state, price, entries_allowed=True):
+        """One desired-state pass: target ladder (grid_engine.plan_orders) vs the real book
+        (last successful full read), every difference sent in one batch. Never acts without a
+        successful read -- an unknown book is never assumed empty."""
+        # Act once per FRESH read of the book: between reads the engine cannot see what its last
+        # batch did, and acting again would re-send the same cancels and creates.
+        if self._snapshot is None or self._snapshot_at <= self._engine_snapshot_at:
+            return
+        self._engine_snapshot_at = self._snapshot_at
+        spacing_pct = effective_spacing_pct(state)
+        step = math.log(1 + spacing_pct / 100.0)
+        holdings = await self.current_holdings()
+        resting = await self.resting_orders_by_level()
+        active = {lv: h for lv, h in holdings.items() if clamp_order_size(h["qty"]) is not None}
+
+        anchor_log = self._anchor_log(state)
+        if anchor_log is None:
+            if not entries_allowed:
+                return
+            anchor_log = math.log(price)
+            await self.update_state({"grid_anchor_log": anchor_log, "grid_anchor_price": price})
+            state.update({"grid_anchor_log": anchor_log, "grid_anchor_price": price})
+
+        order_size_lit = state.get("order_size_lit")
+        if state.get("dynamic_dd_enabled"):
+            order_size = await self._dynamic_order_size(state, price, spacing_pct, holdings, resting)
+        else:
+            if order_size_lit is None:
+                effective_capital = (float(state["capital_usd"])
+                                     + float(state.get("profit_bucket_compound_usd") or 0))
+                order_size_lit = compute_order_size_lit(
+                    effective_capital, price, spacing_pct,
+                    levels_for_drawdown(spacing_pct, float(state.get("drawdown_pct") or 10.0)))
+                await self.update_state({"order_size_lit": order_size_lit})
+            order_size = clamp_order_size(float(order_size_lit or 0.0))
+        entries = bool(entries_allowed and order_size is not None)
+
+        levels_up = max(1, int(state.get("levels_up") or 1))
+        levels_down = max(1, int(state["levels_down"]))
+        plan = grid_engine.plan_orders(price, anchor_log, step, spacing_pct / 100.0, active,
+                                       levels_up, levels_down, round_price, entries_allowed=entries)
+        actual = self._actual_from_snapshot()
+        now = time.time()
+        self._inflight = {k: t for k, t in self._inflight.items() if now - t < INFLIGHT_S}
+        for o in actual:
+            self._inflight.pop((o["side"], price_to_int(o["price"])), None)
+        self._reject_until = {k: t for k, t in self._reject_until.items() if t > now}
+
+        # Which lot each resting sell on the book belongs to, via the ledger.
+        row_by_co = {int(r["client_order_index"]): r for rows in resting.values() for r in rows
+                     if r.get("client_order_index") is not None}
+        # Orders on the book with no open ledger row (a send reported failed that landed anyway,
+        # leftovers): never count them as satisfying a wanted order -- cancel them (audit
+        # 2026-10-22: one kept as "the sell" would fill unseen by the ledger).
+        foreign = [o for o in actual if o["client_order_index"] not in row_by_co]
+        actual = [o for o in actual if o["client_order_index"] in row_by_co]
+        # A lot is BUSY while ANY open ledger sell row closes it -- resting, in flight, timed out,
+        # or filled-but-not-yet-reconciled. A busy lot never gets a second sell (market or limit):
+        # on spot that second sell would spend another lot's LIT (audit 2026-10-22, P0-1).
+        on_book_cos = {o["client_order_index"] for o in actual}
+        busy = {}
+        for rows in resting.values():
+            for r in rows:
+                if r["side"] == "sell" and r.get("closes_level") is not None:
+                    co = int(r["client_order_index"]) if r.get("client_order_index") is not None else None
+                    busy.setdefault(r["closes_level"], []).append((co, round_price(float(r.get("limit_price") or 0))))
+
+        # Passed-level market sells, one per cycle, only once no open row sells that lot (the diff
+        # below cancels its resting sell first; reconcile then resolves the row).
+        for ln, qty, cost in plan.market_sells:
+            if ln in busy:
+                continue
+            size = clamp_order_size(qty)
+            if size is not None:
+                await self.log_run("sell_level_passed_market_sell", {"closes_level": ln, "price": price})
+                await self.market_sell_level(ln, size, min_price=cost)
+            break
+
+        wants = []
+        for w in plan.sells:
+            if clamp_order_size(w.size) is None:
+                continue
+            if w.closes_line in busy:
+                # Keep it only if its own sell is already resting at exactly this price; anything
+                # else (wrong price, not visible yet) waits until reconcile resolves that row --
+                # an unwanted resting one is cancelled by the diff, never replaced in the same pass.
+                if not any(co in on_book_cos and price_to_int(px) == price_to_int(w.price)
+                           for co, px in busy[w.closes_line]):
+                    continue
+            wants.append(grid_engine.Want("sell", w.price, clamp_order_size(w.size), w.line,
+                                          closes_line=w.closes_line))
+        resting_keys = {(o["side"], price_to_int(o["price"])) for o in actual}
+        funds_ok = True
+        if not entries:
+            # Paused (OFF, balance check, stale order): no NEW buys, but the ones already resting
+            # stay -- cancelling and re-placing them on every pause was churn, and v1 kept them too.
+            for o in actual:
+                if o["side"] == "buy" and o["client_order_index"] in row_by_co:
+                    wants.append(grid_engine.Want("buy", o["price"], 0.0, 0))
+        if entries:
+            _, base_remaining, available = self._funding(state, holdings, resting)
+            max_open = state.get("max_open_buys")
+            allowance = (int(max_open) - int(state.get("lifetime_buy_count") or 0)
+                         if max_open is not None else None)
+            new_buys = 0
+            for ln, px in plan.buy_lines:
+                key = ("buy", price_to_int(px))
+                if key in resting_keys or key in self._inflight:
+                    wants.append(grid_engine.Want("buy", px, order_size, ln))
+                    continue
+                cost = px * order_size
+                if cost > available or (allowance is not None and new_buys >= allowance):
+                    funds_ok = False
+                    break
+                wants.append(grid_engine.Want("buy", px, order_size, ln,
+                                              funded=max(0.0, cost - max(base_remaining, 0.0))))
+                available -= cost
+                base_remaining -= cost
+                new_buys += 1
+            if (plan.trail_line is not None and now - self._last_trail_at >= TRAIL_COOLDOWN_S
+                    and price * order_size <= available
+                    and not any(r.get("order_kind") == "market" for rows in resting.values() for r in rows)):
+                self._last_trail_at = now
+                from_base = min(price * order_size, max(base_remaining, 0.0))
+                if await self.market_buy_level(plan.trail_line, order_size,
+                                                funded_from_bucket_usd=price * order_size - from_base) is not None:
+                    await self.log_run("trailing_up_buy", {"line": plan.trail_line, "price": price})
+        if not funds_ok and not getattr(self, "_no_funds_logged", False):
+            self._no_funds_logged = True
+            await self.log_run("no_funds_for_buy", {"price": price})
+        elif funds_ok:
+            self._no_funds_logged = False
+
+        to_cancel, to_place = grid_engine.diff_orders(wants, actual, set(self._inflight), price_to_int)
+        if foreign:
+            await self.log_run("engine_foreign_orders_cancelled", {"count": len(foreign)})
+            to_cancel = foreign + to_cancel
+        to_place = [w for w in grid_engine.nearest_first(to_place, price)
+                    if (w.side, price_to_int(w.price)) not in self._reject_until]
+        # Only the stale orders are cancelled, nearest-to-price wanted ones stay (audit 2026-10-22:
+        # a cancel-all on a fast move emptied the whole book for a read cycle -- a gap). A big
+        # change (spacing edit, long move) clears over a few batches; creates wait until the
+        # cancels have freed their funds, so a new buy/sell never fails on locked balance.
+        if len(to_cancel) > BULK_CANCEL:
+            to_cancel = sorted(to_cancel, key=lambda o: -abs(float(o["price"]) - price))
+            await self._send_batch(to_cancel[:BATCH_MAX], [], anchor_log, step)
+            return
+        room = max(0, BATCH_MAX - len(to_cancel))
+        await self._send_batch(to_cancel[:BATCH_MAX], to_place[:room], anchor_log, step)
+
+    async def _engine_spacing_change(self, state, price, spacing_pct):
+        """Spacing changed (dashboard edit, gate toggle, tier switch): re-number held lots onto the
+        new grid in log space -- no overflow cliff at any spacing -- through a journal, so a crash
+        between writes re-applies the same moves instead of splitting a lot. No cancels here: the
+        next engine_cycle sees the whole book at the old spacing and replaces it (cancel-all plus
+        one batch)."""
+        buys, sells = await self._holdings_rows()
+        all_rows = await self.sb_paginate(f"{self.TABLE_ORDERS}?select=id,level,closes_level&order=id.asc")
+        all_levels = [r[k] for r in all_rows for k in ("level", "closes_level") if r.get(k) is not None]
+        plan = plan_reanchor_log(buys, sells, all_levels, price, spacing_pct)
+        if plan is None:
+            if not getattr(self, "_reanchor_blocked_logged", False):
+                self._reanchor_blocked_logged = True
+                await self.log_run("spacing_change_reanchor_blocked", {"new": spacing_pct, "price": price})
+            return False
+        anchor_log, moves, mapping = plan
+        # Sells still resting from before the change must follow their lot to its new line: v1
+        # cancelled everything first, v2 leaves the book to the next cycle, and a sell that fills
+        # in between would otherwise close the lot's OLD number -- a lot nobody holds anymore
+        # (found by the engine simulator: the ledger ended up holding more LIT than the account).
+        open_rows = await self.sb_paginate(
+            f"{self.TABLE_ORDERS}?status=in.({','.join(OPEN_STATUSES)})&select=id,side,closes_level")
+        for r in open_rows:
+            if r["side"] == "sell" and r.get("closes_level") in mapping and r["id"] not in moves:
+                moves[r["id"]] = ("closes_level", mapping[r["closes_level"]])
+        journal = {"anchor_log": anchor_log, "spacing": spacing_pct, "price": price,
+                   "moves": {str(rid): [col, line] for rid, (col, line) in moves.items()}}
+        await self.update_state({"reanchor_journal": journal})
+        await self._apply_reanchor_journal(journal)
+        self._reanchor_blocked_logged = False
+        await self.log_run("spacing_changed_rearmed", {"new": spacing_pct, "price": price,
+                                                        "lots_moved": len(mapping)})
+        return True
+
+    async def _apply_reanchor_journal(self, journal):
+        for rid, (col, line) in journal["moves"].items():
+            await self.sb("PATCH", f"{self.TABLE_ORDERS}?id=eq.{int(rid)}", {col: int(line)})
+        self._holdings_cache = None
+        await self.update_state({
+            "grid_anchor_log": journal["anchor_log"],
+            "grid_anchor_price": math.exp(journal["anchor_log"]) if journal["anchor_log"] > -700 else None,
+            "internal_spacing_pct": journal["spacing"], "order_size_lit": None,
+            "reanchor_journal": None, **(journal.get("extra") or {})})
+        self._inflight.clear()
+
+    async def _tick_v2(self, state, profit_mode, route):
+        """engine_v2_enabled path. Same safety gates as v1 (lock, flatten, reset, reconcile,
+        real-balance check, stale-order pause), then a desired-state cycle."""
+        now = time.time()
+        has_stale = getattr(self, "_last_stale", False)
+        pre_read = await self._read_balance_for_check()
+        if pre_read is not None or now - self._last_reconcile_at >= RECONCILE_EVERY:
+            self._last_reconcile_at = now
+            reconciled_ok, usdc_delta, has_stale = await self.reconcile_pending_orders(
+                profit_mode=profit_mode, route=route)
+            self._last_stale = has_stale
+            await self._apply_usdc_delta(usdc_delta)
+            if not reconciled_ok:
+                return
+        balance_ok, _ = await self.check_balance_divergence(confirm=True, pre_read=pre_read)
+        price = await self.fetch_current_price()
+        if price is None:
+            return
+        state = await self.get_state()
+        buckets = await self._bucket_balances(rest_withdrawn=state.get("rest_withdrawn_usd"))
+        if buckets.get("profit_bucket_compound_usd") != state.get("profit_bucket_compound_usd"):
+            buckets["order_size_lit"] = None
+        await self.update_state(buckets)
+        state.update(buckets)
+        entries_allowed = bool(state.get("enabled")) and balance_ok and not has_stale
+        if state.get("dynamic_dd_enabled"):
+            holdings = await self.current_holdings()
+            resting = await self.resting_orders_by_level()
+            await self._dynamic_order_size(state, price, effective_spacing_pct(state), holdings, resting)
+        spacing_pct = effective_spacing_pct(state)
+        persisted = state.get("internal_spacing_pct")
+        if persisted is None:
+            await self.update_state({"internal_spacing_pct": spacing_pct})
+        elif float(persisted) != spacing_pct and self._anchor_log(state) is not None:
+            await self._engine_spacing_change(state, price, spacing_pct)
+            return
+        await self.engine_cycle(state, price, entries_allowed=entries_allowed)
+        await self.update_state({"live_price": price, "updated_at": now_iso()})
+
     async def maintain_window(self, state, price, entries_allowed=True):
         spacing_pct = effective_spacing_pct(state)
         step = math.log(1 + spacing_pct / 100.0)
@@ -1652,8 +2207,9 @@ class LitGridLive:
         # above price and the first buy exactly one spacing below. A run with no anchor keeps
         # the old behavior (global grid, sells at cost + spacing).
         if is_cold_start and entries_allowed:
-            await self.update_state({"grid_anchor_price": price})
+            await self.update_state({"grid_anchor_price": price, "grid_anchor_log": None})
             state["grid_anchor_price"] = price
+            state["grid_anchor_log"] = None
             self._window_center = None
         anchored = state.get("grid_anchor_price") is not None
         anchor = float(state["grid_anchor_price"]) if anchored else 1.0
@@ -1994,12 +2550,15 @@ class LitGridLive:
         price = self.live.best_mid()
         if price is None:
             return None
+        if not self._take_request():
+            return None
         band_price = round_price(price * 0.995)
         if min_price is not None:
             band_price = max(band_price, math.ceil(float(min_price) * 10 ** PRICE_DECIMALS) / 10 ** PRICE_DECIMALS)
-        co_idx = int(time.time() * 1000) % 500_000_000
+        co_idx = self._next_co_idx()
         row = {"level": level, "side": "sell", "closes_level": level, "client_order_index": co_idx,
-               "status": "pending", "limit_price": band_price, "size": sized, "placed_at": now_iso()}
+               "status": "pending", "limit_price": band_price, "size": sized, "placed_at": now_iso(),
+               "order_kind": "market"}
         inserted = await self.sb("POST", self.TABLE_ORDERS, row)
         row_id = inserted[0]["id"]
         try:
@@ -2016,6 +2575,10 @@ class LitGridLive:
                                {"status": "rejected", "error": str(err)[:200]})
                 return None
         except Exception as e:
+            if await self._on_send_exception(e):
+                await self.sb("PATCH", f"{self.TABLE_ORDERS}?id=eq.{row_id}",
+                               {"status": "rejected", "error": ("rate_limited: " + str(e))[:200]})
+                return None
             await self.log_run("flatten_sell_unknown", {"row_id": row_id, "error": str(e)[:200]})
             return row_id
         await self.sb("PATCH", f"{self.TABLE_ORDERS}?id=eq.{row_id}", {"status": "open"})
@@ -2035,8 +2598,10 @@ class LitGridLive:
         price = self.live.best_mid()
         if price is None:
             return None
+        if not self._take_request():
+            return None
         band_price = round_price(price * 1.005)
-        co_idx = int(time.time() * 1000) % 500_000_000
+        co_idx = self._next_co_idx()
         row = {"level": level, "side": "buy", "client_order_index": co_idx,
                "status": "pending", "limit_price": band_price, "size": sized, "placed_at": now_iso(),
                "funded_from_bucket_usd": round(funded_from_bucket_usd, 8), "order_kind": "market"}
@@ -2056,6 +2621,10 @@ class LitGridLive:
                                {"status": "rejected", "error": str(err)[:200]})
                 return None
         except Exception as e:
+            if await self._on_send_exception(e):
+                await self.sb("PATCH", f"{self.TABLE_ORDERS}?id=eq.{row_id}",
+                               {"status": "rejected", "error": ("rate_limited: " + str(e))[:200]})
+                return None
             await self.log_run("initial_fill_buy_unknown", {"row_id": row_id, "error": str(e)[:200]})
             return row_id
         await self.sb("PATCH", f"{self.TABLE_ORDERS}?id=eq.{row_id}", {"status": "open"})
@@ -2076,33 +2645,44 @@ class LitGridLive:
         is applied via _apply_usdc_delta() (external audit fix, seventh pass) -- discarding it
         here is harmless to safety (entries are blocked throughout flatten regardless) but was
         still a real, permanent loss of display accuracy for exactly the reason fixed in tick()."""
+        # One reconcile per tick (2026-10-22): each one is a book read against the shared request
+        # budget, and four per tick starved the sells themselves during a crash. Whatever this
+        # pass sends is picked up by the next tick's reconcile.
         _ok, delta, _stale = await self.reconcile_pending_orders(profit_mode=profit_mode, route=route)
         await self._apply_usdc_delta(delta)
-        resting = await self.resting_orders_by_level()
-        any_cancel_failed = False
-        for rows in resting.values():
-            for r in rows:
-                if not self._lock_held:
-                    await self.log_run("flatten_aborted_lock_lost", {})
-                    return
-                if not await self.cancel_order_row(r):
-                    any_cancel_failed = True
-        if resting:
-            _ok, delta, _stale = await self.reconcile_pending_orders(profit_mode=profit_mode, route=route)
-            await self._apply_usdc_delta(delta)
-
         if not self._lock_held:
             await self.log_run("flatten_aborted_lock_lost", {})
             return
-
         resting = await self.resting_orders_by_level()
+        resting_buys = [r for rows in resting.values() for r in rows if r["side"] == "buy"]
+        resting_sells = [r for rows in resting.values() for r in rows
+                         if r["side"] == "sell" and r.get("order_kind") != "market"]
+        if resting_buys or resting_sells:
+            ok = await self._cancel_all_on_exchange("flatten")
+            if not self._lock_held:
+                await self.log_run("flatten_aborted_lock_lost", {})
+                return
+            await self.log_run("flatten_incomplete", {"waiting_for": "cancel_all", "sent": bool(ok),
+                                                      "resting": len(resting_buys) + len(resting_sells)})
+            return
+
         unresolved_sell_closes = {
             r["closes_level"] for rows in resting.values() for r in rows
             if r["side"] == "sell" and r.get("closes_level") is not None
         }
-
         holdings = await self.current_holdings()
         sell_failed = False
+        if holdings:
+            # Never ask to sell more than the account really holds: a ledger lot a hair above the
+            # real balance (rounding) is refused by the exchange on every retry, forever.
+            if not self._take_request():
+                return
+            try:
+                _usdc, real_lit = await self.real_balances()
+            except Exception as e:
+                await self.log_run("flatten_balance_check_failed", {"error": str(e)[:200]})
+                return
+            available = math.floor(real_lit * 10 ** SIZE_DECIMALS + 1e-6) / 10 ** SIZE_DECIMALS
         for lvl, h in holdings.items():
             if not self._lock_held:
                 await self.log_run("flatten_aborted_lock_lost", {})
@@ -2110,34 +2690,36 @@ class LitGridLive:
             if lvl in unresolved_sell_closes:
                 sell_failed = True
                 continue
-            sized = clamp_order_size(h["qty"])
-            if sized is None:
-                await self.log_run("flatten_dust_stuck", {"level": lvl, "qty": h["qty"]})
-                sell_failed = True
+            qty = round_size(min(h["qty"], available))
+            if clamp_order_size(qty) is None:
+                # Under the exchange's 1 LIT minimum: no order can sell it. Logged, then left --
+                # the final check below decides on the REAL balance (audit 2026-10-22: counting
+                # it as a failure kept Flatten running, and the bot enabled, forever).
+                await self.log_run("flatten_dust_stuck", {"level": lvl, "qty": h["qty"], "sellable": qty})
                 continue
-            row_id = await self.market_sell_level(lvl, h["qty"])
-            if row_id is None:
-                sell_failed = True
-        if holdings:
-            _ok, delta, _stale = await self.reconcile_pending_orders(profit_mode=profit_mode, route=route)
-            await self._apply_usdc_delta(delta)
+            if await self.market_sell_level(lvl, qty) is not None:
+                available -= qty
+            sell_failed = True   # sent or skipped -- the next tick's reconcile settles it
+        if sell_failed or resting:
+            await self.log_run("flatten_incomplete", {"waiting_for": "market_sells",
+                                                      "levels": sorted(holdings)})
+            return
 
+        if not self._take_request():
+            return
         try:
             _usdc, real_lit = await self.real_balances()
         except Exception as e:
             await self.log_run("flatten_balance_check_failed", {"error": str(e)[:200]})
             return
-
-        still_resting = await self.resting_orders_by_level()
-        if any_cancel_failed or sell_failed or real_lit > BALANCE_DIVERGENCE_TOLERANCE_LIT or still_resting:
-            await self.log_run("flatten_incomplete", {
-                "any_cancel_failed": any_cancel_failed, "sell_failed": sell_failed,
-                "real_lit_remaining": real_lit, "still_resting_levels": list(still_resting.keys()),
-            })
+        if clamp_order_size(real_lit) is not None:
+            # 1 LIT or more is still really held: sellable, so not done.
+            await self.log_run("flatten_incomplete", {"real_lit_remaining": real_lit})
             return
 
         await self.update_state({"flatten_requested": False, "enabled": False})
-        await self.log_run("flatten_completed", {"final_real_lit": real_lit})
+        await self.log_run("flatten_completed", {"final_real_lit": real_lit,
+                                                 "dust_left": real_lit > BALANCE_DIVERGENCE_TOLERANCE_LIT})
 
     async def _apply_usdc_delta(self, usdc_delta):
         """Persists a reconciliation pass's cash delta immediately, reading the current balance
@@ -2172,11 +2754,19 @@ class LitGridLive:
         profit_mode = state.get("profit_mode")
         route = {"cap": state.get("rest_cap_usd"), "overflow": state.get("rest_overflow_to"),
                  "withdrawn": state.get("rest_withdrawn_usd")}
+        if state.get("reanchor_journal"):
+            # A re-anchor interrupted by a crash finishes first, before Flatten, a reset or
+            # either engine reads the ledger (audit 2026-10-22).
+            await self._apply_reanchor_journal(state["reanchor_journal"])
+            state = await self.get_state()
         if state.get("flatten_requested"):
             await self.flatten_all(profit_mode=profit_mode, route=route)
             return
         if state.get("grid_reset_requested"):
             await self.reset_grid(profit_mode=profit_mode, route=route)
+            return
+        if state.get("engine_v2_enabled"):
+            await self._tick_v2(state, profit_mode, route)
             return
         reconciled_ok, usdc_delta, has_stale_unresolved = await self.reconcile_pending_orders(profit_mode=profit_mode, route=route)
         await self._apply_usdc_delta(usdc_delta)
@@ -2238,6 +2828,7 @@ class LitGridLive:
                 self._holdings_cache = None
                 self._window_center = None
                 patch["grid_anchor_price"] = anchor
+                patch["grid_anchor_log"] = None   # v1 owns the anchor now; v2 must not read a stale log
                 detail.update({"price": price, "anchor": anchor,
                                "lots_moved": {str(k): v for k, v in sorted(mapping.items())}})
             self._reanchor_blocked_logged = False

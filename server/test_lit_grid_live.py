@@ -264,6 +264,12 @@ def base_state(**over):
     return st
 
 
+class _LongMissing(dict):
+    """First-seen-missing tracker whose rows have already been missing for 10 minutes."""
+    def setdefault(self, k, default=None):
+        return super().setdefault(k, time.time() - 600)
+
+
 def make_bot(state, orders=None, signer_fail=False, signer_err=None, cancel_err=None,
              orders_by_co=None, assets=None, order_api_fail=False, account_api_fail=False,
              active_orders_by_co=None, active_orders_fail=False):
@@ -283,8 +289,9 @@ def make_bot(state, orders=None, signer_fail=False, signer_err=None, cancel_err=
     bot._auth_token_expiry_at = 0.0
     bot._last_balance_check = 0.0
     bot._balance_paused = False
-    bot._exchange_backoff_until = 0.0
-    bot._exchange_backoff_s = core.RATE_LIMIT_BACKOFF_START
+    bot._limiter = core.ExchangeLimiter(per_minute=100000)
+    bot._missing_since = _LongMissing()   # rows a test treats as gone were gone long ago
+    bot._inflight = {}
     bot._last_cancel_all_at = 0.0
     bot.client = FakeSignerClient(fail=signer_fail, err=signer_err, cancel_err=cancel_err)
     bot._order_api = FakeOrderApi(orders_by_co, fail=order_api_fail, client=bot.client,
@@ -384,18 +391,18 @@ async def t_cancel_order_row_enters_backoff_on_invalid_nonce_and_skips_the_next_
 
 async def t_exchange_backoff_resets_on_a_clean_success():
     bot, fake = make_bot(base_state())
-    bot._exchange_backoff_s = 60.0  # pretend we already backed off once before
+    bot._limiter.backoff_s = 60.0  # pretend we already backed off once before
     row_id = await bot.place_grid_order(900, "buy", 3.10, 1.70)
     check("a clean placement succeeds", row_id is not None, row_id)
     check("the backoff duration resets back to the starting value on success",
-          bot._exchange_backoff_s == core.RATE_LIMIT_BACKOFF_START, bot._exchange_backoff_s)
+          bot._limiter.backoff_s == core.RATE_LIMIT_BACKOFF_START, bot._limiter.backoff_s)
 
 
 async def t_place_grid_order_does_not_backoff_on_an_unrelated_rejection():
     bot, fake = make_bot(base_state(), signer_err="insufficient margin for this order")
     await bot.place_grid_order(900, "buy", 3.10, 1.70)
     check("an unrelated rejection never triggers the exchange backoff",
-          bot._exchange_rate_limited() is False, bot._exchange_backoff_until)
+          bot._exchange_rate_limited() is False, bot._limiter.backoff_until)
 
 
 
@@ -443,19 +450,84 @@ async def t_only_the_nearest_levels_up_lots_get_resting_sells():
     check("they belong to the 3 cheapest lots (nearest to price)",
           len(sells) == 3 and sells[-1] < costs[3], (sells, costs[:4]))
 
+
+async def t_reset_grid_waits_for_a_row_it_cannot_settle_yet():
+    # Lighter publishes fills late. A row younger than GHOST_RESOLVE_S that the exchange no longer
+    # shows might be a fill in flight -- closing it would drop that LIT from the ledger.
+    bot, fake = _reset_fixture(active={}, young_ghost=core.now_iso())
+    await bot.tick()
+    rows = {r["id"]: r for r in fake.orders}
+    check("the young unresolved row is left alone", rows[3]["status"] == "pending", rows[3]["status"])
+    check("no re-anchor while it is unresolved; the flag stays set",
+          fake.state.get("grid_anchor_price") == 3.30 and fake.state.get("grid_reset_requested") is True,
+          (fake.state.get("grid_anchor_price"), fake.state.get("grid_reset_requested")))
+
+
+def t_capital_corrected_multiplier_is_bounded():
+    check("a near-zero cash reading cannot blow the multiplier up (cap 4x)",
+          core.capital_corrected_spacing_multiplier(80.0, 0.0001, 10000.0) <= 4.0,
+          core.capital_corrected_spacing_multiplier(80.0, 0.0001, 10000.0))
+    check("never below 1x", core.capital_corrected_spacing_multiplier(10.0, 50000.0, 100.0) >= 1.0,
+          core.capital_corrected_spacing_multiplier(10.0, 50000.0, 100.0))
+
+
+def t_rate_limit_matching_ignores_prices_that_contain_429():
+    check("a price containing 429 is not a rate limit",
+          not core.LitGridLive._is_rate_limit_error("order rejected: price 3.4290 outside band"))
+    check("a WAF 405 is a rate limit", core.LitGridLive._is_rate_limit_error("(405)\nReason: Not Allowed"))
+
+
+async def t_one_bots_rate_limit_slows_the_other():
+    shared = core.ExchangeLimiter(per_minute=1000)
+    a, _ = make_bot(base_state())
+    b, _ = make_bot(base_state())
+    a._limiter = b._limiter = shared
+    a.client.fail_msg = "(429)\nReason: Too Many Requests"
+    await a.place_grid_order(900, "buy", 3.10, 1.70)
+    n = len(b.client.placed)
+    await b.place_grid_order(901, "buy", 3.09, 1.70)
+    check("bot B sends nothing while bot A's 429 backoff is active (same wallet)",
+          len(b.client.placed) == n, b.client.placed)
+
+
+async def t_request_budget_caps_sends_per_minute():
+    bot, fake = make_bot(base_state())
+    bot._limiter = core.ExchangeLimiter(per_minute=3)
+    for i in range(6):
+        await bot.place_grid_order(900 - i, "buy", 3.10 - i * 0.01, 1.70)
+    check("only the budget's worth of orders goes out in a burst", len(bot.client.placed) == 3,
+          len(bot.client.placed))
+
+
+async def t_flatten_uses_one_cancel_all_not_one_cancel_per_order():
+    a = {"id": 1, "level": 900, "side": "buy", "status": "open", "client_order_index": 1,
+         "exchange_order_id": 50, "limit_price": 3.00, "size": 1.70}
+    b = {"id": 2, "level": 901, "side": "buy", "status": "open", "client_order_index": 2,
+         "exchange_order_id": 51, "limit_price": 3.01, "size": 1.70}
+    bot, fake = make_bot(base_state(flatten_requested=True), orders=[a, b],
+                          active_orders_by_co={1: FakeOrder(1, order_index=50), 2: FakeOrder(2, order_index=51)})
+    bot.live.best_mid = lambda max_age=core.BOOK_MAX_AGE: 3.10
+    await bot.flatten_all()
+    check("one cancel-all transaction, no per-order cancels",
+          getattr(bot.client, "cancel_all_calls", 0) == 1 and bot.client.cancelled == [],
+          (getattr(bot.client, "cancel_all_calls", 0), bot.client.cancelled))
+
 # ── Grid reset (one cancel-all tx, then re-anchor) ─────────────────────────────────────────────
 
-def _reset_fixture(active=None, lit_real=6.0, **state_over):
+def _reset_fixture(active=None, lit_real=6.0, young_ghost=None, **state_over):
     held = {"id": 1, "level": 10, "side": "buy", "status": "filled", "filled_qty": 6.0,
             "filled_price": 3.40, "size": 6.0, "closes_level": None}
     resting = {"id": 2, "level": 11, "side": "sell", "status": "open", "closes_level": 10,
-               "client_order_index": 501, "exchange_order_id": 5001, "limit_price": 3.42, "size": 6.0}
+               "client_order_index": 501, "exchange_order_id": 5001, "limit_price": 3.42, "size": 6.0,
+               "placed_at": "2020-01-01T00:00:00+00:00"}
     ghost = {"id": 3, "level": 9, "side": "buy", "status": "pending", "client_order_index": 502,
              "exchange_order_id": None, "limit_price": 3.38, "size": 6.0,
-             "placed_at": core.now_iso()}
+             "placed_at": young_ghost or "2020-01-01T00:00:00+00:00"}
     st = base_state(grid_reset_requested=True, grid_anchor_price=3.30, internal_spacing_pct=0.125,
                     lit_balance=lit_real, **state_over)
+    cancelled_501 = {501: FakeOrder(501, order_index=5001, status="canceled", remaining_base_amount=0.0)}
     bot, fake = make_bot(st, orders=[held, resting, ghost], active_orders_by_co=active or {},
+                         orders_by_co=cancelled_501,
                          assets=[FakeAsset("USDC", 500.0, 0.0), FakeAsset("LIT", lit_real, 0.0)])
     bot.fetch_current_price = lambda: _async_return(3.45)
     return bot, fake
@@ -480,9 +552,10 @@ async def t_reset_grid_reanchors_once_the_exchange_is_clear():
     bot, fake = _reset_fixture(active={})
     await bot.tick()
     rows = {r["id"]: r for r in fake.orders}
-    check("open/pending ledger rows not resting on the exchange are closed as cancelled",
-          rows[2]["status"] == "cancelled" and rows[3]["status"] == "cancelled",
-          (rows[2]["status"], rows[3]["status"]))
+    check("the order cancelled by the cancel-all is recorded as cancelled (exchange's own word)",
+          rows[2]["status"] == "cancelled", rows[2]["status"])
+    check("the ghost (never on the exchange, long past the visibility delay) is resolved",
+          rows[3]["status"] == "rejected", rows[3]["status"])
     check("the held lot keeps its real fill price (cost basis untouched)",
           rows[1]["filled_price"] == 3.40 and rows[1]["status"] == "filled", rows[1])
     check("the grid is re-anchored (new anchor) and the flag cleared",
@@ -992,8 +1065,14 @@ async def t_flatten_sells_each_held_level_separately_with_correct_closes_level()
               "filled_qty": 1.70, "filled_price": 3.10}
     held_b = {"id": 2, "level": 910, "side": "buy", "status": "filled",
               "filled_qty": 2.00, "filled_price": 3.15}
-    bot, fake = make_bot(base_state(), orders=[held_a, held_b], assets=[FakeAsset("LIT", 0.0, 0.0)])
+    bot, fake = make_bot(base_state(), orders=[held_a, held_b], assets=[FakeAsset("LIT", 3.70, 0.0)])
     bot.live.best_mid = lambda max_age=core.BOOK_MAX_AGE: 3.10
+    await bot.flatten_all()
+    # One step per tick (2026-10-22): this pass sends the sells; the next confirms the account flat.
+    bot._account_api.assets = [FakeAsset("LIT", 0.0, 0.0)]
+    for o in fake.orders:   # the next tick comes after the exchange's visibility delay
+        if o["side"] == "sell":
+            o["placed_at"] = "2020-01-01T00:00:00+00:00"
     await bot.flatten_all()
     sell_rows = [o for o in fake.orders if o["side"] == "sell"]
     closes_levels = {o["closes_level"] for o in sell_rows}
@@ -1062,8 +1141,11 @@ async def t_flatten_logs_dust_stuck_distinctly_for_an_unsellable_remainder():
     await bot.flatten_all()
     check("a terminal remainder below the sellable minimum is logged distinctly",
           any(r["action"] == "flatten_dust_stuck" for r in fake.runs), fake.runs)
-    check("flatten correctly refuses to report completion while dust remains unsellable",
-          not any(r["action"] == "flatten_completed" for r in fake.runs), fake.runs)
+    # Audit 2026-10-22: dust under the 1 LIT minimum can never be sold; Flatten completes (and
+    # stops the bot) instead of retrying forever, and says dust was left.
+    check("flatten completes with unsellable dust left, and says so",
+          any(r["action"] == "flatten_completed" and r["detail"].get("dust_left") for r in fake.runs)
+          and fake.state["enabled"] is False, fake.runs)
 
 
 # ── Atomic one-shot buy allowance ────────────────────────────────────────────────────────────────
@@ -1288,17 +1370,13 @@ async def t_flatten_aborts_if_the_lock_is_lost_during_the_cancel_loop():
     bot, fake = make_bot(base_state(flatten_requested=True), orders=[resting_a, resting_b, held],
                           assets=[FakeAsset("LIT", 1.70, 0.0)])
     bot.live.best_mid = lambda max_age=core.BOOK_MAX_AGE: 3.10
-    orig_cancel = bot.cancel_order_row
 
-    async def losing_cancel(row):
-        ok = await orig_cancel(row)
-        if row["id"] == 1:
-            bot._lock_held = False
-        return ok
-    bot.cancel_order_row = losing_cancel
+    async def losing_cancel_all(context):
+        bot._lock_held = False
+        return True
+    bot._cancel_all_on_exchange = losing_cancel_all
     await bot.flatten_all()
-    check("only the first cancel went out before the lock loss was noticed",
-          sorted(bot.client.cancelled) == [50], bot.client.cancelled)
+    check("no per-order cancels at all (one cancel-all)", bot.client.cancelled == [], bot.client.cancelled)
     check("no market sell was attempted after the lock was lost",
           not any(o["side"] == "sell" for o in fake.orders), fake.orders)
     check("the abort is logged distinctly", any(r["action"] == "flatten_aborted_lock_lost" for r in fake.runs), fake.runs)
@@ -3107,11 +3185,39 @@ async def t_tick_gate_spacing_growth_off_keeps_old_behavior_even_with_a_tier_rec
     check("no reanchor fired (anchor price unchanged)", fake.state.get("grid_anchor_price") == A, fake.state.get("grid_anchor_price"))
 
 
+async def t_a_resting_order_that_just_left_the_book_is_not_marked_rejected():
+    # Audit 2026-10-22 (P0-2): a sell that rested for hours, filled, and was not yet visible in the
+    # per-order lookup was marked rejected on the spot -- the fill and its profit lost for good.
+    held = {"id": 1, "level": 10, "side": "buy", "status": "filled", "filled_qty": 6.0,
+            "filled_price": 3.40, "size": 6.0, "closes_level": None}
+    sell = {"id": 2, "level": 11, "side": "sell", "status": "open", "closes_level": 10,
+            "client_order_index": 601, "exchange_order_id": 6001, "limit_price": 3.42, "size": 6.0,
+            "placed_at": "2020-01-01T00:00:00+00:00"}
+    ghost = {"id": 3, "level": 9, "side": "buy", "status": "pending", "client_order_index": 602,
+             "exchange_order_id": None, "limit_price": 3.38, "size": 6.0,
+             "placed_at": "2020-01-01T00:00:00+00:00"}
+    bot, fake = make_bot(base_state(), orders=[held, sell, ghost], active_orders_by_co={})
+    bot._missing_since = {}
+    await bot.reconcile_pending_orders()
+    rows = {r["id"]: r for r in fake.orders}
+    check("an old resting sell that just left the book is NOT resolved on first sight",
+          rows[2]["status"] == "open", rows[2]["status"])
+    check("an old ghost is NOT resolved on first sight either (needs a minute missing)",
+          rows[3]["status"] == "pending", rows[3]["status"])
+    bot._missing_since = {k: v - core.GHOST_RESOLVE_S - 1 for k, v in bot._missing_since.items()}
+    await bot.reconcile_pending_orders()
+    rows = {r["id"]: r for r in fake.orders}
+    check("after a full minute missing, the never-seen ghost resolves", rows[3]["status"] == "rejected",
+          rows[3]["status"])
+
+
 async def main():
     t_precision_and_minimum_enforcement()
     t_order_fill_amounts_uses_real_human_decimal_units()
     t_order_is_terminal_uses_remaining_amount_primarily()
     t_is_rate_limit_error_matches_429_and_nonce_not_unrelated_errors()
+    t_capital_corrected_multiplier_is_bounded()
+    t_rate_limit_matching_ignores_prices_that_contain_429()
     t_rounding_does_not_shift_the_real_fill_price_bin()
     t_cover_for_tier_matches_the_live_gates()
     t_capital_corrected_spacing_multiplier_matches_verified_values()
@@ -3146,6 +3252,10 @@ async def main():
               t_passed_level_market_sell_is_floored_at_the_lots_cost,
               t_a_429_at_placement_is_a_definite_rejection_not_a_ghost,
               t_only_the_nearest_levels_up_lots_get_resting_sells,
+              t_reset_grid_waits_for_a_row_it_cannot_settle_yet,
+              t_one_bots_rate_limit_slows_the_other,
+              t_request_budget_caps_sends_per_minute,
+              t_flatten_uses_one_cancel_all_not_one_cancel_per_order,
               t_cancel_marks_cancel_requested_not_cancelled_directly,
               t_cancel_requested_resolves_to_filled_if_a_fill_raced_it,
               t_cancel_order_row_checks_the_sdk_error,
@@ -3264,7 +3374,8 @@ async def main():
               t_tick_passes_rest_cap_from_state,
               t_maintain_window_uses_hysteresis_guard_for_the_window_center,
               t_lock_heartbeat_touched_after_each_order_placement,
-              t_rate_limited_errors_back_off_before_retrying):
+              t_rate_limited_errors_back_off_before_retrying,
+              t_a_resting_order_that_just_left_the_book_is_not_marked_rejected):
         try:
             await t()
         except Exception as e:
