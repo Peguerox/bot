@@ -2813,6 +2813,28 @@ async def t_dynamic_order_size_never_touches_multiplier_fields_when_growth_flag_
           "dynamic_dd_base_capital_usd" not in fake.state, fake.state.get("dynamic_dd_base_capital_usd"))
 
 
+async def t_dynamic_order_size_resize_without_a_tier_change_never_touches_the_multiplier():
+    # Real incident, 2026-10-22: order_size_lit gets cleared for reasons that have nothing to do
+    # with the tier (compound-profit credit, a settings change, a manual fix) -- recomputing the
+    # capital-corrected multiplier on every one of those (it depends on LIVE cash, unlike the old
+    # flat table) produced a slightly different spacing EVERY time, each one triggering its own
+    # full cancel-and-reanchor even while staying in the exact same tier. Worker 4 got stuck in
+    # back-to-back reanchors this way within minutes of deploy. A resize with the SAME tier must
+    # leave gate_spacing_multiplier_value/dynamic_dd_base_capital_usd completely untouched.
+    bot, fake = make_bot(base_state(
+        dynamic_dd_enabled=True, gate_spacing_growth_enabled=True,
+        dynamic_dd_high=100.0, dynamic_dd_tier=20.0, dynamic_dd_base_capital_usd=1000.0,
+        gate_spacing_multiplier_value=1.2566, order_size_lit=None, usdc_balance=850.0,
+    ))
+    await bot._dynamic_order_size(fake.state, 94.0, 0.125, {}, {})  # drop=6% -- still tier 20, no change
+    check("tier is unchanged (still 20)", fake.state.get("dynamic_dd_tier") == 20.0, fake.state.get("dynamic_dd_tier"))
+    check("order_size_lit WAS recomputed (it was None)", fake.state.get("order_size_lit") is not None, fake.state.get("order_size_lit"))
+    check("the multiplier is NOT recomputed -- stays at the exact value it already had",
+          fake.state.get("gate_spacing_multiplier_value") == 1.2566, fake.state.get("gate_spacing_multiplier_value"))
+    check("K0 is NOT touched either -- stays at the exact value it already had",
+          fake.state.get("dynamic_dd_base_capital_usd") == 1000.0, fake.state.get("dynamic_dd_base_capital_usd"))
+
+
 async def t_tick_gate_switch_reanchors_to_the_wider_spacing_next_tick():
     # Direct research finding: starting narrow and staying flat into a deep drawdown gate can
     # collapse orders below the exchange minimum. With the growth flag on, a dynamic_dd_tier
@@ -2935,6 +2957,7 @@ async def main():
               t_dynamic_order_size_persists_multiplier_and_base_capital_on_a_tier_switch,
               t_dynamic_order_size_refreshes_base_capital_every_time_it_returns_to_base_tier,
               t_dynamic_order_size_never_touches_multiplier_fields_when_growth_flag_is_off,
+              t_dynamic_order_size_resize_without_a_tier_change_never_touches_the_multiplier,
               t_tick_gate_spacing_growth_off_keeps_old_behavior_even_with_a_tier_recorded,
               t_two_instances_in_one_process_never_touch_each_others_rows,
               t_tick_spacing_change_reanchors_held_lots_and_sells_near_cost,

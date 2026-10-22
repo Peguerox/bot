@@ -1389,20 +1389,30 @@ class LitGridLive:
         size = state.get("order_size_lit")
         old_tier = state.get("dynamic_dd_tier")
         tier = dynamic_dd_tier_for_drop(drop, float(old_tier) if old_tier is not None else None)
-        if size is None or old_tier is None or float(old_tier) != tier:
+        # tier_changed (not just "size is missing") gates the spacing-multiplier bookkeeping
+        # below -- real incident, 2026-10-22: order_size_lit gets cleared for lots of reasons
+        # that have nothing to do with the tier (a compound-profit credit, a settings change, a
+        # manual fix), and capital_corrected_spacing_multiplier depends on LIVE cash, unlike the
+        # old flat 1/2/3/4x table which depended only on the tier. Recomputing it on every one of
+        # those unrelated resizes produced a slightly different spacing EVERY time, each one
+        # triggering its own full cancel-and-reanchor even while staying in the exact same tier --
+        # Worker 4 got stuck in back-to-back reanchors this way within minutes of deploy. The
+        # multiplier (and K0) must only ever change on a REAL tier transition.
+        tier_changed = old_tier is None or float(old_tier) != tier
+        if size is None or tier_changed:
             _, _, available = self._funding(state, holdings, resting)
             cover = max(tier - drop, 1.0) / (1 - drop / 100)
             size = compute_order_size_lit(max(available, 0.0), price, spacing_pct,
                                           levels_for_drawdown(spacing_pct, cover))
             patch.update({"dynamic_dd_tier": tier, "order_size_lit": size})
-            # Spacing-multiplier bookkeeping for gate_spacing_growth_enabled (2026-10-22, replacing
-            # the old flat 1/2/3/4x table with capital_corrected_spacing_multiplier -- see its own
-            # docstring). K0 (dynamic_dd_base_capital_usd) is the cash available the last time the
-            # bot was at the base tier, refreshed every time it returns there; the multiplier is
-            # computed and persisted here, once per tier switch, for effective_spacing_pct to read
-            # on a later tick -- same ~1-tick-delay design the feature always had, never computed
-            # live from a tier lookup anymore.
-            if state.get("gate_spacing_growth_enabled"):
+            # Spacing-multiplier bookkeeping for gate_spacing_growth_enabled (2026-10-21/22,
+            # replacing the old flat 1/2/3/4x table with capital_corrected_spacing_multiplier --
+            # see its own docstring). K0 (dynamic_dd_base_capital_usd) is the cash available the
+            # last time the bot was at the base tier, refreshed every time it returns there; the
+            # multiplier is computed and persisted here, ONLY on a real tier change, for
+            # effective_spacing_pct to read on a later tick -- same ~1-tick-delay design the
+            # feature always had, never computed live from a tier lookup anymore.
+            if tier_changed and state.get("gate_spacing_growth_enabled"):
                 k0 = state.get("dynamic_dd_base_capital_usd")
                 if tier == DYNAMIC_DD_BASE or k0 is None:
                     k0 = available
