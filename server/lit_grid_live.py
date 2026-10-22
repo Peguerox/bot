@@ -445,6 +445,39 @@ def gate_spacing_multiplier(tier):
         return 1
 
 
+DEESCALATE_HYSTERESIS_PTS = 1.0
+
+
+def dynamic_dd_tier_for_drop(drop, old_tier):
+    """Which dynamic-drawdown tier applies for this drop%, hysteresis-aware (2026-10-22, real
+    incident: with gate_spacing_growth_enabled on, price sitting right on a gate boundary flipped
+    tiers back and forth every 40-95 seconds for hours -- Worker 4 flipped 10<->20 at least 11
+    times in ~4 hours as drop chopped between 4.92% and 6.38% around the 5% gate, each flip
+    forcing a full cancel-and-reanchor of the whole grid under gate_spacing_growth_enabled; that
+    same day a spacing-change cancel got stuck on one vanished order and blocked Worker 3 for
+    4.8 hours straight.
+
+    Escalating to a DEEPER tier still reacts instantly at the raw gate -- that's the safety
+    response, no reason to ever delay it. De-escalating back to a SHALLOWER tier requires drop
+    to have retreated to (the gate that got us into the current tier) minus
+    DEESCALATE_HYSTERESIS_PTS, not just back under that gate by any amount. 1 point is sized from
+    the real data above: the chop stayed at or above 4.92%, so gate-1 (4.0% for the 5% gate)
+    clears the lowest dip actually seen with real margin, not an arbitrary guess. Only the ONE
+    gate that produced the current tier is checked -- a big genuine move (e.g. drop falling
+    straight from 25% to 3% in one tick) still de-escalates all the way through in one step,
+    never stepping down one tier at a time."""
+    tier = DYNAMIC_DD_BASE
+    for gate, t in DYNAMIC_DD_GATES:
+        if drop >= gate:
+            tier = t
+    if old_tier is None or tier >= old_tier:
+        return tier
+    old_gate = next((g for g, t in DYNAMIC_DD_GATES if t == old_tier), None)
+    if old_gate is not None and drop >= old_gate - DEESCALATE_HYSTERESIS_PTS:
+        return old_tier
+    return tier
+
+
 def effective_spacing_pct(state):
     """The spacing actually used for new grid lines this tick: the dashboard's spacing_pct,
     widened by gate_spacing_multiplier() while gate_spacing_growth_enabled AND dynamic_dd_enabled
@@ -1322,12 +1355,9 @@ class LitGridLive:
         if not stored or high > float(stored):
             patch["dynamic_dd_high"] = high
         drop = max(0.0, (1 - price / high) * 100)
-        tier = DYNAMIC_DD_BASE
-        for gate, t in DYNAMIC_DD_GATES:
-            if drop >= gate:
-                tier = t
         size = state.get("order_size_lit")
         old_tier = state.get("dynamic_dd_tier")
+        tier = dynamic_dd_tier_for_drop(drop, float(old_tier) if old_tier is not None else None)
         if size is None or old_tier is None or float(old_tier) != tier:
             _, _, available = self._funding(state, holdings, resting)
             cover = max(tier - drop, 1.0) / (1 - drop / 100)

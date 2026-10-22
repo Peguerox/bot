@@ -2669,6 +2669,71 @@ def t_effective_spacing_widens_with_the_tier_when_both_flags_are_on():
         check(f"tier {tier:g}: 0.125 x{mult} = {want}", got == want, got)
 
 
+# ── De-escalation hysteresis (2026-10-22 real incident) ───────────────────────────────────────
+
+def t_dynamic_dd_tier_escalates_instantly_at_the_raw_gate():
+    check("drop exactly at the 5% gate, coming from tier 10, escalates to 20 immediately",
+          core.dynamic_dd_tier_for_drop(5.0, 10.0) == 20.0)
+    check("a big jump straight to the 20% gate escalates straight to 80, no step-by-step delay",
+          core.dynamic_dd_tier_for_drop(20.0, 10.0) == 80.0)
+
+
+def t_dynamic_dd_tier_blocks_deescalation_inside_the_hysteresis_band():
+    # Real data, 2026-10-22: chop around the 5% gate stayed between 4.92% and 6.38% for hours.
+    # Dipping just under the gate (but still within the 1-point band) must NOT fall back to 10.
+    check("drop just under the gate (4.5%), but within the 1-point band, stays at the deeper tier",
+          core.dynamic_dd_tier_for_drop(4.5, 20.0) == 20.0)
+    check("drop at exactly gate-1 (4.0%) still counts as inside the band (boundary itself holds)",
+          core.dynamic_dd_tier_for_drop(4.0, 20.0) == 20.0)
+
+
+def t_dynamic_dd_tier_deescalates_once_past_the_hysteresis_margin():
+    check("drop clearly past gate-1 (3.9%) de-escalates back to the shallower tier",
+          core.dynamic_dd_tier_for_drop(3.9, 20.0) == 10.0)
+
+
+def t_dynamic_dd_tier_applies_the_same_band_at_every_gate():
+    check("10% gate: 9.5% stays at 40 (inside the band)",
+          core.dynamic_dd_tier_for_drop(9.5, 40.0) == 40.0)
+    check("10% gate: 8.9% de-escalates to 20 (past the band)",
+          core.dynamic_dd_tier_for_drop(8.9, 40.0) == 20.0)
+    check("20% gate: 19.5% stays at 80 (inside the band)",
+          core.dynamic_dd_tier_for_drop(19.5, 80.0) == 80.0)
+    check("20% gate: 18.9% de-escalates to 40 (past the band)",
+          core.dynamic_dd_tier_for_drop(18.9, 80.0) == 40.0)
+
+
+def t_dynamic_dd_tier_lets_a_real_recovery_fall_straight_through():
+    # A genuine large recovery (not noise) must land wherever the raw gate says, in one step --
+    # the band only guards the ONE gate that produced the current tier, never stacks per gate.
+    check("drop falling from deep (old_tier 80) straight to 3% lands at base (10) in one step",
+          core.dynamic_dd_tier_for_drop(3.0, 80.0) == 10.0)
+    check("drop falling from deep (old_tier 80) to 15% lands at 40 in one step",
+          core.dynamic_dd_tier_for_drop(15.0, 80.0) == 40.0)
+
+
+def t_dynamic_dd_tier_with_no_prior_tier_uses_the_raw_gate():
+    check("first-ever call (nothing recorded yet) has no history to hysteresis against",
+          core.dynamic_dd_tier_for_drop(15.0, None) == 40.0)
+
+
+async def t_dynamic_order_size_does_not_thrash_on_real_boundary_chop():
+    # Reproduces the actual 2026-10-22 incident sequence (drop oscillating across the 5% gate)
+    # and confirms the tier no longer flips back and forth tick to tick.
+    bot, fake = make_bot(base_state(
+        dynamic_dd_enabled=True, dynamic_dd_high=100.0, dynamic_dd_tier=10.0,
+        order_size_lit=5.0, usdc_balance=500.0,
+    ))
+    for drop_pct in (4.98, 5.08, 4.92, 5.5, 4.97):
+        price = 100.0 * (1 - drop_pct / 100.0)
+        await bot._dynamic_order_size(fake.state, price, 0.125, {}, {})
+    check("tier settles at the deeper tier instead of flapping back to 10 on every small dip",
+          fake.state.get("dynamic_dd_tier") == 20.0, fake.state.get("dynamic_dd_tier"))
+    switches = [r for r in fake.runs if r["action"] == "dynamic_drawdown_switch"]
+    check("only ONE real switch happened across the whole noisy sequence (escalate once, no bouncing)",
+          len(switches) == 1, switches)
+
+
 async def t_tick_gate_switch_reanchors_to_the_wider_spacing_next_tick():
     # Direct research finding: starting narrow and staying flat into a deep drawdown gate can
     # collapse orders below the exchange minimum. With the growth flag on, a dynamic_dd_tier
@@ -2743,6 +2808,12 @@ async def main():
     t_gate_spacing_multiplier_matches_the_tier_order()
     t_effective_spacing_off_by_default_is_the_plain_dashboard_value()
     t_effective_spacing_widens_with_the_tier_when_both_flags_are_on()
+    t_dynamic_dd_tier_escalates_instantly_at_the_raw_gate()
+    t_dynamic_dd_tier_blocks_deescalation_inside_the_hysteresis_band()
+    t_dynamic_dd_tier_deescalates_once_past_the_hysteresis_margin()
+    t_dynamic_dd_tier_applies_the_same_band_at_every_gate()
+    t_dynamic_dd_tier_lets_a_real_recovery_fall_straight_through()
+    t_dynamic_dd_tier_with_no_prior_tier_uses_the_raw_gate()
     t_default_init_is_byte_identical_to_worker4s_old_hardcoded_behavior()
     t_overridden_init_uses_its_own_tables_and_tag_not_worker4s()
     t_run_lit_grid_live_signature_defaults_match_worker4_exactly()
@@ -2778,6 +2849,7 @@ async def main():
               t_tick_cancels_everything_on_a_spacing_change,
               t_tick_spacing_change_does_not_advance_if_cancel_fails,
               t_tick_gate_switch_reanchors_to_the_wider_spacing_next_tick,
+              t_dynamic_order_size_does_not_thrash_on_real_boundary_chop,
               t_tick_gate_spacing_growth_off_keeps_old_behavior_even_with_a_tier_recorded,
               t_two_instances_in_one_process_never_touch_each_others_rows,
               t_tick_spacing_change_reanchors_held_lots_and_sells_near_cost,
