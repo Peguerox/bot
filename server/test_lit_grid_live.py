@@ -206,6 +206,8 @@ class FakeSignerClient:
         self.cancelled = []
 
     async def create_order(self, **kwargs):
+        if getattr(self, "fail_msg", None):
+            raise RuntimeError(self.fail_msg)
         if self.fail:
             raise RuntimeError("simulated network failure")
         self.placed.append(kwargs)
@@ -410,6 +412,36 @@ async def t_passed_level_market_sell_is_floored_at_the_lots_cost():
     sent2 = bot.client.placed[-1]
     check("with no floor (flatten), the plain 0.5% band is unchanged",
           sent2["avg_execution_price"] == price_to_int(round_price(3.45 * 0.995)), sent2["avg_execution_price"])
+
+
+async def t_a_429_at_placement_is_a_definite_rejection_not_a_ghost():
+    # Live 2026-10-22: a 429 left the row 'pending' with no exchange id -- a ghost that held the
+    # slot, so the sell for a just-bought lot never reached the book.
+    bot, fake = make_bot(base_state())
+    bot.client.fail_msg = "(429)\nReason: Too Many Requests"
+    rid = await bot.place_grid_order(900, "sell", 3.10, 1.70, closes_level=899)
+    row = fake.orders[-1]
+    check("a 429 returns None (nothing placed)", rid is None, rid)
+    check("the ledger row is closed as rejected, not left pending",
+          row["status"] == "rejected", row)
+    check("the backoff starts", bot._exchange_rate_limited() is True)
+
+
+async def t_only_the_nearest_levels_up_lots_get_resting_sells():
+    held = [{"id": i, "level": 900 + i * 3, "side": "buy", "status": "filled", "filled_qty": 2.0,
+             "filled_price": round(3.10 * (1.00125 ** (i * 3)), 4), "size": 2.0} for i in range(1, 9)]
+    bot, fake = make_bot(base_state(levels_up=3, levels_down=1, lit_balance=16.0, grid_anchor_price=1.0),
+                          orders=held,
+                          assets=[FakeAsset("USDC", 500.0, 0.0), FakeAsset("LIT", 16.0, 0.0)])
+    force_not_cold_start(bot)
+    anchor = 3.10 / (1.00125 ** 900)
+    fake.state["grid_anchor_price"] = anchor
+    await bot.maintain_window(fake.state, 3.05)
+    sells = sorted(float(o["limit_price"]) for o in fake.orders if o["side"] == "sell")
+    check("only levels_up (3) resting sells are placed for 8 held lots", len(sells) == 3, sells)
+    costs = sorted(h["filled_price"] for h in held)
+    check("they belong to the 3 cheapest lots (nearest to price)",
+          len(sells) == 3 and sells[-1] < costs[3], (sells, costs[:4]))
 
 # ── Grid reset (one cancel-all tx, then re-anchor) ─────────────────────────────────────────────
 
@@ -3112,6 +3144,8 @@ async def main():
               t_reset_grid_does_nothing_when_the_active_orders_read_fails,
               t_reset_grid_respects_the_rate_limit_backoff,
               t_passed_level_market_sell_is_floored_at_the_lots_cost,
+              t_a_429_at_placement_is_a_definite_rejection_not_a_ghost,
+              t_only_the_nearest_levels_up_lots_get_resting_sells,
               t_cancel_marks_cancel_requested_not_cancelled_directly,
               t_cancel_requested_resolves_to_filled_if_a_fill_raced_it,
               t_cancel_order_row_checks_the_sdk_error,

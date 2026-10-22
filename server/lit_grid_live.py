@@ -820,7 +820,15 @@ class LitGridLive:
                 return None
         except Exception as e:
             if self._is_rate_limit_error(str(e)):
+                # Refused by the rate limiter before reaching the sequencer -- a definite
+                # rejection, not an unknown outcome. Left 'pending' it became a ghost row that
+                # held its slot (no real order, and the bot would not re-place one) until the
+                # 1h stale sweep: live 2026-10-22 it kept the sell for a just-bought lot off the
+                # book, right at price.
                 self._register_exchange_rate_limit()
+                await self.sb("PATCH", f"{self.TABLE_ORDERS}?id=eq.{row_id}",
+                               {"status": "rejected", "error": ("rate_limited: " + str(e))[:200]})
+                return None
             await self.log_run("order_place_unknown", {"row_id": row_id, "error": str(e)[:200]})
             return row_id
         self._register_exchange_success()
@@ -1746,6 +1754,18 @@ class LitGridLive:
         # first ever bought, and always before every buy -- the buy right under price could wait
         # several seconds behind sells far away). Market sells and conflict cancels stay
         # immediate.
+        def _sell_target(lvl, h):
+            if anchored:
+                return max(round_price(anchor * math.exp(hole_target.get(lvl, lvl + 1) * step)),
+                           round_price(h["cost"]))
+            return round_price(h["cost"] * (1 + spacing_pct / 100.0))
+        # Resting sells only for the levels_up lots whose sell sits nearest to price (2026-10-22,
+        # direct request). Far sells for lots bought well above price never trade until price
+        # comes back, but each one costs a signed request -- Worker 3 carried ~70 of them, and
+        # placing them is what kept tripping Lighter's rate limit. A far lot gets its sell once
+        # it ranks among the nearest; a spike past its target is still caught by the passed-level
+        # market sell below, which checks every lot. Existing far sells are left alone.
+        near_lots = set(sorted(active, key=lambda lv: _sell_target(lv, active[lv]))[:levels_up])
         sell_queue = []
         for lvl, h in holdings.items():
             if not self._lock_held:
@@ -1782,6 +1802,8 @@ class LitGridLive:
                 for r in conflicting_buys:
                     await self.cancel_order_row(r)
                 continue  # defer the sell to next tick, after reconciliation confirms it's gone
+            if lvl not in near_lots:
+                continue
             sell_size = clamp_order_size(h["qty"])
             if sell_size is None:
                 continue
