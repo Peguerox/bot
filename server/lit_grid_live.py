@@ -702,14 +702,17 @@ def plan_reanchor_log(buys, sells, all_levels, price, new_spacing_pct):
     (anchor_log, {row_id: (column, new_line)}, {old_level: new_line}) or None if unsafe."""
     step = math.log(1 + new_spacing_pct / 100.0)
     offset = max((abs(int(x)) for x in all_levels), default=0) + REANCHOR_LEVEL_MARGIN
-    planned = _reanchor_moves(buys, sells, offset, price, step)
+    # Every lot keeps its own line (no merging): a merged line averages the lots' costs, and a sell
+    # already resting for the cheaper lot could then fill below that new average (simulator,
+    # 2026-10-22). v1's plan_reanchor still merges.
+    planned = _reanchor_moves(buys, sells, offset, price, step, merge=False)
     if planned is None:
         return None
     moves, mapping = planned
     return math.log(price) - offset * step, moves, mapping
 
 
-def _reanchor_moves(buys, sells, offset, price, step):
+def _reanchor_moves(buys, sells, offset, price, step, merge=True):
     held = holdings_from_rows(buys, sells)
     segs = open_segments(buys, sells)
     used, moves, mapping = {}, {}, {}
@@ -721,7 +724,7 @@ def _reanchor_moves(buys, sells, offset, price, step):
         seg = segs[lvl]
         has_sells = has_sells_of(lvl)
         line = offset + round(math.log(held[lvl]["cost"] / price) / step)
-        while line in used and (has_sells or used[line]):
+        while line in used and (has_sells or used[line] or not merge):
             line += 1
         used[line] = used.get(line, False) or has_sells
         mapping[lvl] = line

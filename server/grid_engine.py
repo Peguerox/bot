@@ -67,7 +67,15 @@ def plan_orders(price, anchor_log, step, spacing_frac, lots, levels_up, levels_d
     plan = Plan()
     cur = line_at_or_below(price, anchor_log, step)
 
-    targets = sorted((sell_target(ln, h["cost"], anchor_log, step, spacing_frac, round_price), ln)
+    # The line a lot really occupies is the line at or ABOVE its cost (live 2026-10-22). A limit buy
+    # costs exactly its line; a trailing market buy costs a bit above price, between two lines --
+    # counting it on the line below blocked that line's buy AND pushed its sell up a line,
+    # leaving a two-order hole around price.
+    def occupied(ln, cost):
+        return max(ln, math.ceil((math.log(cost) - anchor_log) / step - 1e-6))
+    occ = {ln: occupied(ln, h["cost"]) for ln, h in lots.items()}
+
+    targets = sorted((sell_target(occ[ln], h["cost"], anchor_log, step, spacing_frac, round_price), ln)
                      for ln, h in lots.items())
     resting = []
     for tgt, ln in targets:
@@ -82,12 +90,16 @@ def plan_orders(price, anchor_log, step, spacing_frac, lots, levels_up, levels_d
         window_top = line_price(anchor_log, cur + levels_up + 1, step)
         near = sum(1 for w in plan.sells if w.price <= window_top)
         if near < levels_up:
-            ln = cur
-            while ln in lots:
+            # Filed on the line above price: it costs about the price, so that is the line it
+            # occupies, and the line just below price stays free for a buy.
+            ln = cur + 1
+            while ln in lots or ln in occ.values():
                 ln += 1
             plan.trail_line = ln
 
-    held = set(lots)
+    # A ledger line keeps one lot (holdings are keyed by line), so a lot's own line stays blocked
+    # too; new trailing buys are filed on the line above price, so they no longer create a hole.
+    held = set(lots) | set(occ.values())
     if plan.trail_line is not None:
         held.add(plan.trail_line)
     ln = cur

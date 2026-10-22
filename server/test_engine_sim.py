@@ -462,12 +462,19 @@ async def run_scenario(name, kind, seed, p429=0.0, p_timeout=0.0, restart_every=
             check(f"[{name}] a buy and a sell next to price on >={int(need*100)}% of calm ticks ({covered}/{eligible})",
                   covered >= need * eligible, (covered, eligible))
     ledger_lit = sum(h["qty"] for h in lot_costs(db).values())
+    # Fills from the last few seconds are not visible to the bot yet; count them on both sides.
+    for o in ex.orders.values():
+        if o["co"] in {o2["co"] for o2 in ex.orders.values() if Clock.t - o2.get("filled_t", -1e18) < 10}:
+            row = next((r for r in db.orders if r["client_order_index"] == o["co"]), None)
+            if row is not None and row.get("status") != "filled":
+                ledger_lit += o["filled"] if o["side"] == "buy" else -o["filled"]
     check(f"[{name}] ledger LIT matches exchange LIT ({ledger_lit:.2f} vs {ex.lit:.2f})",
           abs(ledger_lit - ex.lit) < 0.05, (ledger_lit, ex.lit))
     open_ledger = {r["client_order_index"] for r in db.orders if r.get("status") in ("open", "pending", "cancel_requested")}
     open_ex = {o["co"] for o in ex.orders.values() if o["status"] == "open"}
     # A cancel sent in the last few seconds is legitimately not reconciled yet.
-    just_closed = {o["co"] for o in ex.orders.values() if Clock.t - o.get("closed_t", -1e18) < 10}
+    just_closed = {o["co"] for o in ex.orders.values()
+                   if Clock.t - max(o.get("closed_t", -1e18), o.get("filled_t", -1e18), o["created"]) < 10}
     check(f"[{name}] no orphan orders on the exchange (exchange \\ ledger empty)",
           not (open_ex - open_ledger), sorted(open_ex - open_ledger)[:10])
     check(f"[{name}] no ghost rows in the ledger (ledger \\ exchange empty)",
@@ -522,6 +529,19 @@ async def main():
                                                               "gate_spacing_multiplier_value": None,
                                                               "dynamic_dd_tier": None, "order_size_lit": None})})
     await run_scenario("flatten mid-crash", "crash", 17, 0.1, 0.05, None, flatten_at=80)
+    # Live 2026-10-22 (Worker 3, 0.125%): a trailing market buy at 3.40175 filed on the 3.3979
+    # line blocked that line's buy and pushed its sell to 3.4065 -- a hole around price. Filed on
+    # the line above price, the line below price keeps its buy.
+    step = math.log(1.00125)
+    anchor = math.log(3.3979) - 10162 * step
+    plan = core.grid_engine.plan_orders(3.4005, anchor, step, 0.00125, {}, 10, 10, core.round_price)
+    check("a trailing buy is filed on the line ABOVE price (the line below keeps its buy)",
+          plan.trail_line == 10163 and plan.buy_lines[0][1] == 3.3979, (plan.trail_line, plan.buy_lines[:2]))
+    lots = {10163: {"qty": 5.3, "cost": 3.40175}}
+    plan = core.grid_engine.plan_orders(3.4005, anchor, step, 0.00125, lots, 10, 10, core.round_price)
+    check("after it fills: buy at 3.3979, sell two lines up, one empty line between (Bitsgap)",
+          plan.buy_lines[0][1] == 3.3979 and plan.sells[0].price == 3.4064,
+          (plan.buy_lines[:1], [w.price for w in plan.sells[:1]]))
     print(f"\n==== {len(PASS)} passed, {len(FAIL)} failed ====")
     if FAIL:
         for f in FAIL:
