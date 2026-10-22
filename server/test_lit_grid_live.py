@@ -2639,34 +2639,64 @@ def t_run_lit_grid_live_signature_defaults_match_worker4_exactly():
 
 # ── Gate-dependent spacing growth (2026-10-21) ────────────────────────────────────────────────
 
-def t_gate_spacing_multiplier_matches_the_tier_order():
-    check("tier 10 (1st/base tier) -> multiplier 1", core.gate_spacing_multiplier(10.0) == 1)
-    check("tier 20 (2nd tier) -> multiplier 2", core.gate_spacing_multiplier(20.0) == 2)
-    check("tier 40 (3rd tier) -> multiplier 3", core.gate_spacing_multiplier(40.0) == 3)
-    check("tier 80 (4th/deepest tier) -> multiplier 4", core.gate_spacing_multiplier(80.0) == 4)
-    check("an unrecognized tier is treated as the first tier (multiplier 1), not an error",
-          core.gate_spacing_multiplier(999.0) == 1)
+def t_cover_for_tier_matches_the_live_gates():
+    check("base tier (10): cover is just the tier itself", core.cover_for_tier(10.0) == 10.0)
+    check("tier 20 (5% gate): cover = (20-5)/(1-0.05) = 15.789...",
+          abs(core.cover_for_tier(20.0) - 15.7894736842) < 1e-6)
+    check("tier 40 (10% gate): cover = (40-10)/(1-0.10) = 33.333...",
+          abs(core.cover_for_tier(40.0) - 33.3333333333) < 1e-6)
+    check("tier 80 (20% gate): cover = (80-20)/(1-0.20) = 75",
+          abs(core.cover_for_tier(80.0) - 75.0) < 1e-9)
+
+
+def t_capital_corrected_spacing_multiplier_matches_verified_values():
+    # 2026-10-22: replaces the old flat 1/2/3/4x table. Values below are the exact numbers
+    # verified against the real sizing code and backtested in
+    # research/lit-constant-profit-spacing-2026-10-22/PROPOSAL.md.
+    base_cover = core.cover_for_tier(10.0)
+    for tier, want in ((10.0, 1.0), (20.0, 1.2566), (40.0, 1.8257), (80.0, 2.7386)):
+        got = core.capital_corrected_spacing_multiplier(tier, available_usdc=1000.0, base_capital_usdc=1000.0)
+        check(f"tier {tier:g} with no capital depletion (K0==Kg): multiplier ~{want}",
+              abs(got - want) < 1e-3, got)
+    check("an unrecognized tier is treated as the base tier: multiplier 1, not an error",
+          abs(core.capital_corrected_spacing_multiplier(999.0, 1000.0, 1000.0) - 1.0) < 1e-9)
+    check("base_capital_usdc=None treats current cash as K0 (plain sqrt-cover, no correction)",
+          abs(core.capital_corrected_spacing_multiplier(20.0, 1000.0, None)
+              - math.sqrt(core.cover_for_tier(20.0) / base_cover)) < 1e-9)
+
+
+def t_capital_corrected_spacing_multiplier_corrects_for_depleted_cash():
+    # Less cash available now (Kg) than when last at base (K0) widens spacing a bit MORE than
+    # the plain cover ratio alone would, to keep per-trade profit flat despite the smaller pool.
+    plain = core.capital_corrected_spacing_multiplier(20.0, available_usdc=1000.0, base_capital_usdc=1000.0)
+    depleted = core.capital_corrected_spacing_multiplier(20.0, available_usdc=800.0, base_capital_usdc=1000.0)
+    check("depleted cash (Kg < K0) widens the multiplier beyond the plain cover-ratio version",
+          depleted > plain, (depleted, plain))
 
 
 def t_effective_spacing_off_by_default_is_the_plain_dashboard_value():
-    st = base_state(spacing_pct=0.5, dynamic_dd_enabled=True, dynamic_dd_tier=40.0)
+    st = base_state(spacing_pct=0.5, dynamic_dd_enabled=True, gate_spacing_multiplier_value=3.0)
     check("gate_spacing_growth_enabled unset/false: plain spacing_pct, no widening",
           core.effective_spacing_pct(st) == 0.5, core.effective_spacing_pct(st))
-    st2 = base_state(spacing_pct=0.5, gate_spacing_growth_enabled=True, dynamic_dd_enabled=False, dynamic_dd_tier=40.0)
+    st2 = base_state(spacing_pct=0.5, gate_spacing_growth_enabled=True, dynamic_dd_enabled=False, gate_spacing_multiplier_value=3.0)
     check("dynamic_dd disabled: plain spacing_pct even with the growth flag on",
           core.effective_spacing_pct(st2) == 0.5, core.effective_spacing_pct(st2))
-    st3 = base_state(spacing_pct=0.5, gate_spacing_growth_enabled=True, dynamic_dd_enabled=True, dynamic_dd_tier=None)
-    check("no tier recorded yet: plain spacing_pct, not an error",
+    st3 = base_state(spacing_pct=0.5, gate_spacing_growth_enabled=True, dynamic_dd_enabled=True)
+    check("no multiplier persisted yet: plain spacing_pct, not an error",
           core.effective_spacing_pct(st3) == 0.5, core.effective_spacing_pct(st3))
 
 
-def t_effective_spacing_widens_with_the_tier_when_both_flags_are_on():
-    for tier, mult in ((10.0, 1), (20.0, 2), (40.0, 3), (80.0, 4)):
+def t_effective_spacing_widens_by_the_persisted_multiplier_when_both_flags_are_on():
+    # effective_spacing_pct (2026-10-22) reads a PERSISTED multiplier -- it no longer derives one
+    # from dynamic_dd_tier itself, since capital_corrected_spacing_multiplier needs live cash
+    # figures only _dynamic_order_size has. dynamic_dd_tier may still be recorded alongside it
+    # for context/logging, but effective_spacing_pct doesn't look at it anymore.
+    for mult in (1.0, 1.2566, 1.8257, 2.7386):
         st = base_state(spacing_pct=0.125, gate_spacing_growth_enabled=True,
-                         dynamic_dd_enabled=True, dynamic_dd_tier=tier)
+                         dynamic_dd_enabled=True, gate_spacing_multiplier_value=mult)
         want = round(0.125 * mult, 6)
         got = round(core.effective_spacing_pct(st), 6)
-        check(f"tier {tier:g}: 0.125 x{mult} = {want}", got == want, got)
+        check(f"multiplier {mult}: 0.125 x{mult} = {want}", got == want, got)
 
 
 # ── De-escalation hysteresis (2026-10-22 real incident) ───────────────────────────────────────
@@ -2734,6 +2764,55 @@ async def t_dynamic_order_size_does_not_thrash_on_real_boundary_chop():
           len(switches) == 1, switches)
 
 
+async def t_dynamic_order_size_persists_multiplier_and_base_capital_on_a_tier_switch():
+    # 2026-10-22: with gate_spacing_growth_enabled on, a tier switch must persist BOTH
+    # gate_spacing_multiplier_value (for effective_spacing_pct to read next tick) and
+    # dynamic_dd_base_capital_usd (K0), not just dynamic_dd_tier/order_size_lit.
+    bot, fake = make_bot(base_state(
+        dynamic_dd_enabled=True, gate_spacing_growth_enabled=True,
+        dynamic_dd_high=100.0, dynamic_dd_tier=10.0, dynamic_dd_base_capital_usd=None,
+        order_size_lit=5.0, usdc_balance=500.0,
+    ))
+    await bot._dynamic_order_size(fake.state, 94.0, 0.125, {}, {})  # drop=6% -> tier 20
+    check("tier switched to 20", fake.state.get("dynamic_dd_tier") == 20.0, fake.state.get("dynamic_dd_tier"))
+    mult = fake.state.get("gate_spacing_multiplier_value")
+    want_mult = core.capital_corrected_spacing_multiplier(20.0, fake.state.get("usdc_balance"), fake.state.get("usdc_balance"))
+    check("multiplier persisted, matching the real formula for this tier/cash",
+          mult is not None and abs(mult - want_mult) < 1e-6, mult)
+    check("K0 (base capital) initialized from current cash -- nothing was recorded before this",
+          fake.state.get("dynamic_dd_base_capital_usd") == fake.state.get("usdc_balance"),
+          fake.state.get("dynamic_dd_base_capital_usd"))
+
+
+async def t_dynamic_order_size_refreshes_base_capital_every_time_it_returns_to_base_tier():
+    bot, fake = make_bot(base_state(
+        capital_usd=1000.0, dynamic_dd_enabled=True, gate_spacing_growth_enabled=True,
+        dynamic_dd_high=100.0, dynamic_dd_tier=20.0, dynamic_dd_base_capital_usd=1000.0,
+        order_size_lit=5.0, usdc_balance=850.0,
+    ))
+    await bot._dynamic_order_size(fake.state, 100.0, 0.125, {}, {})  # drop=0% -> back to base tier 10
+    check("tier returned to base (10)", fake.state.get("dynamic_dd_tier") == 10.0, fake.state.get("dynamic_dd_tier"))
+    check("K0 refreshed to the cash actually available now, not left at the old 1000",
+          fake.state.get("dynamic_dd_base_capital_usd") == 850.0, fake.state.get("dynamic_dd_base_capital_usd"))
+    check("multiplier at the base tier is 1.0 (no widening)",
+          abs(fake.state.get("gate_spacing_multiplier_value") - 1.0) < 1e-9,
+          fake.state.get("gate_spacing_multiplier_value"))
+
+
+async def t_dynamic_order_size_never_touches_multiplier_fields_when_growth_flag_is_off():
+    # Regression guard: gate_spacing_growth_enabled off (the default) must never write the new
+    # columns at all, same philosophy as every other flag-gated read/write in this file.
+    bot, fake = make_bot(base_state(
+        dynamic_dd_enabled=True, dynamic_dd_high=100.0, dynamic_dd_tier=10.0,
+        order_size_lit=5.0, usdc_balance=500.0,
+    ))
+    await bot._dynamic_order_size(fake.state, 94.0, 0.125, {}, {})
+    check("gate_spacing_multiplier_value is never written when the growth flag is off",
+          "gate_spacing_multiplier_value" not in fake.state, fake.state.get("gate_spacing_multiplier_value"))
+    check("dynamic_dd_base_capital_usd is never written when the growth flag is off",
+          "dynamic_dd_base_capital_usd" not in fake.state, fake.state.get("dynamic_dd_base_capital_usd"))
+
+
 async def t_tick_gate_switch_reanchors_to_the_wider_spacing_next_tick():
     # Direct research finding: starting narrow and staying flat into a deep drawdown gate can
     # collapse orders below the exchange minimum. With the growth flag on, a dynamic_dd_tier
@@ -2755,6 +2834,7 @@ async def t_tick_gate_switch_reanchors_to_the_wider_spacing_next_tick():
     bot, fake = make_bot(base_state(
         spacing_pct=0.125, internal_spacing_pct=0.125, grid_anchor_price=A,
         gate_spacing_growth_enabled=True, dynamic_dd_enabled=True, dynamic_dd_tier=40.0, dynamic_dd_high=4.0,
+        gate_spacing_multiplier_value=3.0,
         levels_up=5, levels_down=5, order_size_lit=2.0, usdc_balance=500.0, lit_balance=6.0,
     ), orders=rows, orders_by_co=cancelled,
        assets=[FakeAsset("USDC", 500.0, 0.0), FakeAsset("LIT", 6.0, 0.0)])
@@ -2805,9 +2885,11 @@ async def main():
     t_order_fill_amounts_uses_real_human_decimal_units()
     t_order_is_terminal_uses_remaining_amount_primarily()
     t_rounding_does_not_shift_the_real_fill_price_bin()
-    t_gate_spacing_multiplier_matches_the_tier_order()
+    t_cover_for_tier_matches_the_live_gates()
+    t_capital_corrected_spacing_multiplier_matches_verified_values()
+    t_capital_corrected_spacing_multiplier_corrects_for_depleted_cash()
     t_effective_spacing_off_by_default_is_the_plain_dashboard_value()
-    t_effective_spacing_widens_with_the_tier_when_both_flags_are_on()
+    t_effective_spacing_widens_by_the_persisted_multiplier_when_both_flags_are_on()
     t_dynamic_dd_tier_escalates_instantly_at_the_raw_gate()
     t_dynamic_dd_tier_blocks_deescalation_inside_the_hysteresis_band()
     t_dynamic_dd_tier_deescalates_once_past_the_hysteresis_margin()
@@ -2850,6 +2932,9 @@ async def main():
               t_tick_spacing_change_does_not_advance_if_cancel_fails,
               t_tick_gate_switch_reanchors_to_the_wider_spacing_next_tick,
               t_dynamic_order_size_does_not_thrash_on_real_boundary_chop,
+              t_dynamic_order_size_persists_multiplier_and_base_capital_on_a_tier_switch,
+              t_dynamic_order_size_refreshes_base_capital_every_time_it_returns_to_base_tier,
+              t_dynamic_order_size_never_touches_multiplier_fields_when_growth_flag_is_off,
               t_tick_gate_spacing_growth_off_keeps_old_behavior_even_with_a_tier_recorded,
               t_two_instances_in_one_process_never_touch_each_others_rows,
               t_tick_spacing_change_reanchors_held_lots_and_sells_near_cost,

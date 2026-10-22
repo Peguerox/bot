@@ -434,15 +434,43 @@ def _chunks(seq, n):
         yield seq[i:i + n]
 
 
-def gate_spacing_multiplier(tier):
-    """1, 2, 3, 4 for the 1st/2nd/3rd/4th dynamic-drawdown tier (10/20/40/80 on today's live
-    gates) -- see DYNAMIC_DD_TIER_ORDER's own comment. An unrecognized tier (toggle just
-    switched on, nothing recorded yet) is treated as the first tier: multiplier 1, i.e. no
-    widening -- the safe/inert default."""
-    try:
-        return DYNAMIC_DD_TIER_ORDER.index(tier) + 1
-    except ValueError:
-        return 1
+def cover_for_tier(tier):
+    """How much further (as a % of CURRENT price, not the original high) this tier's grid needs
+    to extend -- the exact same value _dynamic_order_size already used inline before 2026-10-22,
+    pulled out here so both the sizing code and the spacing-multiplier formula below share one
+    definition. The base tier's own cover is just its own tier value (no gate drop to net out).
+    An unrecognized tier (toggle just switched on, nothing recorded yet, or a bad value) is
+    treated as the base tier -- the safe/inert default, same philosophy as the old flat
+    multiplier's fallback."""
+    if tier == DYNAMIC_DD_BASE:
+        return DYNAMIC_DD_BASE
+    gate = next((g for g, t in DYNAMIC_DD_GATES if t == tier), None)
+    if gate is None:
+        return DYNAMIC_DD_BASE
+    return max(tier - gate, 1.0) / (1 - gate / 100)
+
+
+BASE_COVER = cover_for_tier(DYNAMIC_DD_BASE)
+
+
+def capital_corrected_spacing_multiplier(tier, available_usdc, base_capital_usdc):
+    """Replaces the old flat 1/2/3/4x table (2026-10-22, direct request after an external audit's
+    Section 4 refinement): spacing scales as sqrt(cover(tier)/cover(base)) so per-trade profit
+    stays roughly constant across gates instead of swinging 2-2.5x the way the flat multiplier
+    did -- derived from the real sizing math, profit_per_trade ~= capital x spacing^2 / cover
+    (verified against live data in research/lit-constant-profit-spacing-2026-10-22/PROPOSAL.md).
+    The extra sqrt(base_capital/available) term corrects the remaining ~4-8% drift from cash
+    actually depleting a little by the time a deeper gate activates -- base_capital_usdc (K0) is
+    the cash recorded the last time the bot was at the base tier, available_usdc (Kg) is the cash
+    available right now. Backtested (not just derived) against 124 days of real LIT 1-min candles
+    in research/lit-dynamic-vs-static-2026-10-22/sim.py: beats both the flat multiplier and no
+    dynamic spacing at all on profit, end equity, and max drawdown, for both bots' real
+    capital/spacing settings. An unrecognized tier (toggle just switched on, nothing recorded
+    yet) is treated as the base tier: multiplier 1, the safe/inert default."""
+    cover = cover_for_tier(tier)
+    Kg = max(float(available_usdc), 1e-9)
+    K0 = float(base_capital_usdc) if base_capital_usdc is not None else Kg
+    return math.sqrt((cover / BASE_COVER) * (K0 / Kg))
 
 
 DEESCALATE_HYSTERESIS_PTS = 1.0
@@ -480,19 +508,22 @@ def dynamic_dd_tier_for_drop(drop, old_tier):
 
 def effective_spacing_pct(state):
     """The spacing actually used for new grid lines this tick: the dashboard's spacing_pct,
-    widened by gate_spacing_multiplier() while gate_spacing_growth_enabled AND dynamic_dd_enabled
-    are both on and a tier has already been recorded. Any one of those false (or no tier yet):
-    the plain dashboard value, unchanged -- byte-for-byte old behavior. The tier used is
-    whatever was last persisted -- up to one tick (~2s) behind a gate switch that happens this
-    same tick, which only delays the resulting re-anchor by one tick; never a correctness or
-    safety issue (see maintain_window's own call site)."""
+    widened by the persisted gate_spacing_multiplier_value while gate_spacing_growth_enabled AND
+    dynamic_dd_enabled are both on and a multiplier has already been recorded. Any one of those
+    false (or nothing recorded yet): the plain dashboard value, unchanged -- byte-for-byte old
+    behavior. Reads a PERSISTED value (2026-10-22, replacing a pure tier->multiplier lookup)
+    because capital_corrected_spacing_multiplier() needs live cash figures only available where
+    _dynamic_order_size already computes them -- it's stored there, read here. Same ~1-tick
+    (~2s) delay as before: a gate switch that happens this same tick is picked up next tick, which
+    only delays the resulting re-anchor by one tick; never a correctness or safety issue (see
+    maintain_window's own call site)."""
     base = float(state["spacing_pct"])
     if not state.get("gate_spacing_growth_enabled") or not state.get("dynamic_dd_enabled"):
         return base
-    tier = state.get("dynamic_dd_tier")
-    if tier is None:
+    mult = state.get("gate_spacing_multiplier_value")
+    if mult is None:
         return base
-    return base * gate_spacing_multiplier(float(tier))
+    return base * float(mult)
 
 
 def holdings_from_rows(buys, sells):
@@ -1364,6 +1395,19 @@ class LitGridLive:
             size = compute_order_size_lit(max(available, 0.0), price, spacing_pct,
                                           levels_for_drawdown(spacing_pct, cover))
             patch.update({"dynamic_dd_tier": tier, "order_size_lit": size})
+            # Spacing-multiplier bookkeeping for gate_spacing_growth_enabled (2026-10-22, replacing
+            # the old flat 1/2/3/4x table with capital_corrected_spacing_multiplier -- see its own
+            # docstring). K0 (dynamic_dd_base_capital_usd) is the cash available the last time the
+            # bot was at the base tier, refreshed every time it returns there; the multiplier is
+            # computed and persisted here, once per tier switch, for effective_spacing_pct to read
+            # on a later tick -- same ~1-tick-delay design the feature always had, never computed
+            # live from a tier lookup anymore.
+            if state.get("gate_spacing_growth_enabled"):
+                k0 = state.get("dynamic_dd_base_capital_usd")
+                if tier == DYNAMIC_DD_BASE or k0 is None:
+                    k0 = available
+                mult = capital_corrected_spacing_multiplier(tier, available, k0)
+                patch.update({"dynamic_dd_base_capital_usd": k0, "gate_spacing_multiplier_value": mult})
             await self.log_run("dynamic_drawdown_switch", {
                 "from": old_tier, "to": tier, "high": round(high, 5), "drop_pct": round(drop, 2),
                 "available_usdc": round(available, 2), "order_size_lit": round(size, 4)})

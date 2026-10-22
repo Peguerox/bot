@@ -1479,13 +1479,13 @@ function LitGridLivePanel({
   const dynTier = st?.dynamic_dd_tier != null ? Number(st.dynamic_dd_tier) : null;
   const dynHigh = st?.dynamic_dd_high != null ? Number(st.dynamic_dd_high) : null;
   const dynDrop = dynHigh != null && livePrice != null ? Math.max(0, (1 - livePrice / dynHigh) * 100) : null;
-  // Gate-dependent spacing growth (2026-10-21): spacing widens base x (1,2,3,4) across the four
-  // dynamic-drawdown tiers (10/20/40/80) instead of staying flat all the way down -- see
-  // server/lit_grid_live.py's effective_spacing_pct(). DYNAMIC_DD_TIER_ORDER mirrored here since
-  // the dashboard has no direct access to the Python constant.
-  const DD_TIER_ORDER = [10, 20, 40, 80];
+  // Gate-dependent spacing growth (2026-10-21, capital-corrected formula since 2026-10-22):
+  // spacing widens with the dynamic-drawdown tier instead of staying flat all the way down --
+  // see server/lit_grid_live.py's capital_corrected_spacing_multiplier()/effective_spacing_pct().
+  // gate_spacing_multiplier_value is PERSISTED by the worker (it needs live cash figures the
+  // dashboard doesn't have), so this just reads it rather than recomputing anything client-side.
   const gateGrowthOn = !!st?.gate_spacing_growth_enabled;
-  const gateMultiplier = dynTier != null ? (DD_TIER_ORDER.indexOf(dynTier) + 1 || 1) : 1;
+  const gateMultiplier = st?.gate_spacing_multiplier_value != null ? Number(st.gate_spacing_multiplier_value) : 1;
   const baseSpacingPct = st?.spacing_pct != null ? Number(st.spacing_pct) : null;
   const effectiveSpacingPct = baseSpacingPct != null && dynOn && gateGrowthOn ? baseSpacingPct * gateMultiplier : baseSpacingPct;
   const restingPrices = (side: string) => resting.filter((r: any) => r.side === side).map((r: any) => Number(r.limit_price));
@@ -1982,7 +1982,7 @@ function LitGridLivePanel({
             </div>
             {gateGrowthOn && (
               <p className="text-[11px] text-gray-400 tabular-nums">
-                Base {baseSpacingPct != null ? `${baseSpacingPct}%` : "—"} × {gateMultiplier} ={" "}
+                Base {baseSpacingPct != null ? `${baseSpacingPct}%` : "—"} × {gateMultiplier.toFixed(3)} ={" "}
                 <span className="text-blue-300 font-semibold">
                   {effectiveSpacingPct != null ? `${effectiveSpacingPct.toFixed(3)}%` : "—"} effective spacing right now
                 </span>
