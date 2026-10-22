@@ -442,6 +442,17 @@ class ExchangeLimiter:
         self._sent.extend([now] * n)
         return True
 
+    def take_up_to(self, n):
+        """As many of n slots as the window has room for (0 while backing off)."""
+        if self.blocked():
+            return 0
+        now = time.time()
+        while self._sent and now - self._sent[0] >= 60.0:
+            self._sent.popleft()
+        k = max(0, min(int(n), self.capacity - len(self._sent)))
+        self._sent.extend([now] * k)
+        return k
+
     def hit(self):
         self.backoff_until = time.time() + self.backoff_s
         self.backoff_s = min(self.backoff_s * 2, RATE_LIMIT_BACKOFF_MAX)
@@ -1298,7 +1309,11 @@ class LitGridLive:
                     age = (now - placed_at).total_seconds() if placed_at else 0.0
                     missing_since = self._missing_since.setdefault(co, time.time())
                     missing_for = time.time() - missing_since
-                    if age > UNRESOLVED_ORDER_STALE_AFTER_S:
+                    # Stale only when the exchange was actually asked and did not show it: a row
+                    # whose read was skipped (budget) or failed is unknown, not stale (live
+                    # 2026-10-22: skipped lookups paused new buys on both bots).
+                    if (age > UNRESOLVED_ORDER_STALE_AFTER_S and active_by_co is not None
+                            and co not in lookup_failed):
                         await self.log_run("order_unresolved_stale", {"row_id": r["id"], "age_s": age})
                         has_stale_unresolved = True
                     # Absent from a SUCCESSFUL full read and from its own lookup, well past any
@@ -1830,8 +1845,15 @@ class LitGridLive:
             return 0
         if not await self._touch_lock_heartbeat():
             return 0
-        if not self._take_request():
+        # Each transaction inside a batch counts against the wallet's limit (live 2026-10-22: two
+        # 20-tx batches a few seconds apart drew 429s). Shrink the batch to the room left --
+        # cancels first, they free the funds the creates need.
+        cancels = [o for o in cancels if o.get("order_index") is not None]
+        room = self._limiter.take_up_to(len(cancels) + len(creates))
+        if room == 0:
             return 0
+        cancels = cancels[:room]
+        creates = creates[:max(0, room - len(cancels))]
         nm = getattr(self.client, "nonce_manager", None)
         key = (getattr(nm, "api_keys_list", None) or [None])[0]
         tx_types, tx_infos, rows = [], [], []
