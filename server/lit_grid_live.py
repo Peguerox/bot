@@ -349,6 +349,7 @@ SIZE_DECIMALS = 2
 MIN_BASE_AMOUNT = 1.00
 
 TICK_EVERY = 2.0
+REACT_MIN_INTERVAL = 0.5      # v2: at most one tick this often when woken by an order change
 REST_TIMEOUT = 8.0
 ORDER_TIMEOUT = 12.0
 # Minimum gap between cancel-all attempts during a grid reset (one tx each, see reset_grid).
@@ -786,6 +787,11 @@ class OrdersFeed:
         self.frame_at = 0.0       # any frame (updates and pongs)
         self.verified_at = 0.0    # a REST read last agreed with it
         self.distrust_until = 0.0
+        self.seq = 0              # bumps on every message that changed an order
+        try:
+            self.changed = asyncio.Event()   # wakes the tick loop the moment an order changes
+        except RuntimeError:
+            self.changed = None
 
     def live(self, now=None):
         now = time.time() if now is None else now
@@ -812,6 +818,10 @@ class OrdersFeed:
         if snapshot:
             self.synced_at = now
         self.frame_at = now
+        if orders or snapshot:
+            self.seq += 1
+            if self.changed is not None:
+                self.changed.set()
         # Terminal orders are kept 10 minutes (reconcile reads their fills), then dropped.
         for co in [c for c, o in self.orders.items()
                    if _order_is_terminal(o) and now - self.changed_at.get(c, now) > 600]:
@@ -903,6 +913,8 @@ class LitGridLive:
         self._inflight = {}             # (side, price_int) -> sent_at
         self._missing_since = {}        # client_order_index -> first time a read did not show it
         self._started_at_dt = datetime.now(timezone.utc)
+        self._reconciled_seq = -1
+        self._v2_active = False
         self._orders_feed = None        # OrdersFeed, set when the websocket task runs
         self._last_rest_snapshot_at = 0.0
         self._reject_until = {}         # (side, price_int) -> retry_after
@@ -2339,6 +2351,7 @@ class LitGridLive:
                                           closes_line=w.closes_line))
         resting_keys = {(o["side"], price_to_int(o["price"])) for o in actual}
         funds_ok = True
+        buys_need_release = False   # a new buy is funded only by cancelling a far buy in this batch
         if not entries:
             # Paused (OFF, balance check, stale order): no NEW buys, but the ones already resting
             # stay -- cancelling and re-placing them on every pause was churn, and v1 kept them too.
@@ -2380,6 +2393,7 @@ class LitGridLive:
                     kept_far.remove((far_px, far_w))
                     wants.remove(far_w)
                     available += far_px * order_size
+                    buys_need_release = True
                 if cost > available or (allowance is not None and new_buys >= allowance):
                     funds_ok = False
                     break
@@ -2422,12 +2436,17 @@ class LitGridLive:
         # was refused again every cycle (simulator, 2026-10-23).
         own_buys = [o["price"] for o in actual if o["side"] == "buy"]
         own_sells = [o["price"] for o in actual if o["side"] == "sell"]
-        cancel_sides = {o["side"] for o in to_cancel}
-        head = to_place[:2]
+        # Reaction orders = the missing ones within 2 lines of price (a far sell that only fills
+        # out the window is not one). A buy waits behind the cancels only when its money comes
+        # from one of them; sells never need a cancel first (a lot whose old sell is still
+        # resting gets no new one until that row resolves).
+        near = math.log(1 + spacing_pct / 100.0) * 2.05
+        head = [w for w in to_place[:2] if abs(math.log(w.price / price)) <= near]
+        cancel_sides = {"buy"} if buys_need_release else set()
         lead = [w for w in head if w.side not in cancel_sides and (
                 (w.side == "sell" and all(w.price > b for b in own_buys)) or
                 (w.side == "buy" and all(w.price < s for s in own_sells)))]
-        rest = [w for w in head if w not in lead] + to_place[2:]
+        rest = [w for w in head if w not in lead] + [w for w in to_place if w not in head]
         # Stale orders are cancelled farthest first, in batches, never the whole book at once (a
         # cancel-all emptied the book for a cycle -- a gap). When the batch is cut for budget it
         # is cut from the end: lead, cancels, then the reaction orders that waited on them.
@@ -2497,9 +2516,14 @@ class LitGridLive:
         now = time.time()
         has_stale = getattr(self, "_last_stale", False)
         pre_read = await self._read_balance_for_check()
-        every = (ORDERS_WS_RECONCILE_EVERY if self._orders_feed is not None and self._orders_feed.trusted(now)
-                 else RECONCILE_EVERY)
-        if pre_read is not None or now - self._last_reconcile_at >= every:
+        feed = self._orders_feed
+        every = (ORDERS_WS_RECONCILE_EVERY if feed is not None and feed.trusted(now) else RECONCILE_EVERY)
+        # A fill/cancel just arrived on the trusted feed: reconcile now, not at the next interval
+        # -- this is what lets the reaction order go out within a second of the fill.
+        feed_moved = feed is not None and feed.trusted(now) and feed.seq != self._reconciled_seq
+        if pre_read is not None or feed_moved or now - self._last_reconcile_at >= every:
+            if feed is not None:
+                self._reconciled_seq = feed.seq
             self._last_reconcile_at = now
             reconciled_ok, usdc_delta, has_stale = await self.reconcile_pending_orders(
                 profit_mode=profit_mode, route=route)
@@ -3141,6 +3165,7 @@ class LitGridLive:
         if state.get("grid_reset_requested"):
             await self.reset_grid(profit_mode=profit_mode, route=route)
             return
+        self._v2_active = bool(state.get("engine_v2_enabled"))
         if state.get("engine_v2_enabled"):
             await self._tick_v2(state, profit_mode, route)
             return
@@ -3236,7 +3261,21 @@ async def _run_tick_loop(bot):
                 if "429" in msg or "Too Many Requests" in msg:
                     sleep_for = backoff
                     backoff = min(backoff * 2, RATE_LIMIT_BACKOFF_MAX)
-            await asyncio.sleep(sleep_for)
+            feed = getattr(bot, "_orders_feed", None)
+            if (getattr(bot, "_v2_active", False) and feed is not None and feed.changed is not None
+                    and sleep_for == TICK_EVERY):
+                # v2: wake the moment the websocket reports an order change (a fill), instead of
+                # waiting out the 2s tick. At most one tick every REACT_MIN_INTERVAL, so a burst of
+                # fills is answered in one pass; the request budget is untouched (same orders,
+                # sent sooner; the shared limiter still caps every send).
+                try:
+                    await asyncio.wait_for(feed.changed.wait(), timeout=sleep_for)
+                except asyncio.TimeoutError:
+                    pass
+                feed.changed.clear()
+                await asyncio.sleep(REACT_MIN_INTERVAL)
+            else:
+                await asyncio.sleep(sleep_for)
     finally:
         await bot.release_lock()
 

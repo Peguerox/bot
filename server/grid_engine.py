@@ -102,17 +102,13 @@ def plan_orders(price, anchor_log, step, spacing_frac, lots, levels_up, levels_d
 
 
 def priority_order(wants, price):
-    """Direct request: whenever orders can go out, the first is the sell right above price, then
-    the buy right below, then the next sell, the next buy, outward. Sells lead each pair."""
-    sells = sorted((w for w in wants if w.side == "sell"), key=lambda w: w.price)
-    buys = sorted((w for w in wants if w.side == "buy"), key=lambda w: -w.price)
-    out = []
-    for i in range(max(len(sells), len(buys))):
-        if i < len(sells):
-            out.append(sells[i])
-        if i < len(buys):
-            out.append(buys[i])
-    return out
+    """Direct request: whenever orders can go out, the ones closest to price go first -- the sell
+    right above and the buy right below -- then outward; at equal distance the sell leads.
+    (By distance, not "sells first": a far sell filling out the window once took the last free
+    request ahead of the buy right below price -- simulator, 2026-10-23.)"""
+    def dist(w):
+        return abs(math.log(w.price / price))
+    return sorted(wants, key=lambda w: (round(dist(w), 9), 0 if w.side == "sell" else 1))
 
 
 def diff_orders(wants, actual, inflight, price_to_int):

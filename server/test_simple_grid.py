@@ -74,6 +74,10 @@ def path(kind, p0, step):
         return hold(0, 10) + hold(-6.3, 30)
     if kind == "down fast":
         return hold(0, 10) + [line(-k) for k in range(1, 21)] + hold(-20.3, 75)
+    if kind == "flick":            # up past a line for ONE tick (2s) and straight back (live 01:22)
+        # up 1.5 lines for one tick, then back to 0.7 below the start (below the buy-back line
+        # whichever way the start sits between lines)
+        return hold(0, 10) + sum(([line(1.5)] + hold(-0.7, 6) for _ in range(6)), []) + hold(-0.7, 10)
     if kind == "wiggle":           # across a line up and back down, every 4 ticks
         return hold(0, 10) + sum((hold(1.3 if i % 2 else -0.7, 4) for i in range(24)), []) + hold(0.3, 10)
     raise ValueError(kind)
@@ -110,7 +114,7 @@ def lots_of(db):
     return {ln: h for ln, h in S.lot_costs(db).items() if h["qty"] >= 1.0}
 
 
-async def run(name, kind, seed=1, shared_budget=False):
+async def run(name, kind, seed=1, shared_budget=False, react=False):
     st, db, ex, bot, feed, rng = start(name, seed)
     if shared_budget:
         # Live, both bots draw on one wallet limit, and on a fast move both are busy at once:
@@ -119,7 +123,7 @@ async def run(name, kind, seed=1, shared_budget=False):
     sp = float(st["internal_spacing_pct"] or st["spacing_pct"])
     step = math.log(1 + sp / 100)
     prices = path(kind, float(st["live_price"]), step)
-    label = f"{name} {kind}" + (" shared budget" if shared_budget else "")
+    label = f"{name} {kind}" + (" shared budget" if shared_budget else "") + (" fast-react" if react else "")
     held_for = 0
     catch_up = None   # fast moves: seconds after the run stops until both near orders are back for good
     last_bad = 29
@@ -127,13 +131,26 @@ async def run(name, kind, seed=1, shared_budget=False):
     worst_profit = 0.0
     t_start = S.Clock.t
     prev = None
+    seen_seq = -1
     for i, p in enumerate(prices):
-        S.Clock.t += 2.0
         held_for = held_for + 1 if p == prev else 0
         prev = p
-        ex.set_price(p)
-        S.push_feed(feed, ex, rng, 0.0)
-        await bot.tick()
+        if react:
+            # The live loop with event-driven reactions: woken whenever the websocket reports an
+            # order change (here: checked every 0.5s), otherwise every 2s.
+            for sub in range(4):
+                S.Clock.t += 0.5
+                ex.set_price(p)
+                S.push_feed(feed, ex, rng, 0.0)
+                if feed.seq != seen_seq or sub == 3:
+                    seen_seq = feed.seq
+                    bot._v2_active = True
+                    await bot.tick()
+        else:
+            S.Clock.t += 2.0
+            ex.set_price(p)
+            S.push_feed(feed, ex, rng, 0.0)
+            await bot.tick()
         for r in db.orders:
             if r["side"] == "sell" and r.get("realized_profit_usd") is not None and r["id"] > 0:
                 worst_profit = min(worst_profit, float(r["realized_profit_usd"]))
@@ -194,6 +211,12 @@ async def run(name, kind, seed=1, shared_budget=False):
     worst = max(per_min.values()) if per_min else 0
     check(f"[{label}] requests per minute within budget (worst {worst})", worst <= core.REQUEST_BUDGET_PER_MIN + 1, worst)
     fills = len(ex.fills)
+    if kind == "flick":
+        rebuys = sum(1 for side, px, q, co in ex.fills if side == "buy")
+        if react:
+            check(f"[{label}] a 2-second flick is caught: the buy-back fills on the way down ({rebuys} re-buys)",
+                  rebuys >= 3, rebuys)
+        print(f"  {label}: re-buys after flicks = {rebuys}")
     print(f"  {label}: fills={fills} catch_up_s={catch_up} checked_ticks={checked} worst_req/min={worst}")
 
 
@@ -204,6 +227,11 @@ async def main():
         # The same fast runs with the budget the live bots really have when both are busy.
         for kind in ("up fast", "down fast"):
             await run(name, kind, shared_budget=True)
+        # Event-driven reactions (woken by the websocket): the 2-second flick, and every basic
+        # move again, all with the shared budget.
+        await run(name, "flick")
+        for kind in ("flick", "up slow", "up fast", "down slow", "down fast", "wiggle"):
+            await run(name, kind, shared_budget=True, react=True)
     print(f"\n==== {len(PASS)} passed, {len(FAIL)} failed ====")
     if FAIL:
         for f in FAIL:

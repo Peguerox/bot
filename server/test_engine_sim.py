@@ -592,9 +592,13 @@ async def main():
     order = core.grid_engine.priority_order(
         [core.grid_engine.Want("buy", 3.38, 1, 1), core.grid_engine.Want("sell", 3.45, 1, 3),
          core.grid_engine.Want("buy", 3.39, 1, 2), core.grid_engine.Want("sell", 3.41, 1, 2)], 3.40)
-    check("priority: nearest sell, nearest buy, next sell, next buy",
-          [(w.side, w.price) for w in order] == [("sell", 3.41), ("buy", 3.39), ("sell", 3.45), ("buy", 3.38)],
+    check("priority: closest to price first, sell first at equal distance",
+          [(w.side, w.price) for w in order] == [("sell", 3.41), ("buy", 3.39), ("buy", 3.38), ("sell", 3.45)],
           [(w.side, w.price) for w in order])
+    order = core.grid_engine.priority_order(
+        [core.grid_engine.Want("sell", 3.52, 1, 9), core.grid_engine.Want("buy", 3.436, 1, 2)], 3.44)
+    check("a far sell never goes ahead of the buy right below price",
+          order[0].side == "buy", [(w.side, w.price) for w in order])
     print(f"\n==== {len(PASS)} passed, {len(FAIL)} failed ====")
     if FAIL:
         for f in FAIL:
