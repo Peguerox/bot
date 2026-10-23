@@ -299,6 +299,7 @@ def make_bot(state, orders=None, signer_fail=False, signer_err=None, cancel_err=
     bot._reject_count = {}
     bot._reconciled_seq = -1
     bot._v2_active = False
+    bot._gap_since = None
     bot._last_cancel_all_at = 0.0
     bot.client = FakeSignerClient(fail=signer_fail, err=signer_err, cancel_err=cancel_err)
     bot._order_api = FakeOrderApi(orders_by_co, fail=order_api_fail, client=bot.client,
@@ -2617,8 +2618,11 @@ async def t_reconcile_uses_real_quote_delta_across_multiple_partial_fill_passes(
 async def t_tick_resizes_immediately_when_compound_bucket_grows():
     old_sell = {"id": 1, "side": "sell", "status": "filled", "realized_profit_usd": 500.0,
                 "profit_bucket_destination": "profit_bucket_compound_usd"}
+    # 2026-10-23: resizes once compound has grown by 0.2% of the Investment since the recorded
+    # baseline (here $0 -> $500, far past the $1 step).
     bot, fake = make_bot(base_state(order_size_lit=1.70, levels_down=1, capital_usd=500,
-                                     drawdown_pct=10, usdc_balance=5000.0), orders=[old_sell])
+                                     drawdown_pct=10, usdc_balance=5000.0,
+                                     compound_resize={"compound_usd": 0.0}), orders=[old_sell])
     bot.fetch_current_price = lambda: _async_return(3.10)
     await bot.tick()
     check("crediting the compound bucket triggers an immediate resize reflecting the bigger basis",
@@ -3218,6 +3222,21 @@ async def t_a_resting_order_that_just_left_the_book_is_not_marked_rejected():
           rows[3]["status"])
 
 
+async def t_compound_resizes_only_after_two_tenths_percent_of_investment():
+    # Direct request 2026-10-23: new compound profit resizes the orders only after it has grown by
+    # 0.2% of the Investment since the last resize (it used to resize on every single profit).
+    bot, fake = make_bot(base_state(capital_usd=13000.0))
+    st = dict(fake.state)
+    check("first sight only records the baseline (no resize)", bot._compound_resize_due(st, 100.0) is False)
+    check("+$25.99 (< 0.2% of $13,000 = $26) does not resize", bot._compound_resize_due(st, 125.99) is False)
+    check("+$26 resizes", bot._compound_resize_due(st, 126.0) is True)
+    await bot._note_compound_resize(st, 126.0)
+    check("the resize is recorded for the panel and becomes the new baseline",
+          st["compound_resize"]["compound_usd"] == 126.0 and bot._compound_resize_due(st, 140.0) is False,
+          st.get("compound_resize"))
+    check("the next resize needs another full step", bot._compound_resize_due(st, 152.0) is True)
+
+
 async def main():
     t_precision_and_minimum_enforcement()
     t_order_fill_amounts_uses_real_human_decimal_units()
@@ -3382,7 +3401,8 @@ async def main():
               t_maintain_window_uses_hysteresis_guard_for_the_window_center,
               t_lock_heartbeat_touched_after_each_order_placement,
               t_rate_limited_errors_back_off_before_retrying,
-              t_a_resting_order_that_just_left_the_book_is_not_marked_rejected):
+              t_a_resting_order_that_just_left_the_book_is_not_marked_rejected,
+              t_compound_resizes_only_after_two_tenths_percent_of_investment):
         try:
             await t()
         except Exception as e:

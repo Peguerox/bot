@@ -1491,6 +1491,19 @@ function LitGridLivePanel({
   const restingPrices = (side: string) => resting.filter((r: any) => r.side === side).map((r: any) => Number(r.limit_price));
   const nearestSell = livePrice != null ? (restingPrices("sell").filter((p: number) => p >= livePrice).sort((a: number, b: number) => a - b)[0] ?? null) : null;
   const nearestBuy = livePrice != null ? (restingPrices("buy").filter((p: number) => p <= livePrice).sort((a: number, b: number) => b - a)[0] ?? null) : null;
+  // Gap alarm (2026-10-23, direct request): the worker publishes whether the buy right below
+  // price and the nearest sell its rules allow are actually on the book (near_book). A gap that
+  // lasts longer than alert_after_s (normal reactions take ~1s) lights the alarm.
+  const nearBook = st?.near_book ?? null;
+  const gapSinceMs = nearBook?.gap_since ? new Date(nearBook.gap_since).getTime() : null;
+  const gapSecs = gapSinceMs != null ? Math.max(0, Math.round((nowTick - gapSinceMs) / 1000)) : null;
+  const gapAlarm = workerAlive && nearBook != null && gapSecs != null && gapSecs >= Number(nearBook.alert_after_s ?? 10);
+  // Compound resize (2026-10-23): orders grow by the compound profit once it has risen by 0.2% of
+  // the Investment since the last resize; the worker records when.
+  const compoundResize = st?.compound_resize ?? null;
+  const compoundResizeAgo = compoundResize?.at ? Math.max(0, nowTick - new Date(compoundResize.at).getTime()) : null;
+  const fmtAgo = (ms: number) => ms < 60_000 ? `${Math.round(ms / 1000)}s` : ms < 3_600_000 ? `${Math.round(ms / 60_000)}m` : `${(ms / 3_600_000).toFixed(1)}h`;
+  const compoundNextUsd = compoundResize?.compound_usd != null ? Number(compoundResize.compound_usd) + 0.002 * capitalUsd : null;
 
   const openOrders = orders.filter((o: any) => o.status === "pending" || o.status === "open");
   const filledOrders = orders.filter((o: any) => o.status === "filled");
@@ -1653,6 +1666,18 @@ function LitGridLivePanel({
           {[...Array(6)].map((_, i) => <div key={i} className="h-16 bg-gray-800 rounded-lg" />)}
         </div>
       ) : (
+        <>
+        {gapAlarm && (
+          <div className="mb-2 flex items-center gap-2 rounded-lg border border-red-500/60 bg-red-500/15 px-3 py-2 text-sm text-red-300 animate-pulse">
+            <span className="text-base">⚠</span>
+            <span>
+              <b>Gap next to price</b> for {gapSecs}s:
+              {!nearBook.buy_ok && nearBook.want_buy != null ? ` no buy at $${Number(nearBook.want_buy).toFixed(4)}` : ""}
+              {!nearBook.buy_ok && !nearBook.sell_ok ? " ·" : ""}
+              {!nearBook.sell_ok && nearBook.want_sell != null ? ` no sell at $${Number(nearBook.want_sell).toFixed(4)}` : ""}
+            </span>
+          </div>
+        )}
         <div className="grid grid-cols-3 gap-2">
           <Stat label="Total PNL" value={fmtUsd(totalPnl)} sub={fmtPct(totalPnlPct)} color={pnlColor(totalPnl)} />
           <Stat
@@ -1678,8 +1703,11 @@ function LitGridLivePanel({
                 <span className="text-red-400/80">buy ↓ {nearestBuy != null && livePrice != null ? `$${nearestBuy.toFixed(4)} (-${((1 - nearestBuy / livePrice) * 100).toFixed(2)}%)` : "none"}</span>
               </span>
             </span>}
-            sub={st?.order_size_lit != null ? `${Number(st.order_size_lit).toFixed(2)} LIT/order` : ""}
-            color="text-gray-300"
+            sub={`${st?.order_size_lit != null ? `${Number(st.order_size_lit).toFixed(2)} LIT/order` : ""}${
+              compoundResizeAgo != null ? ` · compound resize ${fmtAgo(compoundResizeAgo)} ago` : ""}${
+              compoundNextUsd != null ? ` · next at $${compoundNextUsd.toFixed(2)} compound` : ""}${
+              nearBook != null && !gapAlarm ? " · ✓ buy & sell next to price" : ""}`}
+            color={gapAlarm ? "text-red-400" : "text-gray-300"}
           />
           <Stat label="USDC Balance" value={usdcBalance != null ? `$${usdcBalance.toFixed(2)}` : "—"} sub="real, from the exchange" color="text-gray-300" />
           <Stat
@@ -1711,10 +1739,13 @@ function LitGridLivePanel({
           <Stat
             label="Compound Bucket"
             value={`$${Number(st?.profit_bucket_compound_usd ?? 0).toFixed(2)}`}
-            sub="folded into next order size"
+            sub={compoundNextUsd != null
+              ? `resizes orders every +0.2% of Investment · next at $${compoundNextUsd.toFixed(2)}`
+              : "folded into next order size"}
             color="text-gray-300"
           />
         </div>
+        </>
       )}
       <div className="space-y-2">
         <p className="text-gray-500 text-[9px] uppercase tracking-wide">

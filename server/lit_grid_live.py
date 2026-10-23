@@ -350,6 +350,8 @@ MIN_BASE_AMOUNT = 1.00
 
 TICK_EVERY = 2.0
 ROWS_CACHE_RELOAD_S = 60.0     # full re-read of the holdings rows at least this often
+COMPOUND_RESIZE_STEP = 0.002   # new compound profit resizes orders after +0.2% of the Investment
+NEAR_BOOK_GAP_ALERT_S = 10.0  # dashboard: a missing order next to price for this long = gap alarm
 SLOW_EVERY = 15.0             # v2: profit buckets / tier refresh, after the reaction orders
 REACT_MIN_INTERVAL = 0.5      # v2: at most one tick this often when woken by an order change
 REST_TIMEOUT = 8.0
@@ -917,6 +919,7 @@ class LitGridLive:
         self._started_at_dt = datetime.now(timezone.utc)
         self._rows_cache = None
         self._last_slow_at = 0.0
+        self._gap_since = None
         self._reconciled_seq = -1
         self._v2_active = False
         self._orders_feed = None        # OrdersFeed, set when the websocket task runs
@@ -966,6 +969,40 @@ class LitGridLive:
 
     async def update_state(self, patch):
         await self.sb("PATCH", f"{self.TABLE_STATE}?id=eq.1", patch)
+
+    async def update_state_optional(self, patch):
+        """Dashboard-only fields (2026-10-23: compound_resize, near_book). Written on their own so
+        a column whose migration has not run yet can never break the trading tick."""
+        try:
+            await self.update_state(patch)
+        except Exception as e:
+            if not getattr(self, "_optional_state_warned", False):
+                self._optional_state_warned = True
+                await self.log_run("dashboard_field_write_failed", {"fields": sorted(patch), "error": str(e)[:160]})
+
+    def _compound_resize_due(self, state, compound_now):
+        """Direct request (2026-10-23): new compound profit resizes the orders only once it has
+        grown by COMPOUND_RESIZE_STEP of the Investment since the last resize (0.2%: ~$13 on
+        Worker 4, ~$26 on Worker 3) -- it used to resize on every single profit, ~60 times an
+        hour on Worker 3. The baseline is persisted in compound_resize when that column exists,
+        otherwise kept in memory (first sight = baseline, nothing resizes)."""
+        rec = state.get("compound_resize") or {}
+        base = rec.get("compound_usd") if isinstance(rec, dict) else None
+        if base is None:
+            base = getattr(self, "_compound_base", None)
+        if base is None:
+            self._compound_base = float(compound_now or 0)
+            return False
+        step = COMPOUND_RESIZE_STEP * float(state.get("capital_usd") or 0)
+        return float(compound_now or 0) - float(base) >= max(step, 0.01)
+
+    async def _note_compound_resize(self, state, compound_now):
+        self._compound_base = float(compound_now or 0)
+        rec = {"at": now_iso(), "compound_usd": round(float(compound_now or 0), 6),
+               "capital_usd": float(state.get("capital_usd") or 0)}
+        await self.log_run("compound_resize", rec)
+        await self.update_state_optional({"compound_resize": rec})
+        state["compound_resize"] = rec
 
     async def log_run(self, action, detail):
         print(f"[lit-grid-live{self._tag}:{action}] {detail}", flush=True)
@@ -2494,6 +2531,31 @@ class LitGridLive:
         room = BATCH_MAX - len(lead)
         cancels = to_cancel[:max(0, room - len(deferred))]
         await self._send_batch(cancels, rest[:max(0, room - len(cancels))], anchor_log, step, lead=lead)
+        await self._publish_near_book(plan, actual, entries and funds_ok)
+
+    async def _publish_near_book(self, plan, actual, buys_expected):
+        """Dashboard gap alarm (direct request, 2026-10-23): is the buy right below price and the
+        nearest sell the rules allow actually on the book? Written when that changes (and every
+        30s), with the time a gap started -- the panel alarms once one lasts NEAR_BOOK_GAP_ALERT_S
+        (normal reactions take ~1s and never trigger it)."""
+        now = time.time()
+        want_buy = plan.buy_lines[0][1] if (plan.buy_lines and buys_expected) else None
+        want_sell = min((w.price for w in plan.sells), default=None)
+        have = {(o["side"], price_to_int(o["price"])) for o in actual}
+        buy_ok = want_buy is None or ("buy", price_to_int(want_buy)) in have
+        sell_ok = want_sell is None or ("sell", price_to_int(want_sell)) in have
+        gap = not (buy_ok and sell_ok)
+        if gap and self._gap_since is None:
+            self._gap_since = now_iso()
+        elif not gap:
+            self._gap_since = None
+        status = (buy_ok, sell_ok, want_buy, want_sell)
+        if status == getattr(self, "_near_book_last", None) and now - getattr(self, "_near_book_at", 0.0) < 30:
+            return
+        self._near_book_last, self._near_book_at = status, now
+        await self.update_state_optional({"near_book": {
+            "buy_ok": buy_ok, "sell_ok": sell_ok, "want_buy": want_buy, "want_sell": want_sell,
+            "gap_since": self._gap_since, "at": now_iso(), "alert_after_s": NEAR_BOOK_GAP_ALERT_S}})
 
     async def _engine_spacing_change(self, state, price, spacing_pct):
         """Spacing changed (dashboard edit, gate toggle, tier switch): re-number held lots onto the
@@ -2589,10 +2651,13 @@ class LitGridLive:
     async def _v2_slow_refresh(self, state, price):
         self._last_slow_at = time.time()
         buckets = await self._bucket_balances(rest_withdrawn=state.get("rest_withdrawn_usd"))
-        if buckets.get("profit_bucket_compound_usd") != state.get("profit_bucket_compound_usd"):
+        resize = self._compound_resize_due(state, buckets.get("profit_bucket_compound_usd"))
+        if resize:
             buckets["order_size_lit"] = None
         await self.update_state(buckets)
         state.update(buckets)
+        if resize:
+            await self._note_compound_resize(state, buckets.get("profit_bucket_compound_usd"))
         if state.get("dynamic_dd_enabled"):
             holdings = await self.current_holdings()
             resting = await self.resting_orders_by_level()
@@ -3230,12 +3295,14 @@ class LitGridLive:
         # maintain_window() below reads these same freshly-derived figures off `state`, never a
         # value that could have drifted out of sync with the ledger.
         buckets = await self._bucket_balances(rest_withdrawn=state.get("rest_withdrawn_usd"))
-        if buckets.get("profit_bucket_compound_usd") != state.get("profit_bucket_compound_usd"):
-            # New compound profit should actually trigger a resize at the next tick, not sit
-            # inert until an unrelated settings change.
+        resize = self._compound_resize_due(state, buckets.get("profit_bucket_compound_usd"))
+        if resize:
+            # Enough new compound profit (+0.2% of the Investment) to resize the next orders.
             buckets["order_size_lit"] = None
         await self.update_state(buckets)
         state.update(buckets)
+        if resize:
+            await self._note_compound_resize(state, buckets.get("profit_bucket_compound_usd"))
         # A stale-unresolved order pauses new entries, never exits -- same philosophy as a real
         # balance divergence (external audit fix, fifth pass: this used to only be logged).
         entries_allowed = bool(state.get("enabled")) and balance_ok and not has_stale_unresolved
