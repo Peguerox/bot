@@ -15,6 +15,7 @@ os.environ.setdefault("SUPABASE_SERVICE_ROLE_KEY", "test")
 sys.path.insert(0, "/Users/julio/trading-bot/server")
 
 import lit_grid_live as core
+core.ROWS_CACHE_RELOAD_S = 0.0   # these tests edit the fake ledger by hand between calls
 from lit_grid_live import (
     LitGridLive, round_price, round_size, clamp_order_size, price_to_int,
     size_to_int, _order_fill_amounts, _order_is_terminal, MIN_BASE_AMOUNT, PRICE_DECIMALS,

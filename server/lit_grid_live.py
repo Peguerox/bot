@@ -349,6 +349,8 @@ SIZE_DECIMALS = 2
 MIN_BASE_AMOUNT = 1.00
 
 TICK_EVERY = 2.0
+ROWS_CACHE_RELOAD_S = 60.0     # full re-read of the holdings rows at least this often
+SLOW_EVERY = 15.0             # v2: profit buckets / tier refresh, after the reaction orders
 REACT_MIN_INTERVAL = 0.5      # v2: at most one tick this often when woken by an order change
 REST_TIMEOUT = 8.0
 ORDER_TIMEOUT = 12.0
@@ -913,6 +915,8 @@ class LitGridLive:
         self._inflight = {}             # (side, price_int) -> sent_at
         self._missing_since = {}        # client_order_index -> first time a read did not show it
         self._started_at_dt = datetime.now(timezone.utc)
+        self._rows_cache = None
+        self._last_slow_at = 0.0
         self._reconciled_seq = -1
         self._v2_active = False
         self._orders_feed = None        # OrdersFeed, set when the websocket task runs
@@ -1589,6 +1593,7 @@ class LitGridLive:
                     continue
                 try:
                     await self.sb("PATCH", f"{self.TABLE_ORDERS}?id=eq.{r['id']}", patch)
+                    self._rows_cache_note(r, patch)
                 except Exception as e:
                     # The write may have actually committed and only the HTTP response was
                     # lost -- NOT proof that nothing persisted (external audit fix, eighth
@@ -1598,6 +1603,7 @@ class LitGridLive:
                     await self.log_run("reconcile_row_write_failed", {"row_id": r["id"], "error": str(e)[:200]})
                     all_ok = False
                     self._balance_paused = True
+                    self._rows_cache = None
                     self._last_balance_check = 0.0
                     continue
                 usdc_delta += row_usdc_delta
@@ -1925,12 +1931,36 @@ class LitGridLive:
         return holdings_from_rows(buys, sells)
 
     async def _holdings_rows(self):
+        """The rows holdings are built from. Kept in memory and updated by reconcile's own fill
+        writes (the only writer of fills), with a full re-read every ROWS_CACHE_RELOAD_S as a
+        safety net (manual SQL edits, anything missed) -- re-reading ~2,800 rows took ~1s and ran
+        twice before every reaction order (measured live, 2026-10-23). Anything that moves lots
+        between lines (re-anchor, reset) drops the cache."""
+        c = getattr(self, "_rows_cache", None)
+        if c is not None and time.time() - c["at"] < ROWS_CACHE_RELOAD_S:
+            return ([c["buys"][k] for k in sorted(c["buys"])], [c["sells"][k] for k in sorted(c["sells"])])
         buys = await self.sb_paginate(
             f"{self.TABLE_ORDERS}?status=eq.filled&side=eq.buy"
             f"&select=id,level,filled_qty,filled_price,size,funded_from_bucket_usd&order=id.asc")
         sells = await self.sb_paginate(
             f"{self.TABLE_ORDERS}?side=eq.sell&closes_level=not.is.null&filled_qty=not.is.null&select=id,closes_level,filled_qty&order=id.asc")
-        return buys or [], sells or []
+        buys, sells = buys or [], sells or []
+        self._rows_cache = {"at": time.time(), "buys": {r["id"]: r for r in buys},
+                            "sells": {r["id"]: r for r in sells}}
+        return buys, sells
+
+    def _rows_cache_note(self, row, patch):
+        """Reconcile just wrote `patch` to `row`: mirror it into the in-memory rows."""
+        c = getattr(self, "_rows_cache", None)
+        if c is None:
+            return
+        m = dict(row, **patch)
+        if m.get("side") == "buy" and m.get("status") == "filled":
+            c["buys"][m["id"]] = {k: m.get(k) for k in ("id", "level", "filled_qty", "filled_price",
+                                                       "size", "funded_from_bucket_usd")}
+        elif (m.get("side") == "sell" and m.get("closes_level") is not None
+              and m.get("filled_qty") is not None):
+            c["sells"][m["id"]] = {k: m.get(k) for k in ("id", "closes_level", "filled_qty")}
 
     async def resting_orders_by_level(self):
         rows = await self.sb_paginate(
@@ -2500,6 +2530,7 @@ class LitGridLive:
         return True
 
     async def _apply_reanchor_journal(self, journal):
+        self._rows_cache = None
         for rid, (col, line) in journal["moves"].items():
             await self.sb("PATCH", f"{self.TABLE_ORDERS}?id=eq.{int(rid)}", {col: int(line)})
         self._holdings_cache = None
@@ -2536,16 +2567,13 @@ class LitGridLive:
         if price is None:
             return
         state = await self.get_state()
-        buckets = await self._bucket_balances(rest_withdrawn=state.get("rest_withdrawn_usd"))
-        if buckets.get("profit_bucket_compound_usd") != state.get("profit_bucket_compound_usd"):
-            buckets["order_size_lit"] = None
-        await self.update_state(buckets)
-        state.update(buckets)
         entries_allowed = bool(state.get("enabled")) and balance_ok and not has_stale
-        if state.get("dynamic_dd_enabled"):
-            holdings = await self.current_holdings()
-            resting = await self.resting_orders_by_level()
-            await self._dynamic_order_size(state, price, effective_spacing_pct(state), holdings, resting)
+        # Bookkeeping that does not change which orders are next to price (profit buckets ~1.7s,
+        # tier refresh) runs AFTER the reaction orders, every SLOW_EVERY -- it used to run before
+        # them on every fill (measured live, 2026-10-23).
+        slow_due = now - self._last_slow_at >= SLOW_EVERY
+        if slow_due and not feed_moved:
+            await self._v2_slow_refresh(state, price)
         spacing_pct = effective_spacing_pct(state)
         persisted = state.get("internal_spacing_pct")
         if persisted is None:
@@ -2555,6 +2583,20 @@ class LitGridLive:
             return
         await self.engine_cycle(state, price, entries_allowed=entries_allowed)
         await self.update_state({"live_price": price, "updated_at": now_iso()})
+        if slow_due and feed_moved:
+            await self._v2_slow_refresh(state, price)
+
+    async def _v2_slow_refresh(self, state, price):
+        self._last_slow_at = time.time()
+        buckets = await self._bucket_balances(rest_withdrawn=state.get("rest_withdrawn_usd"))
+        if buckets.get("profit_bucket_compound_usd") != state.get("profit_bucket_compound_usd"):
+            buckets["order_size_lit"] = None
+        await self.update_state(buckets)
+        state.update(buckets)
+        if state.get("dynamic_dd_enabled"):
+            holdings = await self.current_holdings()
+            resting = await self.resting_orders_by_level()
+            await self._dynamic_order_size(state, price, effective_spacing_pct(state), holdings, resting)
 
     async def maintain_window(self, state, price, entries_allowed=True):
         spacing_pct = effective_spacing_pct(state)
@@ -3224,6 +3266,7 @@ class LitGridLive:
                                             {"old": persisted_spacing, "new": spacing_pct, "price": price})
                     return  # holds every lot, places nothing; set spacing back to resume
                 anchor, moves, mapping = plan
+                self._rows_cache = None
                 for rid, (col, line) in moves.items():
                     await self.sb("PATCH", f"{self.TABLE_ORDERS}?id=eq.{rid}", {col: line})
                 self._holdings_cache = None

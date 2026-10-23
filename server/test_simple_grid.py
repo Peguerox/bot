@@ -198,6 +198,14 @@ async def run(name, kind, seed=1, shared_budget=False, react=False):
     check(f"[{label}] the nearest allowed sell above price is always there ({checked - len(bad_sell)}/{checked})",
           not bad_sell, bad_sell[:4])
     check(f"[{label}] nothing sold below cost (worst {worst_profit:.6f})", worst_profit >= -1e-6, worst_profit)
+    cached = core.holdings_from_rows(*(await bot._holdings_rows()))
+    bot._rows_cache = None
+    fresh = core.holdings_from_rows(*(await bot._holdings_rows()))
+    same = set(cached) == set(fresh) and all(
+        abs(cached[k]["qty"] - fresh[k]["qty"]) < 1e-9 and abs(cached[k]["cost"] - fresh[k]["cost"]) < 1e-9
+        for k in fresh)
+    check(f"[{label}] the bot's in-memory lots match a fresh read of the ledger", same,
+          (len(cached), len(fresh)))
     ledger_lit = sum(h["qty"] for h in S.lot_costs(db).values())
     check(f"[{label}] ledger LIT = exchange LIT ({ledger_lit:.2f} vs {ex.lit:.2f})",
           abs(ledger_lit - ex.lit) < 0.05, (ledger_lit, ex.lit))
