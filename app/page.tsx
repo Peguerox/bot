@@ -1667,29 +1667,6 @@ function LitGridLivePanel({
         </div>
       ) : (
         <>
-        {nearBook != null && workerAlive && (gapAlarm ? (
-          <div className="mb-2 flex items-center gap-2 rounded-lg border-2 border-red-500 bg-red-500/20 px-3 py-2.5 text-base font-semibold text-red-300 animate-pulse">
-            <span className="text-xl">⚠</span>
-            <span>
-              GAP next to price for {gapSecs}s:
-              {!nearBook.buy_ok && nearBook.want_buy != null ? ` no buy at $${Number(nearBook.want_buy).toFixed(4)}` : ""}
-              {!nearBook.buy_ok && !nearBook.sell_ok ? " ·" : ""}
-              {!nearBook.sell_ok && nearBook.want_sell != null ? ` no sell at $${Number(nearBook.want_sell).toFixed(4)}` : ""}
-            </span>
-          </div>
-        ) : (
-          <div className="mb-2 flex items-center gap-2 rounded-lg border border-green-500/60 bg-green-500/15 px-3 py-2 text-base font-semibold text-green-300">
-            <span className="text-xl">✓</span>
-            <span>
-              Buy &amp; sell next to price
-              <span className="ml-2 text-sm font-normal text-green-400/80">
-                {nearBook.want_buy != null ? `buy $${Number(nearBook.want_buy).toFixed(4)}` : ""}
-                {nearBook.want_buy != null && nearBook.want_sell != null ? " · " : ""}
-                {nearBook.want_sell != null ? `sell $${Number(nearBook.want_sell).toFixed(4)}` : ""}
-              </span>
-            </span>
-          </div>
-        ))}
         <div className="grid grid-cols-3 gap-2">
           <Stat label="Total PNL" value={fmtUsd(totalPnl)} sub={fmtPct(totalPnlPct)} color={pnlColor(totalPnl)} />
           <Stat
@@ -1710,6 +1687,12 @@ function LitGridLivePanel({
             label="Live Price"
             value={<span className="flex items-center gap-3">
               <span>{livePrice != null ? `$${Number(livePrice).toFixed(4)}` : "—"}</span>
+              {nearBook != null && workerAlive && (gapAlarm
+                ? <span className="text-red-400 text-base font-bold animate-pulse"
+                        title={`Gap for ${gapSecs}s:${!nearBook.buy_ok && nearBook.want_buy != null ? ` no buy at $${Number(nearBook.want_buy).toFixed(4)}` : ""}${!nearBook.sell_ok && nearBook.want_sell != null ? ` no sell at $${Number(nearBook.want_sell).toFixed(4)}` : ""}`}>
+                    ⚠ GAP {gapSecs}s
+                  </span>
+                : <span className="text-green-400 text-lg" title="Buy and sell next to price are on the book">✓</span>)}
               <span className="flex flex-col text-xs font-normal leading-tight">
                 <span className="text-green-400/80">sell ↑ {nearestSell != null && livePrice != null ? `$${nearestSell.toFixed(4)} (+${((nearestSell / livePrice - 1) * 100).toFixed(2)}%)` : "none"}</span>
                 <span className="text-red-400/80">buy ↓ {nearestBuy != null && livePrice != null ? `$${nearestBuy.toFixed(4)} (-${((1 - nearestBuy / livePrice) * 100).toFixed(2)}%)` : "none"}</span>
