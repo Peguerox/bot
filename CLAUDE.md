@@ -261,6 +261,18 @@ project with no git/Render/Vercel link -- never work there.
     `_order_kind.sql`, `_drawdown_coverage.sql`, `_dynamic_drawdown.sql`.
     Tests: `python3 server/test_lit_grid_live.py` (203).
   - An audit/"did it work?" question gets findings only — no code changes until asked.
+  - **Engine v2 is what runs (2026-10-23, both LIT bots, flag `engine_v2_enabled`):** the simple
+    1:1 grid — `server/grid_engine.py` + `engine_cycle` in `lit_grid_live.py`. Buy on each free
+    line below price, each lot sells on line+1 never below its line's average cost, NO market
+    buys, reaction orders first (closest to price, sell first on ties), wrong-price sells replaced
+    automatically. Reads our orders from Lighter's `account_orders` websocket (checked against
+    REST), wakes on each fill (~1s live reaction). v1 (`maintain_window`) is only the fallback —
+    to be deleted after ~24h of clean audits. Before ANY v2 change run
+    `python3 server/test_simple_grid.py` (starts from copies of the real ledgers, checks the order
+    right above/below price every tick). Live checks: `research/audit_lit_live.py`. Keep gate
+    spacing growth OFF until v2's re-anchor is fixed (lots land far above cost).
+    Budget: Lighter Standard = 60 req/min per wallet, both bots share it, every tx in a batch
+    counts; the bots cap themselves at 40/min together.
 
 Start Commands are `python server/<file>.py`. **There is no Render API/CLI access from this
 environment** — changing which file a worker runs means the user has to manually update that
