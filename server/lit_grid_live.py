@@ -400,9 +400,12 @@ BALANCE_RECONCILE_EVERY = 30.0
 BALANCE_DIVERGENCE_TOLERANCE_LIT = 0.03
 # Dynamic drawdown (toggle `dynamic_dd_enabled`, 2026-10-19 research in
 # research/lit-dynamic-drawdown-2026-10-19/): Drawdown follows how far price is below its
-# high -- <5% -> 10, 5-10% -> 20, 10-20% -> 40, >20% -> 80, same gates both ways.
+# high -- <5% -> 10, 5-10% -> 20, 10-20% -> 40, >20% -> 99.9, same gates both ways.
+# The last gate was 80 until 2026-10-23 (direct request): past a 20% fall the remaining cash is
+# spread down to 0.1% of the high, so the bot can never run out of cash whatever the coin does
+# (costs ~20% smaller orders in that gate only -- lines near zero are nearly free to fund).
 DYNAMIC_DD_BASE = 10.0
-DYNAMIC_DD_GATES = ((5.0, 20.0), (10.0, 40.0), (20.0, 80.0))
+DYNAMIC_DD_GATES = ((5.0, 20.0), (10.0, 40.0), (20.0, 99.9))
 OPEN_STATUSES = ("pending", "open", "cancel_requested")
 # Gate-dependent spacing growth (toggle `gate_spacing_growth_enabled`, 2026-10-21 research in
 # research/lit-dynamic-drawdown-2026-10-19/lit_gate_spacing.py): spacing widens to

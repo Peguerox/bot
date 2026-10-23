@@ -473,8 +473,8 @@ async def t_reset_grid_waits_for_a_row_it_cannot_settle_yet():
 
 def t_capital_corrected_multiplier_is_bounded():
     check("a near-zero cash reading cannot blow the multiplier up (cap 4x)",
-          core.capital_corrected_spacing_multiplier(80.0, 0.0001, 10000.0) <= 4.0,
-          core.capital_corrected_spacing_multiplier(80.0, 0.0001, 10000.0))
+          core.capital_corrected_spacing_multiplier(99.9, 0.0001, 10000.0) <= 4.0,
+          core.capital_corrected_spacing_multiplier(99.9, 0.0001, 10000.0))
     check("never below 1x", core.capital_corrected_spacing_multiplier(10.0, 50000.0, 100.0) >= 1.0,
           core.capital_corrected_spacing_multiplier(10.0, 50000.0, 100.0))
 
@@ -1834,7 +1834,7 @@ async def t_dust_lot_does_not_block_gap_fill():
 async def t_dynamic_drawdown_sizes_on_available_cash_and_follows_the_gates():
     # Toggle on: high = price at switch-on, tier 10, size = spendable cash spread down to 10%
     # below the high. A 6% drop switches to 20% and re-sizes on the cash left; a further fall
-    # past 20% -> 80%; back above -5% -> 10% again (same gates both ways).
+    # past 20% -> 99.9%; back above -5% -> 10% again (same gates both ways).
     P = 2.83365
     bot, fake = make_bot(base_state(levels_up=5, levels_down=5, order_size_lit=None,
                                      usdc_balance=6500.0, capital_usd=6500.0, grid_anchor_price=P,
@@ -1856,10 +1856,10 @@ async def t_dynamic_drawdown_sizes_on_available_cash_and_follows_the_gates():
     check("tier-10 size spreads the spendable cash down to 10% below the high",
           abs(sizes["start"][1] - expect) < 1e-6, (sizes["start"][1], expect))
     check("6% drop -> tier 20", sizes["drop6"][0] == 20, sizes)
-    check("22% drop -> tier 80", sizes["drop22"][0] == 80, sizes)
+    check("22% drop -> deepest tier 99.9 (was 80 until 2026-10-23)", sizes["drop22"][0] == 99.9, sizes)
     check("back within 5% of the high -> tier 10 again", sizes["back"][0] == 10, sizes)
     check("the high does not move on the way down", sizes["drop22"][2] == P, sizes)
-    check("each switch is logged", [d["to"] for a, d in logged if a == "dynamic_drawdown_switch"] == [10, 20, 80, 10], logged)
+    check("each switch is logged", [d["to"] for a, d in logged if a == "dynamic_drawdown_switch"] == [10, 20, 99.9, 10], logged)
     n = len(logged)
     await bot._dynamic_order_size(st, P * 0.97, 0.125, {}, {})
     check("no re-size while the tier is unchanged", len(logged) == n, logged[n:])
@@ -2939,8 +2939,8 @@ def t_cover_for_tier_matches_the_live_gates():
           abs(core.cover_for_tier(20.0) - 15.7894736842) < 1e-6)
     check("tier 40 (10% gate): cover = (40-10)/(1-0.10) = 33.333...",
           abs(core.cover_for_tier(40.0) - 33.3333333333) < 1e-6)
-    check("tier 80 (20% gate): cover = (80-20)/(1-0.20) = 75",
-          abs(core.cover_for_tier(80.0) - 75.0) < 1e-9)
+    check("deepest tier 99.9 (20% gate, was 80 until 2026-10-23): cover = (99.9-20)/(1-0.20) = 99.875",
+          abs(core.cover_for_tier(99.9) - 99.875) < 1e-9)
 
 
 def t_capital_corrected_spacing_multiplier_matches_verified_values():
@@ -2948,7 +2948,7 @@ def t_capital_corrected_spacing_multiplier_matches_verified_values():
     # verified against the real sizing code and backtested in
     # research/lit-constant-profit-spacing-2026-10-22/PROPOSAL.md.
     base_cover = core.cover_for_tier(10.0)
-    for tier, want in ((10.0, 1.0), (20.0, 1.2566), (40.0, 1.8257), (80.0, 2.7386)):
+    for tier, want in ((10.0, 1.0), (20.0, 1.2566), (40.0, 1.8257), (99.9, 3.1603)):
         got = core.capital_corrected_spacing_multiplier(tier, available_usdc=1000.0, base_capital_usdc=1000.0)
         check(f"tier {tier:g} with no capital depletion (K0==Kg): multiplier ~{want}",
               abs(got - want) < 1e-3, got)
@@ -2999,7 +2999,7 @@ def t_dynamic_dd_tier_escalates_instantly_at_the_raw_gate():
     check("drop exactly at the 5% gate, coming from tier 10, escalates to 20 immediately",
           core.dynamic_dd_tier_for_drop(5.0, 10.0) == 20.0)
     check("a big jump straight to the 20% gate escalates straight to 80, no step-by-step delay",
-          core.dynamic_dd_tier_for_drop(20.0, 10.0) == 80.0)
+          core.dynamic_dd_tier_for_drop(20.0, 10.0) == 99.9)
 
 
 def t_dynamic_dd_tier_blocks_deescalation_inside_the_hysteresis_band():
@@ -3022,18 +3022,18 @@ def t_dynamic_dd_tier_applies_the_same_band_at_every_gate():
     check("10% gate: 8.9% de-escalates to 20 (past the band)",
           core.dynamic_dd_tier_for_drop(8.9, 40.0) == 20.0)
     check("20% gate: 19.5% stays at 80 (inside the band)",
-          core.dynamic_dd_tier_for_drop(19.5, 80.0) == 80.0)
+          core.dynamic_dd_tier_for_drop(19.5, 99.9) == 99.9)
     check("20% gate: 18.9% de-escalates to 40 (past the band)",
-          core.dynamic_dd_tier_for_drop(18.9, 80.0) == 40.0)
+          core.dynamic_dd_tier_for_drop(18.9, 99.9) == 40.0)
 
 
 def t_dynamic_dd_tier_lets_a_real_recovery_fall_straight_through():
     # A genuine large recovery (not noise) must land wherever the raw gate says, in one step --
     # the band only guards the ONE gate that produced the current tier, never stacks per gate.
     check("drop falling from deep (old_tier 80) straight to 3% lands at base (10) in one step",
-          core.dynamic_dd_tier_for_drop(3.0, 80.0) == 10.0)
+          core.dynamic_dd_tier_for_drop(3.0, 99.9) == 10.0)
     check("drop falling from deep (old_tier 80) to 15% lands at 40 in one step",
-          core.dynamic_dd_tier_for_drop(15.0, 80.0) == 40.0)
+          core.dynamic_dd_tier_for_drop(15.0, 99.9) == 40.0)
 
 
 def t_dynamic_dd_tier_with_no_prior_tier_uses_the_raw_gate():
@@ -3187,7 +3187,7 @@ async def t_tick_gate_spacing_growth_off_keeps_old_behavior_even_with_a_tier_rec
             "filled_price": 2.90, "size": 1.70}
     bot, fake = make_bot(base_state(
         spacing_pct=0.125, internal_spacing_pct=0.125, grid_anchor_price=A, dynamic_dd_enabled=True,
-        dynamic_dd_tier=80.0, dynamic_dd_high=4.0, order_size_lit=2.0, usdc_balance=500.0, lit_balance=1.70,
+        dynamic_dd_tier=99.9, dynamic_dd_high=4.0, order_size_lit=2.0, usdc_balance=500.0, lit_balance=1.70,
     ), orders=[held], assets=[FakeAsset("USDC", 500.0, 0.0), FakeAsset("LIT", 1.70, 0.0)])
     bot.fetch_current_price = lambda: _async_return(3.10)
     await bot.tick()

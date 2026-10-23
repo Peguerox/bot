@@ -192,7 +192,7 @@ def levels_for_drawdown(spacing_pct: float, drawdown_pct: float) -> int:
     last through that whole decline WITHOUT the bot ever actually building/tracking that many
     levels -- it just keeps recreating the next line as price moves, same dynamic window as
     always. levels_up/levels_down are a separate, small, active-tracking window, not a depth."""
-    drawdown_pct = min(max(drawdown_pct, 0.01), 99.0)
+    drawdown_pct = min(max(drawdown_pct, 0.01), 99.9)   # 99.9: the live bot's last gate (2026-10-23)
     ratio = 1.0 - drawdown_pct / 100.0
     step = math.log(1 + spacing_pct / 100.0)
     return max(1, math.ceil(math.log(1 / ratio) / step))

@@ -1971,7 +1971,7 @@ function LitGridLivePanel({
           <div className="grid grid-cols-3 bg-gray-800/80 text-[10px] uppercase tracking-wide text-gray-500 px-2 py-1">
             <span>Price fall</span><span>Switches at</span><span className="text-right">Money lasts to</span>
           </div>
-          {([[0, 5, 10], [5, 10, 20], [10, 20, 40], [20, null, 80]] as const).map(([from, to, tier]) => {
+          {([[0, 5, 10], [5, 10, 20], [10, 20, 40], [20, null, 99.9]] as const).map(([from, to, tier]) => {
             const active = dynOn && dynTier === tier;
             const ref = dynOn ? dynHigh : livePrice;
             return (
