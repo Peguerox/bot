@@ -378,6 +378,7 @@ ORDERS_WS_DISTRUST_S = 300.0        # after a mismatch, REST only for this long
 ORDERS_WS_SETTLE_S = 5.0            # an order changed this recently may differ between the two
 INFLIGHT_S = 12.0
 REJECT_COOLDOWN_S = 60.0
+REJECT_RETRY_S = 4.0          # first refusal in a rejected batch: retry after this, not the full cooldown
 BATCH_MAX = 20
 BULK_CANCEL = 8
 LOW_BUDGET_SLOTS = 8   # below this many request slots left, only the reaction orders go out
@@ -901,9 +902,11 @@ class LitGridLive:
         self._last_reconcile_at = 0.0
         self._inflight = {}             # (side, price_int) -> sent_at
         self._missing_since = {}        # client_order_index -> first time a read did not show it
+        self._started_at_dt = datetime.now(timezone.utc)
         self._orders_feed = None        # OrdersFeed, set when the websocket task runs
         self._last_rest_snapshot_at = 0.0
         self._reject_until = {}         # (side, price_int) -> retry_after
+        self._reject_count = {}         # (side, price_int) -> consecutive refusals
         self._last_trail_at = 0.0
         self._engine_snapshot_at = 0.0  # the read the engine last acted on (one action per read)
 
@@ -986,6 +989,9 @@ class LitGridLive:
     async def _on_send_exception(self, e):
         """Shared handling for an exception out of any signed send. Returns True if it was a
         rate-limit refusal (definitely not placed), False if the outcome is unknown."""
+        if "invalid nonce" in str(e).lower():
+            await self._resync_nonce(hard=True)
+            return True
         if self._is_rate_limit_error(str(e)):
             self._register_exchange_rate_limit()
             await self._resync_nonce(hard=False)
@@ -1492,8 +1498,15 @@ class LitGridLive:
                     # v1's one-hour rule.
                     limit_age = (GHOST_RESOLVE_S if r.get("exchange_order_id") is None
                                  else UNRESOLVED_ORDER_STALE_AFTER_S)
+                    # A row written by a process that has since restarted, and never seen by the
+                    # exchange, was most likely never sent (the old process died between writing
+                    # it and sending): resolved after 12s instead of 60 -- it blocked its lot or
+                    # line for over a minute after a deploy (audit 2026-10-23).
+                    from_before_restart = (r.get("exchange_order_id") is None and placed_at is not None
+                                           and placed_at <= self._started_at_dt
+                                           and age > 2 * VISIBILITY_GRACE_S)
                     if (active_by_co is not None and co not in lookup_failed
-                            and age > limit_age and missing_for > GHOST_RESOLVE_S):
+                            and ((age > limit_age and missing_for > GHOST_RESOLVE_S) or from_before_restart)):
                         try:
                             await self.sb("PATCH", f"{self.TABLE_ORDERS}?id=eq.{r['id']}",
                                            {"status": "rejected", "error": "vanished_from_exchange_lookup"})
@@ -2058,8 +2071,13 @@ class LitGridLive:
                 price = float(getattr(o, "price"))
             except (TypeError, ValueError):
                 continue
+            try:
+                remaining = float(getattr(o, "remaining_base_amount", None) or 0)
+            except (TypeError, ValueError):
+                remaining = 0.0
             out.append({"side": side, "price": price, "order_index": getattr(o, "order_index", None),
-                        "client_order_index": int(getattr(o, "client_order_index", 0) or 0)})
+                        "client_order_index": int(getattr(o, "client_order_index", 0) or 0),
+                        "remaining": remaining})
         return out
 
     async def _send_batch(self, cancels, creates, anchor_log, step, lead=()):
@@ -2119,22 +2137,30 @@ class LitGridLive:
                 tx_infos.append(tx_info)
                 return True
 
+            async def abandon(reason):
+                # Nothing is sent: the rows already written for this batch were never placed --
+                # resolve them now rather than leaving them to block their lines as ghosts.
+                for rid, _w in rows:
+                    await self.sb("PATCH", f"{self.TABLE_ORDERS}?id=eq.{rid}",
+                                   {"status": "rejected", "error": ("not sent: " + reason)[:200]})
+                await self.log_run("engine_sign_failed", {"error": reason[:200]})
+                return 0
+
             for w in lead:
                 if not await sign_create(w):
-                    return 0
+                    return await abandon("sign failed")
             for o in cancels:
                 n = await next_nonce()
                 tx_type, tx_info, _h, err = self.client.sign_cancel_order(
                     MARKET_ID, int(o["order_index"]), nonce=n, api_key_index=key)
                 if err:
                     await self._resync_nonce(hard=True)
-                    await self.log_run("engine_sign_failed", {"error": str(err)[:200]})
-                    return 0
+                    return await abandon(str(err))
                 tx_types.append(tx_type)
                 tx_infos.append(tx_info)
             for w in creates:
                 if not await sign_create(w):
-                    return 0
+                    return await abandon("sign failed")
             if not tx_types:
                 return 0
             try:
@@ -2147,7 +2173,9 @@ class LitGridLive:
             except Exception as e:
                 err = str(e)
                 refused = self._is_rate_limit_error(err)
-                if refused:
+                # A nonce error is ours to repair (re-read the nonce), not a reason to slow BOTH
+                # bots down for 15s through the shared limiter (audit 2026-10-23).
+                if refused and "invalid nonce" not in err.lower():
                     self._register_exchange_rate_limit()
                 await self._resync_nonce(hard=True)
                 if not refused:
@@ -2156,14 +2184,21 @@ class LitGridLive:
                         self._inflight[(w.side, price_to_int(w.price))] = time.time()
                     return 0
             if err:
-                if self._is_rate_limit_error(err):
+                if self._is_rate_limit_error(err) and "invalid nonce" not in err.lower():
                     self._register_exchange_rate_limit()
                 await self._resync_nonce(hard=True)
                 for rid, w in rows:
                     await self.sb("PATCH", f"{self.TABLE_ORDERS}?id=eq.{rid}",
                                    {"status": "rejected", "error": ("batch: " + err)[:200]})
                     if not self._is_rate_limit_error(err):
-                        self._reject_until[(w.side, price_to_int(w.price))] = time.time() + REJECT_COOLDOWN_S
+                        # One bad transaction rejects the whole batch, so a single refusal says
+                        # little about each order: a short pause first, the full cooldown only
+                        # for an order refused twice in a row (audit 2026-10-23: one rejected
+                        # batch kept the buy right below price off the book for 60s).
+                        key = (w.side, price_to_int(w.price))
+                        self._reject_count[key] = self._reject_count.get(key, 0) + 1
+                        pause = REJECT_COOLDOWN_S if self._reject_count[key] >= 2 else REJECT_RETRY_S
+                        self._reject_until[key] = time.time() + pause
                 await self.log_run("engine_batch_rejected", {"error": err[:200], "txs": len(tx_types)})
                 return 0
         finally:
@@ -2174,6 +2209,7 @@ class LitGridLive:
         for rid, w in rows:
             await self.sb("PATCH", f"{self.TABLE_ORDERS}?id=eq.{rid}", {"status": "open"})
             self._inflight[(w.side, price_to_int(w.price))] = now
+            self._reject_count.pop((w.side, price_to_int(w.price)), None)
         await self.log_run("engine_batch_sent", {
             "cancels": len(tx_types) - len(rows), "creates": len(rows),
             "quota_remaining": getattr(resp, "volume_quota_remaining", None)})
@@ -2250,6 +2286,7 @@ class LitGridLive:
         # or filled-but-not-yet-reconciled. A busy lot never gets a second sell (market or limit):
         # on spot that second sell would spend another lot's LIT (audit 2026-10-22, P0-1).
         on_book_cos = {o["client_order_index"] for o in actual}
+        remaining_by_co = {o["client_order_index"]: o.get("remaining", 0.0) for o in actual}
         busy = {}
         for rows in resting.values():
             for r in rows:
@@ -2288,10 +2325,14 @@ class LitGridLive:
                     for co, px in busy.get(w.closes_line, [])):
                 continue   # beyond the window and not already resting: not placed
             if w.closes_line in busy:
-                # Keep it only if its own sell is already resting at exactly this price; anything
-                # else (wrong price, not visible yet) waits until reconcile resolves that row --
-                # an unwanted resting one is cancelled by the diff, never replaced in the same pass.
+                # Keep it only if its own sell is already resting at exactly this price AND for the
+                # whole lot; anything else (wrong price, wrong size -- a merged v1 line had a sell
+                # for half its LIT, audit 2026-10-23 -- not visible yet) waits until reconcile
+                # resolves that row; an unwanted resting one is cancelled by the diff, never
+                # replaced in the same pass.
+                lot_qty = clamp_order_size(w.size) or 0.0
                 if not any(co in on_book_cos and price_to_int(px) == price_to_int(w.price)
+                           and abs(remaining_by_co.get(co, 0.0) - lot_qty) < 0.011
                            for co, px in busy[w.closes_line]):
                     continue
             wants.append(grid_engine.Want("sell", w.price, clamp_order_size(w.size), w.line,
@@ -2398,8 +2439,11 @@ class LitGridLive:
             funding = [o for o in to_cancel if o["side"] in needed_sides][:len(needed_sides)]
             await self._send_batch(funding, [w for w in head if w not in lead], anchor_log, step, lead=lead)
             return
+        # Cancels never fill the whole batch: the reaction orders that waited on them always
+        # keep their slots (audit 2026-10-23: a spacing change sent 20 cancels and 0 creates).
+        deferred = [w for w in head if w not in lead]
         room = BATCH_MAX - len(lead)
-        cancels = to_cancel[:room]
+        cancels = to_cancel[:max(0, room - len(deferred))]
         await self._send_batch(cancels, rest[:max(0, room - len(cancels))], anchor_log, step, lead=lead)
 
     async def _engine_spacing_change(self, state, price, spacing_pct):

@@ -294,6 +294,8 @@ def make_bot(state, orders=None, signer_fail=False, signer_err=None, cancel_err=
     bot._inflight = {}
     bot._orders_feed = None
     bot._last_rest_snapshot_at = 0.0
+    bot._started_at_dt = core.datetime(2000, 1, 1, tzinfo=core.timezone.utc)
+    bot._reject_count = {}
     bot._last_cancel_all_at = 0.0
     bot.client = FakeSignerClient(fail=signer_fail, err=signer_err, cancel_err=cancel_err)
     bot._order_api = FakeOrderApi(orders_by_co, fail=order_api_fail, client=bot.client,
