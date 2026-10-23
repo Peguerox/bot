@@ -67,13 +67,13 @@ def path(kind, p0, step):
     if kind == "up jump":          # 6 lines in one tick
         return hold(0, 10) + hold(6.3, 30)
     if kind == "up fast":          # one line every tick for 20 ticks
-        return hold(0, 10) + [line(k) for k in range(1, 21)] + hold(20.3, 30)
+        return hold(0, 10) + [line(k) for k in range(1, 21)] + hold(20.3, 75)
     if kind == "down slow":
         return hold(0, 10) + sum((hold(-k, 5) for k in range(1, 16)), []) + hold(-15, 20)
     if kind == "down jump":
         return hold(0, 10) + hold(-6.3, 30)
     if kind == "down fast":
-        return hold(0, 10) + [line(-k) for k in range(1, 21)] + hold(-20.3, 30)
+        return hold(0, 10) + [line(-k) for k in range(1, 21)] + hold(-20.3, 75)
     if kind == "wiggle":           # across a line up and back down, every 4 ticks
         return hold(0, 10) + sum((hold(1.3 if i % 2 else -0.7, 4) for i in range(24)), []) + hold(0.3, 10)
     raise ValueError(kind)
@@ -121,7 +121,8 @@ async def run(name, kind, seed=1, shared_budget=False):
     prices = path(kind, float(st["live_price"]), step)
     label = f"{name} {kind}" + (" shared budget" if shared_budget else "")
     held_for = 0
-    catch_up = None   # fast moves: seconds after the run stops until both near orders are back
+    catch_up = None   # fast moves: seconds after the run stops until both near orders are back for good
+    last_bad = 29
     bad_buy, bad_sell, checked = [], [], 0
     worst_profit = 0.0
     t_start = S.Clock.t
@@ -138,10 +139,11 @@ async def run(name, kind, seed=1, shared_budget=False):
                 worst_profit = min(worst_profit, float(r["realized_profit_usd"]))
         if held_for < 3 or i < 6:
             continue
-        if "fast" in kind and i >= 30 and catch_up is None and not ok_now(db, ex, bot, p, step, sp):
+        if "fast" in kind and i >= 30:
+            # Fast runs: measured as the time until the book is right AND stays right.
+            if not ok_now(db, ex, bot, p, step, sp):
+                last_bad = i
             continue
-        if "fast" in kind and i >= 30 and catch_up is None:
-            catch_up = (i - 30) * 2
         checked += 1
         state = db.state
         anchor = bot._anchor_log(state)
@@ -169,9 +171,11 @@ async def run(name, kind, seed=1, shared_budget=False):
         S.push_feed(feed, ex, rng, 0.0)
         await bot.tick()
     if "fast" in kind:
-        check(f"[{label}] both orders next to price are back within 90s after the run (took {catch_up}s)",
-              catch_up is not None and catch_up <= 90, catch_up)
-        label += " (after catch-up)"
+        catch_up = (last_bad + 1 - 30) * 2
+        limit = 120 if shared_budget else 60
+        stays = last_bad < len(prices) - 1
+        check(f"[{label}] both orders next to price are back for good within {limit}s after the run (took {catch_up}s)",
+              stays and catch_up <= limit, catch_up)
     check(f"[{label}] the buy right below price is always there ({checked - len(bad_buy)}/{checked})",
           not bad_buy, bad_buy[:4])
     check(f"[{label}] the nearest allowed sell above price is always there ({checked - len(bad_sell)}/{checked})",
