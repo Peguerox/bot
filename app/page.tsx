@@ -1411,6 +1411,102 @@ const LIT_GRID_EXCLUDED_WINDOWS: [string, string][] = [
   ["2026-10-19T14:46:00Z", "2026-10-19T20:13:00Z"],
 ];
 
+// ── LIT liquidity tracker (2026-10-23, in Worker 4's old spot after the merge) ──────────────────
+// Answers one question: how much bigger can the LIT grid get before LIT's own market can't absorb
+// its orders? Reads Lighter's public order book + 24h stats straight from the browser (Lighter
+// allows this site), and Worker 3's last-24h fills from Supabase. No bot involvement.
+const LIT_MARKET_ID = 2049;
+const LIGHTER_API = "https://mainnet.zklighter.elliot.ai/api/v1";
+
+function LitLiquidityPanel({ state, fills24h }: { state: any; fills24h: any[] }) {
+  const [book, setBook] = useState<{ bids: [number, number][]; asks: [number, number][] } | null>(null);
+  const [stats, setStats] = useState<{ volLit: number; volUsd: number; trades: number } | null>(null);
+  const [err, setErr] = useState<string | null>(null);
+  useEffect(() => {
+    let alive = true;
+    const load = async () => {
+      try {
+        const [ob, det] = await Promise.all([
+          fetch(`${LIGHTER_API}/orderBookOrders?market_id=${LIT_MARKET_ID}&limit=100`).then((r) => r.json()),
+          fetch(`${LIGHTER_API}/orderBookDetails?market_id=${LIT_MARKET_ID}`).then((r) => r.json()),
+        ]);
+        if (!alive) return;
+        const side = (xs: any[]) => (xs ?? []).map((o: any) => [Number(o.price), Number(o.remaining_base_amount)] as [number, number]);
+        setBook({ bids: side(ob.bids), asks: side(ob.asks) });
+        const d = (det.spot_order_book_details ?? det.order_book_details ?? [])[0] ?? {};
+        setStats({ volLit: Number(d.daily_base_token_volume ?? 0), volUsd: Number(d.daily_quote_token_volume ?? 0), trades: Number(d.daily_trades_count ?? 0) });
+        setErr(null);
+      } catch (e: any) {
+        if (alive) setErr("Lighter market data unavailable");
+      }
+    };
+    load();
+    const id = setInterval(load, 30_000);
+    return () => { alive = false; clearInterval(id); };
+  }, []);
+
+  const price = state?.live_price != null ? Number(state.live_price) : null;
+  const orderLit = state?.order_size_lit != null ? Number(state.order_size_lit) : null;
+  const capital = state?.capital_usd != null ? Number(state.capital_usd) : null;
+  const within = (xs: [number, number][], lo: number, hi: number) => xs.filter(([p]) => p >= lo && p <= hi).reduce((a, [, q]) => a + q, 0);
+  const bidDepth = book && price ? within(book.bids, price * 0.995, price) : null;
+  const askDepth = book && price ? within(book.asks, price, price * 1.005) : null;
+  const thinner = bidDepth != null && askDepth != null ? Math.min(bidDepth, askDepth) : null;
+  const vsBook = thinner && orderLit ? (orderLit / thinner) * 100 : null;
+
+  // Our fills in the last 24h: share of LIT's whole market, and how often an order filled only in part.
+  const withFill = fills24h.filter((r: any) => Number(r.filled_qty ?? 0) > 0);
+  const partial = withFill.filter((r: any) => Number(r.filled_qty) < Number(r.size ?? 0) * 0.999);
+  const partialPct = withFill.length ? (partial.length / withFill.length) * 100 : null;
+  const ourLit24h = withFill.reduce((a: number, r: any) => a + Number(r.filled_qty ?? 0), 0);
+  const marketShare = stats && stats.volLit > 0 ? (ourLit24h / stats.volLit) * 100 : null;
+
+  // Verdict + headroom from our SHARE OF REAL TRADING (a grid fills from actual trades, not from
+  // orders resting on the book): past ~10% of LIT's whole volume we would be a big part of the
+  // market and fills would degrade. Partial fills are the early warning.
+  const SHARE_CEILING = 10;
+  const verdict = marketShare == null ? null
+    : marketShare < 5 && (partialPct ?? 0) < 10 ? { label: "Room to grow", cls: "bg-green-500/15 text-green-300 border-green-500/50" }
+    : marketShare < SHARE_CEILING && (partialPct ?? 0) < 25 ? { label: "Getting close", cls: "bg-amber-500/15 text-amber-300 border-amber-500/50" }
+    : { label: "At the limit", cls: "bg-red-500/15 text-red-300 border-red-500/50" };
+  const headroomX = marketShare ? SHARE_CEILING / marketShare : null;
+
+  return (
+    <section className="bg-gray-900/60 border border-gray-800 rounded-xl p-4 space-y-3">
+      <div className="flex items-center justify-between gap-2 flex-wrap">
+        <div>
+          <h2 className="text-white font-semibold">LIT Liquidity — how big can Worker 3 get?</h2>
+          <p className="text-gray-500 text-xs">Lighter's live LIT/USDC order book and 24h market, against Worker 3's orders and fills</p>
+        </div>
+        {verdict && <span className={`text-sm font-semibold px-3 py-1 rounded-md border ${verdict.cls}`}>{verdict.label}</span>}
+      </div>
+      {err && <p className="text-amber-400 text-xs">{err}</p>}
+      <div className="grid grid-cols-2 md:grid-cols-4 gap-2">
+        <Stat label="Our order vs the book"
+          value={vsBook != null ? `${vsBook.toFixed(1)}%` : "—"}
+          sub={orderLit != null && thinner != null
+            ? `${orderLit.toFixed(2)} LIT per order vs ${thinner.toFixed(0)} LIT on the thinner side within ±0.5% (bids ${bidDepth!.toFixed(0)} · asks ${askDepth!.toFixed(0)})`
+            : "loading the order book…"}
+          color={vsBook == null ? "text-gray-400" : vsBook < 10 ? "text-green-400" : vsBook < 30 ? "text-amber-400" : "text-red-400"} />
+        <Stat label="Partial fills (24h)"
+          value={partialPct != null ? `${partialPct.toFixed(1)}%` : "—"}
+          sub={`${partial.length} of ${withFill.length} filled orders filled only in part`}
+          color={partialPct == null ? "text-gray-400" : partialPct < 10 ? "text-green-400" : partialPct < 25 ? "text-amber-400" : "text-red-400"} />
+        <Stat label="Our share of LIT volume (24h)"
+          value={marketShare != null ? `${marketShare.toFixed(2)}%` : "—"}
+          sub={stats ? `${ourLit24h.toFixed(0)} of ${stats.volLit.toLocaleString(undefined, { maximumFractionDigits: 0 })} LIT traded ($${(stats.volUsd / 1e6).toFixed(2)}M, ${stats.trades.toLocaleString()} trades)` : "loading…"}
+          color="text-gray-300" />
+        <Stat label="Room to grow"
+          value={headroomX != null ? `~${headroomX.toFixed(1)}×` : "—"}
+          sub={headroomX != null && capital != null
+            ? `Investment could grow to ~$${(capital * headroomX).toLocaleString(undefined, { maximumFractionDigits: 0 })} before we are ${SHARE_CEILING}% of all LIT trading (watch partial fills on the way)`
+            : ""}
+          color={headroomX == null ? "text-gray-400" : headroomX >= 2 ? "text-green-400" : headroomX >= 1 ? "text-amber-400" : "text-red-400"} />
+      </div>
+    </section>
+  );
+}
+
 function LitGridLivePanel({
   state, orders, sells, sellCount, resting, loading, firstSellAt = null,
   enabled, onToggle, toggling,
@@ -6508,6 +6604,7 @@ export default function Dashboard() {
   const [litGridLiveSellCount, setLitGridLiveSellCount] = useState(0);
   const [litGridLiveFirstSellAt, setLitGridLiveFirstSellAt] = useState<string | null>(null);
   const [litGridWorker3FirstSellAt, setLitGridWorker3FirstSellAt] = useState<string | null>(null);
+  const [litGridWorker3Fills24h, setLitGridWorker3Fills24h] = useState<any[]>([]);
   const [litGridLiveToggling,  setLitGridLiveToggling]  = useState(false);
   const [litGridLiveFlattening, setLitGridLiveFlattening] = useState(false);
   const [litGridLiveClearing, setLitGridLiveClearing] = useState(false);
@@ -6579,6 +6676,7 @@ export default function Dashboard() {
       { data: litGridWorker3Resting },
       { data: litGridLiveFirstSell },
       { data: litGridWorker3FirstSell },
+      { data: litGridWorker3Fills24h },
     ] = await Promise.all([
       getSupabase().from("surfer_state").select("*").eq("id", 1).single(),
       getSupabase().from("surfer_trades").select("*").order("exit_time", { ascending: false }).limit(5000),
@@ -6639,6 +6737,8 @@ export default function Dashboard() {
       // divided by those few hours (Worker 3 showed 152/hr instead of ~32, 2026-10-23).
       getSupabase().from("lighter_lit_grid_live_orders").select("filled_at").eq("side", "sell").not("realized_profit_usd", "is", null).not("filled_at", "is", null).order("filled_at", { ascending: true }).limit(1),
       getSupabase().from("lighter_lit_grid_live_worker3_orders").select("filled_at").eq("side", "sell").not("realized_profit_usd", "is", null).not("filled_at", "is", null).order("filled_at", { ascending: true }).limit(1),
+      // Liquidity tracker: every Worker 3 order with a fill in the last 24h (not the transfer rows).
+      getSupabase().from("lighter_lit_grid_live_worker3_orders").select("side,size,filled_qty,status,filled_at,order_kind").gte("filled_at", new Date(Date.now() - 86_400_000).toISOString()).not("filled_qty", "is", null).limit(5000),
     ]);
     setSurferState(surferSt ?? null);
     setSurferTrades(surferTr ?? []);
@@ -6678,6 +6778,7 @@ export default function Dashboard() {
     setLitGridWorker3Resting(litGridWorker3Resting ?? []);
     setLitGridLiveFirstSellAt(litGridLiveFirstSell?.[0]?.filled_at ?? null);
     setLitGridWorker3FirstSellAt(litGridWorker3FirstSell?.[0]?.filled_at ?? null);
+    setLitGridWorker3Fills24h((litGridWorker3Fills24h ?? []).filter((r: any) => r.order_kind !== "transfer"));
     setDcaBtcStats({ total: dcaBtcTotal ?? 0, wins: dcaBtcWins ?? 0 });
     setInitialBtcStats({ total: initialBtcTotal ?? 0, wins: initialBtcWins ?? 0 });
     setOptimalBtcStats({ total: optimalBtcTotal ?? 0, wins: optimalBtcWins ?? 0 });
@@ -7033,24 +7134,8 @@ export default function Dashboard() {
           subaccountNote="Worker 3's own sub-account, twin of Worker 4 below at a different spacing"
         />
 
-        {/* LIT grid bot on its own full-width row below Worker 1 and the hedge (direct request). */}
-        <LitGridLivePanel
-          state={litGridLiveState}
-          orders={litGridLiveOrders}
-          sells={litGridLiveSells}
-          sellCount={litGridLiveSellCount}
-          firstSellAt={litGridLiveFirstSellAt}
-          resting={litGridLiveResting}
-          loading={loading}
-          enabled={litGridLiveState?.enabled ?? false}
-          onToggle={handleLitGridLiveToggle}
-          toggling={litGridLiveToggling}
-          onFlatten={handleLitGridLiveFlatten}
-          flattening={litGridLiveFlattening}
-          onClearHistory={handleLitGridLiveClearHistory}
-          clearingHistory={litGridLiveClearing}
-          title="LIT/USDC Grid Bot — Worker 4"
-        />
+        {/* Worker 4 merged into Worker 3 (2026-10-23); its spot now tracks LIT liquidity for Worker 3. */}
+        <LitLiquidityPanel state={litGridWorker3State} fills24h={litGridWorker3Fills24h} />
 
       </div>
     </main>

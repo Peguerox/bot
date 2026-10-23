@@ -698,29 +698,6 @@ def open_segments(buys, sells):
     return out
 
 
-def plan_reanchor(buys, sells, all_levels, price, new_spacing_pct):
-    """Spacing change on an anchored grid (direct request 2026-10-20): line numbers only mean a
-    price under the spacing they were made with, so a held lot keyed to an old line would get
-    its sell far from its cost. Re-anchor so the current price is a line of the new grid, and
-    move each held lot to the new line nearest its real cost (its sell, one line up, lands
-    about one new spacing above cost; dust and partly sold lots are placed last so they never
-    displace a whole lot;
-    sells are still never placed below cost). New line numbers start past every number ever used,
-    so moved rows never mix with old closed history at the same number. Lots with a partial
-    sell get a line of their own, so average costs are never blended. Returns
-    (anchor, {row_id: (column, new_line)}, {old_level: new_line}) or None if unsafe."""
-    step = math.log(1 + new_spacing_pct / 100.0)
-    offset = max((abs(int(x)) for x in all_levels), default=0) + REANCHOR_LEVEL_MARGIN
-    if offset * step > 600:
-        return None
-    anchor = price / math.exp(offset * step)
-    planned = _reanchor_moves(buys, sells, offset, price, step)
-    if planned is None:
-        return None
-    moves, mapping = planned
-    return anchor, moves, mapping
-
-
 def plan_reanchor_log(buys, sells, all_levels, price, new_spacing_pct):
     """plan_reanchor for engine v2: the anchor is returned as ln(anchor), so line prices are
     exp(anchor_log + line*step) and there is no overflow limit at any spacing -- v1's
@@ -864,18 +841,6 @@ def _order_ns(d):
     )
 
 
-class LiveSnapshot:
-    def __init__(self, resting_by_level):
-        self.rows_by_level = resting_by_level
-        self.buy_levels = {lvl for lvl, rows in resting_by_level.items()
-                            if any(r["side"] == "buy" for r in rows)}
-        self.sell_closes = set()
-        for rows in resting_by_level.values():
-            for r in rows:
-                if r["side"] == "sell" and r.get("closes_level") is not None:
-                    self.sell_closes.add(r["closes_level"])
-
-
 class LitGridLive:
     def __init__(self, http: aiohttp.ClientSession, table_state=TABLE_STATE,
                  table_orders=TABLE_ORDERS, table_runs=TABLE_RUNS, tag=""):
@@ -893,7 +858,6 @@ class LitGridLive:
         self._lock_checked_at = 0.0
         self._lock_blocked_logged = False
         self._last_level = None
-        self._window_center = None  # guard-banded active-window center, external audit fix P2-11
         self._dust_logged = set()
         self.live = LiveBook(MARKET_ID)
         self._book_ws_connected_at = 0.0
@@ -1056,14 +1020,6 @@ class LitGridLive:
         await self._resync_nonce(hard=True)
         return False
 
-    def _exchange_rate_limited(self):
-        """True while a 429/nonce backoff window is active -- callers must skip the real SDK call
-        entirely (not just retry faster) so a rate-limit storm can actually clear instead of being
-        perpetuated by our own repeated hammering. place_grid_order/cancel_order_row each catch
-        their own errors and never raise, so this can't rely on _run_tick_loop's own backoff --
-        that only ever sees an exception that escapes all the way out of tick()."""
-        return self._limiter.blocked()
-
     def _take_request(self):
         """Budget gate for every exchange request (reads and sends). False = skip this one now."""
         return self._limiter.try_take()
@@ -1073,103 +1029,6 @@ class LitGridLive:
 
     def _register_exchange_success(self):
         self._limiter.ok()
-
-    async def place_grid_order(self, level, side, limit_price, size, closes_level=None,
-                                funded_from_bucket_usd=0.0):
-        # Lock validated BEFORE anything else (external audit fix, fifth pass): checking AFTER
-        # the send let exactly one action slip through per lock-loss event.
-        if not await self._touch_lock_heartbeat():
-            return None
-        if not self._take_request():
-            return None
-        co_idx = self._next_co_idx()
-        row = {
-            "level": level, "side": side, "client_order_index": co_idx,
-            "status": "pending", "limit_price": limit_price, "size": size,
-            "placed_at": now_iso(), "closes_level": closes_level,
-            # Written in the SAME insert as the row itself, never a separate follow-up PATCH
-            # (external audit fix, eighth pass): a failed follow-up write used to leave a real,
-            # open order with an invisible reservation, overstating what _bucket_balances()
-            # thought was still free.
-            "funded_from_bucket_usd": round(funded_from_bucket_usd, 8),
-        }
-        inserted = await self.sb("POST", self.TABLE_ORDERS, row)
-        row_id = inserted[0]["id"]
-        is_ask = (side == "sell")
-        price_int = price_to_int(limit_price)
-        size_int = size_to_int(size)
-        try:
-            _order, _resp, err = await asyncio.wait_for(
-                self.client.create_order(
-                    market_index=MARKET_ID, client_order_index=co_idx,
-                    base_amount=size_int, price=price_int, is_ask=is_ask,
-                    order_type=self.client.ORDER_TYPE_LIMIT,
-                    time_in_force=self.client.ORDER_TIME_IN_FORCE_POST_ONLY,
-                    reduce_only=False,
-                ),
-                timeout=ORDER_TIMEOUT,
-            )
-            if err:
-                if self._is_rate_limit_error(str(err)):
-                    self._register_exchange_rate_limit()
-                await self.sb("PATCH", f"{self.TABLE_ORDERS}?id=eq.{row_id}",
-                               {"status": "rejected", "error": str(err)[:200]})
-                return None
-        except Exception as e:
-            if await self._on_send_exception(e):
-                # Refused by the rate limiter before reaching the sequencer -- a definite
-                # rejection, not an unknown outcome. Left 'pending' it became a ghost row that
-                # held its slot (no real order, and the bot would not re-place one) until the
-                # 1h stale sweep: live 2026-10-22 it kept the sell for a just-bought lot off the
-                # book, right at price.
-                await self.sb("PATCH", f"{self.TABLE_ORDERS}?id=eq.{row_id}",
-                               {"status": "rejected", "error": ("rate_limited: " + str(e))[:200]})
-                return None
-            await self.log_run("order_place_unknown", {"row_id": row_id, "error": str(e)[:200]})
-            return row_id
-        self._register_exchange_success()
-        await self.sb("PATCH", f"{self.TABLE_ORDERS}?id=eq.{row_id}", {"status": "open"})
-        return row_id
-
-    async def cancel_order_row(self, row):
-        """Returns True only if the cancel REQUEST was sent cleanly -- this is NOT confirmation
-        the order is actually gone (external audit fix P1-4). Callers must reconcile and check
-        real resting state before treating a cancel as done."""
-        if not await self._touch_lock_heartbeat():
-            return False
-        order_index = row.get("exchange_order_id")
-        if order_index is None:
-            return False
-        if not self._take_request():
-            return False
-        try:
-            _tx, _resp, err = await asyncio.wait_for(
-                self.client.cancel_order(market_index=MARKET_ID, order_index=int(order_index)),
-                timeout=ORDER_TIMEOUT,
-            )
-            if err:
-                if self._is_rate_limit_error(str(err)):
-                    self._register_exchange_rate_limit()
-                await self.log_run("cancel_order_failed", {"row_id": row["id"], "error": str(err)[:200]})
-                return False
-        except Exception as e:
-            await self._on_send_exception(e)
-            await self.log_run("cancel_order_failed", {"row_id": row["id"], "error": str(e)[:200]})
-            return False
-        self._register_exchange_success()
-        await self.sb("PATCH", f"{self.TABLE_ORDERS}?id=eq.{row['id']}", {"status": "cancel_requested"})
-        return True
-
-    async def cancel_all_resting(self):
-        resting = await self.resting_orders_by_level()
-        all_ok = True
-        for rows in resting.values():
-            for r in rows:
-                if not self._lock_held:
-                    return False
-                if not await self.cancel_order_row(r):
-                    all_ok = False
-        return all_ok
 
     async def _rest_net(self, withdrawn):
         sells = await self.sb_paginate(
@@ -1222,15 +1081,6 @@ class LitGridLive:
             max(0.0, gross["profit_bucket_rest_usd"] - float(rest_withdrawn or 0)), 8)
         gross["profit_bucket_compound_usd"] = round(gross["profit_bucket_compound_usd"], 8)
         return gross
-
-    async def _has_ever_bought(self):
-        """Whether any buy has EVER been confirmed filled, ever, for this bot -- the cold-start
-        detector (direct request, eighth pass). A fresh enable, or a reset that wiped the order
-        ledger, reads as never-bought again, which is exactly the point: each genuinely fresh
-        start gets the eager initial fill; every tick after that first fill goes through the
-        normal resting-limit ladder."""
-        rows = await self.sb("GET", f"{self.TABLE_ORDERS}?side=eq.buy&status=eq.filled&select=id&limit=1")
-        return bool(rows)
 
     async def _fetch_active_orders_list(self, auth):
         """Every order resting on the exchange for this account/market, or None if the read
@@ -1402,7 +1252,6 @@ class LitGridLive:
                    "extra": {"grid_reset_requested": False}}
         await self.update_state({"reanchor_journal": journal})
         await self._apply_reanchor_journal(journal)
-        self._window_center = None
         detail.update({"anchor_log": anchor_log, "lots_moved": len(mapping)})
         await self.log_run("grid_reset_completed", detail)
 
@@ -2012,20 +1861,6 @@ class LitGridLive:
         return by_level
 
     # ── One-shot allowance, reserved atomically BEFORE a buy is ever sent ──────────────────────
-    async def _reserve_buy_allowance(self, expected_count):
-        """Conditional PATCH: only succeeds if lifetime_buy_count still equals what we last
-        read. Called BEFORE place_grid_order for a buy (external audit fix P1-1) -- an ambiguous
-        send (crash, timeout) still consumed its slot, since the counter is already durably
-        incremented by the time the order is attempted. Returns the new count, or None if
-        another instance/tick already consumed it."""
-        rows = await self.sb(
-            "PATCH", f"{self.TABLE_STATE}?id=eq.1&lifetime_buy_count=eq.{expected_count}",
-            {"lifetime_buy_count": expected_count + 1},
-        )
-        if not rows:
-            return None
-        return expected_count + 1
-
     def _funding(self, state, holdings, resting):
         """Money the next buy may spend: (resting_buy_cost, base_capital_remaining,
         available_usdc). Shared by the buy ladder and the dynamic-drawdown sizing so both
@@ -2673,384 +2508,6 @@ class LitGridLive:
             resting = await self.resting_orders_by_level()
             await self._dynamic_order_size(state, price, effective_spacing_pct(state), holdings, resting)
 
-    async def maintain_window(self, state, price, entries_allowed=True):
-        spacing_pct = effective_spacing_pct(state)
-        step = math.log(1 + spacing_pct / 100.0)
-        levels_down = max(1, int(state["levels_down"]))
-        max_open_buys = state.get("max_open_buys")
-        max_open_buys = int(max_open_buys) if max_open_buys is not None else None
-        lifetime_buy_count = int(state.get("lifetime_buy_count") or 0)
-
-        order_size_lit = state.get("order_size_lit")
-        if order_size_lit is None and not state.get("dynamic_dd_enabled"):
-            # Compound bucket folded into the sizing basis (direct request, profit allocation
-            # feature), mirroring the paper bot's compounding_basis = capital_usd + bot_profit_usd
-            # -- never decremented by this use, it keeps growing as more profit lands in it.
-            compound_bucket = float(state.get("profit_bucket_compound_usd") or 0)
-            effective_capital = float(state["capital_usd"]) + compound_bucket
-            down_sizing_levels = levels_for_drawdown(spacing_pct, float(state.get("drawdown_pct") or 10.0))
-            order_size_lit = compute_order_size_lit(
-                effective_capital, price, spacing_pct, down_sizing_levels)
-            await self.update_state({"order_size_lit": order_size_lit})
-        order_size = clamp_order_size(float(order_size_lit or 0.0))
-
-        holdings = await self.current_holdings()
-        resting = await self.resting_orders_by_level()
-        snap = LiveSnapshot(resting)
-        # Dust lots (below the 1 LIT exchange minimum, left by a buy cancelled after a tiny
-        # partial fill) can never get a sell. Counted as held they pinned the buy ladder under
-        # them and blocked gap fill -- live 2026-10-19, a 0.24 LIT lot at line 49 froze trading
-        # for 4+ hours while price sat 6 lines higher. The window ignores them; their line can
-        # be bought again, which merges the dust into a sellable lot.
-        dust = {lv for lv, h in holdings.items() if clamp_order_size(h["qty"]) is None}
-        if dust != getattr(self, "_dust_logged", set()):
-            self._dust_logged = dust
-            if dust:
-                await self.log_run("dust_lots_ignored", {
-                    "levels": sorted(dust),
-                    "qty": {str(lv): round(holdings[lv]["qty"], 4) for lv in sorted(dust)}})
-        active = {lv: h for lv, h in holdings.items() if lv not in dust}
-        if state.get("dynamic_dd_enabled"):
-            order_size = await self._dynamic_order_size(state, price, spacing_pct, holdings, resting)
-
-        # Cold-start detector (direct request, eighth pass) -- computed once per call, before
-        # anything below can change holdings/has-ever-bought, so the whole buy-placement section
-        # treats this tick consistently as either a cold start or not, never a mix.
-        is_cold_start = (not holdings and not snap.buy_levels
-                         and not await self._has_ever_bought())
-
-        # Grid anchored at the starting price (direct request): every line is
-        # anchor * (1 + spacing)^n, so on a fresh start the first sell sits exactly one spacing
-        # above price and the first buy exactly one spacing below. A run with no anchor keeps
-        # the old behavior (global grid, sells at cost + spacing).
-        if is_cold_start and entries_allowed:
-            await self.update_state({"grid_anchor_price": price, "grid_anchor_log": None})
-            state["grid_anchor_price"] = price
-            state["grid_anchor_log"] = None
-            self._window_center = None
-        anchored = state.get("grid_anchor_price") is not None
-        anchor = float(state["grid_anchor_price"]) if anchored else 1.0
-        # Guard-banded window center (external audit fix P2-11): pure boundary noise no longer
-        # shifts the active window and cancels a resting buy before it ever had a chance to fill.
-        cur_lvl = level_of(price / anchor, step, reference=self._window_center)
-        self._window_center = cur_lvl
-
-        # Always levels_up sells above price and levels_down buys below (direct request: "5 up
-        # + 15 down = 20 orders all the time", trailing up). Each held lot at line L has its
-        # sell at L+1, so levels_up sells means levels_up held lots. When sells fill on a rise
-        # and fewer than levels_up lots are held, trailing up market-buys the missing lots onto
-        # the lines just above the highest held one (their sells land at the new top), and the
-        # grid's bottom moves up with the top so the lowest buys are cancelled -- the order
-        # count stays levels_up + levels_down and the money moves up instead of growing. On a
-        # drop nothing trails: buys fill, their sells appear above them, and spending is capped
-        # by the buys already in the grid.
-        levels_up = max(1, int(state.get("levels_up") or 1))
-        held_lines = set(active)
-        # Buys always sit on the levels_down lines directly below the empty line next to price
-        # (trailing down, direct request): the empty line is the lowest held lot's line, or with
-        # nothing held, the line at price. As buys fill on a drop the window moves down and a
-        # new buy is added at the bottom; as sells fill on a rise it moves up and the lowest buy
-        # is cancelled. A held line never gets a second buy.
-        buy_top = min(min(held_lines) - 1, cur_lvl) if held_lines else cur_lvl - 1
-        # A trailing-up buy still in flight is any open buy row marked order_kind='market'.
-        # Anything derived from price goes stale in a fast rise: "priced above the market"
-        # (the row's 0.5% band) and "on a line above the buy ladder" both stopped matching
-        # once price ran past them before the fill was confirmed, so the in-flight buy stopped
-        # counting and another was bought for the same slot -- live 2026-10-18 the bot held 9
-        # lots against levels_up=5. The mark is set when the order is placed and never moves.
-        pending_up = {int(r["level"]) for rows in resting.values() for r in rows
-                      if r["side"] == "buy" and r.get("order_kind") == "market"}
-        trail_lines = []
-        if anchored and not is_cold_start and entries_allowed:
-            need = levels_up - len(held_lines) - len(pending_up)
-            if need > 0:
-                occupied = held_lines | pending_up
-                start = max(max(occupied) + 1, cur_lvl) if occupied else cur_lvl
-                trail_lines = [ln for ln in range(start, start + need) if ln not in snap.buy_levels]
-        grid_bottom = buy_top - levels_down + 1
-        if anchored and entries_allowed:
-            for rows in resting.values():
-                for r in rows:
-                    if r["side"] == "buy" and int(r["level"]) < grid_bottom:
-                        if not self._lock_held:
-                            return
-                        await self.cancel_order_row(r)
-
-        # A resting buy below grid_bottom is cancelled just above (the window trails up with
-        # price). Buys inside the window are never cancelled for being "outside the top edge" --
-        # that older eighth-pass rule is gone; the guard-banded cur_lvl stops boundary noise.
-
-        # Place sells FIRST. Conflict detection compares REAL integer price ticks, never a
-        # recomputed display level (external audit fix P2-8). If a conflicting buy is found, it
-        # is cancelled but the sell is DEFERRED to next tick -- never placed in the same breath
-        # as an unconfirmed cancel (external audit fix P1-4).
-        # Fill gaps in the sell ladder (direct request): a fast move can sell a lot from the
-        # middle (e.g. at market) and leave an empty line between sells. A lot without a resting
-        # sell takes the lowest such gap below its own line; if every lot already has a sell,
-        # the TOP sell is cancelled so that lot can move down into the gap next tick. Only when
-        # the gap is above the market and still at least one spacing above that lot's cost.
-        hole_target = {}
-        if anchored and active:
-            def _line(p):
-                return int(round(math.log(float(p) / anchor) / step))
-            sell_rows = [r for rows in resting.values() for r in rows
-                         if r["side"] == "sell" and r.get("closes_level") is not None]
-            free_lots = sorted(lv for lv in active if lv not in snap.sell_closes)
-            all_lines = {_line(r["limit_price"]) for r in sell_rows} | {lv + 1 for lv in free_lots}
-            # Empty lines from just above price up to the top sell.
-            holes = [x for x in range(cur_lvl + 1, max(all_lines))
-                     if x not in all_lines] if all_lines else []
-
-            def _best_hole(below_line, cost):
-                # A moved sell must still earn at least one full spacing over the lot's cost.
-                fits = [x for x in holes if x < below_line
-                        and anchor * math.exp(x * step) >= cost * (1 + spacing_pct / 100.0) - 1e-9]
-                return min(fits) if fits else None
-
-            for lv in sorted(free_lots, reverse=True):
-                hl = _best_hole(lv + 1, active[lv]["cost"])
-                if hl is not None:
-                    hole_target[lv] = hl
-                    holes.remove(hl)
-            if (holes and not free_lots and sell_rows
-                    and not any(r.get("status") == "cancel_requested" for r in sell_rows)):
-                top = max(sell_rows, key=lambda r: float(r["limit_price"]))
-                top_lot = top["closes_level"]
-                hl = _best_hole(_line(top["limit_price"]), active[top_lot]["cost"]) if top_lot in active else None
-                if hl is not None:
-                    await self.log_run("gap_fill_move_top_sell", {
-                        "row_id": top["id"], "from_line": _line(top["limit_price"]), "to_line": hl})
-                    await self.cancel_order_row(top)
-
-        # Limit sells are queued here and placed below together with the buys, nearest to price
-        # first (direct request, 2026-10-18 audit: sells used to go in the order each level was
-        # first ever bought, and always before every buy -- the buy right under price could wait
-        # several seconds behind sells far away). Market sells and conflict cancels stay
-        # immediate.
-        def _sell_target(lvl, h):
-            if anchored:
-                return max(round_price(anchor * math.exp(hole_target.get(lvl, lvl + 1) * step)),
-                           round_price(h["cost"]))
-            return round_price(h["cost"] * (1 + spacing_pct / 100.0))
-        # Resting sells only for the levels_up lots whose sell sits nearest to price (2026-10-22,
-        # direct request). Far sells for lots bought well above price never trade until price
-        # comes back, but each one costs a signed request -- Worker 3 carried ~70 of them, and
-        # placing them is what kept tripping Lighter's rate limit. A far lot gets its sell once
-        # it ranks among the nearest; a spike past its target is still caught by the passed-level
-        # market sell below, which checks every lot. Existing far sells are left alone.
-        near_lots = set(sorted(active, key=lambda lv: _sell_target(lv, active[lv]))[:levels_up])
-        sell_queue = []
-        for lvl, h in holdings.items():
-            if not self._lock_held:
-                return
-            if lvl in snap.sell_closes:
-                continue
-            if anchored:
-                # One sell per grid line: lot held at line L sells at line L+1 (or at a gap line
-                # below that, see above), never below cost.
-                target_line = hole_target.get(lvl, lvl + 1)
-                sell_price = max(round_price(anchor * math.exp(target_line * step)),
-                                 round_price(h["cost"]))
-            else:
-                sell_price = round_price(h["cost"] * (1 + spacing_pct / 100.0))
-            if sell_price < price:
-                # Price already ran past this lot's sell level before the sell could rest (fill
-                # seen late, or a fast spike). A post-only limit below the market is cancelled
-                # by the exchange on arrival -- live it was re-placed and cancelled 25+ times,
-                # pinning the buys below it. The lot is already past its target, so sell it now
-                # at market (more profit than the target, never less than cost).
-                mkt_size = clamp_order_size(h["qty"])
-                if mkt_size is not None:
-                    await self.log_run("sell_level_passed_market_sell", {
-                        "closes_level": lvl, "sell_level_price": sell_price, "price": price})
-                    if await self.market_sell_level(lvl, mkt_size, min_price=h["cost"]) is not None:
-                        snap.sell_closes.add(lvl)
-                continue
-            sell_price_int = price_to_int(sell_price)
-            conflicting_buys = [
-                r for rows in snap.rows_by_level.values() for r in rows
-                if r["side"] == "buy" and price_to_int(float(r["limit_price"])) == sell_price_int
-            ]
-            if conflicting_buys:
-                for r in conflicting_buys:
-                    await self.cancel_order_row(r)
-                continue  # defer the sell to next tick, after reconciliation confirms it's gone
-            if lvl not in near_lots:
-                continue
-            sell_size = clamp_order_size(h["qty"])
-            if sell_size is None:
-                continue
-            sell_queue.append((sell_price, lvl, sell_size))
-        sell_queue.sort()
-
-        async def place_queued_sell(item):
-            sp, lv, sz = item
-            await self.place_grid_order(level_of(sp / anchor, step), "sell", sp, sz, closes_level=lv)
-            snap.sell_closes.add(lv)
-
-        async def flush_sells():
-            for item in sell_queue:
-                if not self._lock_held:
-                    return
-                await place_queued_sell(item)
-            sell_queue.clear()
-
-        if not (entries_allowed and order_size is not None):
-            await flush_sells()
-            return
-        resting_buy_cost, base_capital_remaining, available_usdc = self._funding(state, holdings, resting)
-
-        real_total = float(state.get("usdc_balance") or 0) + float(state.get("lit_balance") or 0) * price
-        if is_cold_start and float(state["capital_usd"]) > real_total + 0.005:
-            # The investment can never be more than the money actually in the account
-            # (direct request) -- refuse to start rather than size the grid on money that
-            # isn't there.
-            if not getattr(self, "_investment_error_logged", False):
-                await self.log_run("investment_exceeds_balance", {
-                    "capital_usd": float(state["capital_usd"]), "real_total": round(real_total, 4)})
-                self._investment_error_logged = True
-            await flush_sells()
-            return
-        self._investment_error_logged = False
-        if is_cold_start:
-            await flush_sells()  # nothing is held on a cold start, so normally empty
-            # Cold start (direct request): market-buy the LIT for the levels_up lots now, one
-            # market order per lot, held at grid lines 0..levels_up-1 so their sells land at
-            # anchor +1..+levels_up spacings -- one sell per line, never stacked on one
-            # price (2026-10-18 incident). The buy ladder follows next tick.
-            for lvl in range(0, max(1, int(state.get("levels_up") or 1))):
-                if not self._lock_held:
-                    return
-                if max_open_buys is not None and lifetime_buy_count >= max_open_buys:
-                    break
-                cost = price * order_size
-                if cost > available_usdc:
-                    break
-                if max_open_buys is not None:
-                    reserved = await self._reserve_buy_allowance(lifetime_buy_count)
-                    if reserved is None:
-                        break
-                    lifetime_buy_count = reserved
-                from_base = min(cost, base_capital_remaining)
-                row_id = await self.market_buy_level(
-                    lvl, order_size, funded_from_bucket_usd=cost - from_base)
-                if row_id is None:
-                    continue
-                available_usdc -= cost
-                base_capital_remaining -= from_base
-        else:
-            if anchored:
-                top = buy_top
-                bottom = grid_bottom
-            else:
-                top = cur_lvl - 1
-                bottom = top - levels_down + 1
-            buy_lines = [
-                lvl for lvl in range(top, bottom - 1, -1)
-                if not (lvl in snap.buy_levels or lvl in snap.sell_closes or lvl in active
-                        or (anchored and (lvl - 1) in active))
-            ]
-            buys_open = True
-            si = bi = 0
-            # Nearest to price first, alternating sides: the next sell (lowest price above
-            # the market) vs the next buy (highest price below it), whichever is closer.
-            while si < len(sell_queue) or (buys_open and bi < len(buy_lines)):
-                if not self._lock_held:
-                    return
-                take_sell = si < len(sell_queue)
-                if take_sell and buys_open and bi < len(buy_lines):
-                    buy_px = anchor * math.exp(buy_lines[bi] * step)
-                    take_sell = (sell_queue[si][0] - price) <= (price - buy_px)
-                if take_sell:
-                    await place_queued_sell(sell_queue[si])
-                    si += 1
-                    continue
-                lvl = buy_lines[bi]
-                bi += 1
-                if max_open_buys is not None and lifetime_buy_count >= max_open_buys:
-                    buys_open = False
-                    continue
-                limit_price = round_price(anchor * math.exp(lvl * step))
-                cost = limit_price * order_size
-                if cost > available_usdc:
-                    if not getattr(self, "_no_funds_logged", False):
-                        # Capital and the cover-drop bucket are both used up (capital is
-                        # spent first, cover-drop only after it): stay quiet, keep what's in
-                        # the grid, wait for sells to free money.
-                        await self.log_run("no_funds_for_buy", {
-                            "line": lvl, "needed": round(cost, 4),
-                            "available": round(available_usdc, 4)})
-                        self._no_funds_logged = True
-                    buys_open = False
-                    continue
-                if max_open_buys is not None:
-                    reserved = await self._reserve_buy_allowance(lifetime_buy_count)
-                    if reserved is None:
-                        buys_open = False  # another instance/tick already consumed the last slot
-                        continue
-                    lifetime_buy_count = reserved
-                from_base = min(cost, base_capital_remaining)
-                from_bucket_amount = cost - from_base
-                row_id = await self.place_grid_order(
-                    lvl, "buy", limit_price, order_size, funded_from_bucket_usd=from_bucket_amount)
-                if row_id is None:
-                    # Confirmed rejection (or the lock was lost -- caught by the loop-top
-                    # check next iteration either way): no money was spent, so no charge
-                    # against either budget (external audit fix, sixth pass -- a rejected
-                    # buy used to be charged exactly like an accepted one). An AMBIGUOUS
-                    # send still returns a real row id here and is still charged below,
-                    # deliberately conservative, same philosophy as the allowance counter.
-                    continue
-                snap.buy_levels.add(lvl)
-                available_usdc -= cost
-                base_capital_remaining -= from_base
-                self._no_funds_logged = False
-
-            # Trailing-up market buys last: their sells only go up next tick anyway.
-            for lvl in trail_lines:
-                if not self._lock_held:
-                    return
-                if max_open_buys is not None and lifetime_buy_count >= max_open_buys:
-                    break
-                cost = price * order_size
-                if cost > available_usdc:
-                    break
-                if max_open_buys is not None:
-                    reserved = await self._reserve_buy_allowance(lifetime_buy_count)
-                    if reserved is None:
-                        break
-                    lifetime_buy_count = reserved
-                from_base = min(cost, base_capital_remaining)
-                row_id = await self.market_buy_level(
-                    lvl, order_size, funded_from_bucket_usd=cost - from_base)
-                if row_id is None:
-                    continue
-                await self.log_run("trailing_up_buy", {"line": lvl, "price": price})
-                snap.buy_levels.add(lvl)
-                available_usdc -= cost
-                base_capital_remaining -= from_base
-
-            # Drawdown coverage (direct request, shown on the Cover-Drop box): how far price can
-            # fall while the bot can still keep buying -- the buys already on the book, plus as
-            # many more lines below them as the money left can pay for (capital first, then the
-            # cover-drop bucket, capped by real USDC: the same available_usdc every buy uses).
-            if anchored and price > 0:
-                ladder = [lv for lv in snap.buy_levels if grid_bottom <= lv <= buy_top]
-                deepest = min(ladder) if ladder else buy_top + 1
-                money = max(0.0, available_usdc)
-                lv = deepest
-                while deepest - lv < 5000:
-                    nxt = order_size * anchor * math.exp((lv - 1) * step)
-                    if nxt > money:
-                        break
-                    money -= nxt
-                    lv -= 1
-                coverage = round(max(0.0, (1 - anchor * math.exp(lv * step) / price) * 100.0), 2)
-                if coverage != getattr(self, "_last_coverage", None):
-                    await self.update_state({"drawdown_coverage_pct": coverage})
-                    state["drawdown_coverage_pct"] = coverage
-                    self._last_coverage = coverage
-
     async def market_sell_level(self, level, qty, min_price=None):
         """min_price (2026-10-22): the worst execution price allowed, floored at the lot's own
         cost by the passed-level caller so a market sell can never fill below what the lot cost
@@ -3097,52 +2554,6 @@ class LitGridLive:
                                {"status": "rejected", "error": ("rate_limited: " + str(e))[:200]})
                 return None
             await self.log_run("flatten_sell_unknown", {"row_id": row_id, "error": str(e)[:200]})
-            return row_id
-        await self.sb("PATCH", f"{self.TABLE_ORDERS}?id=eq.{row_id}", {"status": "open"})
-        return row_id
-
-    async def market_buy_level(self, level, qty, funded_from_bucket_usd=0.0):
-        """Real market buy for the cold-start initial fill (direct request, eighth pass): the
-        resting-limit ladder only ever fills if price drifts down into it, which might never
-        happen. The very first time this bot has nothing bought, each configured level is filled
-        with a real market buy like this one instead of a resting limit, right away. Mirrors
-        market_sell_level's own IOC-style execution band, just on the buy side."""
-        if not await self._touch_lock_heartbeat():
-            return None
-        sized = clamp_order_size(qty)
-        if sized is None:
-            return None
-        price = self.live.best_mid()
-        if price is None:
-            return None
-        if not self._take_request():
-            return None
-        band_price = round_price(price * 1.005)
-        co_idx = self._next_co_idx()
-        row = {"level": level, "side": "buy", "client_order_index": co_idx,
-               "status": "pending", "limit_price": band_price, "size": sized, "placed_at": now_iso(),
-               "funded_from_bucket_usd": round(funded_from_bucket_usd, 8), "order_kind": "market"}
-        inserted = await self.sb("POST", self.TABLE_ORDERS, row)
-        row_id = inserted[0]["id"]
-        try:
-            _o, _r, err = await asyncio.wait_for(
-                self.client.create_market_order(
-                    market_index=MARKET_ID, client_order_index=co_idx,
-                    base_amount=size_to_int(sized), avg_execution_price=price_to_int(band_price),
-                    is_ask=False, reduce_only=False,
-                ),
-                timeout=ORDER_TIMEOUT,
-            )
-            if err:
-                await self.sb("PATCH", f"{self.TABLE_ORDERS}?id=eq.{row_id}",
-                               {"status": "rejected", "error": str(err)[:200]})
-                return None
-        except Exception as e:
-            if await self._on_send_exception(e):
-                await self.sb("PATCH", f"{self.TABLE_ORDERS}?id=eq.{row_id}",
-                               {"status": "rejected", "error": ("rate_limited: " + str(e))[:200]})
-                return None
-            await self.log_run("initial_fill_buy_unknown", {"row_id": row_id, "error": str(e)[:200]})
             return row_id
         await self.sb("PATCH", f"{self.TABLE_ORDERS}?id=eq.{row_id}", {"status": "open"})
         return row_id
@@ -3282,85 +2693,10 @@ class LitGridLive:
         if state.get("grid_reset_requested"):
             await self.reset_grid(profit_mode=profit_mode, route=route)
             return
-        self._v2_active = bool(state.get("engine_v2_enabled"))
-        if state.get("engine_v2_enabled"):
-            await self._tick_v2(state, profit_mode, route)
-            return
-        reconciled_ok, usdc_delta, has_stale_unresolved = await self.reconcile_pending_orders(profit_mode=profit_mode, route=route)
-        await self._apply_usdc_delta(usdc_delta)
-        if not reconciled_ok:
-            return
-        balance_ok, _balance_refreshed = await self.check_balance_divergence()
-        price = await self.fetch_current_price()
-        if price is None:
-            return
-        # Always re-read state fresh after reconciliation, for every field -- not just cash
-        # (external audit fix, sixth pass: a stale local patch of only usdc_balance left a
-        # same-tick profit-bucket credit invisible to maintain_window()'s spend check later this
-        # same tick, which then wrote old_bucket - spent, silently overwriting the fresh credit).
-        state = await self.get_state()
-        # Profit buckets are PURE DERIVED values now (external audit fix, seventh pass -- see
-        # _bucket_balances()'s own docstring for why the old mutable counter was replaced
-        # entirely). Computed fresh every tick and persisted purely for dashboard display;
-        # maintain_window() below reads these same freshly-derived figures off `state`, never a
-        # value that could have drifted out of sync with the ledger.
-        buckets = await self._bucket_balances(rest_withdrawn=state.get("rest_withdrawn_usd"))
-        resize = self._compound_resize_due(state, buckets.get("profit_bucket_compound_usd"))
-        if resize:
-            # Enough new compound profit (+0.2% of the Investment) to resize the next orders.
-            buckets["order_size_lit"] = None
-        await self.update_state(buckets)
-        state.update(buckets)
-        if resize:
-            await self._note_compound_resize(state, buckets.get("profit_bucket_compound_usd"))
-        # A stale-unresolved order pauses new entries, never exits -- same philosophy as a real
-        # balance divergence (external audit fix, fifth pass: this used to only be logged).
-        entries_allowed = bool(state.get("enabled")) and balance_ok and not has_stale_unresolved
-
-        spacing_pct = effective_spacing_pct(state)
-        persisted_spacing = state.get("internal_spacing_pct")
-        if persisted_spacing is not None and float(persisted_spacing) != spacing_pct:
-            await self.cancel_all_resting()
-            _spacing_ok, spacing_usdc_delta, _spacing_stale = await self.reconcile_pending_orders(profit_mode=profit_mode, route=route)
-            await self._apply_usdc_delta(spacing_usdc_delta)
-            still_resting = await self.resting_orders_by_level()
-            if still_resting:
-                await self.log_run("spacing_change_cancel_incomplete",
-                                    {"old": persisted_spacing, "new": spacing_pct,
-                                     "still_resting_levels": list(still_resting.keys())})
-                return  # retry next tick -- don't advance internal_spacing_pct until clean
-            patch = {"internal_spacing_pct": spacing_pct, "order_size_lit": None}
-            detail = {"old": persisted_spacing, "new": spacing_pct}
-            if state.get("grid_anchor_price") is not None:
-                buys, sells = await self._holdings_rows()
-                all_rows = await self.sb_paginate(f"{self.TABLE_ORDERS}?select=id,level,closes_level&order=id.asc")
-                all_levels = [r[k] for r in all_rows for k in ("level", "closes_level") if r.get(k) is not None]
-                plan = plan_reanchor(buys, sells, all_levels, price, spacing_pct)
-                if plan is None:
-                    if not getattr(self, "_reanchor_blocked_logged", False):
-                        self._reanchor_blocked_logged = True
-                        await self.log_run("spacing_change_reanchor_blocked",
-                                            {"old": persisted_spacing, "new": spacing_pct, "price": price})
-                    return  # holds every lot, places nothing; set spacing back to resume
-                anchor, moves, mapping = plan
-                self._rows_cache = None
-                for rid, (col, line) in moves.items():
-                    await self.sb("PATCH", f"{self.TABLE_ORDERS}?id=eq.{rid}", {col: line})
-                self._holdings_cache = None
-                self._window_center = None
-                patch["grid_anchor_price"] = anchor
-                patch["grid_anchor_log"] = None   # v1 owns the anchor now; v2 must not read a stale log
-                detail.update({"price": price, "anchor": anchor,
-                               "lots_moved": {str(k): v for k, v in sorted(mapping.items())}})
-            self._reanchor_blocked_logged = False
-            await self.update_state(patch)
-            await self.log_run("spacing_changed_rearmed", detail)
-            return
-        if persisted_spacing is None:
-            await self.update_state({"internal_spacing_pct": spacing_pct})
-
-        await self.maintain_window(state, price, entries_allowed=entries_allowed)
-        await self.update_state({"live_price": price, "updated_at": now_iso()})
+        # Engine v2 is the only engine (v1 removed 2026-10-23 after ~24h of clean v2 audits on
+        # both bots; engine_v2_enabled in the state row is no longer read).
+        self._v2_active = True
+        await self._tick_v2(state, profit_mode, route)
 
 
 async def _run_tick_loop(bot):
