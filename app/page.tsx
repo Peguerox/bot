@@ -1412,7 +1412,7 @@ const LIT_GRID_EXCLUDED_WINDOWS: [string, string][] = [
 ];
 
 function LitGridLivePanel({
-  state, orders, sells, sellCount, resting, loading,
+  state, orders, sells, sellCount, resting, loading, firstSellAt = null,
   enabled, onToggle, toggling,
   onFlatten, flattening,
   onClearHistory, clearingHistory,
@@ -1421,6 +1421,7 @@ function LitGridLivePanel({
   subaccountNote = "same sub-account Worker 4 used",
 }: {
   state: any; orders: any[]; sells: any[]; sellCount: number; resting: any[]; loading: boolean;
+  firstSellAt?: string | null;
   enabled: boolean; onToggle: () => void; toggling: boolean;
   onFlatten: () => void; flattening: boolean;
   onClearHistory: () => void; clearingHistory: boolean;
@@ -1458,7 +1459,9 @@ function LitGridLivePanel({
   // Trades/hour: sell count since the bot's current history started (history_reset_at), or
   // since the oldest sell we have if that's missing -- live, recomputes as nowTick ticks.
   const sellTimes = sells.map((r: any) => r.filled_at ? new Date(r.filled_at).getTime() : null).filter((t: number | null): t is number => t != null);
-  const tradesStartMs = st?.history_reset_at ? new Date(st.history_reset_at).getTime() : (sellTimes.length ? Math.min(...sellTimes) : null);
+  const tradesStartMs = st?.history_reset_at ? new Date(st.history_reset_at).getTime()
+    : firstSellAt ? new Date(firstSellAt).getTime()
+    : (sellTimes.length ? Math.min(...sellTimes) : null);
   // Hours the bot was stuck (not its normal pace) don't count -- 2026-10-19 dust-lot freeze.
   const excludedMs = tradesStartMs == null ? 0 : LIT_GRID_EXCLUDED_WINDOWS.reduce((sum, [a, b]) => {
     const s = Math.max(Date.parse(a), tradesStartMs), e = Math.min(Date.parse(b), nowTick);
@@ -6503,6 +6506,8 @@ export default function Dashboard() {
   // litGridLiveSells.length, which silently undercounted once the ledger passed that query's
   // row limit -- a count-only query never hits a wall no matter how large the ledger grows.
   const [litGridLiveSellCount, setLitGridLiveSellCount] = useState(0);
+  const [litGridLiveFirstSellAt, setLitGridLiveFirstSellAt] = useState<string | null>(null);
+  const [litGridWorker3FirstSellAt, setLitGridWorker3FirstSellAt] = useState<string | null>(null);
   const [litGridLiveToggling,  setLitGridLiveToggling]  = useState(false);
   const [litGridLiveFlattening, setLitGridLiveFlattening] = useState(false);
   const [litGridLiveClearing, setLitGridLiveClearing] = useState(false);
@@ -6572,6 +6577,8 @@ export default function Dashboard() {
       { data: litGridWorker3Or },
       { data: litGridWorker3Sells },
       { data: litGridWorker3Resting },
+      { data: litGridLiveFirstSell },
+      { data: litGridWorker3FirstSell },
     ] = await Promise.all([
       getSupabase().from("surfer_state").select("*").eq("id", 1).single(),
       getSupabase().from("surfer_trades").select("*").order("exit_time", { ascending: false }).limit(5000),
@@ -6627,6 +6634,11 @@ export default function Dashboard() {
       getSupabase().from("lighter_lit_grid_live_worker3_orders").select("*").order("id", { ascending: false }).limit(50),
       getSupabase().from("lighter_lit_grid_live_worker3_orders").select("id,filled_at,filled_qty,filled_price,filled_quote,realized_profit_usd").eq("side", "sell").not("realized_profit_usd", "is", null).order("filled_at", { ascending: false, nullsFirst: false }).order("id", { ascending: false }).limit(200),
       getSupabase().from("lighter_lit_grid_live_worker3_orders").select("side,limit_price").in("status", ["open", "pending"]).limit(500),
+      // First real trade ever, for the trades/hour start when no history reset is recorded --
+      // the oldest of the 200 sells loaded above was only a few hours back, so 924 trades were
+      // divided by those few hours (Worker 3 showed 152/hr instead of ~32, 2026-10-23).
+      getSupabase().from("lighter_lit_grid_live_orders").select("filled_at").eq("side", "sell").not("realized_profit_usd", "is", null).not("filled_at", "is", null).order("filled_at", { ascending: true }).limit(1),
+      getSupabase().from("lighter_lit_grid_live_worker3_orders").select("filled_at").eq("side", "sell").not("realized_profit_usd", "is", null).not("filled_at", "is", null).order("filled_at", { ascending: true }).limit(1),
     ]);
     setSurferState(surferSt ?? null);
     setSurferTrades(surferTr ?? []);
@@ -6664,6 +6676,8 @@ export default function Dashboard() {
     setLitGridWorker3Sells(litGridWorker3Sells ?? []);
     setLitGridWorker3SellCount(litGridWorker3SellCount ?? 0);
     setLitGridWorker3Resting(litGridWorker3Resting ?? []);
+    setLitGridLiveFirstSellAt(litGridLiveFirstSell?.[0]?.filled_at ?? null);
+    setLitGridWorker3FirstSellAt(litGridWorker3FirstSell?.[0]?.filled_at ?? null);
     setDcaBtcStats({ total: dcaBtcTotal ?? 0, wins: dcaBtcWins ?? 0 });
     setInitialBtcStats({ total: initialBtcTotal ?? 0, wins: initialBtcWins ?? 0 });
     setOptimalBtcStats({ total: optimalBtcTotal ?? 0, wins: optimalBtcWins ?? 0 });
@@ -7004,6 +7018,7 @@ export default function Dashboard() {
           orders={litGridWorker3Orders}
           sells={litGridWorker3Sells}
           sellCount={litGridWorker3SellCount}
+          firstSellAt={litGridWorker3FirstSellAt}
           resting={litGridWorker3Resting}
           loading={loading}
           enabled={litGridWorker3State?.enabled ?? false}
@@ -7024,6 +7039,7 @@ export default function Dashboard() {
           orders={litGridLiveOrders}
           sells={litGridLiveSells}
           sellCount={litGridLiveSellCount}
+          firstSellAt={litGridLiveFirstSellAt}
           resting={litGridLiveResting}
           loading={loading}
           enabled={litGridLiveState?.enabled ?? false}
