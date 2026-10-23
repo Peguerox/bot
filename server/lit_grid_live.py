@@ -367,6 +367,15 @@ GHOST_RESOLVE_S = 60.0
 # most BATCH_MAX transactions; a diff wanting more than BULK_CANCEL cancels uses one cancel-all
 # instead; trailing-up market buys are spaced at least TRAIL_COOLDOWN_S apart.
 RECONCILE_EVERY = 5.0
+# Account-orders websocket (2026-10-22): the book of OUR orders pushed by Lighter, so the bot sees
+# its orders without spending the 60/min request limit on reads. REST stays as the check on it.
+ORDERS_WS_RECONCILE_EVERY = 2.0     # reconcile cadence while the feed is trusted (no request cost)
+ORDERS_WS_PING_EVERY = 20.0         # Lighter closes a socket silent for 2 minutes
+ORDERS_WS_MAX_SILENCE = 50.0        # no frame (pong included) this long = feed not trusted
+ORDERS_WS_RENEW_EVERY = 8 * 60.0    # reconnect with a fresh auth token (tokens live 10 minutes)
+ORDERS_WS_VERIFY_EVERY = 60.0       # one REST read a minute cross-checks the feed
+ORDERS_WS_DISTRUST_S = 300.0        # after a mismatch, REST only for this long
+ORDERS_WS_SETTLE_S = 5.0            # an order changed this recently may differ between the two
 INFLIGHT_S = 12.0
 REJECT_COOLDOWN_S = 60.0
 BATCH_MAX = 20
@@ -752,6 +761,81 @@ def _parse_iso(s):
         return None
 
 
+class OrdersFeed:
+    """Our own orders on this market, as Lighter pushes them over the account_orders websocket
+    channel (2026-10-22). Every message is applied as an upsert by client_order_index -- correct
+    whether Lighter sends the full list or only what changed -- and the first message on a
+    connection replaces everything (the snapshot). Trusted only while frames keep arriving and
+    no REST cross-check has disagreed with it recently; otherwise callers fall back to REST."""
+
+    def __init__(self):
+        self.orders = {}          # client_order_index -> order (same attributes as the REST model)
+        self.changed_at = {}      # client_order_index -> when this feed last changed it
+        self.synced_at = 0.0      # this connection's snapshot arrived
+        self.frame_at = 0.0       # any frame (updates and pongs)
+        self.verified_at = 0.0    # a REST read last agreed with it
+        self.distrust_until = 0.0
+
+    def live(self, now=None):
+        now = time.time() if now is None else now
+        return (self.synced_at > 0 and now - self.frame_at < ORDERS_WS_MAX_SILENCE
+                and now >= self.distrust_until)
+
+    def trusted(self, now=None):
+        """Live AND a REST read has agreed with it since this connection's snapshot -- a feed
+        nobody has checked yet is never acted on."""
+        return self.live(now) and self.verified_at >= self.synced_at
+
+    def reset(self):
+        self.orders, self.changed_at, self.synced_at, self.verified_at = {}, {}, 0.0, 0.0
+
+    def apply(self, orders, snapshot, now=None):
+        now = time.time() if now is None else now
+        if snapshot:
+            self.orders, self.changed_at = {}, {}
+        for raw in orders:
+            o = raw if not isinstance(raw, dict) else _order_ns(raw)
+            co = int(o.client_order_index)
+            self.orders[co] = o
+            self.changed_at[co] = now
+        if snapshot:
+            self.synced_at = now
+        self.frame_at = now
+        # Terminal orders are kept 10 minutes (reconcile reads their fills), then dropped.
+        for co in [c for c, o in self.orders.items()
+                   if _order_is_terminal(o) and now - self.changed_at.get(c, now) > 600]:
+            self.orders.pop(co, None)
+            self.changed_at.pop(co, None)
+
+    def active(self):
+        return [o for o in self.orders.values() if not _order_is_terminal(o)]
+
+    def lookup(self, co):
+        return self.orders.get(int(co))
+
+    def recently_changed(self, co, now=None):
+        now = time.time() if now is None else now
+        return now - self.changed_at.get(int(co), -1e18) < ORDERS_WS_SETTLE_S
+
+
+def _order_ns(d):
+    """A websocket order dict as an object with the REST model's attribute names."""
+    import types as _types
+    return _types.SimpleNamespace(
+        client_order_index=int(d.get("client_order_index") or 0),
+        order_index=d.get("order_index"),
+        is_ask=bool(d.get("is_ask")),
+        price=d.get("price"),
+        status=d.get("status"),
+        remaining_base_amount=(d.get("remaining_base_amount")
+                               if d.get("remaining_base_amount") is not None or str(d.get("status")) != "filled"
+                               else "0"),
+        filled_base_amount=d.get("filled_base_amount"),
+        filled_quote_amount=d.get("filled_quote_amount"),
+        initial_base_amount=d.get("initial_base_amount"),
+    )
+
+
 class LiveSnapshot:
     def __init__(self, resting_by_level):
         self.rows_by_level = resting_by_level
@@ -807,6 +891,8 @@ class LitGridLive:
         self._last_reconcile_at = 0.0
         self._inflight = {}             # (side, price_int) -> sent_at
         self._missing_since = {}        # client_order_index -> first time a read did not show it
+        self._orders_feed = None        # OrdersFeed, set when the websocket task runs
+        self._last_rest_snapshot_at = 0.0
         self._reject_until = {}         # (side, price_int) -> retry_after
         self._last_trail_at = 0.0
         self._engine_snapshot_at = 0.0  # the read the engine last acted on (one action per read)
@@ -1077,7 +1163,18 @@ class LitGridLive:
         """Every order resting on the exchange for this account/market, or None if the read
         failed or the request budget is spent. A failed read must never look like "nothing
         resting": reset_grid treats an empty list as proof the book is clear, and reconcile only
-        resolves a missing row when this read succeeded."""
+        resolves a missing row when this read succeeded.
+
+        While the account_orders websocket is trusted it answers for free; a REST read still runs
+        once every ORDERS_WS_VERIFY_EVERY and is compared with it -- any disagreement (beyond
+        orders that changed in the last few seconds) logs and distrusts the feed for a while."""
+        feed = self._orders_feed
+        now = time.time()
+        if (feed is not None and feed.trusted(now)
+                and now - self._last_rest_snapshot_at < ORDERS_WS_VERIFY_EVERY):
+            orders = feed.active()
+            self._snapshot, self._snapshot_at = orders, now
+            return orders
         if not self._take_request():
             return None
         try:
@@ -1095,6 +1192,23 @@ class LitGridLive:
             return None
         orders = list(resp.orders or [])
         self._snapshot, self._snapshot_at = orders, time.time()
+        self._last_rest_snapshot_at = time.time()
+        if feed is not None and feed.live():
+            rest_cos = {int(o.client_order_index) for o in orders}
+            ws_cos = {int(o.client_order_index) for o in feed.active()}
+            differ = [co for co in rest_cos ^ ws_cos if not feed.recently_changed(co)]
+            if differ:
+                feed.distrust_until = time.time() + ORDERS_WS_DISTRUST_S
+                await self.log_run("orders_ws_mismatch", {"only_rest": sorted(rest_cos - ws_cos)[:10],
+                                                          "only_ws": sorted(ws_cos - rest_cos)[:10]})
+            else:
+                # They agree: the feed is verified, and the fresher of the two (REST lags new
+                # orders by seconds).
+                if feed.verified_at < feed.synced_at:
+                    await self.log_run("orders_ws_verified", {"orders": len(ws_cos)})
+                feed.verified_at = time.time()
+                orders = feed.active()
+                self._snapshot = orders
         return orders
 
     async def _cancel_all_on_exchange(self, context):
@@ -1263,6 +1377,21 @@ class LitGridLive:
         # (including partial fills), and only rows that LEFT the book -- normally zero or one per
         # pass -- need a per-order lookup. v1 looked up every open row every tick (5 requests per
         # tick on Worker 3, ~210/min across both bots), the main load behind that day's 429s.
+        feed = self._orders_feed
+        if feed is not None and feed.live() and not feed.trusted() and self._limiter.blocked():
+            # A reconnected feed normally waits for a REST read to agree with it; while REST is
+            # cooling down after a 429, the ledger can vouch instead: every order it knows is on
+            # the book (old enough to be visible) is in the feed, and the feed shows nothing the
+            # ledger does not know.
+            grace = now - timedelta(seconds=VISIBILITY_GRACE_S)
+            settled = {int(r["client_order_index"]) for r in pending
+                       if r.get("exchange_order_id") is not None and r.get("order_kind") != "market"
+                       and (_parse_iso(r.get("placed_at")) or now) < grace}
+            ws_cos = {int(o.client_order_index) for o in feed.active()}
+            open_cos_all = {int(r["client_order_index"]) for r in pending}
+            if settled <= ws_cos and ws_cos <= open_cos_all:
+                feed.verified_at = time.time()
+                await self.log_run("orders_ws_verified", {"orders": len(ws_cos), "by": "ledger"})
         snapshot = await self._fetch_active_orders_list(auth)
         active_by_co = ({int(o.client_order_index): o for o in snapshot}
                         if snapshot is not None else None)
@@ -1278,6 +1407,15 @@ class LitGridLive:
         for co in [c for c in self._missing_since if c not in open_cos]:
             del self._missing_since[co]
         lookup_by_co, lookup_failed = {}, set()
+        # The websocket also pushes each order's final state (filled, cancelled) with its fill
+        # amounts: a row it knows is answered by it, at no request cost.
+        feed = self._orders_feed
+        if feed is not None and feed.trusted() and active_by_co is not None:
+            for r in missing:
+                o = feed.lookup(r["client_order_index"])
+                if o is not None:
+                    lookup_by_co[int(r["client_order_index"])] = o
+            missing = [r for r in missing if int(r["client_order_index"]) not in lookup_by_co]
         for chunk in _chunks(missing, 20):
             chunk_cos = {int(r["client_order_index"]) for r in chunk}
             if not self._take_request():
@@ -1619,6 +1757,63 @@ class LitGridLive:
         self._book_ws_connected_at = time.time()
         await ws.run_async()
 
+    async def _orders_ws_session(self, feed):
+        """One account_orders connection: subscribe with a fresh auth token, apply every message,
+        ping so Lighter keeps it open, and close after ORDERS_WS_RENEW_EVERY (token lifetime)."""
+        token = self._get_auth_token()
+        if not token:
+            raise RuntimeError("no auth token for the orders websocket")
+        channel = f"account_orders/{MARKET_ID}/{self.account_index}"
+        opened = time.time()
+        async with self.http.ws_connect(STREAM_URL, heartbeat=None, max_msg_size=0) as ws:
+            await ws.send_json({"type": "subscribe", "channel": channel, "auth": token})
+            first = True
+            last_ping = time.time()
+            while time.time() - opened < ORDERS_WS_RENEW_EVERY:
+                if time.time() - last_ping >= ORDERS_WS_PING_EVERY:
+                    await ws.send_json({"type": "ping"})
+                    last_ping = time.time()
+                try:
+                    msg = await ws.receive(timeout=5.0)
+                except asyncio.TimeoutError:
+                    continue
+                if msg.type in (aiohttp.WSMsgType.CLOSED, aiohttp.WSMsgType.CLOSING, aiohttp.WSMsgType.ERROR):
+                    raise RuntimeError(f"orders websocket closed ({msg.type})")
+                if msg.type != aiohttp.WSMsgType.TEXT:
+                    continue
+                data = jsonlib.loads(msg.data)
+                kind = str(data.get("type") or "")
+                if kind == "pong" or kind == "ping":
+                    feed.frame_at = time.time()
+                    if kind == "ping":
+                        await ws.send_json({"type": "pong"})
+                    continue
+                if "error" in data or kind == "error":
+                    raise RuntimeError(f"orders websocket error: {str(data)[:200]}")
+                if "account_orders" not in kind and "account_orders" not in str(data.get("channel") or ""):
+                    feed.frame_at = time.time()
+                    continue
+                orders = (data.get("orders") or {}).get(str(MARKET_ID)) or []
+                feed.apply(orders, snapshot=first or kind.startswith("subscribed"))
+                first = False
+
+    async def run_orders_ws_forever(self):
+        """Keeps the account_orders feed connected for the life of the process. Any failure just
+        leaves the feed untrusted (the bot reads REST meanwhile) and reconnects."""
+        feed = OrdersFeed()
+        self._orders_feed = feed
+        failures = 0
+        while True:
+            try:
+                await self._orders_ws_session(feed)
+                failures = 0
+            except Exception as e:
+                failures += 1
+                if failures in (1, 5) or failures % 50 == 0:
+                    await self.log_run("orders_ws_reconnect", {"error": str(e)[:200], "failures": failures})
+            feed.reset()
+            await asyncio.sleep(min(30.0, 1.0 * failures))
+
     async def run_book_ws_forever(self):
         while True:
             task = asyncio.create_task(self._book_ws_session())
@@ -1815,6 +2010,9 @@ class LitGridLive:
         clock so a restart does not reuse a recent id."""
         co = max(int(time.time() * 1000) % 500_000_000, getattr(self, "_last_co_idx", 0) + 1)
         self._last_co_idx = co
+        feed = getattr(self, "_orders_feed", None)
+        if feed is not None:
+            feed.changed_at.setdefault(co, time.time())   # just sent: may show on REST before the feed
         return co
 
     def _anchor_log(self, state):
@@ -1986,8 +2184,10 @@ class LitGridLive:
 
         levels_up = max(1, int(state.get("levels_up") or 1))
         levels_down = max(1, int(state["levels_down"]))
+        reserved = {lv for lv, rows in resting.items() if any(r["side"] == "buy" for r in rows)}
         plan = grid_engine.plan_orders(price, anchor_log, step, spacing_pct / 100.0, active,
-                                       levels_up, levels_down, round_price, entries_allowed=entries)
+                                       levels_up, levels_down, round_price, entries_allowed=entries,
+                                       reserved=reserved)
         actual = self._actual_from_snapshot()
         now = time.time()
         self._inflight = {k: t for k, t in self._inflight.items() if now - t < INFLIGHT_S}
@@ -2054,6 +2254,15 @@ class LitGridLive:
             new_buys = 0
             for ln, px in plan.buy_lines:
                 key = ("buy", price_to_int(px))
+                line_rows = [r for r in resting.get(ln, []) if r["side"] == "buy"]
+                if line_rows:
+                    # This line already has an open buy row. Keep it only if it is resting at this
+                    # exact price; otherwise (filled but not yet recorded, in flight, old price)
+                    # wait for reconcile -- a second buy here would stack two lots on one line.
+                    if any(int(r["client_order_index"]) in on_book_cos
+                           and price_to_int(float(r.get("limit_price") or 0)) == key[1] for r in line_rows):
+                        wants.append(grid_engine.Want("buy", px, order_size, ln))
+                    continue
                 if key in resting_keys or key in self._inflight:
                     wants.append(grid_engine.Want("buy", px, order_size, ln))
                     continue
@@ -2080,7 +2289,19 @@ class LitGridLive:
         elif funds_ok:
             self._no_funds_logged = False
 
-        to_cancel, to_place = grid_engine.diff_orders(wants, actual, set(self._inflight), price_to_int)
+        # In flight also from the ledger, so it survives a restart: a row sent moments ago that no
+        # read shows yet (simulator: a restart one tick after a batch placed the same buy twice).
+        inflight = set(self._inflight)
+        cutoff = datetime.now(timezone.utc) - timedelta(seconds=INFLIGHT_S)
+        for rows in resting.values():
+            for r in rows:
+                placed = _parse_iso(r.get("placed_at"))
+                if (placed is not None and placed > cutoff and r.get("limit_price") is not None
+                        and r.get("client_order_index") is not None
+                        and int(r["client_order_index"]) not in on_book_cos
+                        and r.get("order_kind") != "market"):
+                    inflight.add((r["side"], price_to_int(float(r["limit_price"]))))
+        to_cancel, to_place = grid_engine.diff_orders(wants, actual, inflight, price_to_int)
         if foreign:
             await self.log_run("engine_foreign_orders_cancelled", {"count": len(foreign)})
             to_cancel = foreign + to_cancel
@@ -2148,7 +2369,9 @@ class LitGridLive:
         now = time.time()
         has_stale = getattr(self, "_last_stale", False)
         pre_read = await self._read_balance_for_check()
-        if pre_read is not None or now - self._last_reconcile_at >= RECONCILE_EVERY:
+        every = (ORDERS_WS_RECONCILE_EVERY if self._orders_feed is not None and self._orders_feed.trusted(now)
+                 else RECONCILE_EVERY)
+        if pre_read is not None or now - self._last_reconcile_at >= every:
             self._last_reconcile_at = now
             reconciled_ok, usdc_delta, has_stale = await self.reconcile_pending_orders(
                 profit_mode=profit_mode, route=route)
@@ -2911,4 +3134,5 @@ async def run_lit_grid_live(table_state=TABLE_STATE, table_orders=TABLE_ORDERS,
         bot._order_api = lighter.OrderApi(bot.client.api_client)
         bot._account_api = lighter.AccountApi(bot.client.api_client)
         await bot.log_run("started", {})
-        await asyncio.gather(_run_tick_loop(bot), bot.run_book_ws_forever(), return_exceptions=True)
+        await asyncio.gather(_run_tick_loop(bot), bot.run_book_ws_forever(), bot.run_orders_ws_forever(),
+                             return_exceptions=True)

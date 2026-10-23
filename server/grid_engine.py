@@ -21,9 +21,9 @@ Grid rules (the owner's, unchanged from v1 unless noted):
     of profit, never below cost. A lot whose sell is already below price is sold at market,
     floored at cost.
   - Only the `levels_up` sells nearest to price rest on the book; far ones wait until they rank.
-  - Always a sell right above price (direct request): if fewer than `levels_up` sells sit within
-    the first `levels_up` lines above price, buy one lot at market (trailing up) -- its sell lands
-    one full step above the price paid.
+  - Trailing up (direct request): if the bot holds fewer lots than `levels_up` (a run-up sold them
+    off), buy one lot at market, filed on the line above price -- its sell lands one full step
+    above the price paid, and the line below price keeps its buy.
 """
 import math
 from dataclasses import dataclass, field
@@ -61,9 +61,11 @@ def sell_target(line, cost, anchor_log, step, spacing_frac, round_price):
 
 
 def plan_orders(price, anchor_log, step, spacing_frac, lots, levels_up, levels_down,
-                round_price, entries_allowed=True):
+                round_price, entries_allowed=True, reserved=()):
     """The target ladder. `lots` = {line: {"qty", "cost"}} of sellable lots (dust already removed).
-    Pure: same inputs, same output, so the diff never churns orders that are already right."""
+    `reserved` = lines with an open buy row (resting or in flight): a trailing buy never lands on
+    one, or two lots would share a line. Pure: same inputs, same output, so the diff never churns
+    orders that are already right."""
     plan = Plan()
     cur = line_at_or_below(price, anchor_log, step)
 
@@ -87,13 +89,15 @@ def plan_orders(price, anchor_log, step, spacing_frac, lots, levels_up, levels_d
     sell_prices = {w.price for w in plan.sells}
 
     if entries_allowed:
-        window_top = line_price(anchor_log, cur + levels_up + 1, step)
-        near = sum(1 for w in plan.sells if w.price <= window_top)
-        if near < levels_up:
+        # Trailing UP only (Bitsgap's rule, and the owner's "market-buy missing lots"): fill in
+        # when the bot holds fewer lots than sell levels -- after a run-up sold them off. Counting
+        # only sells NEAR price also fired in a crash, where every lot's sell sits far above, and
+        # market-bought below the ladder until the cash ran out (simulator, 2026-10-22).
+        if len(resting) < levels_up:
             # Filed on the line above price: it costs about the price, so that is the line it
             # occupies, and the line just below price stays free for a buy.
             ln = cur + 1
-            while ln in lots or ln in occ.values():
+            while ln in lots or ln in occ.values() or ln in reserved:
                 ln += 1
             plan.trail_line = ln
 

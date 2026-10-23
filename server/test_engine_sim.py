@@ -388,16 +388,38 @@ def lot_costs(db):
     return core.holdings_from_rows(buys, sells)
 
 
+def push_feed(feed, ex, rng, p_drop):
+    """The account_orders websocket as the bot would see it: each order's state ~1s after it
+    changed (an order that changed more recently keeps its previous state in the feed), and a
+    dropped connection now and then (empty feed, then a snapshot of the OPEN orders only)."""
+    if feed is None:
+        return
+    if rng.random() < p_drop:
+        feed.reset()
+        return
+    lagged = [ex.as_obj(o) for o in ex.orders.values()
+              if Clock.t - max(o["created"], o.get("filled_t", -1e18), o.get("closed_t", -1e18)) >= 1.0]
+    if feed.synced_at == 0:
+        feed.apply([o for o in lagged if o.status == "open"], snapshot=True, now=Clock.t)
+    else:
+        known = {co: (o.status, o.filled_base_amount) for co, o in feed.orders.items()}
+        changed = [o for o in lagged if known.get(o.client_order_index) != (o.status, o.filled_base_amount)]
+        feed.apply(changed, snapshot=False, now=Clock.t)
+    feed.frame_at = Clock.t
+
+
 async def run_scenario(name, kind, seed, p429=0.0, p_timeout=0.0, restart_every=None, ticks=240,
                        spacing=0.5, levels=(5, 5), disrupt_until=None, state_over=None, hooks=None,
-                       flatten_at=None):
+                       flatten_at=None, ws=True, p_drop=0.02):
     rng = random.Random(seed)
     Clock.t = T0
     ex = SimExchange(3.50, 1000.0, 0.0, rng)
     db = SimDb(base_state(spacing_pct=spacing, levels_up=levels[0], levels_down=levels[1],
                           **(state_over or {})))
     limiter = core.ExchangeLimiter()
+    feed = core.OrdersFeed() if ws else None
     bot = make_sim_bot(db, ex, limiter)
+    bot._orders_feed = feed
     prices = price_path(kind, 3.50, ticks, rng)
     disrupt_until = disrupt_until if disrupt_until is not None else int(ticks * 0.6)
     worst_profit = 0.0
@@ -415,6 +437,10 @@ async def run_scenario(name, kind, seed, p429=0.0, p_timeout=0.0, restart_every=
         ex.set_price(p)
         if restart_every and i and i % restart_every == 0:
             bot = make_sim_bot(db, ex, limiter)
+            if feed is not None:
+                feed = core.OrdersFeed()     # a restart starts a new connection
+            bot._orders_feed = feed
+        push_feed(feed, ex, rng, p_drop if on else 0.0)
         try:
             await bot.tick()
         except RateLimited:
@@ -435,7 +461,12 @@ async def run_scenario(name, kind, seed, p429=0.0, p_timeout=0.0, restart_every=
         # per-tick move (~0.3% in 2s) outruns one 5s book refresh by more than 3 lines.
         reach = max(step ** 3.05, 1.006)
         near_buy = bool(buys) and max(buys) >= p / reach
-        near_sell = bool(sells) and min(sells) <= p * reach
+        # Sells never go below a lot's cost + one step (owner's rule). After a drop every lot was
+        # bought higher, so the nearest ALLOWED sell can be far above price: then "next to price"
+        # means within a line of that nearest allowed sell.
+        lots_now = {k: h for k, h in lot_costs(db).items() if h["qty"] >= 1.0}
+        floor = min((h["cost"] * step for h in lots_now.values()), default=0.0)
+        near_sell = bool(sells) and min(sells) <= max(p * reach, floor * step ** 1.05)
         if not on and recovered_at is None and near_buy and near_sell:
             recovered_at = i
         grace = disrupt_until + int(core.RATE_LIMIT_BACKOFF_MAX / 2) + 5 if (p429 or p_timeout) else 20
@@ -447,6 +478,7 @@ async def run_scenario(name, kind, seed, p429=0.0, p_timeout=0.0, restart_every=
     ex.p429 = ex.p_timeout = 0.0
     for _ in range(40):
         Clock.t += 2.0
+        push_feed(feed, ex, rng, 0.0)
         await bot.tick()
     if flatten_at is not None:
         check(f"[{name}] flatten sold everything and stopped the bot",
@@ -470,6 +502,18 @@ async def run_scenario(name, kind, seed, p429=0.0, p_timeout=0.0, restart_every=
                 ledger_lit += o["filled"] if o["side"] == "buy" else -o["filled"]
     check(f"[{name}] ledger LIT matches exchange LIT ({ledger_lit:.2f} vs {ex.lit:.2f})",
           abs(ledger_lit - ex.lit) < 0.05, (ledger_lit, ex.lit))
+    # One lot per line: walking each line's buys and sells in time order, it never holds two.
+    worst_stack = 0
+    events = sorted((r["id"], r) for r in db.orders if r.get("status") == "filled")
+    held_per_line = {}
+    for _, r in events:
+        if r["side"] == "buy":
+            held_per_line[r["level"]] = held_per_line.get(r["level"], 0) + 1
+            worst_stack = max(worst_stack, held_per_line[r["level"]])
+        elif r.get("closes_level") is not None:
+            held_per_line[r["closes_level"]] = max(0, held_per_line.get(r["closes_level"], 0) - 1)
+    if not any(h for h in (hooks or {})) and flatten_at is None:
+        check(f"[{name}] a line never holds two lots at once (worst {worst_stack})", worst_stack <= 1, worst_stack)
     open_ledger = {r["client_order_index"] for r in db.orders if r.get("status") in ("open", "pending", "cancel_requested")}
     open_ex = {o["co"] for o in ex.orders.values() if o["status"] == "open"}
     # A cancel sent in the last few seconds is legitimately not reconciled yet.
@@ -529,6 +573,10 @@ async def main():
                                                               "gate_spacing_multiplier_value": None,
                                                               "dynamic_dd_tier": None, "order_size_lit": None})})
     await run_scenario("flatten mid-crash", "crash", 17, 0.1, 0.05, None, flatten_at=80)
+    # The websocket down the whole time: REST alone must still be correct (slower, not wrong).
+    await run_scenario("no websocket, crash + 429s + timeouts", "crash", 18, 0.2, 0.1, None, ws=False)
+    await run_scenario("no websocket, chop + restarts", "chop", 19, 0.1, 0.05, 20, ws=False)
+    await run_scenario("websocket dropping often, spike", "spike", 20, 0.1, 0.05, None, p_drop=0.2)
     # Live 2026-10-22 (Worker 3, 0.125%): a trailing market buy at 3.40175 filed on the 3.3979
     # line blocked that line's buy and pushed its sell to 3.4065 -- a hole around price. Filed on
     # the line above price, the line below price keeps its buy.
