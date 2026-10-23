@@ -465,8 +465,9 @@ async def run_scenario(name, kind, seed, p429=0.0, p_timeout=0.0, restart_every=
         # bought higher, so the nearest ALLOWED sell can be far above price: then "next to price"
         # means within a line of that nearest allowed sell.
         lots_now = {k: h for k, h in lot_costs(db).items() if h["qty"] >= 1.0}
-        floor = min((h["cost"] * step for h in lots_now.values()), default=0.0)
-        near_sell = bool(sells) and min(sells) <= max(p * reach, floor * step ** 1.05)
+        floor = min((h["cost"] for h in lots_now.values()), default=0.0)
+        # No lot held = nothing to sell (no market buys): the sell side has no gap to fill.
+        near_sell = (not lots_now) or (bool(sells) and min(sells) <= max(p * reach, floor * step ** 1.05))
         if not on and recovered_at is None and near_buy and near_sell:
             recovered_at = i
         grace = disrupt_until + int(core.RATE_LIMIT_BACKOFF_MAX / 2) + 5 if (p429 or p_timeout) else 20
@@ -577,19 +578,23 @@ async def main():
     await run_scenario("no websocket, crash + 429s + timeouts", "crash", 18, 0.2, 0.1, None, ws=False)
     await run_scenario("no websocket, chop + restarts", "chop", 19, 0.1, 0.05, 20, ws=False)
     await run_scenario("websocket dropping often, spike", "spike", 20, 0.1, 0.05, None, p_drop=0.2)
-    # Live 2026-10-22 (Worker 3, 0.125%): a trailing market buy at 3.40175 filed on the 3.3979
-    # line blocked that line's buy and pushed its sell to 3.4065 -- a hole around price. Filed on
-    # the line above price, the line below price keeps its buy.
+    # Live 2026-10-22 (Worker 3, 0.125%): a lot bought at market at 3.40175 on the 3.3979 line.
+    # Simple grid: it sells on the line above, never below its cost -> 3.4022 (one line up),
+    # and the planner never market-buys.
     step = math.log(1.00125)
     anchor = math.log(3.3979) - 10162 * step
-    plan = core.grid_engine.plan_orders(3.4005, anchor, step, 0.00125, {}, 10, 10, core.round_price)
-    check("a trailing buy is filed on the line ABOVE price (the line below keeps its buy)",
-          plan.trail_line == 10163 and plan.buy_lines[0][1] == 3.3979, (plan.trail_line, plan.buy_lines[:2]))
-    lots = {10163: {"qty": 5.3, "cost": 3.40175}}
+    lots = {10162: {"qty": 5.3, "cost": 3.40175}}
     plan = core.grid_engine.plan_orders(3.4005, anchor, step, 0.00125, lots, 10, 10, core.round_price)
-    check("after it fills: buy at 3.3979, sell two lines up, one empty line between (Bitsgap)",
-          plan.buy_lines[0][1] == 3.3979 and plan.sells[0].price == 3.4064,
-          (plan.buy_lines[:1], [w.price for w in plan.sells[:1]]))
+    check("a lot sells one line up, never below cost",
+          plan.sells[0].price == core.round_price(math.exp(anchor + 10163 * step)) and plan.sells[0].price >= 3.40175,
+          [w.price for w in plan.sells[:1]])
+    check("the planner never market-buys", not hasattr(plan, "trail_line") or plan.trail_line is None, None)
+    order = core.grid_engine.priority_order(
+        [core.grid_engine.Want("buy", 3.38, 1, 1), core.grid_engine.Want("sell", 3.45, 1, 3),
+         core.grid_engine.Want("buy", 3.39, 1, 2), core.grid_engine.Want("sell", 3.41, 1, 2)], 3.40)
+    check("priority: nearest sell, nearest buy, next sell, next buy",
+          [(w.side, w.price) for w in order] == [("sell", 3.41), ("buy", 3.39), ("sell", 3.45), ("buy", 3.38)],
+          [(w.side, w.price) for w in order])
     print(f"\n==== {len(PASS)} passed, {len(FAIL)} failed ====")
     if FAIL:
         for f in FAIL:

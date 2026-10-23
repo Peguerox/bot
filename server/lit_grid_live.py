@@ -380,6 +380,7 @@ INFLIGHT_S = 12.0
 REJECT_COOLDOWN_S = 60.0
 BATCH_MAX = 20
 BULK_CANCEL = 8
+LOW_BUDGET_SLOTS = 8   # below this many request slots left, only the reaction orders go out
 TRAIL_COOLDOWN_S = 10.0
 VISIBILITY_GRACE_S = 6.0        # a just-sent order is not visible to any read before this
 SETTLE_S = 30.0                 # a just-vanished order may explain a balance mismatch this long
@@ -450,6 +451,15 @@ class ExchangeLimiter:
             return False
         self._sent.extend([now] * n)
         return True
+
+    def room(self):
+        """Slots left in the current 60s window (0 while backing off)."""
+        if self.blocked():
+            return 0
+        now = time.time()
+        while self._sent and now - self._sent[0] >= 60.0:
+            self._sent.popleft()
+        return max(0, self.capacity - len(self._sent))
 
     def take_up_to(self, n):
         """As many of n slots as the window has room for (0 while backing off)."""
@@ -1196,12 +1206,23 @@ class LitGridLive:
         if feed is not None and feed.live():
             rest_cos = {int(o.client_order_index) for o in orders}
             ws_cos = {int(o.client_order_index) for o in feed.active()}
-            differ = [co for co in rest_cos ^ ws_cos if not feed.recently_changed(co)]
-            if differ:
+            differ = {co for co in rest_cos ^ ws_cos if not feed.recently_changed(co)}
+            # A fill or cancel can reach REST a moment before the websocket (or the other way):
+            # one disagreement is re-checked on the very next read, and only the SAME orders
+            # disagreeing twice distrust the feed (the first version distrusted it on any single
+            # difference and fell back to slow REST for 5 minutes -- simulator, 2026-10-23).
+            prev = getattr(self, "_ws_differ", set())
+            if differ and (differ & prev):
                 feed.distrust_until = time.time() + ORDERS_WS_DISTRUST_S
+                self._ws_differ = set()
                 await self.log_run("orders_ws_mismatch", {"only_rest": sorted(rest_cos - ws_cos)[:10],
                                                           "only_ws": sorted(ws_cos - rest_cos)[:10]})
+            elif differ:
+                self._ws_differ = differ
+                self._last_rest_snapshot_at = 0.0     # re-check on the next read
+                self._snapshot = orders               # this cycle acts on REST
             else:
+                self._ws_differ = set()
                 # They agree: the feed is verified, and the fresher of the two (REST lags new
                 # orders by seconds).
                 if feed.verified_at < feed.synced_at:
@@ -1649,12 +1670,17 @@ class LitGridLive:
             # mismatch by itself: stay unsure (no pause) until reconcile has resolved it.
             # Bounded: a row missing for longer than SETTLE_S no longer excuses a mismatch.
             settling = any(time.time() - t0 < SETTLE_S for t0 in self._missing_since.values())
-            if diverged and not self._balance_paused and (
-                    settling or not getattr(self, "_divergence_pending", False)):
-                self._divergence_pending = True
+            # Confirmed only by the SAME mismatch seen again: if the ledger or the real balance
+            # moved in between, fills are still arriving and the new reading starts over (two
+            # different fills a few seconds apart used to "confirm" each other and pause buys for
+            # 20s -- simulator on the real books, 2026-10-23).
+            reading = (round(ledger_lit, 6), round(real_lit, 6))
+            pending = getattr(self, "_divergence_pending", None)
+            if diverged and not self._balance_paused and (settling or pending != reading):
+                self._divergence_pending = reading
                 self._last_balance_check = now - BALANCE_RECONCILE_EVERY + 2 * RECONCILE_EVERY
                 return True, True
-            self._divergence_pending = False
+            self._divergence_pending = None
             if diverged:
                 self._last_balance_check = now - BALANCE_RECONCILE_EVERY + 2 * RECONCILE_EVERY
         if diverged and not self._balance_paused:
@@ -2036,25 +2062,27 @@ class LitGridLive:
                         "client_order_index": int(getattr(o, "client_order_index", 0) or 0)})
         return out
 
-    async def _send_batch(self, cancels, creates, anchor_log, step):
-        """ONE signed request carrying every cancel and create (cancels first, so a buy and a
-        sell trading places never cross each other). Ledger rows for creates are written before
-        sending. A rate-limit refusal or a non-200 reply rejects them all (nothing was placed); a
-        timeout leaves them pending, and reconcile settles each against the real book within
-        GHOST_RESOLVE_S. Returns the number of transactions accepted."""
-        if not cancels and not creates:
+    async def _send_batch(self, cancels, creates, anchor_log, step, lead=()):
+        """ONE signed request: `lead` creates first (the reaction orders right above and below
+        price -- direct request: the gap a fill just opened is filled before anything else), then
+        cancels, then the remaining creates. Ledger rows for creates are written before sending.
+        A rate-limit refusal or a non-200 reply rejects them all (nothing was placed); a timeout
+        leaves them pending, and reconcile settles each against the real book. When the request
+        budget is short the batch is cut from the END, so the lead orders always go first."""
+        lead = list(lead)
+        if not cancels and not creates and not lead:
             return 0
         if not await self._touch_lock_heartbeat():
             return 0
         # Each transaction inside a batch counts against the wallet's limit (live 2026-10-22: two
-        # 20-tx batches a few seconds apart drew 429s). Shrink the batch to the room left --
-        # cancels first, they free the funds the creates need.
+        # 20-tx batches a few seconds apart drew 429s).
         cancels = [o for o in cancels if o.get("order_index") is not None]
-        room = self._limiter.take_up_to(len(cancels) + len(creates))
+        room = self._limiter.take_up_to(len(lead) + len(cancels) + len(creates))
         if room == 0:
             return 0
-        cancels = cancels[:room]
-        creates = creates[:max(0, room - len(cancels))]
+        lead = lead[:room]
+        cancels = cancels[:max(0, room - len(lead))]
+        creates = creates[:max(0, room - len(lead) - len(cancels))]
         nm = getattr(self.client, "nonce_manager", None)
         key = (getattr(nm, "api_keys_list", None) or [None])[0]
         tx_types, tx_infos, rows = [], [], []
@@ -2067,19 +2095,7 @@ class LitGridLive:
                     return -1
                 _, n = await nm.async_next_nonce(key)
                 return n
-            for o in cancels:
-                if o.get("order_index") is None:
-                    continue
-                n = await next_nonce()
-                tx_type, tx_info, _h, err = self.client.sign_cancel_order(
-                    MARKET_ID, int(o["order_index"]), nonce=n, api_key_index=key)
-                if err:
-                    await self._resync_nonce(hard=True)
-                    await self.log_run("engine_sign_failed", {"error": str(err)[:200]})
-                    return 0
-                tx_types.append(tx_type)
-                tx_infos.append(tx_info)
-            for w in creates:
+            async def sign_create(w):
                 co_idx = self._next_co_idx()
                 level = (w.line if w.side == "buy"
                          else int(round((math.log(w.price) - anchor_log) / step)))
@@ -2097,10 +2113,28 @@ class LitGridLive:
                     await self.sb("PATCH", f"{self.TABLE_ORDERS}?id=eq.{inserted[0]['id']}",
                                    {"status": "rejected", "error": str(err)[:200]})
                     await self._resync_nonce(hard=True)
-                    return 0
+                    return False
                 rows.append((inserted[0]["id"], w))
                 tx_types.append(tx_type)
                 tx_infos.append(tx_info)
+                return True
+
+            for w in lead:
+                if not await sign_create(w):
+                    return 0
+            for o in cancels:
+                n = await next_nonce()
+                tx_type, tx_info, _h, err = self.client.sign_cancel_order(
+                    MARKET_ID, int(o["order_index"]), nonce=n, api_key_index=key)
+                if err:
+                    await self._resync_nonce(hard=True)
+                    await self.log_run("engine_sign_failed", {"error": str(err)[:200]})
+                    return 0
+                tx_types.append(tx_type)
+                tx_infos.append(tx_info)
+            for w in creates:
+                if not await sign_create(w):
+                    return 0
             if not tx_types:
                 return 0
             try:
@@ -2188,6 +2222,14 @@ class LitGridLive:
         plan = grid_engine.plan_orders(price, anchor_log, step, spacing_pct / 100.0, active,
                                        levels_up, levels_down, round_price, entries_allowed=entries,
                                        reserved=reserved)
+        # Orders already resting may stay out to TWICE the window: new orders follow the window,
+        # but shuffling the far edge (cancel one far order every time a near one appears) cost two
+        # requests per line and ran the budget out in fast moves (simulator, 2026-10-23).
+        keep_plan = grid_engine.plan_orders(price, anchor_log, step, spacing_pct / 100.0, active,
+                                            2 * levels_up, 2 * levels_down, round_price,
+                                            entries_allowed=entries, reserved=reserved)
+        new_sell_lots = {w.closes_line for w in plan.sells}
+        new_buy_lines = {ln for ln, _px in plan.buy_lines}
         actual = self._actual_from_snapshot()
         now = time.time()
         self._inflight = {k: t for k, t in self._inflight.items() if now - t < INFLIGHT_S}
@@ -2202,7 +2244,8 @@ class LitGridLive:
         # leftovers): never count them as satisfying a wanted order -- cancel them (audit
         # 2026-10-22: one kept as "the sell" would fill unseen by the ledger).
         foreign = [o for o in actual if o["client_order_index"] not in row_by_co]
-        actual = [o for o in actual if o["client_order_index"] in row_by_co]
+        actual = [dict(o, closes_line=row_by_co[o["client_order_index"]].get("closes_level"))
+                  for o in actual if o["client_order_index"] in row_by_co]
         # A lot is BUSY while ANY open ledger sell row closes it -- resting, in flight, timed out,
         # or filled-but-not-yet-reconciled. A busy lot never gets a second sell (market or limit):
         # on spot that second sell would spend another lot's LIT (audit 2026-10-22, P0-1).
@@ -2226,9 +2269,24 @@ class LitGridLive:
             break
 
         wants = []
-        for w in plan.sells:
+        # A lot whose sell price has just been passed keeps its resting sell: it has almost surely
+        # filled already and the fill is on its way -- cancelling it only spends a request.
+        for ln, _qty, _cost in plan.market_sells:
+            for co, px in busy.get(ln, []):
+                if co in on_book_cos:
+                    wants.append(grid_engine.Want("sell", px, 0.0, ln, closes_line=ln))
+        # An order price has just gone through has filled (its fill is on the way): keep it,
+        # cancelling it only spends a request.
+        for o in actual:
+            if (o["side"] == "buy" and o["price"] >= price) or (o["side"] == "sell" and o["price"] <= price):
+                wants.append(grid_engine.Want(o["side"], o["price"], 0.0, 0, closes_line=o.get("closes_line")))
+        for w in keep_plan.sells:
             if clamp_order_size(w.size) is None:
                 continue
+            if w.closes_line not in new_sell_lots and not any(
+                    co in on_book_cos and price_to_int(px) == price_to_int(w.price)
+                    for co, px in busy.get(w.closes_line, [])):
+                continue   # beyond the window and not already resting: not placed
             if w.closes_line in busy:
                 # Keep it only if its own sell is already resting at exactly this price; anything
                 # else (wrong price, not visible yet) waits until reconcile resolves that row --
@@ -2252,6 +2310,13 @@ class LitGridLive:
             allowance = (int(max_open) - int(state.get("lifetime_buy_count") or 0)
                          if max_open is not None else None)
             new_buys = 0
+            kept_far = []    # (px, want) resting buys beyond the window, cancellable to fund near ones
+            for ln, px in keep_plan.buy_lines:
+                key = ("buy", price_to_int(px))
+                if ln not in new_buy_lines and key in resting_keys:
+                    w = grid_engine.Want("buy", px, order_size, ln)
+                    wants.append(w)
+                    kept_far.append((px, w))
             for ln, px in plan.buy_lines:
                 key = ("buy", price_to_int(px))
                 line_rows = [r for r in resting.get(ln, []) if r["side"] == "buy"]
@@ -2267,6 +2332,13 @@ class LitGridLive:
                     wants.append(grid_engine.Want("buy", px, order_size, ln))
                     continue
                 cost = px * order_size
+                # Short of money while far buys hold it: release the farthest (the diff cancels it,
+                # and the cancel goes before this buy in the batch).
+                while cost > available and kept_far:
+                    far_px, far_w = min(kept_far, key=lambda x: x[0])
+                    kept_far.remove((far_px, far_w))
+                    wants.remove(far_w)
+                    available += far_px * order_size
                 if cost > available or (allowance is not None and new_buys >= allowance):
                     funds_ok = False
                     break
@@ -2275,14 +2347,6 @@ class LitGridLive:
                 available -= cost
                 base_remaining -= cost
                 new_buys += 1
-            if (plan.trail_line is not None and now - self._last_trail_at >= TRAIL_COOLDOWN_S
-                    and price * order_size <= available
-                    and not any(r.get("order_kind") == "market" for rows in resting.values() for r in rows)):
-                self._last_trail_at = now
-                from_base = min(price * order_size, max(base_remaining, 0.0))
-                if await self.market_buy_level(plan.trail_line, order_size,
-                                                funded_from_bucket_usd=price * order_size - from_base) is not None:
-                    await self.log_run("trailing_up_buy", {"line": plan.trail_line, "price": price})
         if not funds_ok and not getattr(self, "_no_funds_logged", False):
             self._no_funds_logged = True
             await self.log_run("no_funds_for_buy", {"price": price})
@@ -2305,18 +2369,38 @@ class LitGridLive:
         if foreign:
             await self.log_run("engine_foreign_orders_cancelled", {"count": len(foreign)})
             to_cancel = foreign + to_cancel
-        to_place = [w for w in grid_engine.nearest_first(to_place, price)
+        to_place = [w for w in grid_engine.priority_order(to_place, price)
                     if (w.side, price_to_int(w.price)) not in self._reject_until]
-        # Only the stale orders are cancelled, nearest-to-price wanted ones stay (audit 2026-10-22:
-        # a cancel-all on a fast move emptied the whole book for a read cycle -- a gap). A big
-        # change (spacing edit, long move) clears over a few batches; creates wait until the
-        # cancels have freed their funds, so a new buy/sell never fails on locked balance.
-        if len(to_cancel) > BULK_CANCEL:
-            to_cancel = sorted(to_cancel, key=lambda o: -abs(float(o["price"]) - price))
-            await self._send_batch(to_cancel[:BATCH_MAX], [], anchor_log, step)
+        # The reaction orders lead the batch (direct request): the missing sell nearest above price
+        # and the missing buy nearest below go out before any cleanup. Only one that cannot cross
+        # one of our own resting orders (a post-only order that would cross is refused by the
+        # exchange) -- otherwise it waits for the cancel in this same batch and goes next cycle.
+        # A lead order that needs funds a cancel in this batch frees (a new buy while old buys
+        # still hold the USDC, a new sell while old sells hold the LIT -- every fast run) goes right
+        # AFTER the cancels instead: sent first, the exchange refuses it for lack of funds, and it
+        # was refused again every cycle (simulator, 2026-10-23).
+        own_buys = [o["price"] for o in actual if o["side"] == "buy"]
+        own_sells = [o["price"] for o in actual if o["side"] == "sell"]
+        cancel_sides = {o["side"] for o in to_cancel}
+        head = to_place[:2]
+        lead = [w for w in head if w.side not in cancel_sides and (
+                (w.side == "sell" and all(w.price > b for b in own_buys)) or
+                (w.side == "buy" and all(w.price < s for s in own_sells)))]
+        rest = [w for w in head if w not in lead] + to_place[2:]
+        # Stale orders are cancelled farthest first, in batches, never the whole book at once (a
+        # cancel-all emptied the book for a cycle -- a gap). When the batch is cut for budget it
+        # is cut from the end: lead, cancels, then the reaction orders that waited on them.
+        to_cancel = sorted(to_cancel, key=lambda o: -abs(float(o["price"]) - price))
+        if self._limiter.room() < LOW_BUDGET_SLOTS:
+            # Budget nearly spent: only the reaction orders (sell right above, buy right below),
+            # plus a cancel only where one of them needs its funds. Cleanup waits.
+            needed_sides = {w.side for w in head if w not in lead}
+            funding = [o for o in to_cancel if o["side"] in needed_sides][:len(needed_sides)]
+            await self._send_batch(funding, [w for w in head if w not in lead], anchor_log, step, lead=lead)
             return
-        room = max(0, BATCH_MAX - len(to_cancel))
-        await self._send_batch(to_cancel[:BATCH_MAX], to_place[:room], anchor_log, step)
+        room = BATCH_MAX - len(lead)
+        cancels = to_cancel[:room]
+        await self._send_batch(cancels, rest[:max(0, room - len(cancels))], anchor_log, step, lead=lead)
 
     async def _engine_spacing_change(self, state, price, spacing_pct):
         """Spacing changed (dashboard edit, gate toggle, tier switch): re-number held lots onto the
