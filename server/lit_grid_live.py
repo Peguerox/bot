@@ -992,6 +992,7 @@ class LitGridLive:
             base = getattr(self, "_compound_base", None)
         if base is None:
             self._compound_base = float(compound_now or 0)
+            self._compound_base_unsaved = True   # stored for the panel ("next resize at $...")
             return False
         step = COMPOUND_RESIZE_STEP * float(state.get("capital_usd") or 0)
         return float(compound_now or 0) - float(base) >= max(step, 0.01)
@@ -2658,6 +2659,12 @@ class LitGridLive:
         state.update(buckets)
         if resize:
             await self._note_compound_resize(state, buckets.get("profit_bucket_compound_usd"))
+        elif getattr(self, "_compound_base_unsaved", False):
+            self._compound_base_unsaved = False
+            rec = {"at": None, "compound_usd": round(self._compound_base, 6),
+                   "capital_usd": float(state.get("capital_usd") or 0)}
+            await self.update_state_optional({"compound_resize": rec})
+            state["compound_resize"] = rec
         if state.get("dynamic_dd_enabled"):
             holdings = await self.current_holdings()
             resting = await self.resting_orders_by_level()

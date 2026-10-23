@@ -1667,17 +1667,29 @@ function LitGridLivePanel({
         </div>
       ) : (
         <>
-        {gapAlarm && (
-          <div className="mb-2 flex items-center gap-2 rounded-lg border border-red-500/60 bg-red-500/15 px-3 py-2 text-sm text-red-300 animate-pulse">
-            <span className="text-base">⚠</span>
+        {nearBook != null && workerAlive && (gapAlarm ? (
+          <div className="mb-2 flex items-center gap-2 rounded-lg border-2 border-red-500 bg-red-500/20 px-3 py-2.5 text-base font-semibold text-red-300 animate-pulse">
+            <span className="text-xl">⚠</span>
             <span>
-              <b>Gap next to price</b> for {gapSecs}s:
+              GAP next to price for {gapSecs}s:
               {!nearBook.buy_ok && nearBook.want_buy != null ? ` no buy at $${Number(nearBook.want_buy).toFixed(4)}` : ""}
               {!nearBook.buy_ok && !nearBook.sell_ok ? " ·" : ""}
               {!nearBook.sell_ok && nearBook.want_sell != null ? ` no sell at $${Number(nearBook.want_sell).toFixed(4)}` : ""}
             </span>
           </div>
-        )}
+        ) : (
+          <div className="mb-2 flex items-center gap-2 rounded-lg border border-green-500/60 bg-green-500/15 px-3 py-2 text-base font-semibold text-green-300">
+            <span className="text-xl">✓</span>
+            <span>
+              Buy &amp; sell next to price
+              <span className="ml-2 text-sm font-normal text-green-400/80">
+                {nearBook.want_buy != null ? `buy $${Number(nearBook.want_buy).toFixed(4)}` : ""}
+                {nearBook.want_buy != null && nearBook.want_sell != null ? " · " : ""}
+                {nearBook.want_sell != null ? `sell $${Number(nearBook.want_sell).toFixed(4)}` : ""}
+              </span>
+            </span>
+          </div>
+        ))}
         <div className="grid grid-cols-3 gap-2">
           <Stat label="Total PNL" value={fmtUsd(totalPnl)} sub={fmtPct(totalPnlPct)} color={pnlColor(totalPnl)} />
           <Stat
@@ -1703,10 +1715,7 @@ function LitGridLivePanel({
                 <span className="text-red-400/80">buy ↓ {nearestBuy != null && livePrice != null ? `$${nearestBuy.toFixed(4)} (-${((1 - nearestBuy / livePrice) * 100).toFixed(2)}%)` : "none"}</span>
               </span>
             </span>}
-            sub={`${st?.order_size_lit != null ? `${Number(st.order_size_lit).toFixed(2)} LIT/order` : ""}${
-              compoundResizeAgo != null ? ` · compound resize ${fmtAgo(compoundResizeAgo)} ago` : ""}${
-              compoundNextUsd != null ? ` · next at $${compoundNextUsd.toFixed(2)} compound` : ""}${
-              nearBook != null && !gapAlarm ? " · ✓ buy & sell next to price" : ""}`}
+            sub={st?.order_size_lit != null ? `${Number(st.order_size_lit).toFixed(2)} LIT/order` : ""}
             color={gapAlarm ? "text-red-400" : "text-gray-300"}
           />
           <Stat label="USDC Balance" value={usdcBalance != null ? `$${usdcBalance.toFixed(2)}` : "—"} sub="real, from the exchange" color="text-gray-300" />
@@ -1739,9 +1748,14 @@ function LitGridLivePanel({
           <Stat
             label="Compound Bucket"
             value={`$${Number(st?.profit_bucket_compound_usd ?? 0).toFixed(2)}`}
-            sub={compoundNextUsd != null
-              ? `resizes orders every +0.2% of Investment · next at $${compoundNextUsd.toFixed(2)}`
-              : "folded into next order size"}
+            sub={<span className="flex flex-col gap-0.5 text-xs">
+              <span className="text-amber-300 font-semibold">
+                {compoundResizeAgo != null ? `↻ last resize ${fmtAgo(compoundResizeAgo)} ago` : "↻ no resize yet"}
+              </span>
+              <span className="text-sky-300">
+                {compoundNextUsd != null ? `next resize at $${compoundNextUsd.toFixed(2)}` : "resizes every +0.2% of Investment"}
+              </span>
+            </span>}
             color="text-gray-300"
           />
         </div>
