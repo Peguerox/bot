@@ -1,5 +1,6 @@
 import { NextRequest, NextResponse } from "next/server";
 import { getSupabaseAdmin } from "@/lib/supabase-admin";
+import { checkLitGridLiveAuth } from "@/lib/lit-grid-live-auth";
 
 // Master schedule panel (2026-10-04, direct request: "a third panel that can control both...
 // by hour... if this volume do this, if this wiggle and volume do this"). One shared row
@@ -127,6 +128,9 @@ function validateRule(rule: unknown, idx: number): string | null {
 }
 
 export async function POST(req: NextRequest) {
+  // The schedule can turn real-money bots on/off: same admin secret as the other bot controls.
+  const authError = checkLitGridLiveAuth(req);
+  if (authError) return authError;
   const body = await req.json();
   const out: Record<string, unknown> = {};
 
