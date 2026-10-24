@@ -451,12 +451,13 @@ function LitGridLivePanel({
   const gapSinceMs = nearBook?.gap_since ? new Date(nearBook.gap_since).getTime() : null;
   const gapSecs = gapSinceMs != null ? Math.max(0, Math.round((nowTick - gapSinceMs) / 1000)) : null;
   const gapAlarm = workerAlive && nearBook != null && gapSecs != null && gapSecs >= Number(nearBook.alert_after_s ?? 10);
-  // Compound resize (2026-10-23): orders grow by the compound profit once it has risen by 0.2% of
-  // the Investment since the last resize; the worker records when.
+  // Compound resize (2026-10-24): orders grow by the compound profit once it adds >= 0.01 LIT to
+  // each order; the worker records when, and the $ step (it moves with price and the gate).
   const compoundResize = st?.compound_resize ?? null;
   const compoundResizeAgo = compoundResize?.at ? Math.max(0, nowTick - new Date(compoundResize.at).getTime()) : null;
   const fmtAgo = (ms: number) => ms < 60_000 ? `${Math.round(ms / 1000)}s` : ms < 3_600_000 ? `${Math.round(ms / 60_000)}m` : `${(ms / 3_600_000).toFixed(1)}h`;
-  const compoundNextUsd = compoundResize?.compound_usd != null ? Number(compoundResize.compound_usd) + 0.002 * capitalUsd : null;
+  const compoundNextUsd = compoundResize?.compound_usd != null && compoundResize?.step_usd != null
+    ? Number(compoundResize.compound_usd) + Number(compoundResize.step_usd) : null;
 
   const openOrders = orders.filter((o: any) => o.status === "pending" || o.status === "open");
   const filledOrders = orders.filter((o: any) => o.status === "filled");
@@ -689,7 +690,7 @@ function LitGridLivePanel({
                 {compoundResizeAgo != null ? `↻ last resize ${fmtAgo(compoundResizeAgo)} ago` : "↻ no resize yet"}
               </span>
               <span className="text-sky-300">
-                {compoundNextUsd != null ? `next resize at $${compoundNextUsd.toFixed(2)}` : "resizes every +0.2% of Investment"}
+                {compoundNextUsd != null ? `next resize at $${compoundNextUsd.toFixed(2)}` : "resizes every +0.01 LIT per order"}
               </span>
             </span>}
             color="text-gray-300"

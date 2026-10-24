@@ -1762,19 +1762,65 @@ async def t_a_resting_order_that_just_left_the_book_is_not_marked_rejected():
           rows[3]["status"])
 
 
-async def t_compound_resizes_only_after_two_tenths_percent_of_investment():
-    # Direct request 2026-10-23: new compound profit resizes the orders only after it has grown by
-    # 0.2% of the Investment since the last resize (it used to resize on every single profit).
-    bot, fake = make_bot(base_state(capital_usd=13000.0))
+async def t_compound_resizes_once_it_adds_a_hundredth_of_a_lit():
+    # Direct request 2026-10-24: new compound profit resizes the orders as soon as it adds >= 0.01
+    # LIT to every order (the exchange's size step) -- replacing the +0.2%-of-Investment step that
+    # grew to $89 after a deposit and almost never fired.
+    price = 3.0
+    bot, fake = make_bot(base_state(capital_usd=44561.0))
     st = dict(fake.state)
-    check("first sight only records the baseline (no resize)", bot._compound_resize_due(st, 100.0) is False)
-    check("+$25.99 (< 0.2% of $13,000 = $26) does not resize", bot._compound_resize_due(st, 125.99) is False)
-    check("+$26 resizes", bot._compound_resize_due(st, 126.0) is True)
-    await bot._note_compound_resize(st, 126.0)
-    check("the resize is recorded for the panel and becomes the new baseline",
-          st["compound_resize"]["compound_usd"] == 126.0 and bot._compound_resize_due(st, 140.0) is False,
-          st.get("compound_resize"))
-    check("the next resize needs another full step", bot._compound_resize_due(st, 152.0) is True)
+    step = bot._compound_step_usd(st, price)
+    expect = 0.01 * core._price_sum_for_levels(price, 0.125, core.levels_for_drawdown(0.125, 10.0))
+    check("step = 0.01 LIT x the price sum of the lines the cash is spread over",
+          abs(step - expect) < 1e-9, (step, expect))
+    check("first sight only records the baseline (no resize)", bot._compound_resize_due(st, 100.0, price) is False)
+    check("just under one step does not resize", bot._compound_resize_due(st, 100.0 + step - 0.01, price) is False)
+    check("one full step resizes", bot._compound_resize_due(st, 100.0 + step + 1e-6, price) is True)
+    await bot._note_compound_resize(st, 100.0 + step, step)
+    check("the resize is recorded (with its step) and becomes the new baseline",
+          st["compound_resize"]["compound_usd"] == round(100.0 + step, 6)
+          and st["compound_resize"]["step_usd"] == round(step, 2)
+          and bot._compound_resize_due(st, 100.0 + step * 1.5, price) is False, st.get("compound_resize"))
+    check("the next resize needs another full step",
+          bot._compound_resize_due(st, 100.0 + step * 2 + 0.01, price) is True)
+
+    # The 99.9% gate at -20% from the high: ~$25 per 0.01 LIT with LIT ~$3.13 (owner's live case).
+    deep = base_state(dynamic_dd_enabled=True, dynamic_dd_high=3.91285, dynamic_dd_tier=99.9)
+    s99 = bot._compound_step_usd(deep, 3.13)
+    s40 = bot._compound_step_usd(dict(deep, dynamic_dd_tier=40.0), 3.17)
+    check("99.9% gate: ~$25 of compound per +0.01 LIT", 23.0 < s99 < 27.0, s99)
+    check("40% gate: a much smaller step (~$6.60)", 5.5 < s40 < 7.5, s40)
+
+
+async def t_compound_resize_never_changes_any_bucket():
+    # Owner's condition (2026-10-24): the resize rule must not touch the Rest / Cover-drop /
+    # Compound buckets -- it only reads Compound. Run the real slow refresh with all three buckets
+    # funded, once without and once with a resize, and compare every bucket.
+    rows = [
+        {"id": 1, "side": "sell", "status": "filled", "realized_profit_usd": 7.0,
+         "profit_bucket_destination": "profit_bucket_rest_usd"},
+        {"id": 2, "side": "sell", "status": "filled", "realized_profit_usd": 11.0,
+         "profit_bucket_destination": "profit_bucket_cover_drop_usd"},
+        {"id": 3, "side": "sell", "status": "filled", "realized_profit_usd": 40.0,
+         "profit_bucket_destination": "profit_bucket_compound_usd"},
+    ]
+    keys = ("profit_bucket_rest_usd", "profit_bucket_cover_drop_usd", "profit_bucket_compound_usd")
+    for label, base_compound in (("no resize", 39.0), ("resize", 0.0)):
+        bot, fake = make_bot(base_state(capital_usd=44561.0), orders=[dict(r) for r in rows])
+        st = dict(fake.state)
+        st["compound_resize"] = {"at": None, "compound_usd": base_compound, "capital_usd": 44561.0}
+        before = await bot._bucket_balances()
+        await bot._v2_slow_refresh(st, 3.0)
+        after = await bot._bucket_balances()
+        check(f"{label}: all three buckets identical before/after",
+              all(abs(before[k] - after[k]) < 1e-9 for k in keys), (before, after))
+        check(f"{label}: the state's bucket fields equal the ledger's",
+              all(abs(float(st[k]) - after[k]) < 1e-9 for k in keys), {k: st[k] for k in keys})
+        check(f"{label}: buckets are 7 / 11 / 40",
+              [round(after[k], 6) for k in keys] == [7.0, 11.0, 40.0], after)
+        resized = st.get("order_size_lit") is None or (st.get("compound_resize") or {}).get("at") is not None
+        check(f"{label}: resize happened = {label == 'resize'}", resized == (label == "resize"),
+              st.get("compound_resize"))
 
 
 async def main():
@@ -1864,7 +1910,8 @@ async def main():
               t_tick_passes_rest_cap_from_state,
               t_rate_limited_errors_back_off_before_retrying,
               t_a_resting_order_that_just_left_the_book_is_not_marked_rejected,
-              t_compound_resizes_only_after_two_tenths_percent_of_investment):
+              t_compound_resizes_once_it_adds_a_hundredth_of_a_lit,
+              t_compound_resize_never_changes_any_bucket):
         try:
             await t()
         except Exception as e:

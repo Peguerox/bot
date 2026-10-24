@@ -331,7 +331,7 @@ import lighter
 
 import grid_engine
 from lit_grid_paper import (
-    level_of, compute_order_size_lit, levels_for_drawdown, LiveBook,
+    level_of, compute_order_size_lit, levels_for_drawdown, LiveBook, _price_sum_for_levels,
     STREAM_URL, BOOK_MAX_AGE, BOOK_WS_RECONNECT_AFTER,
 )
 
@@ -350,7 +350,7 @@ MIN_BASE_AMOUNT = 1.00
 
 TICK_EVERY = 2.0
 ROWS_CACHE_RELOAD_S = 60.0     # full re-read of the holdings rows at least this often
-COMPOUND_RESIZE_STEP = 0.002   # new compound profit resizes orders after +0.2% of the Investment
+COMPOUND_RESIZE_MIN_LIT = 0.01  # new compound profit resizes orders once it adds >= 0.01 LIT per order
 NEAR_BOOK_GAP_ALERT_S = 10.0  # dashboard: a missing order next to price for this long = gap alarm
 SLOW_EVERY = 15.0             # v2: profit buckets / tier refresh, after the reaction orders
 REACT_MIN_INTERVAL = 0.5      # v2: at most one tick this often when woken by an order change
@@ -947,11 +947,29 @@ class LitGridLive:
                 self._optional_state_warned = True
                 await self.log_run("dashboard_field_write_failed", {"fields": sorted(patch), "error": str(e)[:160]})
 
-    def _compound_resize_due(self, state, compound_now):
-        """Direct request (2026-10-23): new compound profit resizes the orders only once it has
-        grown by COMPOUND_RESIZE_STEP of the Investment since the last resize (0.2%: ~$13 on
-        Worker 4, ~$26 on Worker 3) -- it used to resize on every single profit, ~60 times an
-        hour on Worker 3. The baseline is persisted in compound_resize when that column exists,
+    def _compound_step_usd(self, state, price):
+        """Compound dollars that add COMPOUND_RESIZE_MIN_LIT to every order at the current sizing
+        depth: 0.01 LIT x the price sum of all the lines the cash is spread over (same cover math
+        as _dynamic_order_size). ~$25 at the 99.9% gate, ~$6.60 at 40% with LIT near $3.10."""
+        spacing = effective_spacing_pct(state)
+        if state.get("dynamic_dd_enabled"):
+            stored = state.get("dynamic_dd_high")
+            high = max(float(stored), price) if stored else price
+            drop = max(0.0, (1 - price / high) * 100)
+            tier = state.get("dynamic_dd_tier")
+            tier = float(tier) if tier is not None else DYNAMIC_DD_BASE
+            cover = max(tier - drop, 1.0) / (1 - drop / 100)
+        else:
+            cover = float(state.get("drawdown_pct") or DYNAMIC_DD_BASE)
+        return COMPOUND_RESIZE_MIN_LIT * _price_sum_for_levels(price, spacing, levels_for_drawdown(spacing, cover))
+
+    def _compound_resize_due(self, state, compound_now, price):
+        """Direct request (2026-10-24, replacing the 2026-10-23 "+0.2% of the Investment" step):
+        new compound profit resizes the orders as soon as it is enough to make every order at least
+        0.01 LIT (the exchange's size step) bigger -- a smaller resize would round to the same size.
+        That's ~once a day at the 99.9% gate and every 1-2 hours at 40%. A resize only changes the
+        size of NEW orders (no cancels, no exchange requests). Reads the compound bucket only; never
+        writes any bucket. The baseline is persisted in compound_resize when that column exists,
         otherwise kept in memory (first sight = baseline, nothing resizes)."""
         rec = state.get("compound_resize") or {}
         base = rec.get("compound_usd") if isinstance(rec, dict) else None
@@ -961,13 +979,14 @@ class LitGridLive:
             self._compound_base = float(compound_now or 0)
             self._compound_base_unsaved = True   # stored for the panel ("next resize at $...")
             return False
-        step = COMPOUND_RESIZE_STEP * float(state.get("capital_usd") or 0)
+        step = self._compound_step_usd(state, price)
         return float(compound_now or 0) - float(base) >= max(step, 0.01)
 
-    async def _note_compound_resize(self, state, compound_now):
+    async def _note_compound_resize(self, state, compound_now, step_usd=None):
         self._compound_base = float(compound_now or 0)
         rec = {"at": now_iso(), "compound_usd": round(float(compound_now or 0), 6),
-               "capital_usd": float(state.get("capital_usd") or 0)}
+               "capital_usd": float(state.get("capital_usd") or 0),
+               "step_usd": round(step_usd, 2) if step_usd is not None else None}
         await self.log_run("compound_resize", rec)
         await self.update_state_optional({"compound_resize": rec})
         state["compound_resize"] = rec
@@ -2490,19 +2509,30 @@ class LitGridLive:
     async def _v2_slow_refresh(self, state, price):
         self._last_slow_at = time.time()
         buckets = await self._bucket_balances(rest_withdrawn=state.get("rest_withdrawn_usd"))
-        resize = self._compound_resize_due(state, buckets.get("profit_bucket_compound_usd"))
+        compound_now = buckets.get("profit_bucket_compound_usd")
+        resize = self._compound_resize_due(state, compound_now, price)
+        step_usd = self._compound_step_usd(state, price)
         if resize:
             buckets["order_size_lit"] = None
         await self.update_state(buckets)
         state.update(buckets)
         if resize:
-            await self._note_compound_resize(state, buckets.get("profit_bucket_compound_usd"))
+            await self._note_compound_resize(state, compound_now, step_usd)
         elif getattr(self, "_compound_base_unsaved", False):
             self._compound_base_unsaved = False
             rec = {"at": None, "compound_usd": round(self._compound_base, 6),
-                   "capital_usd": float(state.get("capital_usd") or 0)}
+                   "capital_usd": float(state.get("capital_usd") or 0), "step_usd": round(step_usd, 2)}
             await self.update_state_optional({"compound_resize": rec})
             state["compound_resize"] = rec
+        else:
+            # Panel's "next resize at $..." = baseline + step; the step moves with price/gate, so
+            # refresh it when it has drifted by 50 cents or more (not every 15s).
+            rec = state.get("compound_resize")
+            if isinstance(rec, dict) and rec.get("compound_usd") is not None and (
+                    rec.get("step_usd") is None or abs(float(rec["step_usd"]) - step_usd) >= 0.5):
+                rec = dict(rec, step_usd=round(step_usd, 2))
+                await self.update_state_optional({"compound_resize": rec})
+                state["compound_resize"] = rec
         if state.get("dynamic_dd_enabled"):
             holdings = await self.current_holdings()
             resting = await self.resting_orders_by_level()
