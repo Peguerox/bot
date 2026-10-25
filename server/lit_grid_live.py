@@ -349,7 +349,7 @@ SIZE_DECIMALS = 2
 MIN_BASE_AMOUNT = 1.00
 
 TICK_EVERY = 2.0
-ROWS_CACHE_RELOAD_S = 60.0     # full re-read of the holdings rows at least this often
+ROWS_CACHE_RELOAD_S = 900.0    # full re-read of the ledger rows (holdings + profits) at least this often
 COMPOUND_RESIZE_MIN_LIT = 0.01  # new compound profit resizes orders once it adds >= 0.01 LIT per order
 NEAR_BOOK_GAP_ALERT_S = 10.0  # dashboard: a missing order next to price for this long = gap alarm
 SLOW_EVERY = 15.0             # v2: profit buckets / tier refresh, after the reaction orders
@@ -984,9 +984,11 @@ class LitGridLive:
 
     async def _note_compound_resize(self, state, compound_now, step_usd=None):
         self._compound_base = float(compound_now or 0)
+        size = state.get("order_size_lit")
         rec = {"at": now_iso(), "compound_usd": round(float(compound_now or 0), 6),
                "capital_usd": float(state.get("capital_usd") or 0),
-               "step_usd": round(step_usd, 2) if step_usd is not None else None}
+               "step_usd": round(step_usd, 2) if step_usd is not None else None,
+               "order_size_lit": round(float(size), 4) if size is not None else None}
         await self.log_run("compound_resize", rec)
         await self.update_state_optional({"compound_resize": rec})
         state["compound_resize"] = rec
@@ -1050,9 +1052,7 @@ class LitGridLive:
         self._limiter.ok()
 
     async def _rest_net(self, withdrawn):
-        sells = await self.sb_paginate(
-            f"{self.TABLE_ORDERS}?side=eq.sell&realized_profit_usd=not.is.null"
-            f"&select=realized_profit_usd,profit_bucket_destination")
+        sells = await self._profit_rows()
         gross = sum(float(s.get("realized_profit_usd") or 0) for s in (sells or [])
                     if (s.get("profit_bucket_destination") or "profit_bucket_rest_usd") == "profit_bucket_rest_usd")
         return gross - float(withdrawn or 0)
@@ -1079,9 +1079,7 @@ class LitGridLive:
         sold yet (current_holdings()'s bucket_cost_total, which already shrinks automatically
         the moment that inventory sells -- so cover_drop's spendable room rises back up on its
         own, with no separate 'return principal' step to get out of sync)."""
-        sells = await self.sb_paginate(
-            f"{self.TABLE_ORDERS}?side=eq.sell&realized_profit_usd=not.is.null"
-            f"&select=realized_profit_usd,profit_bucket_destination")
+        sells = await self._profit_rows()
         gross = {"profit_bucket_rest_usd": 0.0, "profit_bucket_cover_drop_usd": 0.0,
                  "profit_bucket_compound_usd": 0.0}
         for s in (sells or []):
@@ -1629,6 +1627,10 @@ class LitGridLive:
         elif not diverged and self._balance_paused:
             await self.log_run("balance_divergence_cleared",
                                 {"ledger_lit": ledger_lit, "real_lit": real_lit})
+        if diverged:
+            # A confirmed mismatch re-reads the ledger fresh on the next check instead of trusting
+            # the in-memory copy (reloaded only every ROWS_CACHE_RELOAD_S, 2026-10-24).
+            self._rows_cache = None
         self._balance_paused = diverged
         return not diverged, True
 
@@ -1853,9 +1855,13 @@ class LitGridLive:
             f"&select=id,level,filled_qty,filled_price,size,funded_from_bucket_usd&order=id.asc")
         sells = await self.sb_paginate(
             f"{self.TABLE_ORDERS}?side=eq.sell&closes_level=not.is.null&filled_qty=not.is.null&select=id,closes_level,filled_qty&order=id.asc")
+        profits = await self.sb_paginate(
+            f"{self.TABLE_ORDERS}?side=eq.sell&realized_profit_usd=not.is.null"
+            f"&select=id,realized_profit_usd,profit_bucket_destination&order=id.asc")
         buys, sells = buys or [], sells or []
         self._rows_cache = {"at": time.time(), "buys": {r["id"]: r for r in buys},
-                            "sells": {r["id"]: r for r in sells}}
+                            "sells": {r["id"]: r for r in sells},
+                            "profits": {r["id"]: r for r in (profits or [])}}
         return buys, sells
 
     def _rows_cache_note(self, row, patch):
@@ -1870,6 +1876,16 @@ class LitGridLive:
         elif (m.get("side") == "sell" and m.get("closes_level") is not None
               and m.get("filled_qty") is not None):
             c["sells"][m["id"]] = {k: m.get(k) for k in ("id", "closes_level", "filled_qty")}
+        if m.get("side") == "sell" and m.get("realized_profit_usd") is not None:
+            c["profits"][m["id"]] = {k: m.get(k) for k in ("id", "realized_profit_usd", "profit_bucket_destination")}
+
+    async def _profit_rows(self):
+        """Sells with a realized profit, kept in the same in-memory ledger copy as the holdings
+        (2026-10-24: re-reading every sell ever made every 15s grew ~700 rows a day). Reconcile --
+        the only writer of realized_profit_usd -- mirrors its writes into the cache; a full
+        re-read every ROWS_CACHE_RELOAD_S is the safety net."""
+        await self._holdings_rows()
+        return list(self._rows_cache["profits"].values())
 
     async def resting_orders_by_level(self):
         rows = await self.sb_paginate(
@@ -2513,7 +2529,20 @@ class LitGridLive:
         resize = self._compound_resize_due(state, compound_now, price)
         step_usd = self._compound_step_usd(state, price)
         if resize:
-            buckets["order_size_lit"] = None
+            # Compounding only ever ADDS to the order size (2026-10-24, owner: "compounding should
+            # increase size not decrease it"): the new compound dollars spread over the same lines,
+            # on top of the current size. A full recompute from available cash re-counted the money
+            # already sitting in open buys and shrank orders 44.3 -> 43.3 -> 40.1 LIT in one day.
+            # A gate change still recomputes from available cash (_dynamic_order_size).
+            cur = state.get("order_size_lit")
+            if state.get("dynamic_dd_enabled") and cur is not None and step_usd > 0:
+                rec0 = state.get("compound_resize")
+                base = rec0.get("compound_usd") if isinstance(rec0, dict) else None
+                base = float(base if base is not None else getattr(self, "_compound_base", 0.0) or 0.0)
+                added = (float(compound_now or 0) - base) * COMPOUND_RESIZE_MIN_LIT / step_usd
+                buckets["order_size_lit"] = float(cur) + max(0.0, added)
+            else:
+                buckets["order_size_lit"] = None
         await self.update_state(buckets)
         state.update(buckets)
         if resize:

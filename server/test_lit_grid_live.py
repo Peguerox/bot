@@ -1823,6 +1823,55 @@ async def t_compound_resize_never_changes_any_bucket():
               st.get("compound_resize"))
 
 
+async def t_compound_resize_only_ever_adds_to_the_order_size():
+    # Owner (2026-10-24): "compounding should increase size not decrease it". Live, a full
+    # recompute from available cash shrank orders 44.3 -> 43.3 -> 40.1 LIT. Now a compound resize
+    # adds exactly the new compound dollars spread over the same lines, even when cash is low.
+    rows = [{"id": 3, "side": "sell", "status": "filled", "realized_profit_usd": 200.0, "closes_level": 5,
+             "filled_qty": 1.0, "profit_bucket_destination": "profit_bucket_compound_usd"}]
+    st0 = base_state(capital_usd=44561.0, usdc_balance=10.0, dynamic_dd_enabled=True,
+                     dynamic_dd_high=3.91285, dynamic_dd_tier=40.0, order_size_lit=40.0)
+    bot, fake = make_bot(st0, orders=[dict(r) for r in rows])
+    st = dict(fake.state)
+    step = bot._compound_step_usd(st, 3.2)
+    st["compound_resize"] = {"at": None, "compound_usd": 200.0 - 3 * step, "capital_usd": 44561.0}
+    await bot._v2_slow_refresh(st, 3.2)
+    check("3 steps of new compound -> exactly +0.03 LIT (never a recompute from cash)",
+          abs(float(st["order_size_lit"]) - 40.03) < 1e-6, st.get("order_size_lit"))
+    check("the resize is logged with the new size",
+          abs(float(st["compound_resize"]["order_size_lit"]) - 40.03) < 1e-4, st.get("compound_resize"))
+    before = float(st["order_size_lit"])
+    await bot._v2_slow_refresh(st, 3.2)
+    check("no new compound -> size unchanged", float(st["order_size_lit"]) == before, st.get("order_size_lit"))
+
+
+async def t_bucket_totals_come_from_the_cached_ledger_and_match_a_fresh_read():
+    # 2026-10-24: the buckets re-read every sell ever made every 15s (~700 new rows a day). They
+    # now come from the in-memory ledger copy that reconcile keeps current, reloaded every 15 min.
+    old_reload = core.ROWS_CACHE_RELOAD_S
+    core.ROWS_CACHE_RELOAD_S = 10 ** 9
+    try:
+        buy = {"id": 1, "level": 900, "side": "buy", "status": "filled", "filled_qty": 2.0,
+               "filled_price": 3.00, "size": 2.0}
+        sell_row = {"id": 2, "level": 901, "side": "sell", "closes_level": 900, "client_order_index": 555,
+                    "status": "pending", "limit_price": 3.10, "size": 2.0}
+        filled_sell = FakeOrder(555, order_index=77, status="filled",
+                                filled_base_amount=2.0, filled_quote_amount=2.0 * 3.10, remaining_base_amount=0.0)
+        bot, fake = make_bot(base_state(profit_mode="compound"), orders=[buy, sell_row],
+                             orders_by_co={555: filled_sell})
+        b0 = await bot._bucket_balances()
+        check("cache loaded, no profit yet", abs(b0["profit_bucket_compound_usd"]) < 1e-9, b0)
+        await bot.reconcile_pending_orders(profit_mode="compound")
+        b1 = await bot._bucket_balances()
+        check("a fill written by reconcile shows in the buckets without a reload",
+              abs(b1["profit_bucket_compound_usd"] - 0.2) < 1e-6, b1)
+        bot._rows_cache = None
+        b2 = await bot._bucket_balances()
+        check("cached totals equal a fresh full read", all(abs(b1[k] - b2[k]) < 1e-9 for k in b1), (b1, b2))
+    finally:
+        core.ROWS_CACHE_RELOAD_S = old_reload
+
+
 async def main():
     t_precision_and_minimum_enforcement()
     t_order_fill_amounts_uses_real_human_decimal_units()
@@ -1911,7 +1960,9 @@ async def main():
               t_rate_limited_errors_back_off_before_retrying,
               t_a_resting_order_that_just_left_the_book_is_not_marked_rejected,
               t_compound_resizes_once_it_adds_a_hundredth_of_a_lit,
-              t_compound_resize_never_changes_any_bucket):
+              t_compound_resize_never_changes_any_bucket,
+              t_compound_resize_only_ever_adds_to_the_order_size,
+              t_bucket_totals_come_from_the_cached_ledger_and_match_a_fresh_read):
         try:
             await t()
         except Exception as e:
