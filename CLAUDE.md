@@ -274,6 +274,17 @@ project with no git/Render/Vercel link -- never work there.
     Budget: Lighter Standard = 60 req/min per wallet, both bots share it, every tx in a batch
     counts; the bots cap themselves at 40/min together.
 
+**Current state (2026-10-25) -- read before the history above:** Render has 3 services: Worker 1
+(`lighter_stoch_dca_btc_initial.py`, live), Worker 3 (`lighter_lit_grid_dual_twin.py` = the ONE LIT bot,
+live, ~$44.5k), Worker 2 **suspended** (hedge retired; its API routes were deleted 2026-10-24 and
+Master Schedule now needs the admin secret). Supabase is on the **FREE plan (500 MB DB, 5 GB/month
+egress)**: 2026-10-25 it hit 525 MB -> dead tables truncated (local gzip backups in
+`data/supabase-archive-2026-10-25/`, script `scripts/archive_tables.cjs`), now ~250 MB. A pg_cron job
+`daily-trim-logs` (04:00 UTC) keeps 14 days of *_runs logs (LIT: only reconciled_order /
+engine_batch_sent / orders_ws_verified are trimmed) and 30 days of lighter_btc_price_ticks. Never add
+code that re-reads a whole ledger/log table on a short timer (the LIT bot did, ~1.5 GB/day egress;
+fixed dc4b888: in-memory ledger, full re-read every 15 min).
+
 Start Commands are `python server/<file>.py`. **There is no Render API/CLI access from this
 environment** — changing which file a worker runs means the user has to manually update that
 worker's Start Command in the Render dashboard. I can't do it.
