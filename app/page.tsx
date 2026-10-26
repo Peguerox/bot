@@ -428,7 +428,13 @@ function LitGridLivePanel({
   const fmtUsd = (v: number | null) => v == null ? "—" : `${v >= 0 ? "+" : "-"}$${Math.abs(v).toFixed(2)}`;
   const fmtPct = (v: number | null, d = 2) => v == null ? "" : `${v >= 0 ? "+" : ""}${v.toFixed(d)}%`;
 
-  const dynOn = !!st?.dynamic_dd_enabled;
+  // Sizing mode (2026-10-25): exactly one of flat / dynamic (gates) / curve; curve wins if both
+  // flags are ever set, same as the worker's sizing_mode().
+  const curveOn = !!st?.curve_enabled;
+  const dynOn = !!st?.dynamic_dd_enabled && !curveOn;
+  const sizingMode: "flat" | "dynamic" | "curve" = curveOn ? "curve" : dynOn ? "dynamic" : "flat";
+  const curve = st?.curve_state ?? null;
+  const curveAgo = curve?.at ? Math.max(0, nowTick - new Date(curve.at).getTime()) : null;
   const dynTier = st?.dynamic_dd_tier != null ? Number(st.dynamic_dd_tier) : null;
   const dynHigh = st?.dynamic_dd_high != null ? Number(st.dynamic_dd_high) : null;
   const dynDrop = dynHigh != null && livePrice != null ? Math.max(0, (1 - livePrice / dynHigh) * 100) : null;
@@ -514,7 +520,7 @@ function LitGridLivePanel({
   }
 
   const [dynSaving, setDynSaving] = useState(false);
-  async function handleDynamicDrawdown(body: Record<string, boolean>, question: string) {
+  async function handleDynamicDrawdown(body: Record<string, boolean | string | number>, question: string) {
     if (dynSaving || !confirm(question)) return;
     const secret = litGridLiveAdminSecret();
     if (!secret) return;
@@ -531,6 +537,14 @@ function LitGridLivePanel({
     }
     setDynSaving(false);
   }
+
+  const [curveNIn, setCurveNIn] = useState("");
+  const [curveFloorIn, setCurveFloorIn] = useState("");
+  const sizingQuestions: Record<string, string> = {
+    flat: "Switch sizing to FLAT? Gates and curve both off: one order size from your Drawdown setting.",
+    dynamic: "Switch sizing to DYNAMIC (gates)? The high starts at the current price and order size follows the gates, using the available balance.",
+    curve: "Switch sizing to CURVE? The curve starts at the current price with the cash available now: biggest buys right below price, shrinking to the floor down to a 99.9% fall. Resting buys are swapped once to their curve size. Held LIT is not touched.",
+  };
 
   async function handleSave() {
     const body: Record<string, unknown> = {};
@@ -852,6 +866,105 @@ function LitGridLivePanel({
         </p>
       </div>
 
+      <div className="rounded-xl border border-gray-700 bg-gray-900/60 p-3 space-y-2">
+        <p className="text-gray-200 text-sm font-bold">Sizing</p>
+        <div className="grid grid-cols-3 gap-1.5">
+          {(["flat", "dynamic", "curve"] as const).map((m) => (
+            <button
+              key={m}
+              onClick={() => m !== sizingMode && handleDynamicDrawdown({ sizingMode: m }, sizingQuestions[m])}
+              disabled={dynSaving}
+              className={`text-xs font-bold px-2 py-1.5 rounded-full border disabled:opacity-40 ${m === sizingMode
+                ? "bg-green-500/15 text-green-400 border-green-500/40"
+                : "bg-gray-800 text-gray-400 border-gray-600 hover:text-gray-200"}`}
+            >
+              {m === sizingMode ? "● " : ""}{m === "flat" ? "Flat" : m === "dynamic" ? "Dynamic" : "Curve"}
+            </button>
+          ))}
+        </div>
+        <p className="text-gray-500 text-[10px] leading-snug">Only one is ever on. Flat = one size from Drawdown · Dynamic = the gates · Curve = the formula.</p>
+      </div>
+
+      <div className="rounded-xl border border-gray-700 bg-gray-900/60 p-3 space-y-3">
+        <div className="flex items-start justify-between gap-2">
+          <div>
+            <p className="text-gray-200 text-sm font-bold">Curve</p>
+            <p className="text-gray-500 text-[11px] leading-snug">
+              Each new buy sized at its own price: most right below the top, shrinking smoothly to the floor, down to a 99.9% fall. Profit grows it right away.
+            </p>
+          </div>
+          <span className={`shrink-0 text-xs font-bold px-3 py-1.5 rounded-full border ${curveOn
+            ? "bg-green-500/15 text-green-400 border-green-500/40" : "bg-gray-800 text-gray-500 border-gray-700"}`}>
+            {curveOn ? "● ON" : "○ OFF"}
+          </span>
+        </div>
+        <p className="text-gray-400 text-[11px] font-mono leading-snug">size = floor + (B − R)/W × ((p − F)/(P − F))^n</p>
+        {curveOn && (
+          <>
+            {curve == null ? (
+              <p className="text-gray-500 text-xs">Planning the curve at the current price…</p>
+            ) : (
+              <>
+                <div className="grid grid-cols-3 gap-2">
+                  <div className="rounded-lg border border-gray-700 bg-gray-800/60 p-2">
+                    <p className="text-gray-500 text-[10px] uppercase tracking-wide">Top (P)</p>
+                    <p className="text-gray-100 text-sm font-bold tabular-nums">${Number(curve.top).toFixed(4)}</p>
+                    <p className="text-gray-500 text-[10px]">{livePrice != null ? `price ${((livePrice / Number(curve.top) - 1) * 100).toFixed(2)}%` : ""}</p>
+                  </div>
+                  <div className="rounded-lg border border-gray-700 bg-gray-800/60 p-2">
+                    <p className="text-gray-500 text-[10px] uppercase tracking-wide">Budget (B)</p>
+                    <p className="text-gray-100 text-sm font-bold tabular-nums">${Number(curve.budget_usd).toLocaleString(undefined, { maximumFractionDigits: 0 })}</p>
+                    <p className="text-gray-500 text-[10px]">floor costs ${Number(curve.floor_reserve_usd).toLocaleString(undefined, { maximumFractionDigits: 0 })}</p>
+                  </div>
+                  <div className="rounded-lg border border-blue-500/40 bg-blue-500/10 p-2">
+                    <p className="text-blue-300/80 text-[10px] uppercase tracking-wide">Next buy</p>
+                    <p className="text-blue-300 text-sm font-bold tabular-nums">{Number(curve.next_buy_size).toFixed(2)} LIT</p>
+                    <p className="text-gray-500 text-[10px] tabular-nums">at ${Number(curve.next_buy_price).toFixed(4)}</p>
+                  </div>
+                </div>
+                <div className="rounded-lg border border-gray-700 overflow-hidden">
+                  <div className="grid grid-cols-3 bg-gray-800/80 text-[10px] uppercase tracking-wide text-gray-500 px-2 py-1">
+                    <span>Below top</span><span>Price</span><span className="text-right">Size</span>
+                  </div>
+                  {([[0, "size_top"], [10, "size_10"], [20, "size_20"], [30, "size_30"], [50, "size_50"], [99.9, null]] as const).map(([d, k]) => (
+                    <div key={d} className="grid grid-cols-3 px-2 py-1.5 text-xs tabular-nums border-t border-gray-800 text-gray-400">
+                      <span>{d === 0 ? "top" : `−${d}%`}</span>
+                      <span>${(Number(curve.top) * (1 - d / 100)).toFixed(4)}</span>
+                      <span className="text-right">{k ? `${Number(curve[k]).toFixed(2)} LIT` : `${Number(curve.floor_lit).toFixed(2)} LIT (floor)`}</span>
+                    </div>
+                  ))}
+                </div>
+                <p className="text-gray-500 text-[10px] tabular-nums">
+                  n {curve.n} · floor {curve.floor_lit} LIT · bottom ${Number(curve.bottom).toFixed(4)} · {curve.lines} lines · cash at plan ${Number(curve.cash_at_plan_usd).toLocaleString(undefined, { maximumFractionDigits: 0 })}{curveAgo != null ? ` · updated ${fmtAgo(curveAgo)} ago` : ""}
+                </p>
+              </>
+            )}
+          </>
+        )}
+        <div className="flex items-end gap-2">
+          <label className="flex-1 text-[10px] text-gray-500">n
+            <input value={curveNIn} onChange={(e) => setCurveNIn(e.target.value)} placeholder={String(st?.curve_n ?? 10)}
+              className="mt-0.5 w-full bg-gray-800 border border-gray-700 rounded px-2 py-1 text-xs text-gray-200" />
+          </label>
+          <label className="flex-1 text-[10px] text-gray-500">Floor (LIT)
+            <input value={curveFloorIn} onChange={(e) => setCurveFloorIn(e.target.value)} placeholder={String(st?.curve_floor_lit ?? 1)}
+              className="mt-0.5 w-full bg-gray-800 border border-gray-700 rounded px-2 py-1 text-xs text-gray-200" />
+          </label>
+          <button
+            onClick={() => {
+              const body: Record<string, number> = {};
+              if (curveNIn.trim()) body.curveN = Number(curveNIn);
+              if (curveFloorIn.trim()) body.curveFloorLit = Number(curveFloorIn);
+              if (Object.keys(body).length === 0) return;
+              handleDynamicDrawdown(body, `Set curve ${body.curveN != null ? `n = ${body.curveN} ` : ""}${body.curveFloorLit != null ? `floor = ${body.curveFloorLit} LIT` : ""}? New buys only; resting buys more than 25% off get swapped.`)
+                .then(() => { setCurveNIn(""); setCurveFloorIn(""); });
+            }}
+            disabled={dynSaving || (!curveNIn.trim() && !curveFloorIn.trim())}
+            className="text-xs font-bold px-2.5 py-1.5 rounded bg-blue-500/20 text-blue-300 hover:bg-blue-500/30 disabled:opacity-30"
+          >Save</button>
+        </div>
+      </div>
+
       <div className="rounded-xl border border-gray-700 bg-gray-900/60 p-3 space-y-3">
         <div className="flex items-start justify-between gap-2">
           <div>
@@ -860,17 +973,10 @@ function LitGridLivePanel({
               The further price falls from its high, the deeper the money is stretched, so the bot never runs out of cash.
             </p>
           </div>
-          <button
-            onClick={() => handleDynamicDrawdown({ dynamicDrawdown: !dynOn }, dynOn
-              ? "Turn dynamic drawdown OFF? Order size goes back to your Drawdown setting."
-              : "Turn dynamic drawdown ON? The high starts at the current price and order size follows the levels below, using the available balance.")}
-            disabled={dynSaving}
-            className={`shrink-0 text-xs font-bold px-3 py-1.5 rounded-full border disabled:opacity-40 ${dynOn
-              ? "bg-green-500/15 text-green-400 border-green-500/40"
-              : "bg-gray-800 text-gray-400 border-gray-600 hover:text-gray-200"}`}
-          >
+          <span className={`shrink-0 text-xs font-bold px-3 py-1.5 rounded-full border ${dynOn
+            ? "bg-green-500/15 text-green-400 border-green-500/40" : "bg-gray-800 text-gray-500 border-gray-700"}`}>
             {dynOn ? "● ON" : "○ OFF"}
-          </button>
+          </span>
         </div>
 
         {dynOn && (

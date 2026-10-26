@@ -1872,8 +1872,74 @@ async def t_bucket_totals_come_from_the_cached_ledger_and_match_a_fresh_read():
         core.ROWS_CACHE_RELOAD_S = old_reload
 
 
+# ── Curve sizing (2026-10-25) ────────────────────────────────────────────────────────────────────
+
+def t_curve_spends_exactly_the_budget_down_to_the_floor_price():
+    # The whole curve, summed line by line from the top to 0.1% of it, costs exactly B; biggest
+    # right at the top, the floor at the bottom, never below the floor anywhere.
+    P, step = 3.16, math.log(1.00125)
+    plan = core.curve_plan(P, math.log(P), step, 10, 1.0)
+    budget = 27_000.0
+    ln, total, sizes = 0, 0.0, []
+    while True:
+        px = core.grid_engine.line_price(math.log(P), ln, step)
+        if px <= plan["F"]:
+            break
+        q = core.curve_size(px, plan, budget)
+        total += q * px; sizes.append(q); ln -= 1
+    check("curve costs exactly the budget", abs(total - budget) < 0.01, total)
+    check("sizes only shrink going down", all(a >= b - 1e-12 for a, b in zip(sizes, sizes[1:])))
+    check("bottom lines sit on the 1 LIT floor", abs(sizes[-1] - 1.0) < 1e-6, sizes[-1])
+    check("top size matches the research table (~107 LIT at $3.16, $27k, n=10)", 100 < sizes[0] < 114, sizes[0])
+    check("~5,500 lines down to 99.9%", 5400 < plan["lines"] < 5600, plan["lines"])
+    check("a budget below the floor reserve gives the floor, never less",
+          abs(core.curve_size(P, plan, plan["R"] * 0.5) - 1.0) < 1e-9)
+
+
+def t_sizing_mode_only_one_is_ever_on():
+    check("both off -> flat", core.sizing_mode({}) == "flat")
+    check("gates only -> dynamic", core.sizing_mode({"dynamic_dd_enabled": True}) == "dynamic")
+    check("curve wins if both flags are set", core.sizing_mode({"dynamic_dd_enabled": True, "curve_enabled": True}) == "curve")
+    st = {"spacing_pct": 0.125, "gate_spacing_growth_enabled": True, "dynamic_dd_enabled": True,
+          "curve_enabled": True, "gate_spacing_multiplier_value": 2.0}
+    check("curve mode never uses the gate spacing multiplier", core.effective_spacing_pct(st) == 0.125)
+
+
+async def t_curve_plans_at_switch_on_and_moves_up_only_at_a_new_top():
+    P = 3.16
+    step = math.log(1.00125)
+    rows = _grid_rows(P, held=[], sells_for=[], buys_at=[-1, -2])   # two resting buys, 2.16 LIT each
+    bot, fake = make_bot(base_state(usdc_balance=27_000.0, capital_usd=27_000.0, grid_anchor_price=P,
+                                     curve_enabled=True, curve_n=10, curve_floor_lit=1), orders=rows)
+    st = fake.state
+    holdings = await bot.current_holdings()
+    resting = await bot.resting_orders_by_level()
+    size_at = await bot._curve_sizer(st, P, math.log(P), step, holdings, resting)
+    check("switch-on plans at the current price", abs(st["curve_top"] - P) < 1e-12, st.get("curve_top"))
+    check("cash = all spendable USDC, money in resting buys included",
+          abs(st["curve_cash_usd"] - 27_000.0) < 1e-6, st["curve_cash_usd"])
+    top_size = size_at(P)
+    check("the top buy is big (~107 LIT)", 100 < top_size < 114, top_size)
+    check("10% lower is smaller (~38 LIT)", 33 < size_at(P * 0.9) < 43, size_at(P * 0.9))
+    check("curve_state published for the panel", (st.get("curve_state") or {}).get("next_buy_size") is not None)
+    plans = [r for r in fake.runs if r.get("action") == "curve_replan"]
+    await bot._curve_sizer(st, P * 0.97, math.log(P), step, holdings, resting)
+    await bot._curve_sizer(st, P * 1.0005, math.log(P), step, holdings, resting)
+    check("no re-plan below the top or less than a line above it",
+          len([r for r in fake.runs if r.get("action") == "curve_replan"]) == len(plans) and st["curve_top"] == P)
+    st["profit_bucket_compound_usd"] = 270.0
+    bigger = (await bot._curve_sizer(st, P, math.log(P), step, holdings, resting))(P)
+    check("new compound profit makes the curve bigger right away", bigger > top_size, (bigger, top_size))
+    await bot._curve_sizer(st, P * 1.002, math.log(P), step, holdings, resting)
+    check("a full line above the top re-plans at the new top", abs(st["curve_top"] - P * 1.002) < 1e-12, st["curve_top"])
+    check("profit is part of the cash at the new plan, not counted twice",
+          abs(bot._curve_budget(st) - st["curve_cash_usd"]) < 1e-9)
+
+
 async def main():
     t_precision_and_minimum_enforcement()
+    t_curve_spends_exactly_the_budget_down_to_the_floor_price()
+    t_sizing_mode_only_one_is_ever_on()
     t_order_fill_amounts_uses_real_human_decimal_units()
     t_order_is_terminal_uses_remaining_amount_primarily()
     t_is_rate_limit_error_matches_429_and_nonce_not_unrelated_errors()
@@ -1962,7 +2028,8 @@ async def main():
               t_compound_resizes_once_it_adds_a_hundredth_of_a_lit,
               t_compound_resize_never_changes_any_bucket,
               t_compound_resize_only_ever_adds_to_the_order_size,
-              t_bucket_totals_come_from_the_cached_ledger_and_match_a_fresh_read):
+              t_bucket_totals_come_from_the_cached_ledger_and_match_a_fresh_read,
+              t_curve_plans_at_switch_on_and_moves_up_only_at_a_new_top):
         try:
             await t()
         except Exception as e:

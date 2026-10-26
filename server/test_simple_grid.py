@@ -31,8 +31,13 @@ def load(name):
     return st, snap["orders"]
 
 
-def start(name, seed):
+def start(name, seed, curve=False):
     st, orders = load(name)
+    if curve:
+        # Curve sizing switched on from this real book (2026-10-25): plans at the current price.
+        st.update({"curve_enabled": True, "dynamic_dd_enabled": False, "curve_n": 10,
+                   "curve_floor_lit": 1, "curve_top": None, "curve_cash_usd": None,
+                   "curve_profit_base_usd": None, "curve_state": None})
     t_snap = datetime.fromisoformat(st["updated_at"].replace("Z", "+00:00"))
     S.Clock.t = S.T0 + (t_snap - S.BASE_DT).total_seconds()
     rng = random.Random(seed)
@@ -114,8 +119,8 @@ def lots_of(db):
     return {ln: h for ln, h in S.lot_costs(db).items() if h["qty"] >= 1.0}
 
 
-async def run(name, kind, seed=1, shared_budget=False, react=False):
-    st, db, ex, bot, feed, rng = start(name, seed)
+async def run(name, kind, seed=1, shared_budget=False, react=False, curve=False):
+    st, db, ex, bot, feed, rng = start(name, seed, curve=curve)
     if shared_budget:
         # Live, both bots draw on one wallet limit, and on a fast move both are busy at once:
         # each gets about half.
@@ -123,7 +128,8 @@ async def run(name, kind, seed=1, shared_budget=False, react=False):
     sp = float(st["internal_spacing_pct"] or st["spacing_pct"])
     step = math.log(1 + sp / 100)
     prices = path(kind, float(st["live_price"]), step)
-    label = f"{name} {kind}" + (" shared budget" if shared_budget else "") + (" fast-react" if react else "")
+    label = (f"{name} {kind}" + (" shared budget" if shared_budget else "") + (" fast-react" if react else "")
+             + (" CURVE" if curve else ""))
     held_for = 0
     catch_up = None   # fast moves: seconds after the run stops until both near orders are back for good
     last_bad = 29
@@ -218,6 +224,18 @@ async def run(name, kind, seed=1, shared_budget=False, react=False):
         per_min[int((t - t_start) // 60)] = per_min.get(int((t - t_start) // 60), 0) + 1
     worst = max(per_min.values()) if per_min else 0
     check(f"[{label}] requests per minute within budget (worst {worst})", worst <= core.REQUEST_BUDGET_PER_MIN + 1, worst)
+    if curve:
+        state = db.state
+        anchor = bot._anchor_log(state)
+        plan = bot._curve_plan_cached(state, anchor, step)
+        budget = bot._curve_budget(state)
+        buys = [o for o in ex.orders.values() if o["status"] == "open" and o["side"] == "buy"]
+        off = [(round(o["price"], 4), o["size"], round(core.curve_size(o["price"], plan, budget), 2))
+               for o in buys if o["filled"] == 0 and abs(o["size"] - core.curve_size(o["price"], plan, budget))
+               > core.CURVE_REPLACE_FRAC * core.curve_size(o["price"], plan, budget)]
+        check(f"[{label}] every resting buy is on its curve size ({len(buys) - len(off)}/{len(buys)})",
+              buys and not off, off[:4])
+        print(f"  {label}: top ${plan['P']:.4f} budget ${budget:,.0f} sizes {[round(o['size'], 2) for o in sorted(buys, key=lambda o: -o['price'])][:5]}")
     fills = len(ex.fills)
     if kind == "flick":
         rebuys = sum(1 for side, px, q, co in ex.fills if side == "buy")
@@ -240,6 +258,12 @@ async def main():
         await run(name, "flick")
         for kind in ("flick", "up slow", "up fast", "down slow", "down fast", "wiggle"):
             await run(name, kind, shared_budget=True, react=True)
+    # Curve sizing from the live Worker 3 book: the one-time swap of the old gate-sized buys, then
+    # every basic move (same checks: no gap next to price, nothing below cost, ledger = exchange).
+    for kind in ("up slow", "up fast", "down slow", "down jump", "down fast", "wiggle", "flick"):
+        await run("worker3", kind, curve=True)
+    for kind in ("up fast", "down fast"):
+        await run("worker3", kind, shared_budget=True, react=True, curve=True)
     print(f"\n==== {len(PASS)} passed, {len(FAIL)} failed ====")
     if FAIL:
         for f in FAIL:

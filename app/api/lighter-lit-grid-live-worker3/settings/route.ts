@@ -59,6 +59,36 @@ export async function POST(req: NextRequest) {
     out["dynamic_dd_high"] = null;
     out["dynamic_dd_tier"] = null;
     out["order_size_lit"] = null;
+    if (body.dynamicDrawdown) out["curve_enabled"] = false;
+  }
+
+  // Sizing mode (2026-10-25): exactly one of flat / dynamic (gates) / curve. Switching to curve
+  // clears its top so the worker plans a fresh curve at the current price with the cash it has.
+  if (body.sizingMode !== undefined) {
+    if (!["flat", "dynamic", "curve"].includes(body.sizingMode)) {
+      return NextResponse.json({ error: "sizingMode must be flat, dynamic or curve." }, { status: 400 });
+    }
+    out["dynamic_dd_enabled"] = body.sizingMode === "dynamic";
+    out["curve_enabled"] = body.sizingMode === "curve";
+    out["dynamic_dd_high"] = null;
+    out["dynamic_dd_tier"] = null;
+    out["order_size_lit"] = null;
+    out["curve_top"] = null;
+    out["curve_cash_usd"] = null;
+    out["curve_profit_base_usd"] = null;
+    out["curve_state"] = null;
+  }
+  for (const [key, col, lo, hi, label] of [
+    ["curveN", "curve_n", 1, 30, "curve n"],
+    ["curveFloorLit", "curve_floor_lit", 1, 100, "curve floor (LIT)"],
+  ] as const) {
+    const raw = body[key];
+    if (raw === undefined || raw === null || raw === "") continue;
+    const v = Number(raw);
+    if (!Number.isFinite(v) || v < lo || v > hi) {
+      return NextResponse.json({ error: `${label} must be between ${lo} and ${hi} (got ${raw}).` }, { status: 400 });
+    }
+    out[col] = v;
   }
   if (body.resetDynamicHigh === true) {
     out["dynamic_dd_high"] = null;

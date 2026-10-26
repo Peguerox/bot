@@ -285,6 +285,14 @@ engine_batch_sent / orders_ws_verified are trimmed) and 30 days of lighter_btc_p
 code that re-reads a whole ledger/log table on a short timer (the LIT bot did, ~1.5 GB/day egress;
 fixed dc4b888: in-memory ledger, full re-read every 15 min).
 
+**Sizing modes (2026-10-25):** the LIT bot has exactly one of Flat / Dynamic (gates) / Curve
+(`sizing_mode()` in `lit_grid_live.py`; `curve_enabled` wins over `dynamic_dd_enabled`). Curve =
+owner's formula `size(p) = floor + (B-R)/W * ((p-F)/(P-F))^n`, computed per buy; P = top (switch-on
+price, re-planned a full line above it), F = P x 0.001, B = cash for new buys at the plan + profit
+since. Held LIT is never counted as cash. At switch-on resting buys >25% off their curve size are
+swapped once. Migration `lighter_lit_grid_live_worker3_curve.sql`. Research:
+`research/lit-curve-spacing-2026-10-25/FORMULAS.md`.
+
 Start Commands are `python server/<file>.py`. **There is no Render API/CLI access from this
 environment** — changing which file a worker runs means the user has to manually update that
 worker's Start Command in the Render dashboard. I can't do it.

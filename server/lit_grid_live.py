@@ -417,6 +417,18 @@ OPEN_STATUSES = ("pending", "open", "cancel_requested")
 # minimum deep in a drawdown when starting tight -- real LIT data showed a flat 0.125% grid
 # unable to place any order 67.6% of the way through a recent 31-day window.
 DYNAMIC_DD_TIER_ORDER = (DYNAMIC_DD_BASE,) + tuple(t for _, t in DYNAMIC_DD_GATES)
+# Curve sizing (toggle `curve_enabled`, 2026-10-25, owner's formula -- research in
+# research/lit-curve-spacing-2026-10-25/FORMULAS.md): every new buy is sized at its own price,
+#   size(p) = floor + (B - R)/W * ((p - F)/(P - F))^n      [LIT]
+# P = the curve's top (price at switch-on, moved up at every new top), F = P x 0.001 (a 99.9% fall),
+# R = floor x the sum of every line price from P down to F, W = sum of p x ((p - F)/(P - F))^n over
+# the same lines, B = cash for new buys at the last (re)plan + profit added since. Most money right
+# below the top, shrinking smoothly to the floor, no gaps down to F. Only one sizing mode is ever on:
+# curve beats dynamic if both flags are somehow set.
+CURVE_FLOOR_FRAC = 0.001
+# Curve mode only: a resting, unfilled buy more than 25% off its curve size is cancelled and placed
+# again at the right size (the one-time swap at switch-on). Small drifts (profit, a new top) keep it.
+CURVE_REPLACE_FRAC = 0.25
 TERMINAL_STATUS_SUBSTRINGS = ("cancel", "reject", "expir")
 PAGE_SIZE = 500
 # Re-anchored line numbers start this far past every line number already in the ledger.
@@ -610,6 +622,41 @@ def dynamic_dd_tier_for_drop(drop, old_tier):
     return tier
 
 
+def sizing_mode(state):
+    """'curve', 'dynamic' or 'flat' (both off). Only one is ever in force."""
+    if state.get("curve_enabled"):
+        return "curve"
+    if state.get("dynamic_dd_enabled"):
+        return "dynamic"
+    return "flat"
+
+
+def curve_plan(top_price, anchor_log, step, n, floor_lit):
+    """R and W of the curve over every grid line from the line at/below `top_price` down to
+    F = top x 0.001. Pure; ~5,500 lines at 0.125%, a few ms."""
+    F = top_price * CURVE_FLOOR_FRAC
+    ln = grid_engine.line_at_or_below(top_price, anchor_log, step)
+    P = grid_engine.line_price(anchor_log, ln, step)
+    R = W = 0.0
+    lines = 0
+    while True:
+        p = grid_engine.line_price(anchor_log, ln, step)
+        if p <= F:
+            break
+        R += floor_lit * p
+        W += p * ((p - F) / (P - F)) ** n
+        lines += 1
+        ln -= 1
+    return {"P": P, "F": F, "R": R, "W": W, "n": n, "floor": floor_lit, "lines": lines}
+
+
+def curve_size(px, plan, budget):
+    """Unrounded LIT for a buy at `px`. Above the top counts as the top; below F, the floor."""
+    k = max(0.0, (budget - plan["R"]) / plan["W"]) if plan["W"] > 0 else 0.0
+    x = min(1.0, max(0.0, (px - plan["F"]) / (plan["P"] - plan["F"])))
+    return plan["floor"] + k * x ** plan["n"]
+
+
 def effective_spacing_pct(state):
     """The spacing actually used for new grid lines this tick: the dashboard's spacing_pct,
     widened by the persisted gate_spacing_multiplier_value while gate_spacing_growth_enabled AND
@@ -622,7 +669,7 @@ def effective_spacing_pct(state):
     only delays the resulting re-anchor by one tick; never a correctness or safety issue (see
     maintain_window's own call site)."""
     base = float(state["spacing_pct"])
-    if not state.get("gate_spacing_growth_enabled") or not state.get("dynamic_dd_enabled"):
+    if not state.get("gate_spacing_growth_enabled") or sizing_mode(state) != "dynamic":
         return base
     mult = state.get("gate_spacing_multiplier_value")
     if mult is None:
@@ -952,7 +999,7 @@ class LitGridLive:
         depth: 0.01 LIT x the price sum of all the lines the cash is spread over (same cover math
         as _dynamic_order_size). ~$25 at the 99.9% gate, ~$6.60 at 40% with LIT near $3.10."""
         spacing = effective_spacing_pct(state)
-        if state.get("dynamic_dd_enabled"):
+        if sizing_mode(state) == "dynamic":
             stored = state.get("dynamic_dd_high")
             high = max(float(stored), price) if stored else price
             drop = max(0.0, (1 - price / high) * 100)
@@ -1993,6 +2040,76 @@ class LitGridLive:
             state.update(patch)
         return clamp_order_size(float(size))
 
+    # ── Curve sizing (curve_enabled) ────────────────────────────────────────────────────────────
+    @staticmethod
+    def _curve_profit(state):
+        return (float(state.get("profit_bucket_compound_usd") or 0)
+                + float(state.get("profit_bucket_cover_drop_usd") or 0))
+
+    def _curve_plan_cached(self, state, anchor_log, step):
+        n = float(state.get("curve_n") or 10)
+        floor = float(state.get("curve_floor_lit") or 1)
+        key = (float(state["curve_top"]), anchor_log, step, n, floor)
+        cache = getattr(self, "_curve_cache", None)
+        if cache is None or cache[0] != key:
+            cache = (key, curve_plan(key[0], anchor_log, step, n, floor))
+            self._curve_cache = cache
+        return cache[1]
+
+    def _curve_budget(self, state):
+        """B = cash for new buys at the last (re)plan + profit (compound + cover-drop) added since."""
+        base = float(state.get("curve_profit_base_usd") or 0)
+        return float(state.get("curve_cash_usd") or 0) + max(0.0, self._curve_profit(state) - base)
+
+    async def _curve_sizer(self, state, price, anchor_log, step, holdings, resting):
+        """Returns size_at(px) -> clamped LIT for a buy at px. (Re)plans when the curve has no top
+        yet (switch-on) or price is a full line above the top: top = price, cash = money for new
+        buys now (available + what resting buys hold -- they belong to the curve too). Held LIT is
+        never counted as cash; each lot keeps its own sell."""
+        top = state.get("curve_top")
+        if top is None or price >= float(top) * math.exp(step):
+            resting_buy_cost, _, available = self._funding(state, holdings, resting)
+            cash = max(0.0, available + resting_buy_cost)
+            patch = {"curve_top": price, "curve_cash_usd": cash,
+                     "curve_profit_base_usd": self._curve_profit(state)}
+            await self.update_state(patch)
+            state.update(patch)
+            plan = self._curve_plan_cached(state, anchor_log, step)
+            await self.log_run("curve_replan", {
+                "top": round(price, 5), "previous_top": top, "cash_usd": round(cash, 2),
+                "n": plan["n"], "floor_lit": plan["floor"],
+                "top_size_lit": round(curve_size(plan["P"], plan, cash), 4)})
+            await self._publish_curve_state(state, price, anchor_log, step)
+        plan = self._curve_plan_cached(state, anchor_log, step)
+        budget = self._curve_budget(state)
+        return lambda px: clamp_order_size(curve_size(px, plan, budget))
+
+    async def _publish_curve_state(self, state, price, anchor_log=None, step=None):
+        """Panel readout for the Curve pill (writes curve_state)."""
+        if state.get("curve_top") is None:
+            return
+        if anchor_log is None:
+            anchor_log = self._anchor_log(state)
+            step = math.log(1 + effective_spacing_pct(state) / 100.0)
+        if anchor_log is None:
+            return
+        plan = self._curve_plan_cached(state, anchor_log, step)
+        budget = self._curve_budget(state)
+        nxt = grid_engine.line_at_or_below(price, anchor_log, step)
+        if grid_engine.line_price(anchor_log, nxt, step) >= price:
+            nxt -= 1
+        next_px = grid_engine.line_price(anchor_log, nxt, step)
+        size = lambda px: round(curve_size(px, plan, budget), 2)
+        rec = {"at": now_iso(), "top": round(plan["P"], 5), "bottom": round(plan["F"], 6),
+               "n": plan["n"], "floor_lit": plan["floor"], "lines": plan["lines"],
+               "budget_usd": round(budget, 2), "cash_at_plan_usd": round(float(state.get("curve_cash_usd") or 0), 2),
+               "floor_reserve_usd": round(plan["R"], 2),
+               "next_buy_price": round(next_px, 4), "next_buy_size": size(next_px),
+               "size_top": size(plan["P"]), "size_10": size(plan["P"] * 0.9), "size_20": size(plan["P"] * 0.8),
+               "size_30": size(plan["P"] * 0.7), "size_50": size(plan["P"] * 0.5)}
+        await self.update_state_optional({"curve_state": rec})
+        state["curve_state"] = rec
+
     # ── Engine v2: desired-state order management (grid_engine.py) ───────────────────────────
     def _next_co_idx(self):
         """Unique client_order_index per order. Deriving it from the current millisecond gave two
@@ -2192,7 +2309,12 @@ class LitGridLive:
             state.update({"grid_anchor_log": anchor_log, "grid_anchor_price": price})
 
         order_size_lit = state.get("order_size_lit")
-        if state.get("dynamic_dd_enabled"):
+        mode = sizing_mode(state)
+        size_at = None
+        if mode == "curve":
+            size_at = await self._curve_sizer(state, price, anchor_log, step, holdings, resting)
+            order_size = size_at(price)
+        elif mode == "dynamic":
             order_size = await self._dynamic_order_size(state, price, spacing_pct, holdings, resting)
         else:
             if order_size_lit is None:
@@ -2204,6 +2326,14 @@ class LitGridLive:
                 await self.update_state({"order_size_lit": order_size_lit})
             order_size = clamp_order_size(float(order_size_lit or 0.0))
         entries = bool(entries_allowed and order_size is not None)
+        if size_at is None:
+            size_at = lambda _px: order_size
+
+        def off_curve(row, want):
+            """Curve mode: an unfilled resting buy far from its curve size gets replaced."""
+            if mode != "curve" or want is None or float(row.get("filled_qty") or 0) > 0:
+                return False
+            return abs(float(row.get("size") or 0) - want) > CURVE_REPLACE_FRAC * want
 
         levels_up = max(1, int(state.get("levels_up") or 1))
         levels_down = max(1, int(state["levels_down"]))
@@ -2309,36 +2439,47 @@ class LitGridLive:
             for ln, px in keep_plan.buy_lines:
                 key = ("buy", price_to_int(px))
                 if ln not in new_buy_lines and key in resting_keys:
-                    w = grid_engine.Want("buy", px, order_size, ln)
+                    sz = size_at(px)
+                    rows_here = [r for r in resting.get(ln, []) if r["side"] == "buy"]
+                    if any(off_curve(r, sz) for r in rows_here):
+                        continue   # cancelled by the diff; placed again at its curve size once in range
+                    held_qty = max((float(r.get("size") or 0) for r in rows_here), default=sz or 0.0)
+                    w = grid_engine.Want("buy", px, sz, ln)
                     wants.append(w)
-                    kept_far.append((px, w))
+                    kept_far.append((px, w, held_qty))
             for ln, px in plan.buy_lines:
                 key = ("buy", price_to_int(px))
                 line_rows = [r for r in resting.get(ln, []) if r["side"] == "buy"]
+                sz = size_at(px)
+                if sz is None:
+                    continue
                 if line_rows:
                     # This line already has an open buy row. Keep it only if it is resting at this
                     # exact price; otherwise (filled but not yet recorded, in flight, old price)
                     # wait for reconcile -- a second buy here would stack two lots on one line.
+                    # Curve mode: one far off its curve size is not kept (the diff cancels it, and
+                    # the line is bought again at its curve size once reconcile clears the row).
                     if any(int(r["client_order_index"]) in on_book_cos
-                           and price_to_int(float(r.get("limit_price") or 0)) == key[1] for r in line_rows):
-                        wants.append(grid_engine.Want("buy", px, order_size, ln))
+                           and price_to_int(float(r.get("limit_price") or 0)) == key[1]
+                           and not off_curve(r, sz) for r in line_rows):
+                        wants.append(grid_engine.Want("buy", px, sz, ln))
                     continue
                 if key in resting_keys or key in self._inflight:
-                    wants.append(grid_engine.Want("buy", px, order_size, ln))
+                    wants.append(grid_engine.Want("buy", px, sz, ln))
                     continue
-                cost = px * order_size
+                cost = px * sz
                 # Short of money while far buys hold it: release the farthest (the diff cancels it,
                 # and the cancel goes before this buy in the batch).
                 while cost > available and kept_far:
-                    far_px, far_w = min(kept_far, key=lambda x: x[0])
-                    kept_far.remove((far_px, far_w))
-                    wants.remove(far_w)
-                    available += far_px * order_size
+                    far = min(kept_far, key=lambda x: x[0])
+                    kept_far.remove(far)
+                    wants.remove(far[1])
+                    available += far[0] * far[2]
                     buys_need_release = True
                 if cost > available or (allowance is not None and new_buys >= allowance):
                     funds_ok = False
                     break
-                wants.append(grid_engine.Want("buy", px, order_size, ln,
+                wants.append(grid_engine.Want("buy", px, sz, ln,
                                               funded=max(0.0, cost - max(base_remaining, 0.0))))
                 available -= cost
                 base_remaining -= cost
@@ -2526,7 +2667,8 @@ class LitGridLive:
         self._last_slow_at = time.time()
         buckets = await self._bucket_balances(rest_withdrawn=state.get("rest_withdrawn_usd"))
         compound_now = buckets.get("profit_bucket_compound_usd")
-        resize = self._compound_resize_due(state, compound_now, price)
+        # Curve mode sizes every buy from the budget, profit included -- no order-size resize.
+        resize = sizing_mode(state) != "curve" and self._compound_resize_due(state, compound_now, price)
         step_usd = self._compound_step_usd(state, price)
         if resize:
             # Compounding only ever ADDS to the order size (2026-10-24, owner: "compounding should
@@ -2535,7 +2677,7 @@ class LitGridLive:
             # already sitting in open buys and shrank orders 44.3 -> 43.3 -> 40.1 LIT in one day.
             # A gate change still recomputes from available cash (_dynamic_order_size).
             cur = state.get("order_size_lit")
-            if state.get("dynamic_dd_enabled") and cur is not None and step_usd > 0:
+            if sizing_mode(state) == "dynamic" and cur is not None and step_usd > 0:
                 rec0 = state.get("compound_resize")
                 base = rec0.get("compound_usd") if isinstance(rec0, dict) else None
                 base = float(base if base is not None else getattr(self, "_compound_base", 0.0) or 0.0)
@@ -2562,10 +2704,12 @@ class LitGridLive:
                 rec = dict(rec, step_usd=round(step_usd, 2))
                 await self.update_state_optional({"compound_resize": rec})
                 state["compound_resize"] = rec
-        if state.get("dynamic_dd_enabled"):
+        if sizing_mode(state) == "dynamic":
             holdings = await self.current_holdings()
             resting = await self.resting_orders_by_level()
             await self._dynamic_order_size(state, price, effective_spacing_pct(state), holdings, resting)
+        elif sizing_mode(state) == "curve":
+            await self._publish_curve_state(state, price)
 
     async def market_sell_level(self, level, qty, min_price=None):
         """min_price (2026-10-22): the worst execution price allowed, floored at the lot's own
