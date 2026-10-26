@@ -361,6 +361,122 @@ function LitLiquidityPanel({ state, fills24h }: { state: any; fills24h: any[] })
   );
 }
 
+// Curve pill body (2026-10-25): chart of size vs fall from the top, live position, and a
+// per-level table with $/trade and $/month at the bot's live trade rate. size(p) is rebuilt from
+// curve_state exactly: floor + (size_top - floor) * ((p - F)/(P - F))^n.
+function CurveView({ curve, livePrice, spacingPct, tradesPerDay, ago }: {
+  curve: any; livePrice: number | null; spacingPct: number; tradesPerDay: number; ago: string | null;
+}) {
+  const P = Number(curve.top), F = Number(curve.bottom), n = Number(curve.n);
+  const floor = Number(curve.floor_lit), top = Number(curve.size_top);
+  const sizeAt = (px: number) => floor + (top - floor) * Math.pow(Math.min(1, Math.max(0, (px - F) / (P - F))), n);
+  const perTrade = (px: number) => sizeAt(px) * px * spacingPct / 100;
+  const perMonth = (px: number) => perTrade(px) * tradesPerDay * 30;
+  const fallNow = livePrice != null ? Math.max(0, (1 - livePrice / P) * 100) : null;
+  const usd = (v: number) => v >= 1000 ? `$${(v / 1000).toFixed(1)}k` : v >= 10 ? `$${v.toFixed(0)}` : `$${v.toFixed(2)}`;
+
+  // chart: x = fall from top 0..60%, y = size
+  const W = 320, H = 130, padL = 30, padB = 18, padT = 8, padR = 8, XMAX = 60;
+  const xs = (d: number) => padL + (d / XMAX) * (W - padL - padR);
+  const ys = (q: number) => padT + (1 - q / top) * (H - padT - padB);
+  const pts: [number, number][] = [];
+  for (let i = 0; i <= 120; i++) { const d = (i / 120) * XMAX; pts.push([xs(d), ys(sizeAt(P * (1 - d / 100)))]); }
+  const line = pts.map(([x, y], i) => `${i ? "L" : "M"}${x.toFixed(1)},${y.toFixed(1)}`).join(" ");
+  const area = `${line} L${xs(XMAX)},${ys(0)} L${xs(0)},${ys(0)} Z`;
+  const nowX = fallNow != null ? xs(Math.min(fallNow, XMAX)) : null;
+  const nowY = livePrice != null ? ys(sizeAt(livePrice)) : null;
+
+  const rows = [0, 5, 10, 15, 20, 30, 40, 50, 99.9];
+  const nearest = fallNow == null ? null : rows.reduce((a, b) => Math.abs(b - fallNow) < Math.abs(a - fallNow) ? b : a);
+
+  return (
+    <div className="space-y-3">
+      <div className="grid grid-cols-3 gap-2">
+        <div className="rounded-lg border border-gray-700 bg-gray-800/60 p-2">
+          <p className="text-gray-500 text-[10px] uppercase tracking-wide">Top</p>
+          <p className="text-gray-100 text-sm font-bold tabular-nums">${P.toFixed(4)}</p>
+          <p className={`text-[10px] tabular-nums ${fallNow != null && fallNow > 0.01 ? "text-red-400" : "text-green-400"}`}>
+            {fallNow != null ? (fallNow > 0.01 ? `price −${fallNow.toFixed(2)}%` : "price at the top") : ""}
+          </p>
+        </div>
+        <div className="rounded-lg border border-gray-700 bg-gray-800/60 p-2">
+          <p className="text-gray-500 text-[10px] uppercase tracking-wide">Budget</p>
+          <p className="text-gray-100 text-sm font-bold tabular-nums">${Number(curve.budget_usd).toLocaleString(undefined, { maximumFractionDigits: 0 })}</p>
+          <p className="text-gray-500 text-[10px] tabular-nums">floor ${Number(curve.floor_reserve_usd).toLocaleString(undefined, { maximumFractionDigits: 0 })}</p>
+        </div>
+        <div className="rounded-lg border border-blue-500/40 bg-blue-500/10 p-2">
+          <p className="text-blue-300/80 text-[10px] uppercase tracking-wide">Next buy</p>
+          <p className="text-blue-300 text-sm font-bold tabular-nums">{Number(curve.next_buy_size).toFixed(2)} LIT</p>
+          <p className="text-gray-500 text-[10px] tabular-nums">${Number(curve.next_buy_price).toFixed(4)} · ~{usd(livePrice != null ? perMonth(livePrice) : 0)}/mo</p>
+        </div>
+      </div>
+
+      <div className="rounded-lg border border-gray-700 bg-gray-950/60 p-2">
+        <div className="flex items-center justify-between mb-1">
+          <p className="text-gray-400 text-[10px] uppercase tracking-wide">Order size by fall from the top</p>
+          <p className="text-gray-500 text-[10px]">n {n} · floor {floor} LIT</p>
+        </div>
+        <svg viewBox={`0 0 ${W} ${H}`} className="w-full h-auto">
+          <defs>
+            <linearGradient id="curveFill" x1="0" y1="0" x2="0" y2="1">
+              <stop offset="0%" stopColor="#3b82f6" stopOpacity="0.55" />
+              <stop offset="100%" stopColor="#3b82f6" stopOpacity="0.03" />
+            </linearGradient>
+          </defs>
+          {[10, 20, 30, 40, 50].map((d) => (
+            <g key={d}>
+              <line x1={xs(d)} x2={xs(d)} y1={padT} y2={ys(0)} stroke="#374151" strokeDasharray="2 3" strokeWidth="0.6" />
+              <text x={xs(d)} y={H - 5} fill="#6b7280" fontSize="8" textAnchor="middle">−{d}%</text>
+            </g>
+          ))}
+          <text x={xs(0)} y={H - 5} fill="#6b7280" fontSize="8" textAnchor="start">top</text>
+          {[top, top / 2].map((q) => (
+            <g key={q}>
+              <line x1={padL} x2={W - padR} y1={ys(q)} y2={ys(q)} stroke="#1f2937" strokeWidth="0.6" />
+              <text x={padL - 3} y={ys(q) + 3} fill="#6b7280" fontSize="8" textAnchor="end">{q.toFixed(0)}</text>
+            </g>
+          ))}
+          <path d={area} fill="url(#curveFill)" />
+          <path d={line} fill="none" stroke="#60a5fa" strokeWidth="1.6" />
+          <line x1={padL} x2={W - padR} y1={ys(floor)} y2={ys(floor)} stroke="#f59e0b" strokeOpacity="0.6" strokeDasharray="3 2" strokeWidth="0.8" />
+          {nowX != null && nowY != null && (
+            <g>
+              <line x1={nowX} x2={nowX} y1={padT} y2={ys(0)} stroke="#22c55e" strokeOpacity="0.5" strokeWidth="0.8" />
+              <circle cx={nowX} cy={nowY} r="3.2" fill="#22c55e" stroke="#052e16" strokeWidth="1" />
+              <text x={Math.min(nowX + 5, W - 40)} y={Math.max(nowY - 5, padT + 8)} fill="#4ade80" fontSize="8.5" fontWeight="bold">now {sizeAt(livePrice!).toFixed(1)}</text>
+            </g>
+          )}
+        </svg>
+      </div>
+
+      <div className="rounded-lg border border-gray-700 overflow-hidden">
+        <div className="grid grid-cols-[3.2rem_4.2rem_1fr_3.6rem] gap-2 bg-gray-800/80 text-[10px] uppercase tracking-wide text-gray-500 px-2 py-1">
+          <span>Fall</span><span>Price</span><span>Size</span><span className="text-right">$/mo</span>
+        </div>
+        {rows.map((d) => {
+          const px = P * (1 - d / 100);
+          const q = d === 99.9 ? floor : sizeAt(px);
+          const here = d === nearest;
+          return (
+            <div key={d} className={`grid grid-cols-[3.2rem_4.2rem_1fr_3.6rem] gap-2 items-center px-2 py-1.5 text-xs tabular-nums border-t border-gray-800 ${here ? "bg-green-500/10 text-green-200 font-semibold" : "text-gray-400"}`}>
+              <span>{here ? "▶ " : ""}{d === 0 ? "top" : `−${d}%`}</span>
+              <span>${px < 0.1 ? px.toFixed(4) : px.toFixed(3)}</span>
+              <span className="flex items-center gap-1.5 min-w-0">
+                <span className="h-1.5 rounded-full bg-blue-400/70 shrink-0" style={{ width: `${Math.max(2, (q / top) * 100) * 0.6}%` }} />
+                <span className="truncate">{q.toFixed(q < 10 ? 2 : 1)} LIT</span>
+              </span>
+              <span className="text-right">{usd(perMonth(px))}</span>
+            </div>
+          );
+        })}
+      </div>
+      <p className="text-gray-500 text-[10px] leading-snug tabular-nums">
+        size = floor + (B − R)/W × ((p − F)/(P − F))^n · bottom ${F.toFixed(4)} · {curve.lines} lines · $/mo at the live rate of ~{tradesPerDay.toFixed(0)} trades/day{ago ? ` · updated ${ago} ago` : ""}
+      </p>
+    </div>
+  );
+}
+
 function LitGridLivePanel({
   state, orders, sells, sellCount, resting, loading, firstSellAt = null,
   enabled, onToggle, toggling,
@@ -898,49 +1014,10 @@ function LitGridLivePanel({
             {curveOn ? "● ON" : "○ OFF"}
           </span>
         </div>
-        <p className="text-gray-400 text-[11px] font-mono leading-snug">size = floor + (B − R)/W × ((p − F)/(P − F))^n</p>
-        {curveOn && (
-          <>
-            {curve == null ? (
-              <p className="text-gray-500 text-xs">Planning the curve at the current price…</p>
-            ) : (
-              <>
-                <div className="grid grid-cols-3 gap-2">
-                  <div className="rounded-lg border border-gray-700 bg-gray-800/60 p-2">
-                    <p className="text-gray-500 text-[10px] uppercase tracking-wide">Top (P)</p>
-                    <p className="text-gray-100 text-sm font-bold tabular-nums">${Number(curve.top).toFixed(4)}</p>
-                    <p className="text-gray-500 text-[10px]">{livePrice != null ? `price ${((livePrice / Number(curve.top) - 1) * 100).toFixed(2)}%` : ""}</p>
-                  </div>
-                  <div className="rounded-lg border border-gray-700 bg-gray-800/60 p-2">
-                    <p className="text-gray-500 text-[10px] uppercase tracking-wide">Budget (B)</p>
-                    <p className="text-gray-100 text-sm font-bold tabular-nums">${Number(curve.budget_usd).toLocaleString(undefined, { maximumFractionDigits: 0 })}</p>
-                    <p className="text-gray-500 text-[10px]">floor costs ${Number(curve.floor_reserve_usd).toLocaleString(undefined, { maximumFractionDigits: 0 })}</p>
-                  </div>
-                  <div className="rounded-lg border border-blue-500/40 bg-blue-500/10 p-2">
-                    <p className="text-blue-300/80 text-[10px] uppercase tracking-wide">Next buy</p>
-                    <p className="text-blue-300 text-sm font-bold tabular-nums">{Number(curve.next_buy_size).toFixed(2)} LIT</p>
-                    <p className="text-gray-500 text-[10px] tabular-nums">at ${Number(curve.next_buy_price).toFixed(4)}</p>
-                  </div>
-                </div>
-                <div className="rounded-lg border border-gray-700 overflow-hidden">
-                  <div className="grid grid-cols-3 bg-gray-800/80 text-[10px] uppercase tracking-wide text-gray-500 px-2 py-1">
-                    <span>Below top</span><span>Price</span><span className="text-right">Size</span>
-                  </div>
-                  {([[0, "size_top"], [10, "size_10"], [20, "size_20"], [30, "size_30"], [50, "size_50"], [99.9, null]] as const).map(([d, k]) => (
-                    <div key={d} className="grid grid-cols-3 px-2 py-1.5 text-xs tabular-nums border-t border-gray-800 text-gray-400">
-                      <span>{d === 0 ? "top" : `−${d}%`}</span>
-                      <span>${(Number(curve.top) * (1 - d / 100)).toFixed(4)}</span>
-                      <span className="text-right">{k ? `${Number(curve[k]).toFixed(2)} LIT` : `${Number(curve.floor_lit).toFixed(2)} LIT (floor)`}</span>
-                    </div>
-                  ))}
-                </div>
-                <p className="text-gray-500 text-[10px] tabular-nums">
-                  n {curve.n} · floor {curve.floor_lit} LIT · bottom ${Number(curve.bottom).toFixed(4)} · {curve.lines} lines · cash at plan ${Number(curve.cash_at_plan_usd).toLocaleString(undefined, { maximumFractionDigits: 0 })}{curveAgo != null ? ` · updated ${fmtAgo(curveAgo)} ago` : ""}
-                </p>
-              </>
-            )}
-          </>
-        )}
+        {curveOn && (curve == null
+          ? <p className="text-gray-500 text-xs">Planning the curve at the current price…</p>
+          : <CurveView curve={curve} livePrice={livePrice} spacingPct={baseSpacingPct ?? 0.125}
+              tradesPerDay={tradesPerHour != null ? tradesPerHour * 24 : 626} ago={curveAgo != null ? fmtAgo(curveAgo) : null} />)}
         <div className="flex items-end gap-2">
           <label className="flex-1 text-[10px] text-gray-500">n
             <input value={curveNIn} onChange={(e) => setCurveNIn(e.target.value)} placeholder={String(st?.curve_n ?? 10)}
