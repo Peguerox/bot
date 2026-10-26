@@ -423,6 +423,8 @@ async def run_scenario(name, kind, seed, p429=0.0, p_timeout=0.0, restart_every=
     prices = price_path(kind, 3.50, ticks, rng)
     disrupt_until = disrupt_until if disrupt_until is not None else int(ticks * 0.6)
     worst_profit = 0.0
+    seen_filled = {r["id"] for r in db.orders if r.get("status") == "filled"}
+    held_before, anchor_before, stacked_buys = set(), None, []
     recovered_at = None
     covered = eligible = 0
     for i, p in enumerate(prices):
@@ -450,6 +452,16 @@ async def run_scenario(name, kind, seed, p429=0.0, p_timeout=0.0, restart_every=
         for r in db.orders:
             if r["side"] == "sell" and r.get("realized_profit_usd") is not None:
                 worst_profit = min(worst_profit, float(r["realized_profit_usd"]))
+        # A NEW buy filling on a line that already held a lot = a second buy on a held line (the
+        # rule). Lots merged onto one line by a re-anchor (2026-10-26, by design) don't count.
+        if db.state.get("grid_anchor_log") == anchor_before:
+            for r in db.orders:
+                if (r["side"] == "buy" and r.get("status") == "filled" and r["id"] not in seen_filled
+                        and r["level"] in held_before and r.get("order_kind") != "market"):
+                    stacked_buys.append((i, r["level"]))
+        seen_filled.update(r["id"] for r in db.orders if r.get("status") == "filled")
+        held_before = {k for k, h in lot_costs(db).items() if h["qty"] >= 1e-9}
+        anchor_before = db.state.get("grid_anchor_log")
         prices_on_book = [(o["side"], round(o["price"], 4)) for o in ex.orders.values() if o["status"] == "open"]
         if len(prices_on_book) != len(set(prices_on_book)):
             check(f"[{name}] never two of our orders at one price (tick {i})", False, sorted(prices_on_book))
@@ -492,6 +504,10 @@ async def run_scenario(name, kind, seed, p429=0.0, p_timeout=0.0, restart_every=
             # counting -- docs, confirmed live 2026-10-22). 50% there is the account's ceiling,
             # not the engine's; a Plus account lifts it.
             need = 0.5 if "0.125" in name else 0.85
+            # Every spacing change is a clean reset since 2026-10-26 (one cancel-all, a few seconds
+            # of empty book, then the rebuild); spacing growth changes spacing at every tier.
+            if "growth" in name:
+                need = min(need, 0.8)
             check(f"[{name}] a buy and a sell next to price on >={int(need*100)}% of calm ticks ({covered}/{eligible})",
                   covered >= need * eligible, (covered, eligible))
     ledger_lit = sum(h["qty"] for h in lot_costs(db).values())
@@ -503,18 +519,9 @@ async def run_scenario(name, kind, seed, p429=0.0, p_timeout=0.0, restart_every=
                 ledger_lit += o["filled"] if o["side"] == "buy" else -o["filled"]
     check(f"[{name}] ledger LIT matches exchange LIT ({ledger_lit:.2f} vs {ex.lit:.2f})",
           abs(ledger_lit - ex.lit) < 0.05, (ledger_lit, ex.lit))
-    # One lot per line: walking each line's buys and sells in time order, it never holds two.
-    worst_stack = 0
-    events = sorted((r["id"], r) for r in db.orders if r.get("status") == "filled")
-    held_per_line = {}
-    for _, r in events:
-        if r["side"] == "buy":
-            held_per_line[r["level"]] = held_per_line.get(r["level"], 0) + 1
-            worst_stack = max(worst_stack, held_per_line[r["level"]])
-        elif r.get("closes_level") is not None:
-            held_per_line[r["closes_level"]] = max(0, held_per_line.get(r["closes_level"], 0) - 1)
+    # One lot per line: no new buy ever filled on a line already holding a lot.
     if not any(h for h in (hooks or {})) and flatten_at is None:
-        check(f"[{name}] a line never holds two lots at once (worst {worst_stack})", worst_stack <= 1, worst_stack)
+        check(f"[{name}] never a second buy on a held line ({len(stacked_buys)})", not stacked_buys, stacked_buys[:5])
     open_ledger = {r["client_order_index"] for r in db.orders if r.get("status") in ("open", "pending", "cancel_requested")}
     open_ex = {o["co"] for o in ex.orders.values() if o["status"] == "open"}
     # A cancel sent in the last few seconds is legitimately not reconciled yet.

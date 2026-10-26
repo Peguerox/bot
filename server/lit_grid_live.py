@@ -745,7 +745,7 @@ def open_segments(buys, sells):
     return out
 
 
-def plan_reanchor_log(buys, sells, all_levels, price, new_spacing_pct):
+def plan_reanchor_log(buys, sells, all_levels, price, new_spacing_pct, merge=False):
     """plan_reanchor for engine v2: the anchor is returned as ln(anchor), so line prices are
     exp(anchor_log + line*step) and there is no overflow limit at any spacing -- v1's
     price / exp(offset*step) refused past offset*step > 600, and every re-anchor adds ~2000 lines,
@@ -757,7 +757,7 @@ def plan_reanchor_log(buys, sells, all_levels, price, new_spacing_pct):
     # Every lot keeps its own line (no merging): a merged line averages the lots' costs, and a sell
     # already resting for the cheaper lot could then fill below that new average (simulator,
     # 2026-10-22). v1's plan_reanchor still merges.
-    planned = _reanchor_moves(buys, sells, offset, price, step, merge=False)
+    planned = _reanchor_moves(buys, sells, offset, price, step, merge=merge)
     if planned is None:
         return None
     moves, mapping = planned
@@ -765,22 +765,49 @@ def plan_reanchor_log(buys, sells, all_levels, price, new_spacing_pct):
 
 
 def _reanchor_moves(buys, sells, offset, price, step, merge=True):
+    """Each held lot goes to the new line nearest its cost. With `merge`, lots may share a line
+    when the shared line's average-cost walk gives exactly the lots' own total qty and cost (true
+    whenever one lot's past partial sells all came before the other lot's buys) -- the caller must
+    have an empty book (no sell resting for one lot that could fill against the merged average).
+    A line that cannot take the lot: the nearest other one, either way, whose next line (the sell)
+    is still at or above the lot's cost (2026-10-26: collisions used to go only upward, and on the
+    real ledger a 0.25% change put 167 of 169 lots 2+ spacings above cost, up to 175)."""
     held = holdings_from_rows(buys, sells)
     segs = open_segments(buys, sells)
-    used, moves, mapping = {}, {}, {}
+    placed, moves, mapping = {}, {}, {}
     if any(not segs.get(l) for l in held):
         return None
+    buy_by_id = {b["id"]: b for b in buys}
+    sell_by_id = {x["id"]: x for x in sells}
     is_dust = lambda l: clamp_order_size(held[l]["qty"]) is None
     has_sells_of = lambda l: any(kind == "sell" for _, kind in segs[l])
-    for lvl in sorted(held, key=lambda l: (is_dust(l), has_sells_of(l), held[l]["cost"], l)):
-        seg = segs[lvl]
-        has_sells = has_sells_of(lvl)
-        line = offset + round(math.log(held[lvl]["cost"] / price) / step)
-        while line in used and (has_sells or used[line] or not merge):
-            line += 1
-        used[line] = used.get(line, False) or has_sells
+
+    def fits(line, lvl):
+        lots = placed.get(line, []) + [lvl]
+        if len(lots) == 1:
+            return True
+        if not merge:
+            return False
+        bs = [dict(buy_by_id[rid], level=line) for l in lots for rid, k in segs[l] if k == "buy"]
+        ss = [dict(sell_by_id[rid], closes_level=line) for l in lots for rid, k in segs[l] if k == "sell"]
+        h = holdings_from_rows(bs, ss).get(line)
+        q = sum(held[l]["qty"] for l in lots)
+        c = sum(held[l]["qty"] * held[l]["cost"] for l in lots)
+        bc = sum(held[l]["bucket_cost_total"] for l in lots)
+        return (h is not None and abs(h["qty"] - q) < 1e-6 and abs(h["qty"] * h["cost"] - c) < 1e-6
+                and abs(h["bucket_cost_total"] - bc) < 1e-6)
+
+    # Partly-sold lots first (fewest lines they can share), then by cost.
+    for lvl in sorted(held, key=lambda l: (is_dust(l), not has_sells_of(l), held[l]["cost"], l)):
+        exact = math.log(held[lvl]["cost"] / price) / step
+        nearest = offset + round(exact)
+        line, k = nearest, 0
+        while line + 1 - offset < exact - 1e-9 or not fits(line, lvl):
+            k += 1
+            line = nearest + (k + 1) // 2 if k % 2 else nearest - k // 2
+        placed.setdefault(line, []).append(lvl)
         mapping[lvl] = line
-        for rid, kind in seg:
+        for rid, kind in segs[lvl]:
             moves[rid] = ("level" if kind == "buy" else "closes_level", line)
     after = holdings_from_rows(
         [dict(b, level=moves[b["id"]][1]) if b["id"] in moves else b for b in buys],
@@ -1304,7 +1331,9 @@ class LitGridLive:
         buys, sells = await self._holdings_rows()
         all_rows = await self.sb_paginate(f"{self.TABLE_ORDERS}?select=id,level,closes_level&order=id.asc")
         all_levels = [r[k] for r in all_rows for k in ("level", "closes_level") if r.get(k) is not None]
-        plan = plan_reanchor_log(buys, sells, all_levels, price, spacing_pct)
+        # Book empty and every open row settled: lots may share a line (no resting sell can fill
+        # against a merged average), which keeps them next to their cost at a wider spacing.
+        plan = plan_reanchor_log(buys, sells, all_levels, price, spacing_pct, merge=True)
         if plan is None:
             await self.log_run("grid_reset_reanchor_blocked", detail)
             return
@@ -2572,40 +2601,6 @@ class LitGridLive:
             "buy_ok": buy_ok, "sell_ok": sell_ok, "want_buy": want_buy, "want_sell": want_sell,
             "gap_since": self._gap_since, "at": now_iso(), "alert_after_s": NEAR_BOOK_GAP_ALERT_S}})
 
-    async def _engine_spacing_change(self, state, price, spacing_pct):
-        """Spacing changed (dashboard edit, gate toggle, tier switch): re-number held lots onto the
-        new grid in log space -- no overflow cliff at any spacing -- through a journal, so a crash
-        between writes re-applies the same moves instead of splitting a lot. No cancels here: the
-        next engine_cycle sees the whole book at the old spacing and replaces it (cancel-all plus
-        one batch)."""
-        buys, sells = await self._holdings_rows()
-        all_rows = await self.sb_paginate(f"{self.TABLE_ORDERS}?select=id,level,closes_level&order=id.asc")
-        all_levels = [r[k] for r in all_rows for k in ("level", "closes_level") if r.get(k) is not None]
-        plan = plan_reanchor_log(buys, sells, all_levels, price, spacing_pct)
-        if plan is None:
-            if not getattr(self, "_reanchor_blocked_logged", False):
-                self._reanchor_blocked_logged = True
-                await self.log_run("spacing_change_reanchor_blocked", {"new": spacing_pct, "price": price})
-            return False
-        anchor_log, moves, mapping = plan
-        # Sells still resting from before the change must follow their lot to its new line: v1
-        # cancelled everything first, v2 leaves the book to the next cycle, and a sell that fills
-        # in between would otherwise close the lot's OLD number -- a lot nobody holds anymore
-        # (found by the engine simulator: the ledger ended up holding more LIT than the account).
-        open_rows = await self.sb_paginate(
-            f"{self.TABLE_ORDERS}?status=in.({','.join(OPEN_STATUSES)})&select=id,side,closes_level")
-        for r in open_rows:
-            if r["side"] == "sell" and r.get("closes_level") in mapping and r["id"] not in moves:
-                moves[r["id"]] = ("closes_level", mapping[r["closes_level"]])
-        journal = {"anchor_log": anchor_log, "spacing": spacing_pct, "price": price,
-                   "moves": {str(rid): [col, line] for rid, (col, line) in moves.items()}}
-        await self.update_state({"reanchor_journal": journal})
-        await self._apply_reanchor_journal(journal)
-        self._reanchor_blocked_logged = False
-        await self.log_run("spacing_changed_rearmed", {"new": spacing_pct, "price": price,
-                                                        "lots_moved": len(mapping)})
-        return True
-
     async def _apply_reanchor_journal(self, journal):
         self._rows_cache = None
         for rid, (col, line) in journal["moves"].items():
@@ -2656,7 +2651,12 @@ class LitGridLive:
         if persisted is None:
             await self.update_state({"internal_spacing_pct": spacing_pct})
         elif float(persisted) != spacing_pct and self._anchor_log(state) is not None:
-            await self._engine_spacing_change(state, price, spacing_pct)
+            # A spacing change goes through the clean reset (2026-10-26): one cancel-all, wait for
+            # an empty book, then re-anchor with lots merged next to their cost. Re-anchoring with
+            # sells still resting kept every lot on its own line and pushed collided lots far
+            # above cost.
+            await self.update_state({"grid_reset_requested": True})
+            await self.log_run("spacing_change_clean_reset", {"from": float(persisted), "to": spacing_pct, "price": price})
             return
         await self.engine_cycle(state, price, entries_allowed=entries_allowed)
         await self.update_state({"live_price": price, "updated_at": now_iso()})

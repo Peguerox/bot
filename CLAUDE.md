@@ -269,8 +269,7 @@ project with no git/Render/Vercel link -- never work there.
     REST), wakes on each fill (~1s live reaction). v1 (`maintain_window`) is only the fallback —
     to be deleted after ~24h of clean audits. Before ANY v2 change run
     `python3 server/test_simple_grid.py` (starts from copies of the real ledgers, checks the order
-    right above/below price every tick). Live checks: `research/audit_lit_live.py`. Keep gate
-    spacing growth OFF until v2's re-anchor is fixed (lots land far above cost).
+    right above/below price every tick). Live checks: `research/audit_lit_live.py`. Spacing changes now go through the clean reset (cancel-all, empty book, lots merged next to their cost; fixed 2026-10-26 -- before, collided lots landed up to 175 spacings above cost).
     Budget: Lighter Standard = 60 req/min per wallet, both bots share it, every tx in a batch
     counts; the bots cap themselves at 40/min together.
 

@@ -919,7 +919,9 @@ async def t_tick_spacing_change_unsticks_once_the_vanished_order_resolves():
         assets=[FakeAsset("USDC", 500.0, 0.0), FakeAsset("LIT", 6.0, 0.0)],
     )
     bot.fetch_current_price = lambda: _async_return(3.78)
-    await bot.tick()
+    # Since 2026-10-26 the change asks for the clean reset on one tick and the reset finishes it.
+    for _ in range(4):
+        await bot.tick()
     check("the previously-vanished order is resolved, not still resting",
           next(r for r in fake.orders if r["id"] == 846)["status"] == "rejected",
           fake.orders)
@@ -1936,10 +1938,88 @@ async def t_curve_plans_at_switch_on_and_moves_up_only_at_a_new_top():
           abs(bot._curve_budget(st) - st["curve_cash_usd"]) < 1e-9)
 
 
+# ── Re-anchor keeps lots next to their cost (2026-10-26) ───────────────────────────────────────
+
+def _lot(i, level, qty, price):
+    return {"id": i, "level": level, "side": "buy", "status": "filled", "filled_qty": qty,
+            "filled_price": price, "size": qty}
+
+
+def t_reanchor_merges_lots_that_land_on_one_wider_line():
+    # Four 0.125% lots inside one 0.5% line: merged there (average cost), each sell one line up --
+    # never pushed up a line per collision.
+    P = 3.17
+    buys = [_lot(i + 1, 100 + i, 10.0, round(P * 1.00125 ** -i, 4)) for i in range(4)]
+    step = math.log(1.005)
+    moves, mapping = core._reanchor_moves(buys, [], 5000, P, step, merge=True)
+    check("4 nearby lots share one line at 0.5%", len(set(mapping.values())) <= 2, mapping)
+    after = core.holdings_from_rows([dict(b, level=moves[b["id"]][1]) for b in buys], [])
+    check("total LIT and cost unchanged", abs(sum(h["qty"] for h in after.values()) - 40) < 1e-9
+          and abs(sum(h["qty"] * h["cost"] for h in after.values()) - sum(b["filled_qty"] * b["filled_price"] for b in buys)) < 1e-6)
+    anchor = math.log(P) - 5000 * step
+    worst = max(core.grid_engine.sell_target(ln, h["cost"], anchor, step, 0.005, core.round_price) / h["cost"] - 1
+                for ln, h in after.items())
+    check("every sell within 2 spacings of its cost", worst <= 0.0101, worst)
+    moves2, mapping2 = core._reanchor_moves(buys, [], 5000, P, step, merge=False)
+    check("without merging they could not share (old behaviour kept for merge=False)",
+          len(set(mapping2.values())) == 4, mapping2)
+
+
+def t_reanchor_merges_a_partly_sold_lot_only_when_the_costs_stay_exact():
+    P = 3.17
+    old = _lot(1, 10, 20.0, 3.19)
+    part_sell = {"id": 2, "closes_level": 10, "side": "sell", "filled_qty": 5.0}
+    new = _lot(3, 11, 10.0, 3.1905)                    # bought after the partial sell: merge exact
+    step = math.log(1.005)
+    moves, mapping = core._reanchor_moves([old, new], [part_sell], 5000, P, step, merge=True)
+    check("non-interleaved lots may share a line", mapping[10] == mapping[11], mapping)
+    late_sell = {"id": 4, "closes_level": 10, "side": "sell", "filled_qty": 5.0}   # after lot 11's buy
+    moves, mapping = core._reanchor_moves([old, new], [part_sell, late_sell], 5000, P, step, merge=True)
+    check("a lot sold after the other lot's buy never shares (its cost would mix)",
+          mapping[10] != mapping[11], mapping)
+    held = core.holdings_from_rows([old, new], [part_sell, late_sell])
+    after = core.holdings_from_rows(
+        [dict(b, level=moves[b["id"]][1]) for b in (old, new)],
+        [dict(x, closes_level=moves[x["id"]][1]) for x in (part_sell, late_sell)])
+    check("each lot keeps its exact qty and cost",
+          sorted((round(h["qty"], 9), round(h["cost"], 9)) for h in held.values())
+          == sorted((round(h["qty"], 9), round(h["cost"], 9)) for h in after.values()), (held, after))
+
+
+def t_reanchor_collision_goes_to_the_nearest_line_not_far_up():
+    # A partly-sold lot holds the nearest line; the lot that cannot share it goes one line away,
+    # and never to a line whose sell would be below its cost.
+    P = 3.17
+    step = math.log(1.0025)
+    old = _lot(1, 10, 20.0, 3.20)
+    s1 = {"id": 5, "closes_level": 10, "side": "sell", "filled_qty": 5.0}
+    other = _lot(3, 11, 10.0, 3.2001)
+    s2 = {"id": 6, "closes_level": 10, "side": "sell", "filled_qty": 1.0}
+    moves, mapping = core._reanchor_moves([old, other], [s1, s2], 5000, P, step, merge=True)
+    check("collided lot lands one line from the other", abs(mapping[11] - mapping[10]) == 1, mapping)
+    anchor = math.log(P) - 5000 * step
+    for lv, cost in ((10, 3.20), (11, 3.2001)):
+        nxt = core.grid_engine.line_price(anchor, mapping[lv] + 1, step)
+        check(f"lot {lv}: its sell line is at or above cost", nxt >= cost - 1e-9, (nxt, cost))
+
+
+async def t_spacing_change_asks_for_the_clean_reset():
+    bot, fake = make_bot(base_state(spacing_pct=0.25, internal_spacing_pct=0.125, grid_anchor_price=3.10),
+                          orders=[])
+    bot.fetch_current_price = lambda: _async_return(3.10)
+    await bot.tick()
+    check("a spacing change requests the clean reset (cancel-all, empty book, merge)",
+          fake.state.get("grid_reset_requested") is True, fake.state)
+    check("and logs it", any(r.get("action") == "spacing_change_clean_reset" for r in fake.runs), fake.runs)
+
+
 async def main():
     t_precision_and_minimum_enforcement()
     t_curve_spends_exactly_the_budget_down_to_the_floor_price()
     t_sizing_mode_only_one_is_ever_on()
+    t_reanchor_merges_lots_that_land_on_one_wider_line()
+    t_reanchor_merges_a_partly_sold_lot_only_when_the_costs_stay_exact()
+    t_reanchor_collision_goes_to_the_nearest_line_not_far_up()
     t_order_fill_amounts_uses_real_human_decimal_units()
     t_order_is_terminal_uses_remaining_amount_primarily()
     t_is_rate_limit_error_matches_429_and_nonce_not_unrelated_errors()
@@ -2029,7 +2109,8 @@ async def main():
               t_compound_resize_never_changes_any_bucket,
               t_compound_resize_only_ever_adds_to_the_order_size,
               t_bucket_totals_come_from_the_cached_ledger_and_match_a_fresh_read,
-              t_curve_plans_at_switch_on_and_moves_up_only_at_a_new_top):
+              t_curve_plans_at_switch_on_and_moves_up_only_at_a_new_top,
+              t_spacing_change_asks_for_the_clean_reset):
         try:
             await t()
         except Exception as e:

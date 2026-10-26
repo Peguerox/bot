@@ -246,6 +246,51 @@ async def run(name, kind, seed=1, shared_budget=False, react=False, curve=False)
     print(f"  {label}: fills={fills} catch_up_s={catch_up} checked_ticks={checked} worst_req/min={worst}")
 
 
+async def run_respace(name, new_sp, curve=False, seed=3):
+    """Spacing change on the real book (2026-10-26): the clean reset (one cancel-all, empty book,
+    lots merged next to their cost), then normal trading at the new spacing."""
+    st, db, ex, bot, feed, rng = start(name, seed, curve=curve)
+    label = f"{name} respace {st.get('internal_spacing_pct')}% -> {new_sp}%" + (" CURVE" if curve else "")
+    p0 = float(st["live_price"])
+    worst_profit = 0.0
+    for i in range(160):
+        if i == 10:
+            db.state["spacing_pct"] = new_sp
+        p = p0 * (1 + 0.004 * math.sin(i / 9.0)) if i > 60 else p0
+        S.Clock.t += 2.0
+        ex.set_price(p)
+        S.push_feed(feed, ex, rng, 0.0)
+        await bot.tick()
+        for r in db.orders:
+            if r["side"] == "sell" and r.get("realized_profit_usd") is not None:
+                worst_profit = min(worst_profit, float(r["realized_profit_usd"]))
+    for _ in range(10):
+        S.Clock.t += 2.0
+        S.push_feed(feed, ex, rng, 0.0)
+        await bot.tick()
+    state = db.state
+    check(f"[{label}] reset finished at the new spacing",
+          float(state.get("internal_spacing_pct") or 0) == new_sp and not state.get("grid_reset_requested"),
+          (state.get("internal_spacing_pct"), state.get("grid_reset_requested")))
+    check(f"[{label}] nothing sold below cost (worst {worst_profit:.6f})", worst_profit >= -1e-6, worst_profit)
+    ledger_lit = sum(h["qty"] for h in S.lot_costs(db).values())
+    check(f"[{label}] ledger LIT = exchange LIT ({ledger_lit:.2f} vs {ex.lit:.2f})", abs(ledger_lit - ex.lit) < 0.05)
+    step = math.log(1 + new_sp / 100)
+    anchor = bot._anchor_log(state)
+    lots = lots_of(db)
+    gaps = sorted(core.grid_engine.sell_target(l, h["cost"], anchor, step, new_sp / 100, core.round_price) / h["cost"] - 1
+                  for l, h in lots.items())
+    far = [g for g in gaps if g > 4 * new_sp / 100]
+    check(f"[{label}] lots sit next to their cost: worst sell {gaps[-1] * 100 / new_sp:.1f} spacings above cost",
+          gaps and not far, far[:5])
+    ok = ok_now(db, ex, bot, ex.price, step, new_sp)
+    check(f"[{label}] buy below and sell above price are on the book after the change", ok)
+    open_ledger = {int(r["client_order_index"]) for r in db.orders if r["status"] in ("open", "pending", "cancel_requested")}
+    open_ex = {o["co"] for o in ex.orders.values() if o["status"] == "open"}
+    check(f"[{label}] no orphan / ghost orders", open_ledger == open_ex)
+    print(f"  {label}: {len(lots)} lots, median sell {gaps[len(gaps)//2] * 100 / new_sp:.2f} spacings above cost")
+
+
 async def main():
     for name in ("worker4", "worker3"):
         for kind in ("up slow", "up jump", "up fast", "down slow", "down jump", "down fast", "wiggle"):
@@ -264,6 +309,9 @@ async def main():
         await run("worker3", kind, curve=True)
     for kind in ("up fast", "down fast"):
         await run("worker3", kind, shared_budget=True, react=True, curve=True)
+    for sp in (0.25, 0.5):
+        await run_respace("worker3", sp)
+        await run_respace("worker3", sp, curve=True)
     print(f"\n==== {len(PASS)} passed, {len(FAIL)} failed ====")
     if FAIL:
         for f in FAIL:
