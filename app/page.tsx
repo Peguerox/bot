@@ -820,7 +820,7 @@ function LitGridLivePanel({
               <span className="text-sky-300">
                 every new buy uses it
                 {st?.curve_profit_base_usd != null
-                  ? ` · +$${Math.max(0, Number(st?.profit_bucket_compound_usd ?? 0) + Number(st?.profit_bucket_cover_drop_usd ?? 0) - Number(st.curve_profit_base_usd)).toFixed(2)} since the last plan`
+                  ? ` · +$${Math.max(0, Number(st?.profit_bucket_compound_usd ?? 0) + Number(st?.profit_bucket_cover_drop_usd ?? 0) - Number(st.curve_profit_base_usd)).toFixed(2)} since the last reset`
                   : ""}
               </span>
             </span> : <span className="flex flex-col gap-0.5 text-xs">
