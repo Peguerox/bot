@@ -815,7 +815,15 @@ function LitGridLivePanel({
           <Stat
             label="Compound Bucket"
             value={`$${Number(st?.profit_bucket_compound_usd ?? 0).toFixed(2)}`}
-            sub={<span className="flex flex-col gap-0.5 text-xs">
+            sub={curveOn ? <span className="flex flex-col gap-0.5 text-xs">
+              <span className="text-blue-300 font-semibold">∿ in the curve budget</span>
+              <span className="text-sky-300">
+                every new buy uses it
+                {st?.curve_profit_base_usd != null
+                  ? ` · +$${Math.max(0, Number(st?.profit_bucket_compound_usd ?? 0) + Number(st?.profit_bucket_cover_drop_usd ?? 0) - Number(st.curve_profit_base_usd)).toFixed(2)} since the last plan`
+                  : ""}
+              </span>
+            </span> : <span className="flex flex-col gap-0.5 text-xs">
               <span className="text-amber-300 font-semibold">
                 {compoundResizeAgo != null ? `↻ last resize ${fmtAgo(compoundResizeAgo)} ago` : "↻ no resize yet"}
               </span>
