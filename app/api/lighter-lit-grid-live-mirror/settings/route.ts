@@ -98,6 +98,7 @@ export async function POST(req: NextRequest) {
   if (body.reserveEnabled === true || body.reserveEnabled === false) {
     out["reserve_enabled"] = body.reserveEnabled;
     out["reserve_profit_base_usd"] = null;
+    out["reserve_target_cash_usd"] = null;
   }
   if (body.resetDynamicHigh === true) {
     out["dynamic_dd_high"] = null;

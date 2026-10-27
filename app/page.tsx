@@ -429,6 +429,9 @@ function CurveView({ curve, livePrice, spacingPct, tradesPerDay, ago }: {
             <p className="text-amber-300/80 text-[10px] uppercase tracking-wide">Crash reserve</p>
             <p className="text-amber-200 text-sm font-bold tabular-nums">${Number(curve.reserve_usd).toLocaleString(undefined, { maximumFractionDigits: 2 })}</p>
             <p className="text-gray-500 text-[10px]">{Number(curve.reserve_share_pct ?? 100).toFixed(0)}% of profit kept as cash · used {curve.reserve_deploys ?? 0}×</p>
+            {curve.reserve_target_cash_usd != null && (
+              <p className="text-gray-500 text-[10px]">refills the curve up to ${Number(curve.reserve_target_cash_usd).toLocaleString(undefined, { maximumFractionDigits: 0 })}; any extra waits for the next leg</p>
+            )}
           </div>
           <div className="text-right">
             <p className="text-gray-500 text-[10px] uppercase tracking-wide">Deploys at</p>

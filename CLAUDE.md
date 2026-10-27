@@ -300,7 +300,8 @@ For fresh capital. Same code with two new curve options (both default off, Worke
 `curve_peak_pct` (mirror: biggest orders that % below the top; `curve_weight()`), and the crash
 reserve (`reserve_enabled`, `reserve_share_pct`, `reserve_deploy_pct`): that share of new profit is
 idle USDC (subtracted in `_funding`, never sized into the curve); at deploy% below the top it is
-released and the curve re-plans there with all free cash. Seeded: 0.25%, n=10, peak 10, reserve
+released and the curve re-plans there -- only up to the cash the curve had at its last top
+(`reserve_target_cash_usd`); any extra stays for the next leg down (owner, 2026-10-27). Seeded: 0.25%, n=10, peak 10, reserve
 100%/-30%. Migration `lighter_lit_grid_live_mirror.sql`. Research: `research/lit-plan-50k-2026-10-27/`,
 `research/hype-techniques-2026-10-27/`.
 

@@ -2149,7 +2149,9 @@ class LitGridLive:
         yet (switch-on) or price is a full line above the top: top = price, cash = money for new
         buys now (available + what resting buys hold -- they belong to the curve too). Held LIT is
         never counted as cash; each lot keeps its own sell. Crash reserve on: also re-plans when
-        price reaches the deploy level, with the reserve released into that cash."""
+        price reaches the deploy level. Only what brings the curve's cash back to its size at the
+        last top (reserve_target_cash_usd) is released; any extra stays for the next leg down
+        (owner, 2026-10-27). No target recorded yet: all of it."""
         top = state.get("curve_top")
         if state.get("reserve_enabled") and state.get("reserve_profit_base_usd") is None:
             # Reserve just switched on: it starts empty; profit already in the budget stays there.
@@ -2158,6 +2160,7 @@ class LitGridLive:
             if top is not None:
                 patch["curve_cash_usd"] = self._curve_budget(state)
                 patch["curve_profit_base_usd"] = profit
+                patch["reserve_target_cash_usd"] = patch["curve_cash_usd"]
             await self.update_state(patch)
             state.update(patch)
             await self.log_run("reserve_started", {"profit_base_usd": round(profit, 2)})
@@ -2165,9 +2168,17 @@ class LitGridLive:
         if top is not None and state.get("reserve_enabled"):
             reserve = self._reserve_usd(state)
             deploy_px = self._reserve_deploy_price(state)
-            if reserve >= RESERVE_MIN_DEPLOY_USD and price <= deploy_px:
-                deployed = reserve
-                patch = {"reserve_profit_base_usd": self._curve_profit(state),
+            amount = reserve
+            target = state.get("reserve_target_cash_usd")
+            if reserve >= RESERVE_MIN_DEPLOY_USD and price <= deploy_px and target is not None:
+                resting_buy_cost, _, available = self._funding(state, holdings, resting)
+                amount = min(reserve, max(0.0, float(target) - (available + resting_buy_cost)))
+            if reserve >= RESERVE_MIN_DEPLOY_USD and price <= deploy_px and amount >= RESERVE_MIN_DEPLOY_USD:
+                deployed = amount
+                kept = reserve - amount
+                # What stays: share x (profit - base) = kept.
+                base = self._curve_profit(state) - kept / self._reserve_share(state)
+                patch = {"reserve_profit_base_usd": base,
                          "reserve_deploys": int(state.get("reserve_deploys") or 0) + 1,
                          "reserve_last_deploy_at": now_iso()}
                 await self.update_state(patch)
@@ -2177,13 +2188,16 @@ class LitGridLive:
             cash = max(0.0, available + resting_buy_cost)
             patch = {"curve_top": price, "curve_cash_usd": cash,
                      "curve_profit_base_usd": self._curve_profit(state)}
+            if deployed is None and state.get("reserve_enabled"):
+                patch["reserve_target_cash_usd"] = cash      # the size a deploy refills to
             await self.update_state(patch)
             state.update(patch)
             plan = self._curve_plan_cached(state, anchor_log, step)
             if deployed is not None:
                 await self.log_run("reserve_deployed", {
-                    "reserve_usd": round(deployed, 2), "old_top": top, "price": round(price, 5),
-                    "cash_usd": round(cash, 2)})
+                    "reserve_usd": round(deployed, 2), "kept_usd": round(self._reserve_usd(state), 2),
+                    "target_cash_usd": state.get("reserve_target_cash_usd"),
+                    "old_top": top, "price": round(price, 5), "cash_usd": round(cash, 2)})
             await self.log_run("curve_replan", {
                 "top": round(price, 5), "previous_top": top, "cash_usd": round(cash, 2),
                 "n": plan["n"], "floor_lit": plan["floor"], "peak_pct": round(plan["peak"] * 100, 2),
@@ -2223,6 +2237,8 @@ class LitGridLive:
             rec["reserve_deploy_price"] = round(self._reserve_deploy_price(state), 5)
             rec["reserve_deploys"] = int(state.get("reserve_deploys") or 0)
             rec["reserve_share_pct"] = round(self._reserve_share(state) * 100, 1)
+            if state.get("reserve_target_cash_usd") is not None:
+                rec["reserve_target_cash_usd"] = round(float(state["reserve_target_cash_usd"]), 2)
         await self.update_state_optional({"curve_state": rec})
         state["curve_state"] = rec
 
