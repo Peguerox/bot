@@ -1938,6 +1938,87 @@ async def t_curve_plans_at_switch_on_and_moves_up_only_at_a_new_top():
           abs(bot._curve_budget(st) - st["curve_cash_usd"]) < 1e-9)
 
 
+def t_mirror_spends_exactly_the_budget_with_its_peak_below_the_top():
+    # Mirror (peak 10% below the top): same total cost as the plain curve, biggest DOLLARS at -10%,
+    # equal dollars at the same distance above and below the peak. peak=0 is the old curve exactly.
+    P, step = 3.05, math.log(1.0025)
+    plain = core.curve_plan(P, math.log(P), step, 10, 1.0)
+    old_style = core.curve_plan(P, math.log(P), step, 10, 1.0, 0.0)
+    check("peak 0 = the old curve, line for line", plain["W"] == old_style["W"] and plain["R"] == old_style["R"])
+    plan = core.curve_plan(P, math.log(P), step, 10, 1.0, 0.10)
+    budget = 20_000.0
+    ln, total, dollars = 0, 0.0, []
+    while True:
+        px = core.grid_engine.line_price(math.log(P), ln, step)
+        if px <= plan["F"]:
+            break
+        q = core.curve_size(px, plan, budget)
+        total += q * px; dollars.append((q * px, px)); ln -= 1
+    check("mirror costs exactly the budget", abs(total - budget) < 0.01, total)
+    best = max(dollars)[1]
+    check("biggest order ~10% below the top", abs(best / P - 0.90) < 0.003, best / P)
+    d = lambda frac: core.curve_size(P * frac, plan, budget) * P * frac
+    check("same dollars 5% above and 5% below the peak", abs(d(0.95) - d(0.85)) / d(0.95) < 0.01, (d(0.95), d(0.85)))
+    check("top order smaller than at the peak", d(1.0) < d(0.90) * 0.5, (d(1.0), d(0.90)))
+    check("above the top counts as the top", abs(core.curve_size(P * 1.01, plan, budget) - core.curve_size(plan["P"], plan, budget)) < 1e-9)
+    check("never below the 1 LIT floor", min(core.curve_size(px, plan, budget) for _, px in dollars) >= 1.0 - 1e-12)
+
+
+async def t_crash_reserve_holds_profit_and_deploys_once_at_minus_30():
+    P = 3.05
+    step = math.log(1.0025)
+    bot, fake = make_bot(base_state(usdc_balance=20_000.0, capital_usd=20_000.0, grid_anchor_price=P,
+                                     curve_enabled=True, curve_n=10, curve_floor_lit=1, curve_peak_pct=10,
+                                     reserve_enabled=True, reserve_deploy_pct=30), orders=[])
+    st = fake.state
+    sizer = lambda px: bot._curve_sizer(st, px, math.log(P), step, {}, {})
+    await sizer(P)
+    check("reserve starts empty at switch-on", bot._reserve_usd(st) == 0 and st["reserve_profit_base_usd"] == 0.0)
+    check("curve plans all free cash", abs(st["curve_cash_usd"] - 20_000.0) < 1e-6, st["curve_cash_usd"])
+    budget0 = bot._curve_budget(st)
+    st["profit_bucket_compound_usd"] = 500.0
+    st["usdc_balance"] = 20_500.0
+    check("all new profit goes to the reserve", abs(bot._reserve_usd(st) - 500.0) < 1e-9, bot._reserve_usd(st))
+    check("the curve does not grow from reserved profit", abs(bot._curve_budget(st) - budget0) < 1e-9)
+    _, _, avail = bot._funding(st, {}, {})
+    check("no buy may spend the reserve", abs(avail - 20_000.0) < 1e-6, avail)
+    await sizer(P * 1.003)                     # new top: re-plan without the reserve
+    check("a new top re-plans without the reserve", abs(st["curve_cash_usd"] - 20_000.0) < 1e-6
+          and abs(bot._reserve_usd(st) - 500.0) < 1e-9, (st["curve_cash_usd"], bot._reserve_usd(st)))
+    top = st["curve_top"]
+    await sizer(top * 0.705)
+    check("no deploy above -30%", not [r for r in fake.runs if r.get("action") == "reserve_deployed"])
+    await sizer(top * 0.70)
+    dep = [r for r in fake.runs if r.get("action") == "reserve_deployed"]
+    check("deploys at -30%", len(dep) == 1, dep)
+    check("re-plans at the deploy price", abs(st["curve_top"] - top * 0.70) < 1e-12, st["curve_top"])
+    check("cash now includes the reserve", abs(st["curve_cash_usd"] - 20_500.0) < 1e-6, st["curve_cash_usd"])
+    check("reserve empty after deploy", bot._reserve_usd(st) == 0 and st["reserve_deploys"] == 1)
+    await sizer(top * 0.69)
+    check("no second deploy with an empty reserve",
+          len([r for r in fake.runs if r.get("action") == "reserve_deployed"]) == 1)
+    st["profit_bucket_compound_usd"] = 600.0
+    check("refills from new profit", abs(bot._reserve_usd(st) - 100.0) < 1e-9, bot._reserve_usd(st))
+
+
+async def t_reserve_switched_on_later_keeps_the_profit_already_in_the_budget():
+    P = 3.05
+    step = math.log(1.0025)
+    bot, fake = make_bot(base_state(usdc_balance=20_000.0, capital_usd=20_000.0, grid_anchor_price=P,
+                                     curve_enabled=True, curve_n=10, curve_floor_lit=1), orders=[])
+    st = fake.state
+    await bot._curve_sizer(st, P, math.log(P), step, {}, {})
+    st["profit_bucket_compound_usd"] = 300.0
+    before = bot._curve_budget(st)
+    st["reserve_enabled"] = True
+    await bot._curve_sizer(st, P, math.log(P), step, {}, {})
+    check("turning the reserve on keeps the budget", abs(bot._curve_budget(st) - before) < 1e-9, (before, bot._curve_budget(st)))
+    check("and starts the reserve at 0", bot._reserve_usd(st) == 0)
+    st["curve_enabled"] = False
+    st["profit_bucket_compound_usd"] = 900.0
+    check("outside curve mode the reserve holds nothing back", bot._reserve_usd(st) == 0)
+
+
 # ── Re-anchor keeps lots next to their cost (2026-10-26) ───────────────────────────────────────
 
 def _lot(i, level, qty, price):
@@ -2017,6 +2098,7 @@ async def main():
     t_precision_and_minimum_enforcement()
     t_curve_spends_exactly_the_budget_down_to_the_floor_price()
     t_sizing_mode_only_one_is_ever_on()
+    t_mirror_spends_exactly_the_budget_with_its_peak_below_the_top()
     t_reanchor_merges_lots_that_land_on_one_wider_line()
     t_reanchor_merges_a_partly_sold_lot_only_when_the_costs_stay_exact()
     t_reanchor_collision_goes_to_the_nearest_line_not_far_up()
@@ -2110,6 +2192,8 @@ async def main():
               t_compound_resize_only_ever_adds_to_the_order_size,
               t_bucket_totals_come_from_the_cached_ledger_and_match_a_fresh_read,
               t_curve_plans_at_switch_on_and_moves_up_only_at_a_new_top,
+              t_crash_reserve_holds_profit_and_deploys_once_at_minus_30,
+              t_reserve_switched_on_later_keeps_the_profit_already_in_the_budget,
               t_spacing_change_asks_for_the_clean_reset):
         try:
             await t()

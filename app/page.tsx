@@ -363,13 +363,26 @@ function LitLiquidityPanel({ state, fills24h }: { state: any; fills24h: any[] })
 
 // Curve pill body (2026-10-25): chart of size vs fall from the top, live position, and a
 // per-level table with $/trade and $/month at the bot's live trade rate. size(p) is rebuilt from
-// curve_state exactly: floor + (size_top - floor) * ((p - F)/(P - F))^n.
+// curve_state exactly: floor + (size_top - floor) * w(p)/w(P), w = the curve's shape -- with a
+// peak (mirror, 2026-10-27) the price is mirrored around it first, same as curve_weight() in Python.
 function CurveView({ curve, livePrice, spacingPct, tradesPerDay, ago }: {
   curve: any; livePrice: number | null; spacingPct: number; tradesPerDay: number; ago: string | null;
 }) {
   const P = Number(curve.top), F = Number(curve.bottom), n = Number(curve.n);
-  const floor = Number(curve.floor_lit), top = Number(curve.size_top);
-  const sizeAt = (px: number) => floor + (top - floor) * Math.pow(Math.min(1, Math.max(0, (px - F) / (P - F))), n);
+  const floor = Number(curve.floor_lit), sizeTop = Number(curve.size_top);
+  const peak = Number(curve.peak_pct ?? 0) / 100;
+  const shape = (px0: number) => {
+    const px = Math.min(px0, P);
+    if (px <= F) return 0;
+    if (peak <= 0) return Math.pow((px - F) / (P - F), n);
+    const pm = P * (1 - Math.abs((1 - px / P) - peak));
+    return pm <= F ? 0 : Math.pow((pm - F) / (P - F), n) * pm / px;
+  };
+  const wTop = shape(P);
+  const sizeAt = (px: number) => floor + (wTop > 0 ? (sizeTop - floor) * shape(px) / wTop : 0);
+  let top = sizeTop;
+  for (let i = 0; i <= 120; i++) top = Math.max(top, sizeAt(P * (1 - (i / 120) * 0.6)));
+  const reserveOn = curve.reserve_usd != null;
   const perTrade = (px: number) => sizeAt(px) * px * spacingPct / 100;
   const perMonth = (px: number) => perTrade(px) * tradesPerDay * 30;
   const fallNow = livePrice != null ? Math.max(0, (1 - livePrice / P) * 100) : null;
@@ -410,11 +423,25 @@ function CurveView({ curve, livePrice, spacingPct, tradesPerDay, ago }: {
           <p className="text-gray-500 text-[10px] tabular-nums">${Number(curve.next_buy_price).toFixed(4)} · ~{usd(livePrice != null ? perMonth(livePrice) : 0)}/mo</p>
         </div>
       </div>
+      {reserveOn && (
+        <div className="rounded-lg border border-amber-500/40 bg-amber-500/10 p-2 flex items-center justify-between gap-2">
+          <div>
+            <p className="text-amber-300/80 text-[10px] uppercase tracking-wide">Crash reserve</p>
+            <p className="text-amber-200 text-sm font-bold tabular-nums">${Number(curve.reserve_usd).toLocaleString(undefined, { maximumFractionDigits: 2 })}</p>
+            <p className="text-gray-500 text-[10px]">{Number(curve.reserve_share_pct ?? 100).toFixed(0)}% of profit kept as cash · used {curve.reserve_deploys ?? 0}×</p>
+          </div>
+          <div className="text-right">
+            <p className="text-gray-500 text-[10px] uppercase tracking-wide">Deploys at</p>
+            <p className="text-amber-200 text-sm font-bold tabular-nums">${Number(curve.reserve_deploy_price).toFixed(4)}</p>
+            <p className="text-gray-500 text-[10px] tabular-nums">−{((1 - Number(curve.reserve_deploy_price) / P) * 100).toFixed(0)}% · curve restarts there</p>
+          </div>
+        </div>
+      )}
 
       <div className="rounded-lg border border-gray-700 bg-gray-950/60 p-2">
         <div className="flex items-center justify-between mb-1">
           <p className="text-gray-400 text-[10px] uppercase tracking-wide">Order size by fall from the top</p>
-          <p className="text-gray-500 text-[10px]">n {n} · floor {floor} LIT</p>
+          <p className="text-gray-500 text-[10px]">n {n} · floor {floor} LIT{peak > 0 ? ` · peak −${(peak * 100).toFixed(0)}%` : ""}</p>
         </div>
         <svg viewBox={`0 0 ${W} ${H}`} className="w-full h-auto">
           <defs>
@@ -439,6 +466,13 @@ function CurveView({ curve, livePrice, spacingPct, tradesPerDay, ago }: {
           <path d={area} fill="url(#curveFill)" />
           <path d={line} fill="none" stroke="#60a5fa" strokeWidth="1.6" />
           <line x1={padL} x2={W - padR} y1={ys(floor)} y2={ys(floor)} stroke="#f59e0b" strokeOpacity="0.6" strokeDasharray="3 2" strokeWidth="0.8" />
+          {reserveOn && (1 - Number(curve.reserve_deploy_price) / P) * 100 <= XMAX && (
+            <g>
+              <line x1={xs((1 - Number(curve.reserve_deploy_price) / P) * 100)} x2={xs((1 - Number(curve.reserve_deploy_price) / P) * 100)}
+                y1={padT} y2={ys(0)} stroke="#f59e0b" strokeOpacity="0.8" strokeWidth="0.9" />
+              <text x={xs((1 - Number(curve.reserve_deploy_price) / P) * 100) + 3} y={padT + 8} fill="#fbbf24" fontSize="8">reserve</text>
+            </g>
+          )}
           {nowX != null && nowY != null && (
             <g>
               <line x1={nowX} x2={nowX} y1={padT} y2={ys(0)} stroke="#22c55e" strokeOpacity="0.5" strokeWidth="0.8" />
@@ -471,7 +505,7 @@ function CurveView({ curve, livePrice, spacingPct, tradesPerDay, ago }: {
         })}
       </div>
       <p className="text-gray-500 text-[10px] leading-snug tabular-nums">
-        size = floor + (B − R)/W × ((p − F)/(P − F))^n · bottom ${F.toFixed(4)} · {curve.lines} lines · $/mo at the live rate of ~{tradesPerDay.toFixed(0)} trades/day{ago ? ` · updated ${ago} ago` : ""}
+        size = floor + (B − R)/W × ((p − F)/(P − F))^n{peak > 0 ? ` (price mirrored around −${(peak * 100).toFixed(0)}%)` : ""} · bottom ${F.toFixed(4)} · {curve.lines} lines · $/mo at the live rate of ~{tradesPerDay.toFixed(0)} trades/day{ago ? ` · updated ${ago} ago` : ""}
       </p>
     </div>
   );
@@ -549,6 +583,8 @@ function LitGridLivePanel({
   const curveOn = !!st?.curve_enabled;
   const dynOn = !!st?.dynamic_dd_enabled && !curveOn;
   const sizingMode: "flat" | "dynamic" | "curve" = curveOn ? "curve" : dynOn ? "dynamic" : "flat";
+  // Mirror peak + crash reserve controls only once their columns exist (2026-10-27 migration).
+  const hasReserve = st != null && "reserve_enabled" in st;
   const curve = st?.curve_state ?? null;
   const curveAgo = curve?.at ? Math.max(0, nowTick - new Date(curve.at).getTime()) : null;
   const dynTier = st?.dynamic_dd_tier != null ? Number(st.dynamic_dd_tier) : null;
@@ -656,6 +692,9 @@ function LitGridLivePanel({
 
   const [curveNIn, setCurveNIn] = useState("");
   const [curveFloorIn, setCurveFloorIn] = useState("");
+  const [curvePeakIn, setCurvePeakIn] = useState("");
+  const [reserveDeployIn, setReserveDeployIn] = useState("");
+  const [reserveShareIn, setReserveShareIn] = useState("");
   const sizingQuestions: Record<string, string> = {
     flat: "Switch sizing to FLAT? Gates and curve both off: one order size from your Drawdown setting.",
     dynamic: "Switch sizing to DYNAMIC (gates)? The high starts at the current price and order size follows the gates, using the available balance.",
@@ -1035,19 +1074,67 @@ function LitGridLivePanel({
             <input value={curveFloorIn} onChange={(e) => setCurveFloorIn(e.target.value)} placeholder={String(st?.curve_floor_lit ?? 1)}
               className="mt-0.5 w-full bg-gray-800 border border-gray-700 rounded px-2 py-1 text-xs text-gray-200" />
           </label>
+          {hasReserve && (
+            <label className="flex-1 text-[10px] text-gray-500">Peak −%
+              <input value={curvePeakIn} onChange={(e) => setCurvePeakIn(e.target.value)} placeholder={String(st?.curve_peak_pct ?? 0)}
+                className="mt-0.5 w-full bg-gray-800 border border-gray-700 rounded px-2 py-1 text-xs text-gray-200" />
+            </label>
+          )}
           <button
             onClick={() => {
               const body: Record<string, number> = {};
               if (curveNIn.trim()) body.curveN = Number(curveNIn);
               if (curveFloorIn.trim()) body.curveFloorLit = Number(curveFloorIn);
+              if (curvePeakIn.trim()) body.curvePeakPct = Number(curvePeakIn);
               if (Object.keys(body).length === 0) return;
-              handleDynamicDrawdown(body, `Set curve ${body.curveN != null ? `n = ${body.curveN} ` : ""}${body.curveFloorLit != null ? `floor = ${body.curveFloorLit} LIT` : ""}? New buys only; resting buys more than 25% off get swapped.`)
-                .then(() => { setCurveNIn(""); setCurveFloorIn(""); });
+              handleDynamicDrawdown(body, `Set curve ${body.curveN != null ? `n = ${body.curveN} ` : ""}${body.curveFloorLit != null ? `floor = ${body.curveFloorLit} LIT ` : ""}${body.curvePeakPct != null ? `peak = −${body.curvePeakPct}% (0 = at the top)` : ""}? New buys only; resting buys more than 25% off get swapped.`)
+                .then(() => { setCurveNIn(""); setCurveFloorIn(""); setCurvePeakIn(""); });
             }}
-            disabled={dynSaving || (!curveNIn.trim() && !curveFloorIn.trim())}
+            disabled={dynSaving || (!curveNIn.trim() && !curveFloorIn.trim() && !curvePeakIn.trim())}
             className="text-xs font-bold px-2.5 py-1.5 rounded bg-blue-500/20 text-blue-300 hover:bg-blue-500/30 disabled:opacity-30"
           >Save</button>
         </div>
+        {hasReserve && (
+          <div className="rounded-lg border border-gray-700 bg-gray-950/40 p-2 space-y-2">
+            <div className="flex items-center justify-between gap-2">
+              <div>
+                <p className="text-gray-200 text-xs font-bold">Crash reserve</p>
+                <p className="text-gray-500 text-[10px] leading-snug">Profit kept as cash, never spent. When price is the deploy % below the top, it comes back and the curve restarts there. Held LIT keeps its sells.</p>
+              </div>
+              <button
+                onClick={() => handleDynamicDrawdown({ reserveEnabled: !st?.reserve_enabled },
+                  st?.reserve_enabled
+                    ? "Turn the crash reserve OFF? The cash it holds goes back to normal use (the curve uses it at its next re-plan)."
+                    : "Turn the crash reserve ON? It starts at $0 and keeps a share of every new profit as cash until price falls to the deploy level.")}
+                disabled={dynSaving}
+                className={`shrink-0 text-xs font-bold px-3 py-1.5 rounded-full border disabled:opacity-40 ${st?.reserve_enabled
+                  ? "bg-amber-500/15 text-amber-300 border-amber-500/40" : "bg-gray-800 text-gray-500 border-gray-700"}`}
+              >{st?.reserve_enabled ? "● ON" : "○ OFF"}</button>
+            </div>
+            <div className="flex items-end gap-2">
+              <label className="flex-1 text-[10px] text-gray-500">Deploy at −%
+                <input value={reserveDeployIn} onChange={(e) => setReserveDeployIn(e.target.value)} placeholder={String(st?.reserve_deploy_pct ?? 30)}
+                  className="mt-0.5 w-full bg-gray-800 border border-gray-700 rounded px-2 py-1 text-xs text-gray-200" />
+              </label>
+              <label className="flex-1 text-[10px] text-gray-500">% of profit kept
+                <input value={reserveShareIn} onChange={(e) => setReserveShareIn(e.target.value)} placeholder={String(st?.reserve_share_pct ?? 100)}
+                  className="mt-0.5 w-full bg-gray-800 border border-gray-700 rounded px-2 py-1 text-xs text-gray-200" />
+              </label>
+              <button
+                onClick={() => {
+                  const body: Record<string, number> = {};
+                  if (reserveDeployIn.trim()) body.reserveDeployPct = Number(reserveDeployIn);
+                  if (reserveShareIn.trim()) body.reserveSharePct = Number(reserveShareIn);
+                  if (Object.keys(body).length === 0) return;
+                  handleDynamicDrawdown(body, `Set the crash reserve ${body.reserveDeployPct != null ? `deploy at −${body.reserveDeployPct}% ` : ""}${body.reserveSharePct != null ? `keeping ${body.reserveSharePct}% of profit` : ""}?`)
+                    .then(() => { setReserveDeployIn(""); setReserveShareIn(""); });
+                }}
+                disabled={dynSaving || (!reserveDeployIn.trim() && !reserveShareIn.trim())}
+                className="text-xs font-bold px-2.5 py-1.5 rounded bg-amber-500/20 text-amber-300 hover:bg-amber-500/30 disabled:opacity-30"
+              >Save</button>
+            </div>
+          </div>
+        )}
       </div>
 
       <div className="rounded-xl border border-gray-700 bg-gray-900/60 p-3 space-y-3">
@@ -4445,6 +4532,15 @@ export default function Dashboard() {
   const [litGridWorker3Toggling,  setLitGridWorker3Toggling]  = useState(false);
   const [litGridWorker3Flattening, setLitGridWorker3Flattening] = useState(false);
   const [litGridWorker3Clearing, setLitGridWorker3Clearing] = useState(false);
+  // Mirror bot (2026-10-27): fresh capital on Worker 4's emptied sub-account, mirror curve (peak
+  // -10%) + crash reserve, own tables lighter_lit_grid_live_mirror_*. Hidden until its state row exists.
+  const [litMirrorState,     setLitMirrorState]     = useState<any>(null);
+  const [litMirrorOrders,    setLitMirrorOrders]    = useState<any[]>([]);
+  const [litMirrorSells,     setLitMirrorSells]     = useState<any[]>([]);
+  const [litMirrorResting,   setLitMirrorResting]   = useState<any[]>([]);
+  const [litMirrorSellCount, setLitMirrorSellCount] = useState(0);
+  const [litMirrorFirstSellAt, setLitMirrorFirstSellAt] = useState<string | null>(null);
+  const [litMirrorBusy, setLitMirrorBusy] = useState<"" | "toggle" | "flatten" | "clear">("");
   // True lifetime trade/win counts -- the trades arrays above are capped at 200 rows for
   // display purposes, which silently froze the win-rate % and trade count once any worker
   // passed 200 real trades (Worker 2 hit this first, at 606 real trades and counting).
@@ -4453,7 +4549,26 @@ export default function Dashboard() {
   const [optimalBtcStats, setOptimalBtcStats] = useState({ total: 0, wins: 0 });
   const [rsiPaperStats, setRsiPaperStats] = useState({ total: 0, wins: 0, pnlPct: 0 });
 
+  async function loadMirror() {
+    const T = "lighter_lit_grid_live_mirror_orders";
+    const [{ data: st }, { count }, { data: or }, { data: sells }, { data: resting }, { data: first }] = await Promise.all([
+      getSupabase().from("lighter_lit_grid_live_mirror_state").select("*").eq("id", 1).maybeSingle(),
+      getSupabase().from(T).select("id", { count: "exact", head: true }).eq("side", "sell").not("realized_profit_usd", "is", null),
+      getSupabase().from(T).select("*").order("id", { ascending: false }).limit(50),
+      getSupabase().from(T).select("id,filled_at,filled_qty,filled_price,filled_quote,realized_profit_usd").eq("side", "sell").not("realized_profit_usd", "is", null).order("filled_at", { ascending: false, nullsFirst: false }).order("id", { ascending: false }).limit(200),
+      getSupabase().from(T).select("side,limit_price").in("status", ["open", "pending"]).limit(500),
+      getSupabase().from(T).select("filled_at").eq("side", "sell").not("realized_profit_usd", "is", null).not("filled_at", "is", null).order("filled_at", { ascending: true }).limit(1),
+    ]);
+    setLitMirrorState(st ?? null);
+    setLitMirrorSellCount(count ?? 0);
+    setLitMirrorOrders(or ?? []);
+    setLitMirrorSells(sells ?? []);
+    setLitMirrorResting(resting ?? []);
+    setLitMirrorFirstSellAt(first?.[0]?.filled_at ?? null);
+  }
+
   async function load() {
+    const mirrorLoad = loadMirror().catch(() => {});
     const [
       { data: surferSt },
       { data: surferTr },
@@ -4605,6 +4720,7 @@ export default function Dashboard() {
     setLitGridLiveFirstSellAt(litGridLiveFirstSell?.[0]?.filled_at ?? null);
     setLitGridWorker3FirstSellAt(litGridWorker3FirstSell?.[0]?.filled_at ?? null);
     setLitGridWorker3Fills24h((litGridWorker3Fills24h ?? []).filter((r: any) => r.order_kind !== "transfer"));
+    await mirrorLoad;
     setDcaBtcStats({ total: dcaBtcTotal ?? 0, wins: dcaBtcWins ?? 0 });
     setInitialBtcStats({ total: initialBtcTotal ?? 0, wins: initialBtcWins ?? 0 });
     setOptimalBtcStats({ total: optimalBtcTotal ?? 0, wins: optimalBtcWins ?? 0 });
@@ -4729,6 +4845,27 @@ export default function Dashboard() {
     setLitGridWorker3Clearing(false);
   }
 
+  async function handleLitMirror(kind: "toggle" | "flatten" | "clear") {
+    const q = kind === "toggle"
+      ? (!litMirrorState?.enabled ? "Turn ON the LIVE Mirror bot? This places REAL orders with REAL money." : null)
+      : kind === "flatten"
+        ? "EMERGENCY FLATTEN (Mirror bot): cancel every resting order and market-sell all held LIT back to USDC, then disable. Continue?"
+        : "Clear the Mirror bot's order ledger? Only allowed while disabled and flat.";
+    if (q && !confirm(q)) return;
+    const secret = litGridLiveAdminSecret();
+    if (!secret) return;
+    setLitMirrorBusy(kind);
+    const path = kind === "clear" ? "clear-history" : kind;
+    const res = await fetch(`/api/lighter-lit-grid-live-mirror/${path}`, { method: "POST", headers: { "x-admin-secret": secret } });
+    if (!res.ok) {
+      const body = await res.json().catch(() => ({}));
+      alert(body.error ?? "Failed.");
+      if (res.status === 401) localStorage.removeItem("litGridLiveAdminSecret");
+    }
+    await load();
+    setLitMirrorBusy("");
+  }
+
   const [healthTick, setHealthTick] = useState(Date.now());
   useEffect(() => {
     const id = setInterval(() => setHealthTick(Date.now()), 15_000);
@@ -4790,6 +4927,7 @@ export default function Dashboard() {
       .on("postgres_changes", { event: "*", schema: "public", table: "lighter_lit_grid_live_orders" }, debouncedLoad)
       .on("postgres_changes", { event: "*", schema: "public", table: "lighter_lit_grid_live_worker3_state" }, debouncedLoad)
       .on("postgres_changes", { event: "*", schema: "public", table: "lighter_lit_grid_live_worker3_orders" }, debouncedLoad)
+      .on("postgres_changes", { event: "*", schema: "public", table: "lighter_lit_grid_live_mirror_orders" }, debouncedLoad)
       .subscribe();
     // The three live Lighter state tables aren't on realtime at all (every tick would fire a
     // reload -- too chatty), so a plain metrics write (live_schedule_*, live_wiggle, etc.) with
@@ -4873,6 +5011,28 @@ export default function Dashboard() {
           title="LIT/USDC Grid Bot — Worker 3"
           subaccountNote="Worker 3's own sub-account, twin of Worker 4 below at a different spacing"
         />
+
+        {litMirrorState && (
+          <LitGridLivePanel
+            state={litMirrorState}
+            orders={litMirrorOrders}
+            sells={litMirrorSells}
+            sellCount={litMirrorSellCount}
+            firstSellAt={litMirrorFirstSellAt}
+            resting={litMirrorResting}
+            loading={loading}
+            enabled={litMirrorState?.enabled ?? false}
+            onToggle={() => handleLitMirror("toggle")}
+            toggling={litMirrorBusy === "toggle"}
+            onFlatten={() => handleLitMirror("flatten")}
+            flattening={litMirrorBusy === "flatten"}
+            onClearHistory={() => handleLitMirror("clear")}
+            clearingHistory={litMirrorBusy === "clear"}
+            apiBase="/api/lighter-lit-grid-live-mirror"
+            title="LIT Mirror Bot — Worker 4"
+            subaccountNote="Worker 4's sub-account · mirror curve (peak −10%) + crash reserve · fresh capital"
+          />
+        )}
 
         {/* Worker 4 merged into Worker 3 (2026-10-23); its spot now tracks LIT liquidity for Worker 3. */}
         <LitLiquidityPanel state={litGridWorker3State} fills24h={litGridWorker3Fills24h} />

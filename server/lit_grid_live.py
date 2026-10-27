@@ -429,6 +429,16 @@ CURVE_FLOOR_FRAC = 0.001
 # Curve mode only: a resting, unfilled buy more than 25% off its curve size is cancelled and placed
 # again at the right size (the one-time swap at switch-on). Small drifts (profit, a new top) keep it.
 CURVE_REPLACE_FRAC = 0.25
+# Mirror shape (`curve_peak_pct`, 2026-10-27, owner's choice for the fresh-capital bot): the same
+# curve, but its biggest orders sit `peak`% below the top instead of at it -- the dollars at a price
+# that is g below the peak equal the plain curve's dollars at g below the top, on both sides. 0 =
+# the plain curve (byte-for-byte the old sizes). Research: research/lit-plan-50k-2026-10-27/.
+# Crash reserve (`reserve_enabled`): `reserve_share_pct` of every profit made since it was switched
+# on (or last deployed) is kept as idle USDC -- never sized into the curve, never spent by a buy.
+# When price is `reserve_deploy_pct`% below the curve's top, the reserve is released and the curve
+# re-planned at that price with all free cash. Held lots keep their own sells. On LIT and HYPE this
+# kept the grid earning through the crash (HYPE -66%: no month under $600).
+RESERVE_MIN_DEPLOY_USD = 1.0
 TERMINAL_STATUS_SUBSTRINGS = ("cancel", "reject", "expir")
 PAGE_SIZE = 500
 # Re-anchored line numbers start this far past every line number already in the ledger.
@@ -631,7 +641,22 @@ def sizing_mode(state):
     return "flat"
 
 
-def curve_plan(top_price, anchor_log, step, n, floor_lit):
+def curve_weight(px, P, F, n, peak=0.0):
+    """The curve's shape at `px` (LIT per unit of k). peak=0: ((p - F)/(P - F))^n. peak>0 (mirror):
+    the price is mirrored around the peak (g below or above it -> g below the top) and the plain
+    curve's dollars there are bought at px. Above the top counts as the top; below F, zero."""
+    px = min(px, P)
+    if px <= F:
+        return 0.0
+    if peak <= 0:
+        return ((px - F) / (P - F)) ** n
+    pm = P * (1 - abs((1 - px / P) - peak))
+    if pm <= F:
+        return 0.0
+    return ((pm - F) / (P - F)) ** n * pm / px
+
+
+def curve_plan(top_price, anchor_log, step, n, floor_lit, peak=0.0):
     """R and W of the curve over every grid line from the line at/below `top_price` down to
     F = top x 0.001. Pure; ~5,500 lines at 0.125%, a few ms."""
     F = top_price * CURVE_FLOOR_FRAC
@@ -644,17 +669,16 @@ def curve_plan(top_price, anchor_log, step, n, floor_lit):
         if p <= F:
             break
         R += floor_lit * p
-        W += p * ((p - F) / (P - F)) ** n
+        W += p * curve_weight(p, P, F, n, peak)
         lines += 1
         ln -= 1
-    return {"P": P, "F": F, "R": R, "W": W, "n": n, "floor": floor_lit, "lines": lines}
+    return {"P": P, "F": F, "R": R, "W": W, "n": n, "floor": floor_lit, "lines": lines, "peak": peak}
 
 
 def curve_size(px, plan, budget):
     """Unrounded LIT for a buy at `px`. Above the top counts as the top; below F, the floor."""
     k = max(0.0, (budget - plan["R"]) / plan["W"]) if plan["W"] > 0 else 0.0
-    x = min(1.0, max(0.0, (px - plan["F"]) / (plan["P"] - plan["F"])))
-    return plan["floor"] + k * x ** plan["n"]
+    return plan["floor"] + k * curve_weight(px, plan["P"], plan["F"], plan["n"], plan.get("peak", 0.0))
 
 
 def effective_spacing_pct(state):
@@ -2015,6 +2039,8 @@ class LitGridLive:
         # regardless of attribution -- real cash doesn't care which sub-budget funded it.
         cover_drop_bucket = float(state.get("profit_bucket_cover_drop_usd") or 0)
         available_usdc = min(real_usdc - resting_buy_cost, base_capital_remaining + cover_drop_bucket)
+        # Crash reserve: idle cash until it is deployed -- no buy may spend it.
+        available_usdc -= self._reserve_usd(state)
         return resting_buy_cost, base_capital_remaining, available_usdc
 
     async def _dynamic_order_size(self, state, price, spacing_pct, holdings, resting):
@@ -2078,25 +2104,75 @@ class LitGridLive:
     def _curve_plan_cached(self, state, anchor_log, step):
         n = float(state.get("curve_n") or 10)
         floor = float(state.get("curve_floor_lit") or 1)
-        key = (float(state["curve_top"]), anchor_log, step, n, floor)
+        peak = max(0.0, float(state.get("curve_peak_pct") or 0)) / 100.0
+        key = (float(state["curve_top"]), anchor_log, step, n, floor, peak)
         cache = getattr(self, "_curve_cache", None)
         if cache is None or cache[0] != key:
-            cache = (key, curve_plan(key[0], anchor_log, step, n, floor))
+            cache = (key, curve_plan(key[0], anchor_log, step, n, floor, peak))
             self._curve_cache = cache
         return cache[1]
 
+    @staticmethod
+    def _reserve_share(state):
+        """Fraction of new profit the crash reserve keeps. 0 while it is off, or switched on but
+        not started yet (its base is set on the next curve tick)."""
+        if (sizing_mode(state) != "curve" or not state.get("reserve_enabled")
+                or state.get("reserve_profit_base_usd") is None):
+            return 0.0
+        pct = state.get("reserve_share_pct")
+        return min(1.0, max(0.0, float(100 if pct is None else pct) / 100.0))
+
+    def _reserve_usd(self, state):
+        """Idle USDC held for a crash: share x profit made since the reserve started / last deployed."""
+        share = self._reserve_share(state)
+        if share <= 0:
+            return 0.0
+        return share * max(0.0, self._curve_profit(state) - float(state["reserve_profit_base_usd"]))
+
+    @staticmethod
+    def _reserve_deploy_price(state):
+        top = state.get("curve_top")
+        if top is None:
+            return None
+        pct = state.get("reserve_deploy_pct")
+        return float(top) * (1 - float(30 if pct is None else pct) / 100.0)
+
     def _curve_budget(self, state):
-        """B = cash for new buys at the last (re)plan + profit (compound + cover-drop) added since."""
+        """B = cash for new buys at the last (re)plan + profit (compound + cover-drop) added since,
+        minus the share the crash reserve keeps."""
         base = float(state.get("curve_profit_base_usd") or 0)
-        return float(state.get("curve_cash_usd") or 0) + max(0.0, self._curve_profit(state) - base)
+        added = max(0.0, self._curve_profit(state) - base)
+        return float(state.get("curve_cash_usd") or 0) + (1.0 - self._reserve_share(state)) * added
 
     async def _curve_sizer(self, state, price, anchor_log, step, holdings, resting):
         """Returns size_at(px) -> clamped LIT for a buy at px. (Re)plans when the curve has no top
         yet (switch-on) or price is a full line above the top: top = price, cash = money for new
         buys now (available + what resting buys hold -- they belong to the curve too). Held LIT is
-        never counted as cash; each lot keeps its own sell."""
+        never counted as cash; each lot keeps its own sell. Crash reserve on: also re-plans when
+        price reaches the deploy level, with the reserve released into that cash."""
         top = state.get("curve_top")
-        if top is None or price >= float(top) * math.exp(step):
+        if state.get("reserve_enabled") and state.get("reserve_profit_base_usd") is None:
+            # Reserve just switched on: it starts empty; profit already in the budget stays there.
+            profit = self._curve_profit(state)
+            patch = {"reserve_profit_base_usd": profit}
+            if top is not None:
+                patch["curve_cash_usd"] = self._curve_budget(state)
+                patch["curve_profit_base_usd"] = profit
+            await self.update_state(patch)
+            state.update(patch)
+            await self.log_run("reserve_started", {"profit_base_usd": round(profit, 2)})
+        deployed = None
+        if top is not None and state.get("reserve_enabled"):
+            reserve = self._reserve_usd(state)
+            deploy_px = self._reserve_deploy_price(state)
+            if reserve >= RESERVE_MIN_DEPLOY_USD and price <= deploy_px:
+                deployed = reserve
+                patch = {"reserve_profit_base_usd": self._curve_profit(state),
+                         "reserve_deploys": int(state.get("reserve_deploys") or 0) + 1,
+                         "reserve_last_deploy_at": now_iso()}
+                await self.update_state(patch)
+                state.update(patch)
+        if top is None or deployed is not None or price >= float(top) * math.exp(step):
             resting_buy_cost, _, available = self._funding(state, holdings, resting)
             cash = max(0.0, available + resting_buy_cost)
             patch = {"curve_top": price, "curve_cash_usd": cash,
@@ -2104,9 +2180,14 @@ class LitGridLive:
             await self.update_state(patch)
             state.update(patch)
             plan = self._curve_plan_cached(state, anchor_log, step)
+            if deployed is not None:
+                await self.log_run("reserve_deployed", {
+                    "reserve_usd": round(deployed, 2), "old_top": top, "price": round(price, 5),
+                    "cash_usd": round(cash, 2)})
             await self.log_run("curve_replan", {
                 "top": round(price, 5), "previous_top": top, "cash_usd": round(cash, 2),
-                "n": plan["n"], "floor_lit": plan["floor"],
+                "n": plan["n"], "floor_lit": plan["floor"], "peak_pct": round(plan["peak"] * 100, 2),
+                "reserve_usd": round(self._reserve_usd(state), 2),
                 "top_size_lit": round(curve_size(plan["P"], plan, cash), 4)})
             await self._publish_curve_state(state, price, anchor_log, step)
         plan = self._curve_plan_cached(state, anchor_log, step)
@@ -2135,7 +2216,13 @@ class LitGridLive:
                "floor_reserve_usd": round(plan["R"], 2),
                "next_buy_price": round(next_px, 4), "next_buy_size": size(next_px),
                "size_top": size(plan["P"]), "size_10": size(plan["P"] * 0.9), "size_20": size(plan["P"] * 0.8),
-               "size_30": size(plan["P"] * 0.7), "size_50": size(plan["P"] * 0.5)}
+               "size_30": size(plan["P"] * 0.7), "size_50": size(plan["P"] * 0.5),
+               "peak_pct": round(plan["peak"] * 100, 2)}
+        if state.get("reserve_enabled"):
+            rec["reserve_usd"] = round(self._reserve_usd(state), 2)
+            rec["reserve_deploy_price"] = round(self._reserve_deploy_price(state), 5)
+            rec["reserve_deploys"] = int(state.get("reserve_deploys") or 0)
+            rec["reserve_share_pct"] = round(self._reserve_share(state) * 100, 1)
         await self.update_state_optional({"curve_state": rec})
         state["curve_state"] = rec
 

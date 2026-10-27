@@ -81,6 +81,9 @@ export async function POST(req: NextRequest) {
   for (const [key, col, lo, hi, label] of [
     ["curveN", "curve_n", 1, 30, "curve n"],
     ["curveFloorLit", "curve_floor_lit", 1, 100, "curve floor (LIT)"],
+    ["curvePeakPct", "curve_peak_pct", 0, 50, "curve peak (% below the top)"],
+    ["reserveSharePct", "reserve_share_pct", 0, 100, "reserve share of profit (%)"],
+    ["reserveDeployPct", "reserve_deploy_pct", 5, 90, "reserve deploy (% below the top)"],
   ] as const) {
     const raw = body[key];
     if (raw === undefined || raw === null || raw === "") continue;
@@ -89,6 +92,12 @@ export async function POST(req: NextRequest) {
       return NextResponse.json({ error: `${label} must be between ${lo} and ${hi} (got ${raw}).` }, { status: 400 });
     }
     out[col] = v;
+  }
+  // Crash reserve (2026-10-27): switching it either way clears its base -- on, the worker starts
+  // it empty at the current profit; off, nothing is held back any more.
+  if (body.reserveEnabled === true || body.reserveEnabled === false) {
+    out["reserve_enabled"] = body.reserveEnabled;
+    out["reserve_profit_base_usd"] = null;
   }
   if (body.resetDynamicHigh === true) {
     out["dynamic_dd_high"] = null;

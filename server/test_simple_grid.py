@@ -38,6 +38,13 @@ def start(name, seed, curve=False):
         st.update({"curve_enabled": True, "dynamic_dd_enabled": False, "curve_n": 10,
                    "curve_floor_lit": 1, "curve_top": None, "curve_cash_usd": None,
                    "curve_profit_base_usd": None, "curve_state": None})
+    if curve == "mirror":
+        # Mirror (peak -10%) + crash reserve (2026-10-27), deploy set to -2% so a short run reaches
+        # it, with $200 already saved in the reserve.
+        comp = float(st.get("profit_bucket_compound_usd") or 0)
+        st.update({"curve_peak_pct": 10, "reserve_enabled": True, "reserve_deploy_pct": 2,
+                   "reserve_share_pct": 100, "reserve_profit_base_usd": comp - 200.0,
+                   "reserve_deploys": 0})
     t_snap = datetime.fromisoformat(st["updated_at"].replace("Z", "+00:00"))
     S.Clock.t = S.T0 + (t_snap - S.BASE_DT).total_seconds()
     rng = random.Random(seed)
@@ -129,7 +136,7 @@ async def run(name, kind, seed=1, shared_budget=False, react=False, curve=False)
     step = math.log(1 + sp / 100)
     prices = path(kind, float(st["live_price"]), step)
     label = (f"{name} {kind}" + (" shared budget" if shared_budget else "") + (" fast-react" if react else "")
-             + (" CURVE" if curve else ""))
+             + (" MIRROR+RESERVE" if curve == "mirror" else " CURVE" if curve else ""))
     held_for = 0
     catch_up = None   # fast moves: seconds after the run stops until both near orders are back for good
     last_bad = 29
@@ -235,6 +242,17 @@ async def run(name, kind, seed=1, shared_budget=False, react=False, curve=False)
                > core.CURVE_REPLACE_FRAC * core.curve_size(o["price"], plan, budget)]
         check(f"[{label}] every resting buy is on its curve size ({len(buys) - len(off)}/{len(buys)})",
               buys and not off, off[:4])
+        if curve == "mirror":
+            deployed = [r for r in db.runs if (r or {}).get("action") == "reserve_deployed"]
+            if kind == "down fast":                # 20 lines = 2.5%; the others stay above -2%
+                check(f"[{label}] the reserve deployed once past -2% and the curve re-planned there",
+                      len(deployed) == 1 and abs(state["curve_top"] / float(st["live_price"]) - 1) > 0.019, deployed)
+            else:
+                check(f"[{label}] no deploy without a 2% fall", not deployed, deployed)
+            _, _, avail = bot._funding(state, lots_of(db), await bot.resting_orders_by_level())
+            free = ex.usdc - ex._locked_usdc()
+            check(f"[{label}] the reserve's cash is never spent (free {free:,.2f} >= reserve {bot._reserve_usd(state):,.2f})",
+                  free + 1e-6 >= bot._reserve_usd(state), (free, bot._reserve_usd(state)))
         print(f"  {label}: top ${plan['P']:.4f} budget ${budget:,.0f} sizes {[round(o['size'], 2) for o in sorted(buys, key=lambda o: -o['price'])][:5]}")
     fills = len(ex.fills)
     if kind == "flick":
@@ -309,6 +327,8 @@ async def main():
         await run("worker3", kind, curve=True)
     for kind in ("up fast", "down fast"):
         await run("worker3", kind, shared_budget=True, react=True, curve=True)
+    for kind in ("up fast", "down slow", "down jump", "down fast", "wiggle"):
+        await run("worker3", kind, curve="mirror")
     for sp in (0.25, 0.5):
         await run_respace("worker3", sp)
         await run_respace("worker3", sp, curve=True)
