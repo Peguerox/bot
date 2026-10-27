@@ -1041,7 +1041,7 @@ function LitGridLivePanel({
                 ? "bg-green-500/15 text-green-400 border-green-500/40"
                 : "bg-gray-800 text-gray-400 border-gray-600 hover:text-gray-200"}`}
             >
-              {m === sizingMode ? "● " : ""}{m === "flat" ? "Flat" : m === "dynamic" ? "Dynamic" : "Curve"}
+              {m === sizingMode ? "● " : ""}{m === "flat" ? "Flat" : m === "dynamic" ? "Dynamic" : Number(st?.curve_peak_pct ?? 0) > 0 ? "Mirror" : "Curve"}
             </button>
           ))}
         </div>
@@ -1051,10 +1051,17 @@ function LitGridLivePanel({
       <div className="rounded-xl border border-gray-700 bg-gray-900/60 p-3 space-y-3">
         <div className="flex items-start justify-between gap-2">
           <div>
-            <p className="text-gray-200 text-sm font-bold">Curve</p>
-            <p className="text-gray-500 text-[11px] leading-snug">
-              Each new buy sized at its own price: most right below the top, shrinking smoothly to the floor, down to a 99.9% fall. Profit grows it right away.
-            </p>
+            {Number(st?.curve_peak_pct ?? 0) > 0 ? (<>
+              <p className="text-gray-200 text-sm font-bold">Mirror curve <span className="text-amber-300">· peak −{Number(st.curve_peak_pct)}%</span></p>
+              <p className="text-gray-500 text-[11px] leading-snug">
+                Not the same formula as Worker 3's curve: the biggest buys sit {Number(st.curve_peak_pct)}% below the top, not at it. Sizes grow from the top down to the peak, then shrink to the floor the same way on the other side (the curve mirrored around −{Number(st.curve_peak_pct)}%).
+              </p>
+            </>) : (<>
+              <p className="text-gray-200 text-sm font-bold">Curve</p>
+              <p className="text-gray-500 text-[11px] leading-snug">
+                Each new buy sized at its own price: most right below the top, shrinking smoothly to the floor, down to a 99.9% fall. Profit grows it right away.
+              </p>
+            </>)}
           </div>
           <span className={`shrink-0 text-xs font-bold px-3 py-1.5 rounded-full border ${curveOn
             ? "bg-green-500/15 text-green-400 border-green-500/40" : "bg-gray-800 text-gray-500 border-gray-700"}`}>
