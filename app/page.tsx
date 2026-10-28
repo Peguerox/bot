@@ -272,8 +272,30 @@ const LIT_GRID_EXCLUDED_WINDOWS: [string, string][] = [
 const LIT_MARKET_ID = 2049;
 const LIGHTER_API = "https://mainnet.zklighter.elliot.ai/api/v1";
 
-function LitLiquidityPanel({ state, fills24h }: { state: any; fills24h: any[] }) {
+function LitLiquidityPanel({ state }: { state: any }) {
   const [book, setBook] = useState<{ bids: [number, number][]; asks: [number, number][] } | null>(null);
+  // Our last-24h fills, read here every 5 min and paged past Supabase's 1,000-row cap (2026-10-28:
+  // one capped query re-read on every dashboard reload undercounted once fills passed 1,000 a day).
+  const [fills24h, setFills24h] = useState<any[]>([]);
+  useEffect(() => {
+    let alive = true;
+    const loadFills = async () => {
+      const since = new Date(Date.now() - 86_400_000).toISOString();
+      const rows: any[] = [];
+      for (let from = 0; from < 10_000; from += 1000) {
+        const { data, error } = await getSupabase().from("lighter_lit_grid_live_worker3_orders")
+          .select("side,size,filled_qty,order_kind").gte("filled_at", since).not("filled_qty", "is", null)
+          .order("id", { ascending: true }).range(from, from + 999);
+        if (error || !data) return;
+        rows.push(...data);
+        if (data.length < 1000) break;
+      }
+      if (alive) setFills24h(rows.filter((r: any) => r.order_kind !== "transfer"));
+    };
+    loadFills();
+    const id = setInterval(loadFills, 300_000);
+    return () => { alive = false; clearInterval(id); };
+  }, []);
   const [stats, setStats] = useState<{ volLit: number; volUsd: number; trades: number } | null>(null);
   const [err, setErr] = useState<string | null>(null);
   useEffect(() => {
@@ -300,7 +322,10 @@ function LitLiquidityPanel({ state, fills24h }: { state: any; fills24h: any[] })
   }, []);
 
   const price = state?.live_price != null ? Number(state.live_price) : null;
-  const orderLit = state?.order_size_lit != null ? Number(state.order_size_lit) : null;
+  // Curve mode has no single order size (order_size_lit is null): use the next buy's curve size.
+  const orderLit = state?.curve_enabled
+    ? (state?.curve_state?.next_buy_size != null ? Number(state.curve_state.next_buy_size) : null)
+    : state?.order_size_lit != null ? Number(state.order_size_lit) : null;
   const capital = state?.capital_usd != null ? Number(state.capital_usd) : null;
   const within = (xs: [number, number][], lo: number, hi: number) => xs.filter(([p]) => p >= lo && p <= hi).reduce((a, [, q]) => a + q, 0);
   const bidDepth = book && price ? within(book.bids, price * 0.995, price) : null;
@@ -315,13 +340,14 @@ function LitLiquidityPanel({ state, fills24h }: { state: any; fills24h: any[] })
   const ourLit24h = withFill.reduce((a: number, r: any) => a + Number(r.filled_qty ?? 0), 0);
   const marketShare = stats && stats.volLit > 0 ? (ourLit24h / stats.volLit) * 100 : null;
 
-  // Verdict + headroom from our SHARE OF REAL TRADING (a grid fills from actual trades, not from
-  // orders resting on the book): past ~10% of LIT's whole volume we would be a big part of the
-  // market and fills would degrade. Partial fills are the early warning.
-  const SHARE_CEILING = 10;
-  const verdict = marketShare == null ? null
-    : marketShare < 5 && (partialPct ?? 0) < 10 ? { label: "Room to grow", cls: "bg-green-500/15 text-green-300 border-green-500/50" }
-    : marketShare < SHARE_CEILING && (partialPct ?? 0) < 25 ? { label: "Getting close", cls: "bg-amber-500/15 text-amber-300 border-amber-500/50" }
+  // Verdict from what our fills actually show (2026-10-28): partial fills are the real sign the
+  // market can't absorb our size. Our share of LIT volume is shown as context only -- the old
+  // 10%-share ceiling was a guess and turned the verdict red at 11% share while 99% of our orders
+  // still filled whole. Headroom: rough, against a 20% share.
+  const SHARE_CEILING = 20;
+  const verdict = partialPct == null ? null
+    : partialPct < 10 ? { label: "Fills are healthy", cls: "bg-green-500/15 text-green-300 border-green-500/50" }
+    : partialPct < 25 ? { label: "Getting close", cls: "bg-amber-500/15 text-amber-300 border-amber-500/50" }
     : { label: "At the limit", cls: "bg-red-500/15 text-red-300 border-red-500/50" };
   const headroomX = marketShare ? SHARE_CEILING / marketShare : null;
 
@@ -339,7 +365,7 @@ function LitLiquidityPanel({ state, fills24h }: { state: any; fills24h: any[] })
         <Stat label="Our order vs the book"
           value={vsBook != null ? `${vsBook.toFixed(1)}%` : "—"}
           sub={orderLit != null && thinner != null
-            ? `${orderLit.toFixed(2)} LIT per order vs ${thinner.toFixed(0)} LIT on the thinner side within ±0.5% (bids ${bidDepth!.toFixed(0)} · asks ${askDepth!.toFixed(0)})`
+            ? `${orderLit.toFixed(2)} LIT ${state?.curve_enabled ? "next buy" : "per order"} vs ${thinner.toFixed(0)} LIT on the thinner side within ±0.5% (bids ${bidDepth!.toFixed(0)} · asks ${askDepth!.toFixed(0)})`
             : "loading the order book…"}
           color={vsBook == null ? "text-gray-400" : vsBook < 10 ? "text-green-400" : vsBook < 30 ? "text-amber-400" : "text-red-400"} />
         <Stat label="Partial fills (24h)"
@@ -353,7 +379,7 @@ function LitLiquidityPanel({ state, fills24h }: { state: any; fills24h: any[] })
         <Stat label="Room to grow"
           value={headroomX != null ? `~${headroomX.toFixed(1)}×` : "—"}
           sub={headroomX != null && capital != null
-            ? `Investment could grow to ~$${(capital * headroomX).toLocaleString(undefined, { maximumFractionDigits: 0 })} before we are ${SHARE_CEILING}% of all LIT trading (watch partial fills on the way)`
+            ? `rough: ~$${(capital * headroomX).toLocaleString(undefined, { maximumFractionDigits: 0 })} before we are ${SHARE_CEILING}% of all LIT trading. Partial fills are the real limit -- watch that card`
             : ""}
           color={headroomX == null ? "text-gray-400" : headroomX >= 2 ? "text-green-400" : headroomX >= 1 ? "text-amber-400" : "text-red-400"} />
       </div>
@@ -4533,7 +4559,6 @@ export default function Dashboard() {
   const [litGridLiveSellCount, setLitGridLiveSellCount] = useState(0);
   const [litGridLiveFirstSellAt, setLitGridLiveFirstSellAt] = useState<string | null>(null);
   const [litGridWorker3FirstSellAt, setLitGridWorker3FirstSellAt] = useState<string | null>(null);
-  const [litGridWorker3Fills24h, setLitGridWorker3Fills24h] = useState<any[]>([]);
   const [litGridLiveToggling,  setLitGridLiveToggling]  = useState(false);
   const [litGridLiveFlattening, setLitGridLiveFlattening] = useState(false);
   const [litGridLiveClearing, setLitGridLiveClearing] = useState(false);
@@ -4633,7 +4658,6 @@ export default function Dashboard() {
       { data: litGridWorker3Resting },
       { data: litGridLiveFirstSell },
       { data: litGridWorker3FirstSell },
-      { data: litGridWorker3Fills24h },
     ] = await Promise.all([
       getSupabase().from("surfer_state").select("*").eq("id", 1).single(),
       getSupabase().from("surfer_trades").select("*").order("exit_time", { ascending: false }).limit(5000),
@@ -4695,7 +4719,6 @@ export default function Dashboard() {
       getSupabase().from("lighter_lit_grid_live_orders").select("filled_at").eq("side", "sell").not("realized_profit_usd", "is", null).not("filled_at", "is", null).order("filled_at", { ascending: true }).limit(1),
       getSupabase().from("lighter_lit_grid_live_worker3_orders").select("filled_at").eq("side", "sell").not("realized_profit_usd", "is", null).not("filled_at", "is", null).order("filled_at", { ascending: true }).limit(1),
       // Liquidity tracker: every Worker 3 order with a fill in the last 24h (not the transfer rows).
-      getSupabase().from("lighter_lit_grid_live_worker3_orders").select("side,size,filled_qty,status,filled_at,order_kind").gte("filled_at", new Date(Date.now() - 86_400_000).toISOString()).not("filled_qty", "is", null).limit(5000),
     ]);
     setSurferState(surferSt ?? null);
     setSurferTrades(surferTr ?? []);
@@ -4735,7 +4758,6 @@ export default function Dashboard() {
     setLitGridWorker3Resting(litGridWorker3Resting ?? []);
     setLitGridLiveFirstSellAt(litGridLiveFirstSell?.[0]?.filled_at ?? null);
     setLitGridWorker3FirstSellAt(litGridWorker3FirstSell?.[0]?.filled_at ?? null);
-    setLitGridWorker3Fills24h((litGridWorker3Fills24h ?? []).filter((r: any) => r.order_kind !== "transfer"));
     await mirrorLoad;
     setDcaBtcStats({ total: dcaBtcTotal ?? 0, wins: dcaBtcWins ?? 0 });
     setInitialBtcStats({ total: initialBtcTotal ?? 0, wins: initialBtcWins ?? 0 });
@@ -5051,7 +5073,7 @@ export default function Dashboard() {
         )}
 
         {/* Worker 4 merged into Worker 3 (2026-10-23); its spot now tracks LIT liquidity for Worker 3. */}
-        <LitLiquidityPanel state={litGridWorker3State} fills24h={litGridWorker3Fills24h} />
+        <LitLiquidityPanel state={litGridWorker3State} />
 
       </div>
     </main>
