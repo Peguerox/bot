@@ -601,12 +601,11 @@ function LitGridLivePanel({
   // unlike sells.length which only reflects whatever this page happened to fetch for display
   // (2026-10-20 fix: the fetch limit used to be reused as the trade-rate denominator too).
   const tradesPerHour = tradesHours != null && sellCount > 0 ? sellCount / tradesHours : null;
-  // Curve table's trade rate: the bot's own once it has a day and 200 trades; before that, LIT's
-  // measured rate at this spacing (real prints: 693 / 193 / 54 a day at 0.125 / 0.25 / 0.5%, a
-  // power law). A new bot's first few trades used to set the rate (or 626/day at any spacing).
-  const curveTradesPerDay = tradesPerHour != null && sellCount >= 200 && (tradesHours ?? 0) >= 24
-    ? tradesPerHour * 24
-    : 693 * Math.pow(0.125 / Math.max(Number(st?.spacing_pct ?? 0.125), 0.01), 1.85);
+  // Curve table's trade rate: LIT's measured rate at the spacing in use (real prints: 693 / 193 / 54
+  // a day at 0.125 / 0.25 / 0.5%, a power law). Not the bot's all-time rate: that was measured at
+  // whatever spacing it ran before -- after Worker 3 went 0.125 -> 0.25% (2026-10-28) it applied
+  // 0.125%'s ~700 trades/day to 0.25% lines and showed ~3.6x too much.
+  const curveTradesPerDay = 693 * Math.pow(0.125 / Math.max(Number(st?.internal_spacing_pct ?? st?.spacing_pct ?? 0.125), 0.01), 1.85);
   const unrealizedPnl = totalPnl != null ? totalPnl - botProfit : null;
   const unrealizedPct = unrealizedPnl != null && capitalUsd > 0 ? (unrealizedPnl / capitalUsd) * 100 : null;
   const pnlColor = (v: number | null) => v == null ? "text-gray-500" : Math.abs(v) < 0.005 ? "text-gray-300" : v >= 0 ? "text-green-400" : "text-red-400";
