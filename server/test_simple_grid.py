@@ -57,10 +57,13 @@ def start(name, seed, curve=False):
         if r["status"] in ("open", "pending", "cancel_requested") and r.get("order_kind") != "market":
             oi = ex.next_oi
             ex.next_oi += 1
-            size = float(r["size"]) - float(r.get("filled_qty") or 0)
+            # A partly filled order keeps its fill on the exchange (Lighter reports the cumulative
+            # fill), or cancelling it would lose that LIT from the ledger -- a copy-only artifact.
+            done = float(r.get("filled_qty") or 0)
             ex.orders[oi] = {"oi": oi, "co": int(r["client_order_index"]), "side": r["side"],
-                             "price": float(r["limit_price"]), "size": size, "remaining": size,
-                             "filled": 0.0, "quote": 0.0, "status": "open", "created": S.Clock.t - 600}
+                             "price": float(r["limit_price"]), "size": float(r["size"]),
+                             "remaining": float(r["size"]) - done, "filled": done,
+                             "quote": done * float(r["limit_price"]), "status": "open", "created": S.Clock.t - 600}
             r["exchange_order_id"] = oi
             r["status"] = "open"
     limiter = core.ExchangeLimiter()
