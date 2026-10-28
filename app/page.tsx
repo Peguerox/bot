@@ -548,6 +548,7 @@ function LitGridLivePanel({
   apiBase = "/api/lighter-lit-grid-live",
   title = "LIT/USDC Grid Bot",
   subaccountNote = "same sub-account Worker 4 used",
+  tablePrefix = null,
 }: {
   state: any; orders: any[]; sells: any[]; sellCount: number; resting: any[]; loading: boolean;
   firstSellAt?: string | null;
@@ -558,8 +559,28 @@ function LitGridLivePanel({
   // never duplicated) pointed at its own API routes/account via these three overrides --
   // Worker 4's own call site passes none of them, so its behavior is byte-for-byte unchanged.
   apiBase?: string; title?: string; subaccountNote?: string;
+  // 2026-10-28: trades/hour counted from the last grid reset (spacing change), read from this
+  // bot's own runs/orders tables, against LIT's expected rate at the spacing in use.
+  tablePrefix?: string | null;
 }) {
   const st = state;
+  const [sinceReset, setSinceReset] = useState<{ at: string; count: number } | null>(null);
+  useEffect(() => {
+    if (!tablePrefix) return;
+    let alive = true;
+    const load = async () => {
+      const { data: run } = await getSupabase().from(`${tablePrefix}_runs`).select("ran_at")
+        .eq("action", "grid_reset_completed").order("id", { ascending: false }).limit(1);
+      const at = run?.[0]?.ran_at;
+      if (!at) return;
+      const { count } = await getSupabase().from(`${tablePrefix}_orders`).select("id", { count: "exact", head: true })
+        .eq("side", "sell").not("realized_profit_usd", "is", null).gte("filled_at", at);
+      if (alive) setSinceReset({ at, count: count ?? 0 });
+    };
+    load();
+    const id = setInterval(load, 60_000);
+    return () => { alive = false; clearInterval(id); };
+  }, [tablePrefix]);
 
   const [nowTick, setNowTick] = useState(Date.now());
   useEffect(() => {
@@ -829,7 +850,14 @@ function LitGridLivePanel({
           <Stat
             label="Bot Profit"
             value={`${botProfit >= 0 ? "+" : "-"}$${Math.abs(botProfit).toFixed(4)}`}
-            sub={`${fmtPct(botProfitPct, 3)} · ${sellCount} trades${tradesPerHour != null ? ` · ${tradesPerHour.toFixed(1)}/hr` : ""}`}
+            sub={sinceReset
+              ? (() => {
+                  const hrs = Math.max((nowTick - Date.parse(sinceReset.at)) / 3_600_000, 1 / 60);
+                  const rate = sinceReset.count / hrs;
+                  const expect = 693 * Math.pow(0.125 / Math.max(Number(st?.internal_spacing_pct ?? st?.spacing_pct ?? 0.125), 0.01), 1.85) / 24;
+                  return `${fmtPct(botProfitPct, 3)} · since reset: ${sinceReset.count} trades · ${rate.toFixed(1)}/hr ${rate >= expect ? "✓" : "⚠"} (expect ${expect.toFixed(1)}/hr)`;
+                })()
+              : `${fmtPct(botProfitPct, 3)} · ${sellCount} trades${tradesPerHour != null ? ` · ${tradesPerHour.toFixed(1)}/hr` : ""}`}
             color={pnlColor(botProfit)}
           />
           <Stat label="Unrealized PNL" value={fmtUsd(unrealizedPnl)} sub={fmtPct(unrealizedPct)} color={pnlColor(unrealizedPnl)} />
@@ -5045,6 +5073,7 @@ export default function Dashboard() {
           onClearHistory={handleLitGridWorker3ClearHistory}
           clearingHistory={litGridWorker3Clearing}
           apiBase="/api/lighter-lit-grid-live-worker3"
+          tablePrefix="lighter_lit_grid_live_worker3"
           title="LIT/USDC Grid Bot — Worker 3"
           subaccountNote="Worker 3's own sub-account, twin of Worker 4 below at a different spacing"
         />
@@ -5066,6 +5095,7 @@ export default function Dashboard() {
             onClearHistory={() => handleLitMirror("clear")}
             clearingHistory={litMirrorBusy === "clear"}
             apiBase="/api/lighter-lit-grid-live-mirror"
+            tablePrefix="lighter_lit_grid_live_mirror"
             title="LIT Mirror Bot — Worker 4"
             subaccountNote="Worker 4's sub-account · mirror curve (peak −10%) + crash reserve · fresh capital"
           />
