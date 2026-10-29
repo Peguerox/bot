@@ -391,8 +391,8 @@ function LitLiquidityPanel({ state }: { state: any }) {
 // per-level table with $/trade and $/month at the bot's live trade rate. size(p) is rebuilt from
 // curve_state exactly: floor + (size_top - floor) * w(p)/w(P), w = the curve's shape -- with a
 // peak (mirror, 2026-10-27) the price is mirrored around it first, same as curve_weight() in Python.
-function CurveView({ curve, livePrice, spacingPct, tradesPerDay, ago }: {
-  curve: any; livePrice: number | null; spacingPct: number; tradesPerDay: number; ago: string | null;
+function CurveView({ curve, livePrice, spacingPct, tradesPerDay, ago, rateNote = "" }: {
+  curve: any; livePrice: number | null; spacingPct: number; tradesPerDay: number; ago: string | null; rateNote?: string;
 }) {
   const P = Number(curve.top), F = Number(curve.bottom), n = Number(curve.n);
   const floor = Number(curve.floor_lit), sizeTop = Number(curve.size_top);
@@ -534,7 +534,7 @@ function CurveView({ curve, livePrice, spacingPct, tradesPerDay, ago }: {
         })}
       </div>
       <p className="text-gray-500 text-[10px] leading-snug tabular-nums">
-        size = floor + (B − R)/W × ((p − F)/(P − F))^n{peak > 0 ? ` (price mirrored around −${(peak * 100).toFixed(0)}%)` : ""} · bottom ${F.toFixed(4)} · {curve.lines} lines · $/mo at the live rate of ~{tradesPerDay.toFixed(0)} trades/day{ago ? ` · updated ${ago} ago` : ""}
+        size = floor + (B − R)/W × ((p − F)/(P − F))^n{peak > 0 ? ` (price mirrored around −${(peak * 100).toFixed(0)}%)` : ""} · bottom ${F.toFixed(4)} · {curve.lines} lines · $/mo at {tradesPerDay.toFixed(0)} trades/day ({(tradesPerDay / 24).toFixed(1)}/hr){rateNote ? ` ${rateNote}` : ""}{ago ? ` · updated ${ago} ago` : ""}
       </p>
     </div>
   );
@@ -626,7 +626,12 @@ function LitGridLivePanel({
   // a day at 0.125 / 0.25 / 0.5%, a power law). Not the bot's all-time rate: that was measured at
   // whatever spacing it ran before -- after Worker 3 went 0.125 -> 0.25% (2026-10-28) it applied
   // 0.125%'s ~700 trades/day to 0.25% lines and showed ~3.6x too much.
-  const curveTradesPerDay = 693 * Math.pow(0.125 / Math.max(Number(st?.internal_spacing_pct ?? st?.spacing_pct ?? 0.125), 0.01), 1.85);
+  // 2026-10-29 (owner): once there are enough trades since the last grid reset (measured at the
+  // spacing in use), the table uses that real rate; before that, the model.
+  const modelTradesPerDay = 693 * Math.pow(0.125 / Math.max(Number(st?.internal_spacing_pct ?? st?.spacing_pct ?? 0.125), 0.01), 1.85);
+  const sinceResetHours = sinceReset ? Math.max((nowTick - Date.parse(sinceReset.at)) / 3_600_000, 1 / 60) : 0;
+  const liveRate = sinceReset && sinceResetHours >= 2 && sinceReset.count >= 20;
+  const curveTradesPerDay = liveRate ? (sinceReset!.count / sinceResetHours) * 24 : modelTradesPerDay;
   const unrealizedPnl = totalPnl != null ? totalPnl - botProfit : null;
   const unrealizedPct = unrealizedPnl != null && capitalUsd > 0 ? (unrealizedPnl / capitalUsd) * 100 : null;
   const pnlColor = (v: number | null) => v == null ? "text-gray-500" : Math.abs(v) < 0.005 ? "text-gray-300" : v >= 0 ? "text-green-400" : "text-red-400";
@@ -1171,7 +1176,8 @@ function LitGridLivePanel({
         {curveOn && (curve == null
           ? <p className="text-gray-500 text-xs">Planning the curve at the current price…</p>
           : <CurveView curve={curve} livePrice={livePrice} spacingPct={baseSpacingPct ?? 0.125}
-              tradesPerDay={curveTradesPerDay} ago={curveAgo != null ? fmtAgo(curveAgo) : null} />)}
+              tradesPerDay={curveTradesPerDay}
+              rateNote={liveRate ? "· your real rate since the last reset" : "· estimate until 2h and 20 trades after a reset"} ago={curveAgo != null ? fmtAgo(curveAgo) : null} />)}
         <div className="flex items-end gap-2">
           <label className="flex-1 text-[10px] text-gray-500">n
             <input value={curveNIn} onChange={(e) => setCurveNIn(e.target.value)} placeholder={String(st?.curve_n ?? 10)}
