@@ -854,7 +854,7 @@ function LitGridLivePanel({
           <Stat label="Total PNL" value={fmtUsd(totalPnl)} sub={fmtPct(totalPnlPct)} color={pnlColor(totalPnl)} />
           <Stat
             label="Bot Profit"
-            value={`${botProfit >= 0 ? "+" : "-"}$${Math.abs(botProfit).toFixed(4)}`}
+            value={`${botProfit >= 0 ? "+" : "-"}$${Math.abs(botProfit).toFixed(2)}`}
             sub={sinceReset
               ? (() => {
                   const hrs = Math.max((nowTick - Date.parse(sinceReset.at)) / 3_600_000, 1 / 60);
