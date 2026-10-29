@@ -29,7 +29,8 @@ project with no git/Render/Vercel link -- never work there.
   - **Off:** self-lock, hour ban (`trading_hours_utc=None`, `_WEEKDAY_SCHEDULE` kept in the file),
     dispersion filter, saving lock (`saving_lock_arm_frac_of_sl`, built 2026-10-01, available).
   - **Dashboard overrides win over the code**: `override_sl_pct / override_profit_lock_trigger /
-    override_profit_lock_trail` on the state row (SL/Trigger/Trail boxes on the panel,
+    override_profit_lock_trail / override_tp_pct` on the state row (the TP one only since 2026-10-29:
+    before, the 0.10 recorded at entry in position_tp_pct beat the panel TP) (SL/Trigger/Trail boxes on the panel,
     `app/api/lighter-btc-initial-settings`). Always check them before believing the .py values.
   - Self-lock unlock rule, **broken twice already, pinned by a test**: *2 wins of any kind, OR 1
     literal TP* (`self_lock_require_tp_in_streak=False` + `self_lock_tp_unlocks_instantly=True`).

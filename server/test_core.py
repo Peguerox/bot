@@ -2385,6 +2385,21 @@ async def t_exit_mode_tp_honors_override_tp_pct():
     check("closed via TP at the override level", bot.state_row["side"] is None, bot.state_row["side"])
 
 
+async def t_override_tp_beats_the_band_recorded_at_entry():
+    print("\n[override_tp_pct wins over position_tp_pct recorded at entry (Worker 1 live bug 2026-10-29)]")
+    entry = 86000.0
+    ex = FakeExchange(position=round(10.0 / entry, 5), collateral=10.0)
+    partner = {"side": None, "realized_pnl_usd": 0.0}
+    state = _breakeven_state(entry, 10.0)
+    state["override_exit_mode"] = "tp"
+    state["override_tp_pct"] = 0.06
+    state["position_tp_pct"] = 0.10          # what try_enter records from the compiled tp_pct
+    bot = _breakeven_bot(ex, state, partner, breakeven_floor_enabled=False,
+                          schema_has_exit_overrides=True, schema_has_position_bands=True)
+    await _tick_at(bot, entry * (1 + 0.06 / 100) + 1.0)  # past 0.06, short of the recorded 0.10
+    check("closed via TP at the panel's 0.06, not the recorded 0.10", bot.state_row["side"] is None, bot.state_row["side"])
+
+
 async def t_exit_mode_tp_mode_sl_still_fires():
     print("\n[exit_mode: SL still protects the position in 'tp' mode -- never suppressed]")
     entry = 86000.0
@@ -9509,6 +9524,7 @@ async def main():
               t_exit_mode_tp_enables_literal_tp_even_when_compiled_disabled,
               t_exit_mode_tp_suppresses_the_profit_lock_trail,
               t_exit_mode_tp_honors_override_tp_pct,
+              t_override_tp_beats_the_band_recorded_at_entry,
               t_exit_mode_tp_mode_sl_still_fires,
               t_exit_mode_ignored_without_schema_flag,
               t_entry_settings_snapshot_captures_exit_and_jump_settings,

@@ -7348,6 +7348,10 @@ class StochBot:
             pos_sl = pos_sl if pos_sl is not None else ov_sl
             if cfg.schema_has_exit_overrides and state.get("override_sl_pct") is not None:
                 pos_sl = ov_sl
+            # Same for the TP (2026-10-29, live bug): the band recorded at entry (cfg.tp_pct=0.10)
+            # beat the panel's TP, so a 0.06% TP never fired -- a short sat past it for 2 min.
+            if cfg.schema_has_exit_overrides and state.get("override_tp_pct") is not None:
+                pos_tp = ov_tp
             # Escalated/leveled SL -- see BotConfig.escalated_sl_enabled's docstring. Tier 3 (the
             # hard cap) REPLACES the plain SL entirely: overriding pos_sl here means the ordinary
             # SL check and the native exchange-side stop sync just below both automatically pick
