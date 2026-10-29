@@ -40,10 +40,10 @@ def start(name, seed, curve=False):
                    "curve_profit_base_usd": None, "curve_state": None})
     if curve == "mirror":
         # Mirror (peak -10%) + crash reserve (2026-10-27), deploy set to -2% so a short run reaches
-        # it, with $200 already saved in the reserve.
+        # it, with $1,000 already saved in the reserve (over 10% of this copy's ~$3.8k curve).
         comp = float(st.get("profit_bucket_compound_usd") or 0)
         st.update({"curve_peak_pct": 10, "reserve_enabled": True, "reserve_deploy_pct": 2,
-                   "reserve_share_pct": 100, "reserve_profit_base_usd": comp - 200.0,
+                   "reserve_share_pct": 100, "reserve_profit_base_usd": comp - 1_000.0,
                    "reserve_deploys": 0})
     t_snap = datetime.fromisoformat(st["updated_at"].replace("Z", "+00:00"))
     S.Clock.t = S.T0 + (t_snap - S.BASE_DT).total_seconds()

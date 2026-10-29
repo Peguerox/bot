@@ -439,6 +439,10 @@ CURVE_REPLACE_FRAC = 0.25
 # re-planned at that price with all free cash. Held lots keep their own sells. On LIT and HYPE this
 # kept the grid earning through the crash (HYPE -66%: no month under $600).
 RESERVE_MIN_DEPLOY_USD = 1.0
+# A restart needs a reserve worth at least this share of the curve's cash at its last top
+# (owner, 2026-10-28): restarting on a few dollars gave a 1-LIT-floor curve AND moved the top down,
+# so a real reserve saved days later had to wait for another -30%. Below it, the bot keeps its top.
+RESERVE_MIN_DEPLOY_FRAC = 0.10
 TERMINAL_STATUS_SUBSTRINGS = ("cancel", "reject", "expir")
 PAGE_SIZE = 500
 # Re-anchored line numbers start this far past every line number already in the ledger.
@@ -2170,10 +2174,11 @@ class LitGridLive:
             deploy_px = self._reserve_deploy_price(state)
             amount = reserve
             target = state.get("reserve_target_cash_usd")
-            if reserve >= RESERVE_MIN_DEPLOY_USD and price <= deploy_px and target is not None:
+            enough = max(RESERVE_MIN_DEPLOY_USD, RESERVE_MIN_DEPLOY_FRAC * float(target or 0))
+            if reserve >= enough and price <= deploy_px and target is not None:
                 resting_buy_cost, _, available = self._funding(state, holdings, resting)
                 amount = min(reserve, max(0.0, float(target) - (available + resting_buy_cost)))
-            if reserve >= RESERVE_MIN_DEPLOY_USD and price <= deploy_px and amount >= RESERVE_MIN_DEPLOY_USD:
+            if reserve >= enough and price <= deploy_px and amount >= RESERVE_MIN_DEPLOY_USD:
                 deployed = amount
                 kept = reserve - amount
                 # What stays: share x (profit - base) = kept.
@@ -2239,6 +2244,7 @@ class LitGridLive:
             rec["reserve_share_pct"] = round(self._reserve_share(state) * 100, 1)
             if state.get("reserve_target_cash_usd") is not None:
                 rec["reserve_target_cash_usd"] = round(float(state["reserve_target_cash_usd"]), 2)
+                rec["reserve_min_deploy_usd"] = round(max(RESERVE_MIN_DEPLOY_USD, RESERVE_MIN_DEPLOY_FRAC * float(state["reserve_target_cash_usd"])), 2)
         await self.update_state_optional({"curve_state": rec})
         state["curve_state"] = rec
 
