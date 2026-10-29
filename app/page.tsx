@@ -877,12 +877,12 @@ function LitGridLivePanel({
                     ⚠ GAP {gapSecs}s
                   </span>
                 : <span className="text-green-400 text-lg" title="Buy and sell next to price are on the book">✓</span>)}
-              <span className="flex flex-col text-xs font-normal leading-tight">
-                <span className="text-green-400/80">sell ↑ {nearestSell != null && livePrice != null ? `$${nearestSell.toFixed(4)} (+${((nearestSell / livePrice - 1) * 100).toFixed(2)}%)` : "none"}</span>
-                <span className="text-red-400/80">buy ↓ {nearestBuy != null && livePrice != null ? `$${nearestBuy.toFixed(4)} (-${((1 - nearestBuy / livePrice) * 100).toFixed(2)}%)` : "none"}</span>
-              </span>
             </span>}
-            sub={st?.order_size_lit != null ? `${Number(st.order_size_lit).toFixed(2)} LIT/order` : ""}
+            sub={<span className="flex flex-col leading-tight">
+              <span className="text-green-400/80">sell ↑ {nearestSell != null && livePrice != null ? `$${nearestSell.toFixed(4)} (+${((nearestSell / livePrice - 1) * 100).toFixed(2)}%)` : "none"}</span>
+              <span className="text-red-400/80">buy ↓ {nearestBuy != null && livePrice != null ? `$${nearestBuy.toFixed(4)} (-${((1 - nearestBuy / livePrice) * 100).toFixed(2)}%)` : "none"}</span>
+              {st?.order_size_lit != null && !curveOn && <span>{Number(st.order_size_lit).toFixed(2)} LIT/order</span>}
+            </span>}
             color={gapAlarm ? "text-red-400" : "text-gray-300"}
           />
           <Stat label="USDC Balance" value={usdcBalance != null ? `$${usdcBalance.toFixed(2)}` : "—"} sub="real, from the exchange" color="text-gray-300" />
