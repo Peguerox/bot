@@ -73,10 +73,11 @@ function formatDurationShort(ms: number): string {
   return `${remMins}m`;
 }
 
-function Stat({ label, value, sub, color }: { label: string; value: React.ReactNode; sub: React.ReactNode; color: string }) {
+function Stat({ label, value, sub, color, active = false }: { label: string; value: React.ReactNode; sub: React.ReactNode; color: string; active?: boolean }) {
+  // active (2026-10-29): the profit bucket new profit is going to -- highlighted instead of explained.
   return (
-    <div className="bg-gray-800/60 rounded-lg p-3">
-      <p className="text-gray-500 text-xs uppercase tracking-wide">{label}</p>
+    <div className={`rounded-lg p-3 ${active ? "bg-emerald-500/10 ring-1 ring-emerald-500/60" : "bg-gray-800/60"}`}>
+      <p className={`text-xs uppercase tracking-wide ${active ? "text-emerald-300" : "text-gray-500"}`}>{label}{active ? " ● filling" : ""}</p>
       <p className={`text-xl font-bold mt-0.5 ${color}`}>{value}</p>
       <p className="text-gray-600 text-xs mt-0.5">{sub}</p>
     </div>
@@ -905,12 +906,14 @@ function LitGridLivePanel({
           />
           <Stat
             label="Rest Bucket"
+            active={(st?.profit_mode ?? "rest") === "rest"}
             value={`$${Number(st?.profit_bucket_rest_usd ?? 0).toFixed(2)}`}
             sub="yours to withdraw"
             color="text-gray-300"
           />
           <Stat
             label="Drawdown Bucket"
+            active={st?.profit_mode === "cover_drop"}
             value={`$${Number(st?.profit_bucket_cover_drop_usd ?? 0).toFixed(2)}`}
             sub={<span className="flex flex-col gap-1 text-xs">
               {st?.reserve_enabled ? (() => {
@@ -922,7 +925,6 @@ function LitGridLivePanel({
                 return <>
                   <span className="text-amber-300 font-semibold">🛡 crash reserve · idle, never spent</span>
                   <span className="text-gray-400">{ref > 0 ? `restarts at $${(ref * (1 - pct / 100)).toFixed(4)} (−${pct}%)` : `restarts at −${pct}%`} once ≥ ${minUsd.toLocaleString(undefined, { maximumFractionDigits: 0 })}{Number(st?.reserve_deploys ?? 0) > 0 ? ` · used ${st.reserve_deploys}×` : ""}</span>
-                  {st?.profit_mode !== "cover_drop" && <span className="text-gray-500">not filling (profit goes to {st?.profit_mode ?? "rest"})</span>}
                 </>;
               })() : <span className="text-gray-400">{st?.drawdown_coverage_pct != null
                 ? `extra buying on the way down · now covering a ${Number(st.drawdown_coverage_pct).toFixed(1)}% drop`
@@ -951,23 +953,10 @@ function LitGridLivePanel({
           />
           <Stat
             label="Compound Bucket"
+            active={st?.profit_mode === "compound"}
             value={`$${Number(st?.profit_bucket_compound_usd ?? 0).toFixed(2)}`}
-            sub={curveOn ? (() => {
-              // 2026-10-29: says whether compound is filling (profit mode) and names the shape.
-              const shape = Number(st?.curve_peak_pct ?? 0) > 0 ? "mirror" : "curve";
-              const filling = (st?.profit_mode ?? "rest") === "compound";
-              const sincePlan = st?.curve_profit_base_usd != null
-                ? Math.max(0, Number(st?.profit_bucket_compound_usd ?? 0)
-                    + (st?.reserve_enabled ? 0 : Number(st?.profit_bucket_cover_drop_usd ?? 0))
-                    - Number(st.curve_profit_base_usd))
-                : null;
-              return <span className="flex flex-col gap-0.5 text-xs">
-                <span className="text-blue-300 font-semibold">∿ inside the {shape}'s buying money</span>
-                {filling
-                  ? <span className="text-sky-300">filling now · every new profit makes the buys bigger{sincePlan != null ? ` · +$${sincePlan.toFixed(2)} since the last re-plan` : ""}</span>
-                  : <span className="text-gray-400">not filling · new profit goes to {st?.profit_mode === "cover_drop" ? "the Drawdown reserve" : "Rest"} · switch Profit Allocation to Compound to grow it</span>}
-              </span>;
-            })() : <span className="flex flex-col gap-0.5 text-xs">
+            sub={curveOn ? <span className="text-xs text-gray-500">in the {Number(st?.curve_peak_pct ?? 0) > 0 ? "mirror" : "curve"}'s buying money</span>
+            : <span className="flex flex-col gap-0.5 text-xs">
               <span className="text-amber-300 font-semibold">
                 {compoundResizeAgo != null ? `↻ last resize ${fmtAgo(compoundResizeAgo)} ago` : "↻ no resize yet"}
               </span>
