@@ -454,7 +454,7 @@ function CurveView({ curve, livePrice, spacingPct, tradesPerDay, ago }: {
           <div>
             <p className="text-amber-300/80 text-[10px] uppercase tracking-wide">Crash reserve</p>
             <p className="text-amber-200 text-sm font-bold tabular-nums">${Number(curve.reserve_usd).toLocaleString(undefined, { maximumFractionDigits: 2 })}</p>
-            <p className="text-gray-500 text-[10px]">{Number(curve.reserve_share_pct ?? 100).toFixed(0)}% of profit kept as cash · used {curve.reserve_deploys ?? 0}×</p>
+            <p className="text-gray-500 text-[10px]">the Drawdown bucket{curve.reserve_filling === false ? " (not filling: profit mode isn't Drawdown)" : ", filling from profit"} · used {curve.reserve_deploys ?? 0}×</p>
             {curve.reserve_target_cash_usd != null && (
               <p className="text-gray-500 text-[10px]">refills the curve up to ${Number(curve.reserve_target_cash_usd).toLocaleString(undefined, { maximumFractionDigits: 0 })}; any extra waits for the next leg{curve.reserve_min_deploy_usd != null ? ` · restarts only once it holds $${Number(curve.reserve_min_deploy_usd).toLocaleString(undefined, { maximumFractionDigits: 0 })}+` : ""}</p>
             )}
@@ -687,7 +687,7 @@ function LitGridLivePanel({
 
   async function handleSetProfitMode(mode: "rest" | "cover_drop" | "compound") {
     if (mode === st?.profit_mode || profitModeSaving) return;
-    const labels: Record<string, string> = { rest: "Rest", cover_drop: "Cover Drop", compound: "Compound" };
+    const labels: Record<string, string> = { rest: "Rest", cover_drop: "Drawdown", compound: "Compound" };
     if (!confirm(`Switch profit allocation to "${labels[mode]}"? Money already in another bucket stays there for its own purpose.`)) return;
     const secret = litGridLiveAdminSecret();
     if (!secret) return;
@@ -749,7 +749,6 @@ function LitGridLivePanel({
   const [curveFloorIn, setCurveFloorIn] = useState("");
   const [curvePeakIn, setCurvePeakIn] = useState("");
   const [reserveDeployIn, setReserveDeployIn] = useState("");
-  const [reserveShareIn, setReserveShareIn] = useState("");
   const sizingQuestions: Record<string, string> = {
     flat: "Switch sizing to FLAT? Gates and curve both off: one order size from your Drawdown setting.",
     dynamic: "Switch sizing to DYNAMIC (gates)? The high starts at the current price and order size follows the gates, using the available balance.",
@@ -906,11 +905,43 @@ function LitGridLivePanel({
             color="text-gray-300"
           />
           <Stat
-            label="Cover-Drop Bucket"
+            label="Drawdown Bucket"
             value={`$${Number(st?.profit_bucket_cover_drop_usd ?? 0).toFixed(2)}`}
-            sub={st?.drawdown_coverage_pct != null
-              ? `now covering a ${Number(st.drawdown_coverage_pct).toFixed(1)}% drop`
-              : "extends buying past capital_usd"}
+            sub={<span className="flex flex-col gap-1 text-xs">
+              {st?.reserve_enabled ? (() => {
+                const ref = curveOn ? Number(st?.curve_top) : Number(st?.dynamic_dd_high);
+                const pct = Number(st?.reserve_deploy_pct ?? 30);
+                const minUsd = curveOn
+                  ? Math.max(1, 0.1 * Number(st?.reserve_target_cash_usd ?? 0))
+                  : Math.max(1, 0.1 * Number(st?.capital_usd ?? 0));
+                return <>
+                  <span className="text-amber-300 font-semibold">🛡 crash reserve · idle, never spent</span>
+                  <span className="text-gray-400">{ref > 0 ? `restarts at $${(ref * (1 - pct / 100)).toFixed(4)} (−${pct}%)` : `restarts at −${pct}%`} once ≥ ${minUsd.toLocaleString(undefined, { maximumFractionDigits: 0 })}{Number(st?.reserve_deploys ?? 0) > 0 ? ` · used ${st.reserve_deploys}×` : ""}</span>
+                  {st?.profit_mode !== "cover_drop" && <span className="text-gray-500">not filling (profit goes to {st?.profit_mode ?? "rest"})</span>}
+                </>;
+              })() : <span className="text-gray-400">{st?.drawdown_coverage_pct != null
+                ? `extra buying on the way down · now covering a ${Number(st.drawdown_coverage_pct).toFixed(1)}% drop`
+                : "extra buying on the way down, past the Investment"}</span>}
+              {hasReserve && <span className="flex items-center gap-1.5 flex-wrap">
+                <button
+                  onClick={() => handleDynamicDrawdown({ reserveEnabled: !st?.reserve_enabled },
+                    st?.reserve_enabled
+                      ? "Turn the crash reserve OFF? The Drawdown bucket goes back to extra buying on the way down."
+                      : "Turn the crash reserve ON? The Drawdown bucket stays idle (never spent) until price falls the set % from the top, then restarts the buying there.")}
+                  disabled={dynSaving}
+                  className={`text-[10px] font-bold px-2 py-0.5 rounded-full border disabled:opacity-40 ${st?.reserve_enabled
+                    ? "bg-amber-500/15 text-amber-300 border-amber-500/40" : "bg-gray-800 text-gray-500 border-gray-700"}`}
+                >{st?.reserve_enabled ? "● reserve ON" : "○ reserve OFF"}</button>
+                <input value={reserveDeployIn} onChange={(e) => setReserveDeployIn(e.target.value)} placeholder={`−${st?.reserve_deploy_pct ?? 30}%`}
+                  inputMode="decimal" className="w-14 bg-gray-800 border border-gray-700 rounded px-1.5 py-0.5 text-[10px] text-gray-200" />
+                <button
+                  onClick={() => reserveDeployIn.trim() && handleDynamicDrawdown({ reserveDeployPct: Number(reserveDeployIn) },
+                    `Crash reserve restarts at −${reserveDeployIn}% from the top?`).then(() => setReserveDeployIn(""))}
+                  disabled={dynSaving || !reserveDeployIn.trim()}
+                  className="text-[10px] font-bold px-1.5 py-0.5 rounded bg-amber-500/20 text-amber-300 disabled:opacity-30"
+                >Set</button>
+              </span>}
+            </span>}
             color="text-gray-300"
           />
           <Stat
@@ -944,7 +975,7 @@ function LitGridLivePanel({
         <div className="grid grid-cols-3 gap-1.5">
           {([
             ["rest", "Rest"],
-            ["cover_drop", "Cover Drop"],
+            ["cover_drop", "Drawdown"],
             ["compound", "Compound"],
           ] as const).map(([mode, label]) => (
             <button
@@ -977,7 +1008,7 @@ function LitGridLivePanel({
           <div className={`border border-gray-800 rounded-md p-2 space-y-1.5 ${restMode ? "" : "opacity-40"}`}>
             <p className="text-gray-500 text-[9px] uppercase tracking-wide">
               Rest cap {restMode ? (cap != null && overflow
-                ? `· $${restNow.toFixed(2)} of $${cap.toFixed(2)}${full ? ` · FULL → ${overflow === "compound" ? "Compound" : "Cover Drop"}` : ""}`
+                ? `· $${restNow.toFixed(2)} of $${cap.toFixed(2)}${full ? ` · FULL → ${overflow === "compound" ? "Compound" : "Drawdown"}` : ""}`
                 : "· no cap") : "· only in Rest mode"}
             </p>
             <div className="flex items-center gap-1.5">
@@ -997,7 +1028,7 @@ function LitGridLivePanel({
             </div>
             <div className="flex items-center gap-1.5">
               <span className="text-gray-500 text-[10px] w-16 shrink-0">When full →</span>
-              {([["compound", "Compound"], ["cover_drop", "Cover Drop"]] as const).map(([dest, label]) => (
+              {([["compound", "Compound"], ["cover_drop", "Drawdown"]] as const).map(([dest, label]) => (
                 <button
                   key={dest}
                   disabled={off}
@@ -1093,8 +1124,8 @@ function LitGridLivePanel({
 
       <div className="rounded-xl border border-gray-700 bg-gray-900/60 p-3 space-y-2">
         <p className="text-gray-200 text-sm font-bold">Sizing</p>
-        <div className="grid grid-cols-3 gap-1.5">
-          {(["flat", "dynamic", "curve"] as const).map((m) => (
+        <div className="grid grid-cols-2 gap-1.5">
+          {(["flat", "curve"] as const).map((m) => (
             <button
               key={m}
               onClick={() => m !== sizingMode && handleDynamicDrawdown({ sizingMode: m }, sizingQuestions[m])}
@@ -1103,11 +1134,11 @@ function LitGridLivePanel({
                 ? "bg-green-500/15 text-green-400 border-green-500/40"
                 : "bg-gray-800 text-gray-400 border-gray-600 hover:text-gray-200"}`}
             >
-              {m === sizingMode ? "● " : ""}{m === "flat" ? "Flat" : m === "dynamic" ? "Dynamic" : Number(st?.curve_peak_pct ?? 0) > 0 ? "Mirror" : "Curve"}
+              {m === sizingMode ? "● " : ""}{m === "flat" ? "Flat" : Number(st?.curve_peak_pct ?? 0) > 0 ? "Mirror" : "Curve"}
             </button>
           ))}
         </div>
-        <p className="text-gray-500 text-[10px] leading-snug">Only one is ever on. Flat = one size from Drawdown · Dynamic = the gates · Curve = the formula.</p>
+        <p className="text-gray-500 text-[10px] leading-snug">Only one is ever on. Flat = one size from Drawdown · Curve = the formula (Peak −% makes it the Mirror).</p>
       </div>
 
       <div className="rounded-xl border border-gray-700 bg-gray-900/60 p-3 space-y-3">
@@ -1163,128 +1194,6 @@ function LitGridLivePanel({
             className="text-xs font-bold px-2.5 py-1.5 rounded bg-blue-500/20 text-blue-300 hover:bg-blue-500/30 disabled:opacity-30"
           >Save</button>
         </div>
-        {hasReserve && (
-          <div className="rounded-lg border border-gray-700 bg-gray-950/40 p-2 space-y-2">
-            <div className="flex items-center justify-between gap-2">
-              <div>
-                <p className="text-gray-200 text-xs font-bold">Crash reserve</p>
-                <p className="text-gray-500 text-[10px] leading-snug">Profit kept as cash, never spent. When price is the deploy % below the top, it comes back and the curve restarts there. Held LIT keeps its sells.</p>
-              </div>
-              <button
-                onClick={() => handleDynamicDrawdown({ reserveEnabled: !st?.reserve_enabled },
-                  st?.reserve_enabled
-                    ? "Turn the crash reserve OFF? The cash it holds goes back to normal use (the curve uses it at its next re-plan)."
-                    : "Turn the crash reserve ON? It starts at $0 and keeps a share of every new profit as cash until price falls to the deploy level.")}
-                disabled={dynSaving}
-                className={`shrink-0 text-xs font-bold px-3 py-1.5 rounded-full border disabled:opacity-40 ${st?.reserve_enabled
-                  ? "bg-amber-500/15 text-amber-300 border-amber-500/40" : "bg-gray-800 text-gray-500 border-gray-700"}`}
-              >{st?.reserve_enabled ? "● ON" : "○ OFF"}</button>
-            </div>
-            <div className="flex items-end gap-2">
-              <label className="flex-1 text-[10px] text-gray-500">Deploy at −%
-                <input value={reserveDeployIn} onChange={(e) => setReserveDeployIn(e.target.value)} placeholder={String(st?.reserve_deploy_pct ?? 30)}
-                  className="mt-0.5 w-full bg-gray-800 border border-gray-700 rounded px-2 py-1 text-xs text-gray-200" />
-              </label>
-              <label className="flex-1 text-[10px] text-gray-500">% of profit kept
-                <input value={reserveShareIn} onChange={(e) => setReserveShareIn(e.target.value)} placeholder={String(st?.reserve_share_pct ?? 100)}
-                  className="mt-0.5 w-full bg-gray-800 border border-gray-700 rounded px-2 py-1 text-xs text-gray-200" />
-              </label>
-              <button
-                onClick={() => {
-                  const body: Record<string, number> = {};
-                  if (reserveDeployIn.trim()) body.reserveDeployPct = Number(reserveDeployIn);
-                  if (reserveShareIn.trim()) body.reserveSharePct = Number(reserveShareIn);
-                  if (Object.keys(body).length === 0) return;
-                  handleDynamicDrawdown(body, `Set the crash reserve ${body.reserveDeployPct != null ? `deploy at −${body.reserveDeployPct}% ` : ""}${body.reserveSharePct != null ? `keeping ${body.reserveSharePct}% of profit` : ""}?`)
-                    .then(() => { setReserveDeployIn(""); setReserveShareIn(""); });
-                }}
-                disabled={dynSaving || (!reserveDeployIn.trim() && !reserveShareIn.trim())}
-                className="text-xs font-bold px-2.5 py-1.5 rounded bg-amber-500/20 text-amber-300 hover:bg-amber-500/30 disabled:opacity-30"
-              >Save</button>
-            </div>
-          </div>
-        )}
-      </div>
-
-      <div className="rounded-xl border border-gray-700 bg-gray-900/60 p-3 space-y-3">
-        <div className="flex items-start justify-between gap-2">
-          <div>
-            <p className="text-gray-200 text-sm font-bold">Dynamic Drawdown</p>
-            <p className="text-gray-500 text-[11px] leading-snug">
-              The further price falls from its high, the deeper the money is stretched, so the bot never runs out of cash.
-            </p>
-          </div>
-          <span className={`shrink-0 text-xs font-bold px-3 py-1.5 rounded-full border ${dynOn
-            ? "bg-green-500/15 text-green-400 border-green-500/40" : "bg-gray-800 text-gray-500 border-gray-700"}`}>
-            {dynOn ? "● ON" : "○ OFF"}
-          </span>
-        </div>
-
-        {dynOn && (
-          <div className="grid grid-cols-3 gap-2">
-            <div className="rounded-lg border border-gray-700 bg-gray-800/60 p-2">
-              <p className="text-gray-500 text-[10px] uppercase tracking-wide">High</p>
-              <p className="text-gray-100 text-sm font-bold tabular-nums">${dynHigh != null ? dynHigh.toFixed(4) : "—"}</p>
-              <button
-                onClick={() => handleDynamicDrawdown({ resetDynamicHigh: true }, `Reset the high from $${dynHigh != null ? dynHigh.toFixed(4) : "—"} to the current price $${livePrice != null ? Number(livePrice).toFixed(4) : "—"}?\n\nPrice fall goes back to 0%, the bot returns to the 10% level and new orders get BIGGER (re-sized on the available balance).`)}
-                disabled={dynSaving}
-                className="mt-1 w-full text-[11px] font-semibold px-2 py-1 rounded-md border border-blue-500/50 bg-blue-500/10 text-blue-300 hover:bg-blue-500/20 disabled:opacity-40"
-              >
-                ↻ Reset high
-              </button>
-            </div>
-            <div className="rounded-lg border border-gray-700 bg-gray-800/60 p-2">
-              <p className="text-gray-500 text-[10px] uppercase tracking-wide">Price fall</p>
-              <p className={`text-sm font-bold tabular-nums ${dynDrop != null && dynDrop >= 5 ? "text-red-400" : "text-gray-100"}`}>
-                {dynDrop != null ? `${dynDrop.toFixed(2)}%` : "—"}
-              </p>
-              <p className="text-gray-500 text-[10px]">below the high</p>
-            </div>
-            <div className="rounded-lg border border-blue-500/40 bg-blue-500/10 p-2">
-              <p className="text-blue-300/80 text-[10px] uppercase tracking-wide">Money lasts to</p>
-              <p className="text-blue-300 text-sm font-bold tabular-nums">{dynTier != null && dynHigh != null ? `$${(dynHigh * (1 - dynTier / 100)).toFixed(4)}` : "—"}</p>
-              <p className="text-gray-500 text-[10px] tabular-nums">{dynTier != null ? `−${dynTier}% · ` : ""}{st?.order_size_lit != null ? `${Number(st.order_size_lit).toFixed(1)} LIT/order` : ""}</p>
-            </div>
-          </div>
-        )}
-
-        {dynOn && dynDrop != null && (
-          <div>
-            <div className="relative h-2.5 rounded-full bg-gray-800 overflow-hidden border border-gray-700">
-              <div className="absolute inset-y-0 left-0 bg-gradient-to-r from-green-500/70 via-yellow-500/70 to-red-500/80"
-                   style={{ width: `${Math.min(dynDrop / 25, 1) * 100}%` }} />
-              {[5, 10, 20].map((g) => (
-                <div key={g} className="absolute inset-y-0 w-px bg-gray-400/60" style={{ left: `${(g / 25) * 100}%` }} />
-              ))}
-            </div>
-            <div className="relative h-3 text-[9px] text-gray-500 tabular-nums">
-              {[0, 5, 10, 20].map((g) => (
-                <span key={g} className="absolute -translate-x-1/2 first:translate-x-0" style={{ left: `${(g / 25) * 100}%` }}>{g === 0 ? "high" : `−${g}%`}</span>
-              ))}
-            </div>
-          </div>
-        )}
-
-        <div className="rounded-lg border border-gray-700 overflow-hidden">
-          <div className="grid grid-cols-3 bg-gray-800/80 text-[10px] uppercase tracking-wide text-gray-500 px-2 py-1">
-            <span>Price fall</span><span>Switches at</span><span className="text-right">Money lasts to</span>
-          </div>
-          {([[0, 5, 10], [5, 10, 20], [10, 20, 40], [20, null, 99.9]] as const).map(([from, to, tier]) => {
-            const active = dynOn && dynTier === tier;
-            const ref = dynOn ? dynHigh : livePrice;
-            return (
-              <div key={tier} className={`grid grid-cols-3 px-2 py-1.5 text-xs tabular-nums border-t border-gray-800 ${active ? "bg-blue-500/15 text-blue-200 font-semibold" : "text-gray-400"}`}>
-                <span>{active ? "▶ " : ""}{to == null ? `over ${from}%` : `${from}–${to}%`}</span>
-                <span>{from === 0 ? "start" : ref != null ? `$${(ref * (1 - from / 100)).toFixed(4)}` : "—"}</span>
-                <span className="text-right">{ref != null ? `$${(ref * (1 - tier / 100)).toFixed(4)}` : "—"} <span className="text-gray-500">(−{tier}%)</span></span>
-              </div>
-            );
-          })}
-        </div>
-        <p className="text-gray-500 text-[10px] leading-snug">
-          All % are measured from the high. At each switch the <span className="text-gray-300">available balance</span> is spread over every buy line from today's price down to "money lasts to", so new orders get smaller as price falls and the cash never runs out before that price.
-          Orders already placed keep their size. When price climbs back above a switch price, orders grow again.
-        </p>
       </div>
 
       <div>

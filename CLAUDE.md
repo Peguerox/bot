@@ -293,6 +293,13 @@ since. Held LIT is never counted as cash. At switch-on resting buys >25% off the
 swapped once. Migration `lighter_lit_grid_live_worker3_curve.sql`. Research:
 `research/lit-curve-spacing-2026-10-25/FORMULAS.md`.
 
+**Buckets (2026-10-29, owner):** profit mode Rest / Compound / Drawdown (= cover_drop). The crash reserve is
+an option ON the Drawdown bucket (`reserve_enabled` + `reserve_deploy_pct`, toggle on its card): ON = the bucket
+is idle until -X% (curve: from the top; flat: from the high since on, kept in `dynamic_dd_high`), then released
+(`reserve_released_usd`, spendable like compound) and buying restarts there; OFF = old cover-drop. Switching
+profit mode never empties a bucket. `reserve_share_pct` is no longer used. Dynamic sizing is retired from the
+panel/routes (backend code still present, unused).
+
 **Mirror bot (2026-10-27, built, starts OFF):** a second LIT instance in the same Render process
 (`lighter_lit_grid_dual_twin.py`, wrapped so its crashes never stop Worker 3) on Worker 4's emptied
 sub-account (plain `LIGHTER_*` env vars), NEW tables `lighter_lit_grid_live_mirror_*` (Worker 4's old

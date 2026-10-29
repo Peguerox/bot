@@ -433,11 +433,13 @@ CURVE_REPLACE_FRAC = 0.25
 # curve, but its biggest orders sit `peak`% below the top instead of at it -- the dollars at a price
 # that is g below the peak equal the plain curve's dollars at g below the top, on both sides. 0 =
 # the plain curve (byte-for-byte the old sizes). Research: research/lit-plan-50k-2026-10-27/.
-# Crash reserve (`reserve_enabled`): `reserve_share_pct` of every profit made since it was switched
-# on (or last deployed) is kept as idle USDC -- never sized into the curve, never spent by a buy.
-# When price is `reserve_deploy_pct`% below the curve's top, the reserve is released and the curve
-# re-planned at that price with all free cash. Held lots keep their own sells. On LIT and HYPE this
-# kept the grid earning through the crash (HYPE -66%: no month under $600).
+# Crash reserve (`reserve_enabled`, an option of the Drawdown/cover-drop bucket -- owner, 2026-10-29):
+# with it ON the cover-drop bucket is idle USDC -- never sized into the curve, never spent by a buy.
+# Profit mode decides what fills it (mode cover_drop); switching mode never empties it. When price is
+# `reserve_deploy_pct`% below the curve's top, it is released (reserve_released_usd, then spendable
+# like compound money) and the curve re-planned at that price. OFF: the bucket is the old cover-drop
+# (extra buying past the Investment). Held lots keep their own sells. On LIT and HYPE this kept the
+# grid earning through the crash (HYPE -66%: no month under $600).
 RESERVE_MIN_DEPLOY_USD = 1.0
 # A restart needs a reserve worth at least this share of the curve's cash at its last top
 # (owner, 2026-10-28): restarting on a few dollars gave a 1-LIT-floor curve AND moved the top down,
@@ -1159,7 +1161,7 @@ class LitGridLive:
                     if (s.get("profit_bucket_destination") or "profit_bucket_rest_usd") == "profit_bucket_rest_usd")
         return gross - float(withdrawn or 0)
 
-    async def _bucket_balances(self, rest_withdrawn=0.0):
+    async def _bucket_balances(self, rest_withdrawn=0.0, reserve_released=0.0):
         """PURE DERIVED balances (external audit fix, seventh pass -- replaces the sixth pass's
         mutable spend/credit counter entirely, which had THREE separate non-atomicity bugs found
         by the same audit round: a retry could double-apply a credit if the "mark credited"
@@ -1193,8 +1195,10 @@ class LitGridLive:
         reserved = sum(float(r.get("funded_from_bucket_usd") or 0) for r in (open_buys or []))
         holdings = await self.current_holdings()
         held_bucket_cost = sum(h.get("bucket_cost_total", 0.0) for h in holdings.values())
+        # Minus what crash-reserve deploys released into the curve (reserve_released_usd).
         gross["profit_bucket_cover_drop_usd"] = round(
-            max(0.0, gross["profit_bucket_cover_drop_usd"] - reserved - held_bucket_cost), 8)
+            max(0.0, gross["profit_bucket_cover_drop_usd"] - reserved - held_bucket_cost
+                - float(reserve_released or 0)), 8)
         # Rest minus what the user recorded as withdrawn ("Withdrew $" on the panel).
         gross["profit_bucket_rest_usd"] = round(
             max(0.0, gross["profit_bucket_rest_usd"] - float(rest_withdrawn or 0)), 8)
@@ -2043,8 +2047,11 @@ class LitGridLive:
         # regardless of attribution -- real cash doesn't care which sub-budget funded it.
         cover_drop_bucket = float(state.get("profit_bucket_cover_drop_usd") or 0)
         available_usdc = min(real_usdc - resting_buy_cost, base_capital_remaining + cover_drop_bucket)
-        # Crash reserve: idle cash until it is deployed -- no buy may spend it.
+        # Crash reserve: the Drawdown bucket is idle until deployed -- no buy may spend it. What a
+        # deploy released counts as curve money from then on.
         available_usdc -= self._reserve_usd(state)
+        available_usdc = min(available_usdc + float(state.get("reserve_released_usd") or 0),
+                             real_usdc - resting_buy_cost - self._reserve_usd(state))
         return resting_buy_cost, base_capital_remaining, available_usdc
 
     async def _dynamic_order_size(self, state, price, spacing_pct, holdings, resting):
@@ -2101,9 +2108,48 @@ class LitGridLive:
 
     # ── Curve sizing (curve_enabled) ────────────────────────────────────────────────────────────
     @staticmethod
-    def _curve_profit(state):
-        return (float(state.get("profit_bucket_compound_usd") or 0)
-                + float(state.get("profit_bucket_cover_drop_usd") or 0))
+    def _reserve_on(state):
+        """The Drawdown bucket is the crash reserve (curve/mirror or flat sizing, option on)."""
+        return sizing_mode(state) in ("curve", "flat") and bool(state.get("reserve_enabled"))
+
+    async def _flat_reserve(self, state, price):
+        """Crash reserve under flat sizing (owner, 2026-10-29: the buckets work in every mode).
+        No curve top here, so the reference is the highest price since the option went on or the
+        last deploy (kept in dynamic_dd_high -- dynamic sizing is retired). At deploy% below it,
+        with at least 10% of the Investment saved, the whole reserve is released, the order size
+        recomputed with it, and the high restarts at that price."""
+        if not self._reserve_on(state):
+            return
+        patch = {}
+        high = state.get("dynamic_dd_high")
+        if state.get("reserve_profit_base_usd") is None:
+            patch["reserve_profit_base_usd"] = 0.0
+            high = None
+        if high is None or price > float(high):
+            high = price
+            patch["dynamic_dd_high"] = price
+        reserve = self._reserve_usd(state)
+        pct = state.get("reserve_deploy_pct")
+        deploy_px = float(high) * (1 - float(30 if pct is None else pct) / 100.0)
+        enough = max(RESERVE_MIN_DEPLOY_USD, RESERVE_MIN_DEPLOY_FRAC * float(state.get("capital_usd") or 0))
+        if reserve >= enough and price <= deploy_px:
+            patch.update({
+                "reserve_released_usd": float(state.get("reserve_released_usd") or 0) + reserve,
+                "profit_bucket_cover_drop_usd": max(0.0, float(state.get("profit_bucket_cover_drop_usd") or 0) - reserve),
+                "reserve_deploys": int(state.get("reserve_deploys") or 0) + 1,
+                "reserve_last_deploy_at": now_iso(), "dynamic_dd_high": price, "order_size_lit": None})
+            await self.log_run("reserve_deployed", {"mode": "flat", "reserve_usd": round(reserve, 2),
+                                                    "high": high, "price": round(price, 5)})
+        if patch:
+            await self.update_state(patch)
+            state.update(patch)
+
+    @classmethod
+    def _curve_profit(cls, state):
+        """Profit that grows the curve: compound, plus the Drawdown bucket unless it is the crash
+        reserve."""
+        cd = 0.0 if cls._reserve_on(state) else float(state.get("profit_bucket_cover_drop_usd") or 0)
+        return float(state.get("profit_bucket_compound_usd") or 0) + cd
 
     def _curve_plan_cached(self, state, anchor_log, step):
         n = float(state.get("curve_n") or 10)
@@ -2116,22 +2162,12 @@ class LitGridLive:
             self._curve_cache = cache
         return cache[1]
 
-    @staticmethod
-    def _reserve_share(state):
-        """Fraction of new profit the crash reserve keeps. 0 while it is off, or switched on but
-        not started yet (its base is set on the next curve tick)."""
-        if (sizing_mode(state) != "curve" or not state.get("reserve_enabled")
-                or state.get("reserve_profit_base_usd") is None):
-            return 0.0
-        pct = state.get("reserve_share_pct")
-        return min(1.0, max(0.0, float(100 if pct is None else pct) / 100.0))
-
     def _reserve_usd(self, state):
-        """Idle USDC held for a crash: share x profit made since the reserve started / last deployed."""
-        share = self._reserve_share(state)
-        if share <= 0:
+        """Idle USDC held for a crash: the Drawdown bucket while the reserve option is on (its
+        derived balance already excludes what earlier deploys released)."""
+        if not self._reserve_on(state):
             return 0.0
-        return share * max(0.0, self._curve_profit(state) - float(state["reserve_profit_base_usd"]))
+        return max(0.0, float(state.get("profit_bucket_cover_drop_usd") or 0))
 
     @staticmethod
     def _reserve_deploy_price(state):
@@ -2142,11 +2178,11 @@ class LitGridLive:
         return float(top) * (1 - float(30 if pct is None else pct) / 100.0)
 
     def _curve_budget(self, state):
-        """B = cash for new buys at the last (re)plan + profit (compound + cover-drop) added since,
-        minus the share the crash reserve keeps."""
+        """B = cash for new buys at the last (re)plan + curve profit added since (compound, plus
+        the Drawdown bucket unless it is the crash reserve)."""
         base = float(state.get("curve_profit_base_usd") or 0)
         added = max(0.0, self._curve_profit(state) - base)
-        return float(state.get("curve_cash_usd") or 0) + (1.0 - self._reserve_share(state)) * added
+        return float(state.get("curve_cash_usd") or 0) + added
 
     async def _curve_sizer(self, state, price, anchor_log, step, holdings, resting):
         """Returns size_at(px) -> clamped LIT for a buy at px. (Re)plans when the curve has no top
@@ -2157,17 +2193,22 @@ class LitGridLive:
         last top (reserve_target_cash_usd) is released; any extra stays for the next leg down
         (owner, 2026-10-27). No target recorded yet: all of it."""
         top = state.get("curve_top")
-        if state.get("reserve_enabled") and state.get("reserve_profit_base_usd") is None:
-            # Reserve just switched on: it starts empty; profit already in the budget stays there.
-            profit = self._curve_profit(state)
-            patch = {"reserve_profit_base_usd": profit}
+        if self._reserve_on(state) and state.get("reserve_profit_base_usd") is None:
+            # Option just switched on (the settings route clears this marker either way): the
+            # Drawdown bucket leaves the curve budget and becomes the reserve; compound profit
+            # already in the budget stays there.
+            cd = float(state.get("profit_bucket_cover_drop_usd") or 0)
+            base = float(state.get("curve_profit_base_usd") or 0)
+            old_budget = float(state.get("curve_cash_usd") or 0) + max(
+                0.0, float(state.get("profit_bucket_compound_usd") or 0) + cd - base)
+            patch = {"reserve_profit_base_usd": 0.0}
             if top is not None:
-                patch["curve_cash_usd"] = self._curve_budget(state)
-                patch["curve_profit_base_usd"] = profit
+                patch["curve_cash_usd"] = max(0.0, old_budget - cd)
+                patch["curve_profit_base_usd"] = self._curve_profit(state)
                 patch["reserve_target_cash_usd"] = patch["curve_cash_usd"]
             await self.update_state(patch)
             state.update(patch)
-            await self.log_run("reserve_started", {"profit_base_usd": round(profit, 2)})
+            await self.log_run("reserve_started", {"drawdown_bucket_usd": round(cd, 2)})
         deployed = None
         if top is not None and state.get("reserve_enabled"):
             reserve = self._reserve_usd(state)
@@ -2180,10 +2221,9 @@ class LitGridLive:
                 amount = min(reserve, max(0.0, float(target) - (available + resting_buy_cost)))
             if reserve >= enough and price <= deploy_px and amount >= RESERVE_MIN_DEPLOY_USD:
                 deployed = amount
-                kept = reserve - amount
-                # What stays: share x (profit - base) = kept.
-                base = self._curve_profit(state) - kept / self._reserve_share(state)
-                patch = {"reserve_profit_base_usd": base,
+                # Released money leaves the Drawdown bucket and becomes curve money (see _funding).
+                patch = {"reserve_released_usd": float(state.get("reserve_released_usd") or 0) + amount,
+                         "profit_bucket_cover_drop_usd": max(0.0, float(state.get("profit_bucket_cover_drop_usd") or 0) - amount),
                          "reserve_deploys": int(state.get("reserve_deploys") or 0) + 1,
                          "reserve_last_deploy_at": now_iso()}
                 await self.update_state(patch)
@@ -2237,11 +2277,11 @@ class LitGridLive:
                "size_top": size(plan["P"]), "size_10": size(plan["P"] * 0.9), "size_20": size(plan["P"] * 0.8),
                "size_30": size(plan["P"] * 0.7), "size_50": size(plan["P"] * 0.5),
                "peak_pct": round(plan["peak"] * 100, 2)}
-        if state.get("reserve_enabled"):
+        if self._reserve_on(state):
             rec["reserve_usd"] = round(self._reserve_usd(state), 2)
             rec["reserve_deploy_price"] = round(self._reserve_deploy_price(state), 5)
             rec["reserve_deploys"] = int(state.get("reserve_deploys") or 0)
-            rec["reserve_share_pct"] = round(self._reserve_share(state) * 100, 1)
+            rec["reserve_filling"] = state.get("profit_mode") == "cover_drop"
             if state.get("reserve_target_cash_usd") is not None:
                 rec["reserve_target_cash_usd"] = round(float(state["reserve_target_cash_usd"]), 2)
                 rec["reserve_min_deploy_usd"] = round(max(RESERVE_MIN_DEPLOY_USD, RESERVE_MIN_DEPLOY_FRAC * float(state["reserve_target_cash_usd"])), 2)
@@ -2455,9 +2495,12 @@ class LitGridLive:
         elif mode == "dynamic":
             order_size = await self._dynamic_order_size(state, price, spacing_pct, holdings, resting)
         else:
+            await self._flat_reserve(state, price)
+            order_size_lit = state.get("order_size_lit")
             if order_size_lit is None:
                 effective_capital = (float(state["capital_usd"])
-                                     + float(state.get("profit_bucket_compound_usd") or 0))
+                                     + float(state.get("profit_bucket_compound_usd") or 0)
+                                     + float(state.get("reserve_released_usd") or 0))
                 order_size_lit = compute_order_size_lit(
                     effective_capital, price, spacing_pct,
                     levels_for_drawdown(spacing_pct, float(state.get("drawdown_pct") or 10.0)))
@@ -2774,7 +2817,8 @@ class LitGridLive:
 
     async def _v2_slow_refresh(self, state, price):
         self._last_slow_at = time.time()
-        buckets = await self._bucket_balances(rest_withdrawn=state.get("rest_withdrawn_usd"))
+        buckets = await self._bucket_balances(rest_withdrawn=state.get("rest_withdrawn_usd"),
+                                              reserve_released=state.get("reserve_released_usd"))
         compound_now = buckets.get("profit_bucket_compound_usd")
         # Curve mode sizes every buy from the budget, profit included -- no order-size resize.
         resize = sizing_mode(state) != "curve" and self._compound_resize_due(state, compound_now, price)

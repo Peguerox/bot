@@ -39,12 +39,17 @@ def start(name, seed, curve=False):
                    "curve_floor_lit": 1, "curve_top": None, "curve_cash_usd": None,
                    "curve_profit_base_usd": None, "curve_state": None})
     if curve == "mirror":
-        # Mirror (peak -10%) + crash reserve (2026-10-27), deploy set to -2% so a short run reaches
-        # it, with $1,000 already saved in the reserve (over 10% of this copy's ~$3.8k curve).
-        comp = float(st.get("profit_bucket_compound_usd") or 0)
+        # Mirror (peak -10%) + crash reserve (2026-10-27), deploy set to -2% so a short run reaches it.
+        # 2026-10-29: the reserve is the Drawdown (cover-drop) bucket. This copy gets $1,500 of
+        # past profit in that bucket: one synthetic settled sell (no closes_level, so it touches no
+        # lot) and the same $1,500 of real USDC on the exchange.
         st.update({"curve_peak_pct": 10, "reserve_enabled": True, "reserve_deploy_pct": 2,
-                   "reserve_share_pct": 100, "reserve_profit_base_usd": comp - 1_000.0,
-                   "reserve_deploys": 0})
+                   "profit_mode": "cover_drop", "reserve_profit_base_usd": None, "reserve_deploys": 0,
+                   "usdc_balance": float(st["usdc_balance"]) + 1_500.0})
+        orders = orders + [{"id": max(r["id"] for r in orders) + 1, "side": "sell", "status": "filled",
+                            "level": 0, "closes_level": None, "client_order_index": 1, "limit_price": 1.0,
+                            "size": 0.0, "filled_qty": 0.0, "realized_profit_usd": 1_500.0,
+                            "profit_bucket_destination": "profit_bucket_cover_drop_usd", "funded_from_bucket_usd": 0}]
     t_snap = datetime.fromisoformat(st["updated_at"].replace("Z", "+00:00"))
     S.Clock.t = S.T0 + (t_snap - S.BASE_DT).total_seconds()
     rng = random.Random(seed)
@@ -256,7 +261,7 @@ async def run(name, kind, seed=1, shared_budget=False, react=False, curve=False)
             free = ex.usdc - ex._locked_usdc()
             check(f"[{label}] the reserve's cash is never spent (free {free:,.2f} >= reserve {bot._reserve_usd(state):,.2f})",
                   free + 1e-6 >= bot._reserve_usd(state), (free, bot._reserve_usd(state)))
-        print(f"  {label}: top ${plan['P']:.4f} budget ${budget:,.0f} sizes {[round(o['size'], 2) for o in sorted(buys, key=lambda o: -o['price'])][:5]}")
+        print(f"  {label}: reserve ${bot._reserve_usd(state):,.2f} cd {state.get('profit_bucket_cover_drop_usd')} top ${plan['P']:.4f} budget ${budget:,.0f} sizes {[round(o['size'], 2) for o in sorted(buys, key=lambda o: -o['price'])][:5]}")
     fills = len(ex.fills)
     if kind == "flick":
         rebuys = sum(1 for side, px, q, co in ex.fills if side == "buy")

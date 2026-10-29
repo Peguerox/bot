@@ -1965,26 +1965,27 @@ def t_mirror_spends_exactly_the_budget_with_its_peak_below_the_top():
 
 
 async def t_crash_reserve_holds_profit_and_deploys_once_at_minus_30():
+    # 2026-10-29: the reserve is the Drawdown (cover-drop) bucket with its option on.
     P = 3.05
     step = math.log(1.0025)
     bot, fake = make_bot(base_state(usdc_balance=20_000.0, capital_usd=20_000.0, grid_anchor_price=P,
                                      curve_enabled=True, curve_n=10, curve_floor_lit=1, curve_peak_pct=10,
-                                     reserve_enabled=True, reserve_deploy_pct=30), orders=[])
+                                     profit_mode="cover_drop", reserve_enabled=True, reserve_deploy_pct=30), orders=[])
     st = fake.state
     sizer = lambda px: bot._curve_sizer(st, px, math.log(P), step, {}, {})
     await sizer(P)
     check("reserve starts empty at switch-on", bot._reserve_usd(st) == 0 and st["reserve_profit_base_usd"] == 0.0)
     check("curve plans all free cash", abs(st["curve_cash_usd"] - 20_000.0) < 1e-6, st["curve_cash_usd"])
     budget0 = bot._curve_budget(st)
-    st["profit_bucket_compound_usd"] = 500.0
+    st["profit_bucket_cover_drop_usd"] = 500.0
     st["usdc_balance"] = 20_500.0
-    check("all new profit goes to the reserve", abs(bot._reserve_usd(st) - 500.0) < 1e-9, bot._reserve_usd(st))
+    check("the Drawdown bucket is the reserve", abs(bot._reserve_usd(st) - 500.0) < 1e-9, bot._reserve_usd(st))
     st["usdc_balance"] = 5_500.0
     await sizer(P * 0.69)
     check("a reserve under 10% of the curve ($500 < $2,000) never restarts it",
           not [r for r in fake.runs if r.get("action") == "reserve_deployed"] and st["curve_top"] == P, st["curve_top"])
     st["usdc_balance"] = 20_500.0
-    check("the curve does not grow from reserved profit", abs(bot._curve_budget(st) - budget0) < 1e-9)
+    check("the curve does not grow from the Drawdown bucket", abs(bot._curve_budget(st) - budget0) < 1e-9)
     _, _, avail = bot._funding(st, {}, {})
     check("no buy may spend the reserve", abs(avail - 20_000.0) < 1e-6, avail)
     await sizer(P * 1.003)                     # new top: re-plan without the reserve
@@ -1992,8 +1993,8 @@ async def t_crash_reserve_holds_profit_and_deploys_once_at_minus_30():
           and abs(bot._reserve_usd(st) - 500.0) < 1e-9, (st["curve_cash_usd"], bot._reserve_usd(st)))
     top = st["curve_top"]
     check("the deploy target is the cash at the last top", abs(st["reserve_target_cash_usd"] - 20_000.0) < 1e-6)
-    st["profit_bucket_compound_usd"] = 2_500.0  # reserve $2,500: enough to restart
-    st["usdc_balance"] = 7_500.0               # the fall spent $15k of it on lots
+    st["profit_bucket_cover_drop_usd"] = 2_500.0  # reserve $2,500: enough to restart
+    st["usdc_balance"] = 7_500.0                  # the fall spent $15k of it on lots
     await sizer(top * 0.705)
     check("no deploy above -30%", not [r for r in fake.runs if r.get("action") == "reserve_deployed"])
     await sizer(top * 0.70)
@@ -2002,12 +2003,11 @@ async def t_crash_reserve_holds_profit_and_deploys_once_at_minus_30():
     check("re-plans at the deploy price", abs(st["curve_top"] - top * 0.70) < 1e-12, st["curve_top"])
     check("cash now includes the reserve", abs(st["curve_cash_usd"] - 7_500.0) < 1e-6, st["curve_cash_usd"])
     check("a deploy never moves the target", abs(st["reserve_target_cash_usd"] - 20_000.0) < 1e-6)
-    check("reserve empty after deploy", bot._reserve_usd(st) == 0 and st["reserve_deploys"] == 1)
+    check("bucket emptied, release recorded", bot._reserve_usd(st) == 0 and st["reserve_released_usd"] == 2_500.0
+          and st["reserve_deploys"] == 1, (bot._reserve_usd(st), st.get("reserve_released_usd")))
     await sizer(top * 0.69)
     check("no second deploy with an empty reserve",
           len([r for r in fake.runs if r.get("action") == "reserve_deployed"]) == 1)
-    st["profit_bucket_compound_usd"] = 2_600.0
-    check("refills from new profit", abs(bot._reserve_usd(st) - 100.0) < 1e-9, bot._reserve_usd(st))
 
 
 async def t_crash_reserve_bigger_than_needed_keeps_the_extra():
@@ -2017,11 +2017,11 @@ async def t_crash_reserve_bigger_than_needed_keeps_the_extra():
     step = math.log(1.0025)
     bot, fake = make_bot(base_state(usdc_balance=20_000.0, capital_usd=20_000.0, grid_anchor_price=P,
                                      curve_enabled=True, curve_n=10, curve_floor_lit=1, curve_peak_pct=10,
-                                     reserve_enabled=True, reserve_deploy_pct=30), orders=[])
+                                     profit_mode="cover_drop", reserve_enabled=True, reserve_deploy_pct=30), orders=[])
     st = fake.state
     sizer = lambda px: bot._curve_sizer(st, px, math.log(P), step, {}, {})
     await sizer(P)
-    st["profit_bucket_compound_usd"] = 2_500.0
+    st["profit_bucket_cover_drop_usd"] = 2_500.0
     st["usdc_balance"] = 22_300.0              # $19,800 free for the curve, $2,500 reserve
     await sizer(P * 0.70)
     dep = [r for r in fake.runs if r.get("action") == "reserve_deployed"]
@@ -2030,10 +2030,30 @@ async def t_crash_reserve_bigger_than_needed_keeps_the_extra():
     check("the curve is back to its last-top size", abs(st["curve_cash_usd"] - 20_000.0) < 1e-6, st["curve_cash_usd"])
     _, _, avail = bot._funding(st, {}, {})
     check("the kept $2,300 is still never spent", abs(avail - 20_000.0) < 1e-6, avail)
-    st["usdc_balance"] = 22_300.0
     await sizer(P * 0.70 * 0.995)
     check("nothing missing -> no deploy, no reset",
           len([r for r in fake.runs if r.get("action") == "reserve_deployed"]) == 1)
+
+
+async def t_switching_profit_mode_keeps_the_reserve():
+    # Owner, 2026-10-29: switch to Compound later -- the Drawdown bucket keeps what it saved
+    # (still idle, still the reserve) while new profit compounds.
+    P = 3.05
+    step = math.log(1.0025)
+    bot, fake = make_bot(base_state(usdc_balance=21_000.0, capital_usd=20_000.0, grid_anchor_price=P,
+                                     curve_enabled=True, curve_n=10, curve_floor_lit=1,
+                                     profit_mode="cover_drop", reserve_enabled=True), orders=[])
+    st = fake.state
+    await bot._curve_sizer(st, P, math.log(P), step, {}, {})
+    st["profit_bucket_cover_drop_usd"] = 1_000.0
+    b0 = bot._curve_budget(st)
+    st["profit_mode"] = "compound"
+    st["profit_bucket_compound_usd"] = 300.0
+    check("after the switch the bucket still holds the reserve", abs(bot._reserve_usd(st) - 1_000.0) < 1e-9)
+    check("new compound profit grows the curve", abs(bot._curve_budget(st) - (b0 + 300.0)) < 1e-9)
+    st["reserve_enabled"] = False
+    check("option OFF: the bucket is ordinary cover-drop money again (in the budget)",
+          bot._reserve_usd(st) == 0 and bot._curve_budget(st) > b0 + 300.0 + 999.0)
 
 
 async def t_reserve_switched_on_later_keeps_the_profit_already_in_the_budget():
@@ -2047,11 +2067,37 @@ async def t_reserve_switched_on_later_keeps_the_profit_already_in_the_budget():
     before = bot._curve_budget(st)
     st["reserve_enabled"] = True
     await bot._curve_sizer(st, P, math.log(P), step, {}, {})
-    check("turning the reserve on keeps the budget", abs(bot._curve_budget(st) - before) < 1e-9, (before, bot._curve_budget(st)))
-    check("and starts the reserve at 0", bot._reserve_usd(st) == 0)
+    check("turning the reserve on keeps compound profit in the budget", abs(bot._curve_budget(st) - before) < 1e-9, (before, bot._curve_budget(st)))
+    check("and the reserve is the (empty) Drawdown bucket", bot._reserve_usd(st) == 0)
     st["curve_enabled"] = False
-    st["profit_bucket_compound_usd"] = 900.0
-    check("outside curve mode the reserve holds nothing back", bot._reserve_usd(st) == 0)
+    st["dynamic_dd_enabled"] = True
+    st["profit_bucket_cover_drop_usd"] = 900.0
+    check("in a mode without the reserve (dynamic) it holds nothing back", bot._reserve_usd(st) == 0)
+
+
+async def t_flat_mode_reserve_deploys_from_the_high():
+    # Owner, 2026-10-29: the reserve works under flat sizing too -- reference = the high since on.
+    P = 3.00
+    bot, fake = make_bot(base_state(usdc_balance=10_000.0, capital_usd=10_000.0, grid_anchor_price=P,
+                                     profit_mode="cover_drop", reserve_enabled=True, reserve_deploy_pct=30,
+                                     order_size_lit=20.0), orders=[])
+    st = fake.state
+    await bot._flat_reserve(st, P)
+    await bot._flat_reserve(st, 3.30)
+    check("follows the high", st["dynamic_dd_high"] == 3.30, st.get("dynamic_dd_high"))
+    st["profit_bucket_cover_drop_usd"] = 800.0          # under 10% of $10k
+    await bot._flat_reserve(st, 3.30 * 0.69)
+    check("under 10% of the Investment: no deploy", not st.get("reserve_deploys"))
+    _, _, avail = bot._funding(st, {}, {})
+    check("flat buys never spend the reserve", abs(avail - (10_000.0 - 800.0)) < 1e-6, avail)
+    st["profit_bucket_cover_drop_usd"] = 1_500.0
+    await bot._flat_reserve(st, 3.30 * 0.71)
+    check("no deploy above -30%", not st.get("reserve_deploys"))
+    await bot._flat_reserve(st, 3.30 * 0.70)
+    check("deploys at -30% from the high", st.get("reserve_deploys") == 1 and st["reserve_released_usd"] == 1_500.0)
+    check("the order size is recomputed with it", st.get("order_size_lit") is None)
+    check("the high restarts at the deploy price", abs(st["dynamic_dd_high"] - 3.30 * 0.70) < 1e-9)
+    check("bucket emptied", bot._reserve_usd(st) == 0)
 
 
 # ── Re-anchor keeps lots next to their cost (2026-10-26) ───────────────────────────────────────
@@ -2229,6 +2275,8 @@ async def main():
               t_curve_plans_at_switch_on_and_moves_up_only_at_a_new_top,
               t_crash_reserve_holds_profit_and_deploys_once_at_minus_30,
               t_reserve_switched_on_later_keeps_the_profit_already_in_the_budget,
+              t_switching_profit_mode_keeps_the_reserve,
+              t_flat_mode_reserve_deploys_from_the_high,
               t_crash_reserve_bigger_than_needed_keeps_the_extra,
               t_spacing_change_asks_for_the_clean_reset):
         try:

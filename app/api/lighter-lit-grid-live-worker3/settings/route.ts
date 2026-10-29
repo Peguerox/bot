@@ -54,7 +54,11 @@ export async function POST(req: NextRequest) {
     out["rest_overflow_to"] = body.restOverflowTo;
   }
 
-  if (body.dynamicDrawdown === true || body.dynamicDrawdown === false) {
+  // Dynamic (gates) sizing retired 2026-10-29 (owner): it can only be switched off.
+  if (body.dynamicDrawdown === true) {
+    return NextResponse.json({ error: "Dynamic sizing is retired. Use Flat or Curve." }, { status: 400 });
+  }
+  if (body.dynamicDrawdown === false) {
     out["dynamic_dd_enabled"] = body.dynamicDrawdown;
     out["dynamic_dd_high"] = null;
     out["dynamic_dd_tier"] = null;
@@ -65,8 +69,8 @@ export async function POST(req: NextRequest) {
   // Sizing mode (2026-10-25): exactly one of flat / dynamic (gates) / curve. Switching to curve
   // clears its top so the worker plans a fresh curve at the current price with the cash it has.
   if (body.sizingMode !== undefined) {
-    if (!["flat", "dynamic", "curve"].includes(body.sizingMode)) {
-      return NextResponse.json({ error: "sizingMode must be flat, dynamic or curve." }, { status: 400 });
+    if (!["flat", "curve"].includes(body.sizingMode)) {
+      return NextResponse.json({ error: "sizingMode must be flat or curve." }, { status: 400 });
     }
     out["dynamic_dd_enabled"] = body.sizingMode === "dynamic";
     out["curve_enabled"] = body.sizingMode === "curve";
@@ -82,7 +86,6 @@ export async function POST(req: NextRequest) {
     ["curveN", "curve_n", 1, 30, "curve n"],
     ["curveFloorLit", "curve_floor_lit", 1, 100, "curve floor (LIT)"],
     ["curvePeakPct", "curve_peak_pct", 0, 50, "curve peak (% below the top)"],
-    ["reserveSharePct", "reserve_share_pct", 0, 100, "reserve share of profit (%)"],
     ["reserveDeployPct", "reserve_deploy_pct", 5, 90, "reserve deploy (% below the top)"],
   ] as const) {
     const raw = body[key];
@@ -93,12 +96,13 @@ export async function POST(req: NextRequest) {
     }
     out[col] = v;
   }
-  // Crash reserve (2026-10-27): switching it either way clears its base -- on, the worker starts
-  // it empty at the current profit; off, nothing is held back any more.
+  // Crash reserve (2026-10-29: an option of the Drawdown bucket). Switching it clears its marker so
+  // the worker re-folds the curve budget; ON = the bucket is idle until the deploy level.
   if (body.reserveEnabled === true || body.reserveEnabled === false) {
     out["reserve_enabled"] = body.reserveEnabled;
     out["reserve_profit_base_usd"] = null;
     out["reserve_target_cash_usd"] = null;
+    out["dynamic_dd_high"] = null;    // flat sizing: the reserve's high restarts at today's price
   }
   if (body.resetDynamicHigh === true) {
     out["dynamic_dd_high"] = null;
