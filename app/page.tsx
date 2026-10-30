@@ -415,16 +415,20 @@ function CurveView({ curve, livePrice, spacingPct, tradesPerDay, ago, rateNote =
   const fallNow = livePrice != null ? Math.max(0, (1 - livePrice / P) * 100) : null;
   const usd = (v: number) => v >= 1000 ? `$${(v / 1000).toFixed(1)}k` : v >= 10 ? `$${v.toFixed(0)}` : `$${v.toFixed(2)}`;
 
-  // chart: x = fall from top 0..60%, y = size
-  const W = 320, H = 130, padL = 30, padB = 18, padT = 8, padR = 8, XMAX = 60;
+  // chart: x = fall from top 0..60%, y = profit per trade at that price (owner, 2026-10-29:
+  // dollars per trade read better than LIT per order).
+  const W = 320, H = 130, padL = 34, padB = 18, padT = 8, padR = 8, XMAX = 60;
+  let pTop = 0;
+  for (let i = 0; i <= 120; i++) pTop = Math.max(pTop, perTrade(P * (1 - (i / 120) * XMAX / 100)));
+  pTop = pTop || 1;
   const xs = (d: number) => padL + (d / XMAX) * (W - padL - padR);
-  const ys = (q: number) => padT + (1 - q / top) * (H - padT - padB);
+  const ys = (v: number) => padT + (1 - v / pTop) * (H - padT - padB);
   const pts: [number, number][] = [];
-  for (let i = 0; i <= 120; i++) { const d = (i / 120) * XMAX; pts.push([xs(d), ys(sizeAt(P * (1 - d / 100)))]); }
+  for (let i = 0; i <= 120; i++) { const d = (i / 120) * XMAX; pts.push([xs(d), ys(perTrade(P * (1 - d / 100)))]); }
   const line = pts.map(([x, y], i) => `${i ? "L" : "M"}${x.toFixed(1)},${y.toFixed(1)}`).join(" ");
   const area = `${line} L${xs(XMAX)},${ys(0)} L${xs(0)},${ys(0)} Z`;
   const nowX = fallNow != null ? xs(Math.min(fallNow, XMAX)) : null;
-  const nowY = livePrice != null ? ys(sizeAt(livePrice)) : null;
+  const nowY = livePrice != null ? ys(perTrade(livePrice)) : null;
 
   const rows = [0, 5, 10, 15, 20, 30, 40, 50, 99.9];
   const nearest = fallNow == null ? null : rows.reduce((a, b) => Math.abs(b - fallNow) < Math.abs(a - fallNow) ? b : a);
@@ -470,7 +474,7 @@ function CurveView({ curve, livePrice, spacingPct, tradesPerDay, ago, rateNote =
 
       <div className="rounded-lg border border-gray-700 bg-gray-950/60 p-2">
         <div className="flex items-center justify-between mb-1">
-          <p className="text-gray-400 text-[10px] uppercase tracking-wide">Order size by fall from the top</p>
+          <p className="text-gray-400 text-[10px] uppercase tracking-wide">Profit per trade by fall from the top</p>
           <p className="text-gray-500 text-[10px]">n {n} · floor {floor} LIT{peak > 0 ? ` · peak −${(peak * 100).toFixed(0)}%` : ""}</p>
         </div>
         <svg viewBox={`0 0 ${W} ${H}`} className="w-full h-auto">
@@ -487,15 +491,14 @@ function CurveView({ curve, livePrice, spacingPct, tradesPerDay, ago, rateNote =
             </g>
           ))}
           <text x={xs(0)} y={H - 5} fill="#6b7280" fontSize="8" textAnchor="start">top</text>
-          {[top, top / 2].map((q) => (
+          {[pTop, pTop / 2].map((q) => (
             <g key={q}>
               <line x1={padL} x2={W - padR} y1={ys(q)} y2={ys(q)} stroke="#1f2937" strokeWidth="0.6" />
-              <text x={padL - 3} y={ys(q) + 3} fill="#6b7280" fontSize="8" textAnchor="end">{q.toFixed(0)}</text>
+              <text x={padL - 3} y={ys(q) + 3} fill="#6b7280" fontSize="8" textAnchor="end">${q.toFixed(2)}</text>
             </g>
           ))}
           <path d={area} fill="url(#curveFill)" />
           <path d={line} fill="none" stroke="#60a5fa" strokeWidth="1.6" />
-          <line x1={padL} x2={W - padR} y1={ys(floor)} y2={ys(floor)} stroke="#f59e0b" strokeOpacity="0.6" strokeDasharray="3 2" strokeWidth="0.8" />
           {reserveOn && (1 - Number(curve.reserve_deploy_price) / P) * 100 <= XMAX && (
             <g>
               <line x1={xs((1 - Number(curve.reserve_deploy_price) / P) * 100)} x2={xs((1 - Number(curve.reserve_deploy_price) / P) * 100)}
@@ -507,7 +510,7 @@ function CurveView({ curve, livePrice, spacingPct, tradesPerDay, ago, rateNote =
             <g>
               <line x1={nowX} x2={nowX} y1={padT} y2={ys(0)} stroke="#22c55e" strokeOpacity="0.5" strokeWidth="0.8" />
               <circle cx={nowX} cy={nowY} r="3.2" fill="#22c55e" stroke="#052e16" strokeWidth="1" />
-              <text x={Math.min(nowX + 5, W - 40)} y={Math.max(nowY - 5, padT + 8)} fill="#4ade80" fontSize="8.5" fontWeight="bold">now {sizeAt(livePrice!).toFixed(1)}</text>
+              <text x={Math.min(nowX + 5, W - 40)} y={Math.max(nowY - 5, padT + 8)} fill="#4ade80" fontSize="8.5" fontWeight="bold">now ${perTrade(livePrice!).toFixed(2)}/trade</text>
             </g>
           )}
         </svg>
