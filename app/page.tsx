@@ -4551,6 +4551,9 @@ export default function Dashboard() {
 
   async function load() {
     const mirrorLoad = loadMirror().catch(() => {});
+    // Retired bots (2026-10-30 load audit): their queries ran every 15s and on every realtime
+    // event -- 20,000 dead trades per refresh -- for panels no longer shown. Same slots, no request.
+    const none = Promise.resolve({ data: null, count: 0 } as any);
     const [
       { data: surferSt },
       { data: surferTr },
@@ -4600,54 +4603,53 @@ export default function Dashboard() {
       { data: litGridLiveFirstSell },
       { data: litGridWorker3FirstSell },
     ] = await Promise.all([
-      getSupabase().from("surfer_state").select("*").eq("id", 1).single(),
-      getSupabase().from("surfer_trades").select("*").order("exit_time", { ascending: false }).limit(5000),
-      getSupabase().from("surfer_runs").select("id,run_at,data").order("run_at", { ascending: false }).limit(120),
-      getSupabase().from("surfer_usdt_state").select("*").eq("id", 1).single(),
-      getSupabase().from("surfer_usdt_trades").select("*").order("exit_time", { ascending: false }).limit(5000),
-      getSupabase().from("surfer_usdt_runs").select("id,run_at,data").order("run_at", { ascending: false }).limit(120),
-      getSupabase().from("sol_hypertrade_paper_state").select("*").eq("id", 1).single(),
-      getSupabase().from("sol_hypertrade_paper_trades").select("*").order("exit_time", { ascending: false }).limit(5000),
-      getSupabase().from("sol_hypertrade_paper_runs").select("id,run_at,data").order("run_at", { ascending: false }).limit(120),
-      getSupabase().from("solbtc_sizeconf_state").select("*").eq("id", 1).single(),
-      getSupabase().from("solbtc_sizeconf_trades").select("*").order("fill_time", { ascending: false }).limit(5000),
-      getSupabase().from("solbtc_sizeconf_runs").select("id,run_at,data").order("run_at", { ascending: false }).limit(120),
-      getSupabase().from("lighter_stoch_dca_btc_state").select("*").eq("id", 1).single(),
-      getSupabase().from("lighter_stoch_dca_btc_trades").select("*").order("closed_at", { ascending: false }).limit(200),
-      getSupabase().from("lighter_stoch_dca_btc_runs").select("*").order("ran_at", { ascending: false }).limit(50),
+      none,   // retired: surfer_state
+      none,   // retired: surfer_trades
+      none,   // retired: surfer_runs
+      none,   // retired: surfer_usdt_state
+      none,   // retired: surfer_usdt_trades
+      none,   // retired: surfer_usdt_runs
+      none,   // retired: sol_hypertrade_paper_state
+      none,   // retired: sol_hypertrade_paper_trades
+      none,   // retired: sol_hypertrade_paper_runs
+      none,   // retired: solbtc_sizeconf_state
+      none,   // retired: solbtc_sizeconf_trades
+      none,   // retired: solbtc_sizeconf_runs
+      none,   // retired: lighter_stoch_dca_btc_state
+      none,   // retired: lighter_stoch_dca_btc_trades
+      none,   // retired: lighter_stoch_dca_btc_runs
       getSupabase().from("lighter_btc_initial_state").select("*").eq("id", 1).single(),
       getSupabase().from("lighter_btc_initial_trades").select("*").order("closed_at", { ascending: false }).limit(200),
       getSupabase().from("lighter_btc_initial_runs").select("*").order("ran_at", { ascending: false }).limit(30),
-      getSupabase().from("lighter_btc_worker4_state").select("*").eq("id", 1).single(),
-      getSupabase().from("lighter_btc_worker4_trades").select("*").order("closed_at", { ascending: false }).limit(200),
-      getSupabase().from("lighter_btc_worker4_runs").select("*").order("ran_at", { ascending: false }).limit(30),
-      getSupabase().from("lighter_btc_optimal_state").select("*").eq("id", 1).single(),
-      getSupabase().from("lighter_btc_optimal_trades").select("*").order("closed_at", { ascending: false }).limit(200),
-      getSupabase().from("lighter_btc_optimal_runs").select("*").order("ran_at", { ascending: false }).limit(30),
+      none,   // retired: lighter_btc_worker4_state
+      none,   // retired: lighter_btc_worker4_trades
+      none,   // retired: lighter_btc_worker4_runs
+      none,   // retired: lighter_btc_optimal_state
+      none,   // retired: lighter_btc_optimal_trades
+      none,   // retired: lighter_btc_optimal_runs
       // True lifetime win-rate / trade-count stats -- the .limit(200) fetches above are for
       // display (recent trades list) only and silently freeze any count derived from them
       // once a worker passes 200 real trades. These use Supabase's exact-count instead of
       // fetching rows, so the number is correct however large the real total gets.
-      getSupabase().from("lighter_stoch_dca_btc_trades").select("id", { count: "exact", head: true }),
-      getSupabase().from("lighter_stoch_dca_btc_trades").select("id", { count: "exact", head: true }).gt("pnl_usd", 0),
+      none,   // retired: lighter_stoch_dca_btc_trades
+      none,   // retired: lighter_stoch_dca_btc_trades
       getSupabase().from("lighter_btc_initial_trades").select("id", { count: "exact", head: true }),
       getSupabase().from("lighter_btc_initial_trades").select("id", { count: "exact", head: true }).gt("pnl_usd", 0),
-      getSupabase().from("lighter_btc_optimal_trades").select("id", { count: "exact", head: true }),
-      getSupabase().from("lighter_btc_optimal_trades").select("id", { count: "exact", head: true }).gt("pnl_usd", 0),
+      none,   // retired: lighter_btc_optimal_trades
+      none,   // retired: lighter_btc_optimal_trades
       // RSI paper test (Worker 1 shadow, 2026-09-26) -- separate table, never touches real
       // money. pnl_pct rows fetched in full (volume is low, a selective signal) to sum
       // cumulative % client-side; Supabase's query builder has no SUM aggregate.
       getSupabase().from("lighter_btc_rsi_paper_trades").select("id", { count: "exact", head: true }).eq("worker_id", "worker1"),
       getSupabase().from("lighter_btc_rsi_paper_trades").select("id", { count: "exact", head: true }).eq("worker_id", "worker1").gt("pnl_pct", 0),
       getSupabase().from("lighter_btc_rsi_paper_trades").select("pnl_pct").eq("worker_id", "worker1"),
-      getSupabase().from("lighter_btc_optimal_runs").select("ran_at,detail").eq("action", "environment_er").order("id", { ascending: false }).limit(1),
+      none,   // retired: lighter_btc_optimal_runs
       getSupabase().from("bot_schedule_rules").select("*").eq("id", 1).single(),
-      getSupabase().from("lighter_lit_grid_live_state").select("*").eq("id", 1).single(),
-      getSupabase().from("lighter_lit_grid_live_orders").select("id", { count: "exact", head: true })
-        .eq("side", "sell").not("realized_profit_usd", "is", null),
-      getSupabase().from("lighter_lit_grid_live_orders").select("*").order("id", { ascending: false }).limit(50),
-      getSupabase().from("lighter_lit_grid_live_orders").select("id,filled_at,filled_qty,filled_price,filled_quote,realized_profit_usd").eq("side", "sell").not("realized_profit_usd", "is", null).order("filled_at", { ascending: false, nullsFirst: false }).order("id", { ascending: false }).limit(200),
-      getSupabase().from("lighter_lit_grid_live_orders").select("side,limit_price").in("status", ["open", "pending"]).limit(500),
+      none,   // retired: lighter_lit_grid_live_state
+      none,   // retired: lighter_lit_grid_live_orders
+      none,   // retired: lighter_lit_grid_live_orders
+      none,   // retired: lighter_lit_grid_live_orders
+      none,   // retired: lighter_lit_grid_live_orders
       getSupabase().from("lighter_lit_grid_live_worker3_state").select("*").eq("id", 1).single(),
       getSupabase().from("lighter_lit_grid_live_worker3_orders").select("id", { count: "exact", head: true })
         .eq("side", "sell").not("realized_profit_usd", "is", null),
@@ -4657,7 +4659,7 @@ export default function Dashboard() {
       // First real trade ever, for the trades/hour start when no history reset is recorded --
       // the oldest of the 200 sells loaded above was only a few hours back, so 924 trades were
       // divided by those few hours (Worker 3 showed 152/hr instead of ~32, 2026-10-23).
-      getSupabase().from("lighter_lit_grid_live_orders").select("filled_at").eq("side", "sell").not("realized_profit_usd", "is", null).not("filled_at", "is", null).order("filled_at", { ascending: true }).limit(1),
+      none,   // retired: lighter_lit_grid_live_orders
       getSupabase().from("lighter_lit_grid_live_worker3_orders").select("filled_at").eq("side", "sell").not("realized_profit_usd", "is", null).not("filled_at", "is", null).order("filled_at", { ascending: true }).limit(1),
       // Liquidity tracker: every Worker 3 order with a fill in the last 24h (not the transfer rows).
     ]);
@@ -4869,41 +4871,17 @@ export default function Dashboard() {
       if (debounceTimer) clearTimeout(debounceTimer);
       debounceTimer = setTimeout(load, 800);
     };
-    const ch1 = sb.channel("surfer")
-      .on("postgres_changes", { event: "*", schema: "public", table: "surfer_state" }, debouncedLoad)
-      .on("postgres_changes", { event: "*", schema: "public", table: "surfer_trades" }, debouncedLoad)
-      .on("postgres_changes", { event: "*", schema: "public", table: "surfer_runs" }, debouncedLoad)
-      .subscribe();
-    const ch2 = sb.channel("surfer-usdt")
-      .on("postgres_changes", { event: "*", schema: "public", table: "surfer_usdt_state" }, debouncedLoad)
-      .on("postgres_changes", { event: "*", schema: "public", table: "surfer_usdt_trades" }, debouncedLoad)
-      .on("postgres_changes", { event: "*", schema: "public", table: "surfer_usdt_runs" }, debouncedLoad)
-      .subscribe();
-    const ch3 = sb.channel("sol-hypertrade-paper")
-      .on("postgres_changes", { event: "*", schema: "public", table: "sol_hypertrade_paper_state" }, debouncedLoad)
-      .on("postgres_changes", { event: "*", schema: "public", table: "sol_hypertrade_paper_trades" }, debouncedLoad)
-      .on("postgres_changes", { event: "*", schema: "public", table: "sol_hypertrade_paper_runs" }, debouncedLoad)
-      .subscribe();
-    const ch4 = sb.channel("solbtc-sizeconf")
-      .on("postgres_changes", { event: "*", schema: "public", table: "solbtc_sizeconf_state" }, debouncedLoad)
-      .on("postgres_changes", { event: "*", schema: "public", table: "solbtc_sizeconf_trades" }, debouncedLoad)
-      .on("postgres_changes", { event: "*", schema: "public", table: "solbtc_sizeconf_runs" }, debouncedLoad)
-      .subscribe();
+    // ch1-ch4 (Surfer, Surfer USDT, SOL paper, SOL/BTC): retired bots, unsubscribed 2026-10-30.
     // Lighter BTC workers' runs tables aren't otherwise wired to realtime -- subscribed here
     // specifically so the health banner (below) reflects an error burst live instead of only
     // on the next manual action or full-page reload.
     const ch5 = sb.channel("lighter-btc-runs")
       .on("postgres_changes", { event: "INSERT", schema: "public", table: "lighter_btc_initial_runs" }, debouncedLoad)
-      .on("postgres_changes", { event: "INSERT", schema: "public", table: "lighter_btc_worker4_runs" }, debouncedLoad)
-      .on("postgres_changes", { event: "INSERT", schema: "public", table: "lighter_btc_optimal_runs" }, debouncedLoad)
-      .on("postgres_changes", { event: "INSERT", schema: "public", table: "lighter_stoch_dca_btc_runs" }, debouncedLoad)
       .subscribe();
     const ch6 = sb.channel("lighter-btc-rsi-paper")
       .on("postgres_changes", { event: "INSERT", schema: "public", table: "lighter_btc_rsi_paper_trades" }, debouncedLoad)
       .subscribe();
     const ch8 = sb.channel("lighter-lit-grid-live")
-      .on("postgres_changes", { event: "*", schema: "public", table: "lighter_lit_grid_live_state" }, debouncedLoad)
-      .on("postgres_changes", { event: "*", schema: "public", table: "lighter_lit_grid_live_orders" }, debouncedLoad)
       .on("postgres_changes", { event: "*", schema: "public", table: "lighter_lit_grid_live_worker3_state" }, debouncedLoad)
       .on("postgres_changes", { event: "*", schema: "public", table: "lighter_lit_grid_live_worker3_orders" }, debouncedLoad)
       .on("postgres_changes", { event: "*", schema: "public", table: "lighter_lit_grid_live_mirror_orders" }, debouncedLoad)
@@ -4918,7 +4896,7 @@ export default function Dashboard() {
     return () => {
       if (debounceTimer) clearTimeout(debounceTimer);
       clearInterval(pollId);
-      sb.removeChannel(ch1); sb.removeChannel(ch2); sb.removeChannel(ch3); sb.removeChannel(ch4); sb.removeChannel(ch5);
+      sb.removeChannel(ch5);
       sb.removeChannel(ch6); sb.removeChannel(ch8);
     };
   }, []);
