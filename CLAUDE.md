@@ -277,7 +277,7 @@ project with no git/Render/Vercel link -- never work there.
 **Current state (2026-10-25) -- read before the history above:** Render has 3 services: Worker 1
 (`lighter_stoch_dca_btc_initial.py`, live), Worker 3 (`lighter_lit_grid_dual_twin.py` = the ONE LIT bot,
 live, ~$44.5k), Worker 2 **suspended** (hedge retired; its API routes were deleted 2026-10-24 and
-Master Schedule now needs the admin secret). Supabase is on the **FREE plan (500 MB DB, 5 GB/month
+Master Schedule now needs the admin secret). Supabase is now on the **Pro plan (250 GB/month egress, spend cap on; was FREE: 500 MB DB, 5 GB/month
 egress)**: 2026-10-25 it hit 525 MB -> dead tables truncated (local gzip backups in
 `data/supabase-archive-2026-10-25/`, script `scripts/archive_tables.cjs`), now ~250 MB. A pg_cron job
 `daily-trim-logs` (04:00 UTC) keeps 14 days of *_runs logs (LIT: only reconciled_order /
