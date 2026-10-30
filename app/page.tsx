@@ -4891,8 +4891,9 @@ export default function Dashboard() {
     // no accompanying trade/settings change never triggers a reload. That let the Master
     // Schedule panel's "Currently governing" box go stale between real events -- direct report,
     // a screenshot showing Worker 1 still matched to a rule its OWN live number had already
-    // moved past. A plain poll bounds that staleness to ~15s without subscribing to every tick.
-    const pollId = setInterval(load, 15_000);
+    // moved past. A plain poll bounds that staleness without subscribing to every tick -- 60s since
+    // the 2026-10-30 load audit (was 15s; fills still reload at once through realtime).
+    const pollId = setInterval(load, 60_000);
     return () => {
       if (debounceTimer) clearTimeout(debounceTimer);
       clearInterval(pollId);
