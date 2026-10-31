@@ -2047,11 +2047,12 @@ class LitGridLive:
         # regardless of attribution -- real cash doesn't care which sub-budget funded it.
         cover_drop_bucket = float(state.get("profit_bucket_cover_drop_usd") or 0)
         available_usdc = min(real_usdc - resting_buy_cost, base_capital_remaining + cover_drop_bucket)
-        # Crash reserve: the Drawdown bucket is idle until deployed -- no buy may spend it. What a
-        # deploy released counts as curve money from then on.
-        available_usdc -= self._reserve_usd(state)
-        available_usdc = min(available_usdc + float(state.get("reserve_released_usd") or 0),
-                             real_usdc - resting_buy_cost - self._reserve_usd(state))
+        if self._reserve_on(state):
+            # Crash reserve: the Drawdown bucket + the USDC added to it ("Add to reserve $") are
+            # idle until deployed -- no buy may spend them. What a deploy released from the bucket
+            # counts as curve money from then on (the added part moves into capital_usd).
+            available_usdc = min(real_usdc - resting_buy_cost - self._reserve_usd(state),
+                                 base_capital_remaining + float(state.get("reserve_released_usd") or 0))
         return resting_buy_cost, base_capital_remaining, available_usdc
 
     async def _dynamic_order_size(self, state, price, spacing_pct, holdings, resting):
@@ -2133,9 +2134,8 @@ class LitGridLive:
         deploy_px = float(high) * (1 - float(30 if pct is None else pct) / 100.0)
         enough = max(RESERVE_MIN_DEPLOY_USD, RESERVE_MIN_DEPLOY_FRAC * float(state.get("capital_usd") or 0))
         if reserve >= enough and price <= deploy_px:
+            patch.update(self._release_reserve(state, reserve))
             patch.update({
-                "reserve_released_usd": float(state.get("reserve_released_usd") or 0) + reserve,
-                "profit_bucket_cover_drop_usd": max(0.0, float(state.get("profit_bucket_cover_drop_usd") or 0) - reserve),
                 "reserve_deploys": int(state.get("reserve_deploys") or 0) + 1,
                 "reserve_last_deploy_at": now_iso(), "dynamic_dd_high": price, "order_size_lit": None})
             await self.log_run("reserve_deployed", {"mode": "flat", "reserve_usd": round(reserve, 2),
@@ -2163,11 +2163,28 @@ class LitGridLive:
         return cache[1]
 
     def _reserve_usd(self, state):
-        """Idle USDC held for a crash: the Drawdown bucket while the reserve option is on (its
-        derived balance already excludes what earlier deploys released)."""
+        """Idle USDC held for a crash while the reserve option is on: the Drawdown bucket (its
+        derived balance already excludes what earlier deploys released) + USDC the owner added
+        to it (reserve_extra_usd, "Add to reserve $", 2026-10-31)."""
         if not self._reserve_on(state):
             return 0.0
-        return max(0.0, float(state.get("profit_bucket_cover_drop_usd") or 0))
+        return (max(0.0, float(state.get("profit_bucket_cover_drop_usd") or 0))
+                + max(0.0, float(state.get("reserve_extra_usd") or 0)))
+
+    @staticmethod
+    def _release_reserve(state, amount):
+        """State patch releasing `amount` of the reserve: the Drawdown bucket part first (becomes
+        reserve_released_usd, spendable like compound money), then the added USDC (moves into
+        the Investment, capital_usd)."""
+        cd = max(0.0, float(state.get("profit_bucket_cover_drop_usd") or 0))
+        from_cd = min(cd, amount)
+        patch = {"reserve_released_usd": float(state.get("reserve_released_usd") or 0) + from_cd,
+                 "profit_bucket_cover_drop_usd": cd - from_cd}
+        from_extra = min(max(0.0, float(state.get("reserve_extra_usd") or 0)), amount - from_cd)
+        if from_extra > 0:
+            patch["reserve_extra_usd"] = max(0.0, float(state.get("reserve_extra_usd") or 0) - from_extra)
+            patch["capital_usd"] = float(state["capital_usd"]) + from_extra
+        return patch
 
     @staticmethod
     def _reserve_deploy_price(state):
@@ -2222,8 +2239,7 @@ class LitGridLive:
             if reserve >= enough and price <= deploy_px and amount >= RESERVE_MIN_DEPLOY_USD:
                 deployed = amount
                 # Released money leaves the Drawdown bucket and becomes curve money (see _funding).
-                patch = {"reserve_released_usd": float(state.get("reserve_released_usd") or 0) + amount,
-                         "profit_bucket_cover_drop_usd": max(0.0, float(state.get("profit_bucket_cover_drop_usd") or 0) - amount),
+                patch = {**self._release_reserve(state, amount),
                          "reserve_deploys": int(state.get("reserve_deploys") or 0) + 1,
                          "reserve_last_deploy_at": now_iso()}
                 await self.update_state(patch)
@@ -2279,6 +2295,7 @@ class LitGridLive:
                "peak_pct": round(plan["peak"] * 100, 2)}
         if self._reserve_on(state):
             rec["reserve_usd"] = round(self._reserve_usd(state), 2)
+            rec["reserve_extra_usd"] = round(max(0.0, float(state.get("reserve_extra_usd") or 0)), 2)
             rec["reserve_deploy_price"] = round(self._reserve_deploy_price(state), 5)
             rec["reserve_deploys"] = int(state.get("reserve_deploys") or 0)
             rec["reserve_filling"] = state.get("profit_mode") == "cover_drop"

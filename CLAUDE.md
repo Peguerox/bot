@@ -297,7 +297,8 @@ swapped once. Migration `lighter_lit_grid_live_worker3_curve.sql`. Research:
 an option ON the Drawdown bucket (`reserve_enabled` + `reserve_deploy_pct`, toggle on its card): ON = the bucket
 is idle until -X% (curve: from the top; flat: from the high since on, kept in `dynamic_dd_high`), then released
 (`reserve_released_usd`, spendable like compound) and buying restarts there; OFF = old cover-drop. Switching
-profit mode never empties a bucket. `reserve_share_pct` is no longer used. Dynamic sizing is retired from the
+profit mode never empties a bucket. "Add to reserve $"/Remove (2026-10-31, `reserve_extra_usd`): deposited USDC counted as
+reserve, idle like the bucket; a deploy uses the bucket first, then moves the added part into `capital_usd`. `reserve_share_pct` is no longer used. Dynamic sizing is retired from the
 panel/routes (backend code still present, unused).
 
 **Mirror bot (2026-10-27, built, starts OFF):** a second LIT instance in the same Render process

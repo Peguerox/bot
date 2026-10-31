@@ -2100,6 +2100,62 @@ async def t_flat_mode_reserve_deploys_from_the_high():
     check("bucket emptied", bot._reserve_usd(st) == 0)
 
 
+async def t_added_reserve_is_idle_then_deploys_bucket_first_then_into_the_investment():
+    # Owner, 2026-10-31 ("Add to reserve $"): deposited USDC counted as crash reserve without
+    # raising the Investment. Idle until -30%; a deploy uses the Drawdown bucket first, then the
+    # added USDC, which becomes Investment.
+    P = 3.05
+    step = math.log(1.0025)
+    bot, fake = make_bot(base_state(usdc_balance=20_000.0, capital_usd=20_000.0, grid_anchor_price=P,
+                                     curve_enabled=True, curve_n=10, curve_floor_lit=1, curve_peak_pct=10,
+                                     profit_mode="cover_drop", reserve_enabled=True, reserve_deploy_pct=30), orders=[])
+    st = fake.state
+    sizer = lambda px: bot._curve_sizer(st, px, math.log(P), step, {}, {})
+    await sizer(P)
+    st["usdc_balance"] = 25_500.0                 # $5,000 deposited + $500 profit in the bucket
+    st["profit_bucket_cover_drop_usd"] = 500.0
+    st["reserve_extra_usd"] = 5_000.0
+    check("reserve = bucket + added", abs(bot._reserve_usd(st) - 5_500.0) < 1e-6, bot._reserve_usd(st))
+    _, _, avail = bot._funding(st, {}, {})
+    check("the added USDC is never spent before the crash", abs(avail - 20_000.0) < 1e-6, avail)
+    await sizer(P * 1.01)
+    check("a new top does not size the added USDC into the curve", abs(st["curve_cash_usd"] - 20_000.0) < 1e-6, st["curve_cash_usd"])
+    top = st["curve_top"]
+    st["usdc_balance"] = 25_500.0 - 3_000.0       # the curve spent $3,000 on the way down (now LIT)
+    held = {1: {"qty": 1_000.0, "cost": 3.0, "bucket_cost_total": 0.0}}
+    sizer2 = lambda px: bot._curve_sizer(st, px, math.log(P), step, held, {})
+    await sizer2(top * 0.70)
+    dep = [r for r in fake.runs if r.get("action") == "reserve_deployed"]
+    check("deploys only what refills the curve ($3,000)", len(dep) == 1 and abs(dep[0]["detail"]["reserve_usd"] - 3_000) < 1e-6, dep)
+    check("bucket used first: $500 released", abs(st["reserve_released_usd"] - 500.0) < 1e-6 and st["profit_bucket_cover_drop_usd"] == 0)
+    check("then $2,500 of the added USDC moved into the Investment",
+          abs(st["reserve_extra_usd"] - 2_500.0) < 1e-6 and abs(st["capital_usd"] - 22_500.0) < 1e-6, (st["reserve_extra_usd"], st["capital_usd"]))
+    check("$2,500 stays in the reserve", abs(bot._reserve_usd(st) - 2_500.0) < 1e-6, bot._reserve_usd(st))
+    check("the curve is back to its last-top size", abs(st["curve_cash_usd"] - 20_000.0) < 1e-6, st["curve_cash_usd"])
+    _, _, avail = bot._funding(st, held, {})
+    check("the curve can spend it, never the kept $2,500", abs(avail - 20_000.0) < 1e-6, avail)
+    st["reserve_enabled"] = False
+    _, _, avail = bot._funding(st, held, {})
+    check("option OFF: added USDC is not Investment, so still not spent", avail <= 20_000.0 + 1e-6, avail)
+
+
+async def t_flat_mode_deploys_the_added_reserve_too():
+    P = 3.00
+    bot, fake = make_bot(base_state(usdc_balance=12_000.0, capital_usd=10_000.0, grid_anchor_price=P,
+                                     profit_mode="cover_drop", reserve_enabled=True, reserve_deploy_pct=30,
+                                     order_size_lit=20.0, profit_bucket_cover_drop_usd=0.0,
+                                     reserve_extra_usd=2_000.0), orders=[])
+    st = fake.state
+    _, _, avail = bot._funding(st, {}, {})
+    check("flat: the added $2,000 is idle", abs(avail - 10_000.0) < 1e-6, avail)
+    await bot._flat_reserve(st, P)
+    await bot._flat_reserve(st, P * 0.70)
+    check("flat: added-only reserve deploys at -30% into the Investment",
+          st.get("reserve_deploys") == 1 and abs(st["capital_usd"] - 12_000.0) < 1e-6 and st["reserve_extra_usd"] == 0,
+          (st.get("reserve_deploys"), st["capital_usd"], st.get("reserve_extra_usd")))
+    check("flat: nothing left idle", bot._reserve_usd(st) == 0)
+
+
 # ── Re-anchor keeps lots next to their cost (2026-10-26) ───────────────────────────────────────
 
 def _lot(i, level, qty, price):
@@ -2277,6 +2333,8 @@ async def main():
               t_reserve_switched_on_later_keeps_the_profit_already_in_the_budget,
               t_switching_profit_mode_keeps_the_reserve,
               t_flat_mode_reserve_deploys_from_the_high,
+              t_added_reserve_is_idle_then_deploys_bucket_first_then_into_the_investment,
+              t_flat_mode_deploys_the_added_reserve_too,
               t_crash_reserve_bigger_than_needed_keeps_the_extra,
               t_spacing_change_asks_for_the_clean_reset):
         try:

@@ -758,6 +758,7 @@ function LitGridLivePanel({
   const [curveFloorIn, setCurveFloorIn] = useState("");
   const [curvePeakIn, setCurvePeakIn] = useState("");
   const [reserveDeployIn, setReserveDeployIn] = useState("");
+  const [reserveAddIn, setReserveAddIn] = useState("");
   const sizingQuestions: Record<string, string> = {
     flat: "Switch sizing to FLAT? Gates and curve both off: one order size from your Drawdown setting.",
     dynamic: "Switch sizing to DYNAMIC (gates)? The high starts at the current price and order size follows the gates, using the available balance.",
@@ -917,7 +918,7 @@ function LitGridLivePanel({
           <Stat
             label="Drawdown Bucket"
             active={st?.profit_mode === "cover_drop"}
-            value={`$${Number(st?.profit_bucket_cover_drop_usd ?? 0).toFixed(2)}`}
+            value={`$${(Number(st?.profit_bucket_cover_drop_usd ?? 0) + (st?.reserve_enabled ? Number(st?.reserve_extra_usd ?? 0) : 0)).toFixed(2)}`}
             sub={<span className="flex flex-col gap-1 text-xs">
               {st?.reserve_enabled ? (() => {
                 const ref = curveOn ? Number(st?.curve_top) : Number(st?.dynamic_dd_high);
@@ -927,6 +928,7 @@ function LitGridLivePanel({
                   : Math.max(1, 0.1 * Number(st?.capital_usd ?? 0));
                 return <>
                   <span className="text-amber-300 font-semibold">🛡 crash reserve · idle, never spent</span>
+                  {Number(st?.reserve_extra_usd ?? 0) > 0 && <span className="text-gray-400">from profit ${Number(st?.profit_bucket_cover_drop_usd ?? 0).toFixed(2)} + added ${Number(st?.reserve_extra_usd ?? 0).toFixed(2)}</span>}
                   <span className="text-gray-400">{ref > 0 ? `restarts at $${(ref * (1 - pct / 100)).toFixed(4)} (−${pct}%)` : `restarts at −${pct}%`} once ≥ ${minUsd.toLocaleString(undefined, { maximumFractionDigits: 0 })}{Number(st?.reserve_deploys ?? 0) > 0 ? ` · used ${st.reserve_deploys}×` : ""}</span>
                 </>;
               })() : <span className="text-gray-400">{st?.drawdown_coverage_pct != null
@@ -950,6 +952,22 @@ function LitGridLivePanel({
                   disabled={dynSaving || !reserveDeployIn.trim()}
                   className="text-[10px] font-bold px-1.5 py-0.5 rounded bg-amber-500/20 text-amber-300 disabled:opacity-30"
                 >Set</button>
+              </span>}
+              {hasReserve && st?.reserve_enabled && <span className="flex items-center gap-1.5 flex-wrap">
+                <input value={reserveAddIn} onChange={(e) => setReserveAddIn(e.target.value)} placeholder="Add to reserve $"
+                  inputMode="decimal" className="w-28 bg-gray-800 border border-gray-700 rounded px-1.5 py-0.5 text-[10px] text-gray-200" />
+                <button
+                  onClick={() => reserveAddIn.trim() && handleDynamicDrawdown({ reserveAddUsd: Number(reserveAddIn) },
+                    `Add $${reserveAddIn} of deposited USDC to the crash reserve? It stays idle until the restart, then joins the Investment.`).then(() => setReserveAddIn(""))}
+                  disabled={dynSaving || !reserveAddIn.trim()}
+                  className="text-[10px] font-bold px-1.5 py-0.5 rounded bg-amber-500/20 text-amber-300 disabled:opacity-30"
+                >Add</button>
+                <button
+                  onClick={() => reserveAddIn.trim() && handleDynamicDrawdown({ reserveRemoveUsd: Number(reserveAddIn) },
+                    `Remove $${reserveAddIn} from the added reserve? That USDC is then free to withdraw (not traded).`).then(() => setReserveAddIn(""))}
+                  disabled={dynSaving || !reserveAddIn.trim() || !(Number(st?.reserve_extra_usd ?? 0) > 0)}
+                  className="text-[10px] font-bold px-1.5 py-0.5 rounded bg-gray-700 text-gray-300 disabled:opacity-30"
+                >Remove</button>
               </span>}
             </span>}
             color="text-gray-300"

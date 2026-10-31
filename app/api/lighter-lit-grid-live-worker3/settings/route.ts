@@ -169,6 +169,42 @@ export async function POST(req: NextRequest) {
     out["rest_withdrawn_usd"] = Number(cur.rest_withdrawn_usd ?? 0) + v;
   }
 
+  // "Add to reserve $" / "Remove" (owner, 2026-10-31): deposited USDC counted as crash reserve
+  // (reserve_extra_usd) without raising the Investment. The bot keeps it idle until the restart,
+  // then moves what it uses into capital_usd. Investment + added reserve can't exceed the account.
+  for (const [key, sign] of [["reserveAddUsd", 1], ["reserveRemoveUsd", -1]] as const) {
+    const raw = body[key];
+    if (raw === undefined || raw === null || raw === "") continue;
+    const v = Number(raw);
+    if (!Number.isFinite(v) || v <= 0 || v > 1_000_000) {
+      return NextResponse.json({ error: `Amount must be more than 0 (got ${raw}).` }, { status: 400 });
+    }
+    const { data: cur, error: readErr } = await getSupabaseAdmin()
+      .from(TABLE).select("*").eq("id", 1).single();
+    if (readErr || !cur) return NextResponse.json({ error: readErr?.message ?? "State not found." }, { status: 500 });
+    const extra = Number(cur.reserve_extra_usd ?? 0);
+    if (sign < 0) {
+      if (v > extra + 1e-6) {
+        return NextResponse.json({ error: `You can remove at most the added $${extra.toFixed(2)}.` }, { status: 400 });
+      }
+      out["reserve_extra_usd"] = Math.max(0, extra - v);
+    } else {
+      if (!cur.reserve_enabled) {
+        return NextResponse.json({ error: "Turn the crash reserve ON first." }, { status: 400 });
+      }
+      const next = extra + v;
+      const capital = Number(out["capital_usd"] ?? cur.capital_usd ?? 0);
+      const shortfall = await investmentShortfallError(getSupabaseAdmin(), capital + next, TABLE);
+      if (shortfall) {
+        return NextResponse.json({ error: `Not enough in the account: Investment $${capital.toFixed(2)} + reserve added $${next.toFixed(2)} is more than you have. Deposit first.` }, { status: 400 });
+      }
+      if (next > Number(cur.usdc_balance ?? 0) + 0.005) {
+        return NextResponse.json({ error: `Only $${Number(cur.usdc_balance ?? 0).toFixed(2)} USDC in the account. Deposit first.` }, { status: 400 });
+      }
+      out["reserve_extra_usd"] = next;
+    }
+  }
+
   if (Object.keys(out).length === 0) {
     return NextResponse.json({ error: "Nothing to change." }, { status: 400 });
   }
