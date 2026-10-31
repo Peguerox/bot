@@ -2124,7 +2124,12 @@ async def t_added_reserve_is_idle_then_deploys_bucket_first_then_into_the_invest
     st["usdc_balance"] = 25_500.0 - 3_000.0       # the curve spent $3,000 on the way down (now LIT)
     held = {1: {"qty": 1_000.0, "cost": 3.0, "bucket_cost_total": 0.0}}
     sizer2 = lambda px: bot._curve_sizer(st, px, math.log(P), step, held, {})
+    put_in = lambda: st["capital_usd"] + st.get("reserve_extra_usd", 0)       # panel: Investment + added
+    profit = lambda: st["profit_bucket_cover_drop_usd"] + st.get("reserve_released_usd", 0)  # panel Bot Profit part
+    put_in0, profit0 = put_in(), profit()
     await sizer2(top * 0.70)
+    check("a deploy never changes the money put in (panel Total PNL stays true)", abs(put_in() - put_in0) < 1e-6, (put_in0, put_in()))
+    check("a deploy never changes the profit shown (bucket + released)", abs(profit() - profit0) < 1e-6, (profit0, profit()))
     dep = [r for r in fake.runs if r.get("action") == "reserve_deployed"]
     check("deploys only what refills the curve ($3,000)", len(dep) == 1 and abs(dep[0]["detail"]["reserve_usd"] - 3_000) < 1e-6, dep)
     check("bucket used first: $500 released", abs(st["reserve_released_usd"] - 500.0) < 1e-6 and st["profit_bucket_cover_drop_usd"] == 0)

@@ -153,8 +153,14 @@ export async function POST(req: NextRequest) {
   }
 
   if (out["capital_usd"] !== undefined) {
-    const shortfall = await investmentShortfallError(getSupabaseAdmin(), Number(out["capital_usd"]), TABLE);
-    if (shortfall) return NextResponse.json({ error: shortfall }, { status: 400 });
+    // USDC added to the crash reserve is already spoken for: Investment + it can't pass the account.
+    const { data: ex } = await getSupabaseAdmin().from(TABLE).select("*").eq("id", 1).single();
+    const added = Number(ex?.reserve_extra_usd ?? 0);
+    const shortfall = await investmentShortfallError(getSupabaseAdmin(), Number(out["capital_usd"]) + added, TABLE);
+    if (shortfall) {
+      return NextResponse.json({ error: added > 0
+        ? `${shortfall} (That figure includes the $${added.toFixed(2)} added to the crash reserve.)` : shortfall }, { status: 400 });
+    }
   }
 
   if (body.restWithdrawUsd !== undefined && body.restWithdrawUsd !== null && body.restWithdrawUsd !== "") {

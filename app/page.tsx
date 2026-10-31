@@ -600,15 +600,22 @@ function LitGridLivePanel({
   const livePrice = st?.live_price ?? null;
   const litValueUsd = litBalance != null && livePrice != null ? litBalance * livePrice : null;
   const totalValue = usdcBalance != null && litValueUsd != null ? usdcBalance + litValueUsd : null;
-  const totalPnl = totalValue != null ? totalValue - capitalUsd : null;
-  const totalPnlPct = totalPnl != null && capitalUsd > 0 ? (totalPnl / capitalUsd) * 100 : null;
+  // Money put in = Investment + USDC added to the crash reserve ("Add to reserve $", not part of the
+  // Investment until a deploy moves it there -- the sum never changes when it does), so a deposit
+  // never shows up as profit. Account value = money put in + Total PNL; Total PNL = Bot Profit + Unrealized.
+  const reserveAddedUsd = Number(st?.reserve_extra_usd ?? 0);
+  const putInUsd = capitalUsd + reserveAddedUsd;
+  const totalPnl = totalValue != null ? totalValue - putInUsd : null;
+  const totalPnlPct = totalPnl != null && putInUsd > 0 ? (totalPnl / putInUsd) * 100 : null;
   // Bot profit = realized profit from completed grid round trips (each sell's own recorded
   // profit). Unrealized = whatever is left of Total PNL (held LIT marked at live price).
   // The buckets are server-derived over the FULL ledger (no row cap) -- summing them avoids
   // the bug where summing the (capped) `sells` array silently dropped older trades' profit
   // once the ledger grew past the query's limit (2026-10-20 audit finding).
   const botProfit = Number(st?.profit_bucket_rest_usd ?? 0) + Number(st?.profit_bucket_cover_drop_usd ?? 0)
-    + Number(st?.profit_bucket_compound_usd ?? 0);
+    + Number(st?.profit_bucket_compound_usd ?? 0)
+    // Profit a crash-reserve deploy released into the curve left the Drawdown bucket but is still earned.
+    + Number(st?.reserve_released_usd ?? 0);
   const botProfitPct = capitalUsd > 0 ? (botProfit / capitalUsd) * 100 : null;
   // Trades/hour: sell count since the bot's current history started (history_reset_at), or
   // since the oldest sell we have if that's missing -- live, recomputes as nowTick ticks.
@@ -637,7 +644,7 @@ function LitGridLivePanel({
   const liveRate = sinceReset && sinceResetHours >= 2 && sinceReset.count >= 20;
   const curveTradesPerDay = liveRate ? (sinceReset!.count / sinceResetHours) * 24 : modelTradesPerDay;
   const unrealizedPnl = totalPnl != null ? totalPnl - botProfit : null;
-  const unrealizedPct = unrealizedPnl != null && capitalUsd > 0 ? (unrealizedPnl / capitalUsd) * 100 : null;
+  const unrealizedPct = unrealizedPnl != null && putInUsd > 0 ? (unrealizedPnl / putInUsd) * 100 : null;
   const pnlColor = (v: number | null) => v == null ? "text-gray-500" : Math.abs(v) < 0.005 ? "text-gray-300" : v >= 0 ? "text-green-400" : "text-red-400";
   const fmtUsd = (v: number | null) => v == null ? "—" : `${v >= 0 ? "+" : "-"}$${Math.abs(v).toFixed(2)}`;
   const fmtPct = (v: number | null, d = 2) => v == null ? "" : `${v >= 0 ? "+" : ""}${v.toFixed(d)}%`;
@@ -876,7 +883,7 @@ function LitGridLivePanel({
             sub="USDC + LIT at live price (profit included)"
             color="text-white"
           />
-          <Stat label="Investment" value={`$${capitalUsd.toFixed(2)}`} sub="set via Settings" color="text-gray-300" />
+          <Stat label="Investment" value={`$${capitalUsd.toFixed(2)}`} sub={reserveAddedUsd > 0 ? `+ $${reserveAddedUsd.toFixed(2)} added to reserve = $${putInUsd.toFixed(2)} put in` : "set via Settings"} color="text-gray-300" />
           <Stat
             label="Live Price"
             value={<span className="flex items-center gap-3">
