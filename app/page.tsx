@@ -538,7 +538,7 @@ function CurveView({ curve, livePrice, spacingPct, tradesPerDay, ago, rateNote =
         })}
       </div>
       <p className="text-gray-500 text-[10px] leading-snug tabular-nums">
-        size = floor + (B − R)/W × ((p − F)/(P − F))^n{peak > 0 ? ` (price mirrored around −${(peak * 100).toFixed(0)}%)` : ""} · bottom ${F.toFixed(4)} · {curve.lines} lines · $/mo at {tradesPerDay.toFixed(0)} trades/day ({(tradesPerDay / 24).toFixed(1)}/hr){rateNote ? ` ${rateNote}` : ""}{ago ? ` · updated ${ago} ago` : ""}
+        size = floor + (B − R)/W × ((p − F)/(P − F))^n{peak > 0 ? ` (price mirrored around −${(peak * 100).toFixed(0)}%)` : ""} · bottom ${F.toFixed(4)} · {curve.lines} lines · $/mo at <span className="text-yellow-300 font-bold text-xs">{(tradesPerDay / 24).toFixed(1)} trades/hr</span> ({tradesPerDay.toFixed(0)}/day){rateNote ? ` ${rateNote}` : ""}{ago ? ` · updated ${ago} ago` : ""}
       </p>
     </div>
   );
@@ -876,7 +876,11 @@ function LitGridLivePanel({
                   const hrs = Math.max((nowTick - Date.parse(sinceReset.at)) / 3_600_000, 1 / 60);
                   const rate = hrs >= 1 ? sinceReset.lastHour : sinceReset.count / hrs;
                   const expect = 693 * Math.pow(0.125 / Math.max(Number(st?.internal_spacing_pct ?? st?.spacing_pct ?? 0.125), 0.01), 1.85) / 24;
-                  return `${fmtPct(botProfitPct, 3)} · last hour: ${rate.toFixed(0)}/hr ${rate >= expect ? "✓" : "⚠"} (expect ${expect.toFixed(1)}/hr) · since reset: ${sinceReset.count} trades (avg ${(sinceReset.count / hrs).toFixed(1)}/hr)`;
+                  // Trade rate in yellow (owner, 2026-11-02: "so I can read it really quickly").
+                  return <span>
+                    <span className="block text-yellow-300 font-bold text-sm">{rate.toFixed(0)} trades/hr {rate >= expect ? "✓" : "⚠"}</span>
+                    {`last hour (expect ${expect.toFixed(1)}/hr) · ${fmtPct(botProfitPct, 3)} · since reset: ${sinceReset.count} trades (avg ${(sinceReset.count / hrs).toFixed(1)}/hr)`}
+                  </span>;
                 })()
               : `${fmtPct(botProfitPct, 3)} · ${sellCount} trades${tradesPerHour != null ? ` · ${tradesPerHour.toFixed(1)}/hr` : ""}`}
             color={pnlColor(botProfit)}
