@@ -3281,9 +3281,12 @@ function CompactStochBtcPanel({
             ["SL Dwell", curSlDwell > 0 ? `ON (${curSlDwell}s)` : "off"],
             ["HTF alignment block", curHtfTimeframe !== "off" ? `ON (${curHtfTimeframe})` : "off"],
             ["Self-lock / hour ban", "off (compiled, not live-controllable)"],
-          ].map(([label, val]) => (
-            <div key={label} className="flex items-center justify-between text-[10px]">
-              <span className="text-gray-500">{label}</span>
+          ].map(([label, val], i) => (
+            // Status right next to its setting (owner, 2026-11-02: "the setting and the status are very far
+            // apart"), striped rows, ON rows highlighted.
+            <div key={label} className={`flex items-center gap-2 text-[10px] px-1 py-0.5 rounded ${
+              String(val).startsWith("ON") ? "bg-blue-500/10" : i % 2 ? "bg-gray-800/40" : ""}`}>
+              <span className="text-gray-400 w-[10.5rem] shrink-0">{label}</span>
               <span className={String(val).startsWith("ON") ? "text-blue-300 font-semibold" : "text-gray-600"}>{val}</span>
             </div>
           ))}
