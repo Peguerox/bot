@@ -8924,6 +8924,63 @@ async def t_compute_stoch_k_none_without_enough_history():
     check("None -- not enough history", k is None, k)
 
 
+def _trend_candles(n, path):
+    """n 1-min candles whose closes follow `path(i)` (plus a forming last candle)."""
+    out = []
+    for i in range(n + 1):
+        c = path(i)
+        out.append({"t": i * 60_000, "o": c, "h": c + 1, "l": c - 1, "c": c, "v": 5.0})
+    return out
+
+
+async def t_trend_block_blocks_a_long_while_falling_straight():
+    print("\n[trend block: straight fall over 30 min -> a LONG is blocked, a SHORT is not]")
+    candles = _trend_candles(40, lambda i: 80000 - 10 * i)          # ER = 1, falling
+    bot = make_bot(FakeExchange(), candles=candles, trend_block_available=True, trend_block_enabled=True)
+    check("long blocked (against the fall)", bot._trend_blocks_entry(bot.state_row, "long") is True)
+    check("short allowed (with the fall)", bot._trend_blocks_entry(bot.state_row, "short") is False)
+    check("readout cached: ER 1, direction short", abs(bot._last_trend_er - 1.0) < 1e-9 and bot._last_trend_dir == "short",
+          (bot._last_trend_er, bot._last_trend_dir))
+
+
+async def t_trend_block_lets_chop_trade():
+    print("\n[trend block: choppy 30 min (ER below 0.11) -> nothing blocked]")
+    candles = _trend_candles(40, lambda i: 80000 + (15 if i % 2 else -15) + i * 0.1)
+    bot = make_bot(FakeExchange(), candles=candles, trend_block_available=True, trend_block_enabled=True)
+    er, _ = core.compute_er_and_direction(candles, 30)
+    check("fixture is choppy", er is not None and er < 0.11, er)
+    check("long allowed", bot._trend_blocks_entry(bot.state_row, "long") is False)
+    check("short allowed", bot._trend_blocks_entry(bot.state_row, "short") is False)
+
+
+async def t_trend_block_off_by_default_and_panel_switch_turns_it_on():
+    print("\n[trend block: compiled available but OFF; the panel override turns it on; threshold override works]")
+    candles = _trend_candles(40, lambda i: 80000 + 10 * i)          # rising straight
+    bot = make_bot(FakeExchange(), candles=candles, trend_block_available=True)
+    check("off: short not blocked", bot._trend_blocks_entry(bot.state_row, "short") is False)
+    check("off still refreshes the readout", bot._last_trend_dir == "long", bot._last_trend_dir)
+    state = dict(bot.state_row); state["override_trend_block_enabled"] = True
+    check("panel ON: short blocked while rising", bot._trend_blocks_entry(state, "short") is True)
+    state["override_trend_block_er"] = 1.5
+    check("threshold above 1 -> never trending -> not blocked", bot._trend_blocks_entry(state, "short") is False)
+
+
+async def t_trend_block_not_available_never_reads_columns():
+    print("\n[trend block: not compiled available -> inert even if a stale override says ON]")
+    candles = _trend_candles(40, lambda i: 80000 - 10 * i)
+    bot = make_bot(FakeExchange(), candles=candles)
+    state = dict(bot.state_row); state["override_trend_block_enabled"] = True
+    check("never blocks", bot._trend_blocks_entry(state, "long") is False)
+    check("no readout computed", bot._last_trend_er is None, bot._last_trend_er)
+
+
+async def t_trend_block_fails_closed_without_history():
+    print("\n[trend block: fewer than 31 closed candles while ON -> blocks (fails closed)]")
+    candles = _trend_candles(10, lambda i: 80000 - 10 * i)
+    bot = make_bot(FakeExchange(), candles=candles, trend_block_available=True, trend_block_enabled=True)
+    check("blocked -- no reading yet", bot._trend_blocks_entry(bot.state_row, "short") is True)
+
+
 async def t_htf_alignment_blocks_a_fresh_entry_when_aligned():
     print("\n[HTF alignment block: a LONG signal blocked when the 5m stochastic agrees (K<50)]")
     candles = _htf_candles(5, minutes=5, trend="down")  # trending down -> K near 0 on 5m
@@ -9579,6 +9636,9 @@ async def main():
               t_htf_alignment_blocks_a_fresh_entry_when_aligned,
               t_htf_alignment_allows_entry_when_not_aligned,
               t_htf_alignment_short_signal_mirrors_long,
+              t_trend_block_blocks_a_long_while_falling_straight, t_trend_block_lets_chop_trade,
+              t_trend_block_off_by_default_and_panel_switch_turns_it_on, t_trend_block_not_available_never_reads_columns,
+              t_trend_block_fails_closed_without_history,
               t_htf_alignment_off_by_default,
               t_htf_alignment_inert_without_a_timeframe_selected,
               t_htf_alignment_live_override_selects_timeframe,

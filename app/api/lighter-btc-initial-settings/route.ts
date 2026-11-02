@@ -199,6 +199,28 @@ export async function POST(req: NextRequest) {
     out["override_htf_alignment_block_timeframe"] = tf === "off" ? null : tf;
   }
 
+  // Block against the 30-min trend (2026-11-02, owner: "a new pill"). See BotConfig.trend_block_*.
+  if (body.trendBlockEnabled !== undefined) {
+    if (typeof body.trendBlockEnabled !== "boolean") {
+      return NextResponse.json({ error: "trendBlockEnabled must be true or false." }, { status: 400 });
+    }
+    out["override_trend_block_enabled"] = body.trendBlockEnabled;
+  }
+  if (body.trendBlockEr !== undefined && body.trendBlockEr !== null && body.trendBlockEr !== "") {
+    const v = Number(body.trendBlockEr);
+    if (!Number.isFinite(v) || v <= 0 || v > 1) {
+      return NextResponse.json({ error: `Trend ER must be above 0 and at most 1 (got ${body.trendBlockEr}).` }, { status: 400 });
+    }
+    out["override_trend_block_er"] = v;
+  }
+  if (body.trendBlockMinutes !== undefined && body.trendBlockMinutes !== null && body.trendBlockMinutes !== "") {
+    const v = Number(body.trendBlockMinutes);
+    if (!Number.isInteger(v) || v < 5 || v > 240) {
+      return NextResponse.json({ error: `Trend minutes must be a whole number 5-240 (got ${body.trendBlockMinutes}).` }, { status: 400 });
+    }
+    out["override_trend_block_minutes"] = v;
+  }
+
   if (Object.keys(out).length === 0) {
     return NextResponse.json({ error: "Nothing to change." }, { status: 400 });
   }

@@ -454,6 +454,10 @@ CONFIG = BotConfig(
     # when they disagreed). Off by default (no timeframe selected); extends the candle history
     # fetch to 400 bars so a 1-hour window has enough data. See BotConfig.htf_alignment_block_*.
     htf_alignment_block_available=True,
+    # 2026-11-02 (owner, "a new pill"): block entries against BTC's last-30-min straight-line move
+    # (ER > 0.11), panel switch, starts OFF. Needs lighter_btc_initial_trend_block.sql. See
+    # BotConfig.trend_block_*.
+    trend_block_available=True,
     # 2026-10-04, direct request: the master schedule panel that drives both this bot and the
     # hedge from one place, by hour and/or live ER/volume/wiggle/rate conditions. "worker1" says
     # which half of each shared rule applies to this bot. Requires bot_schedule_rules.sql. See

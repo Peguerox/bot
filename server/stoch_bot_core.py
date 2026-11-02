@@ -457,6 +457,21 @@ class BotConfig:
     # convention as the color-balance gate.
     htf_alignment_block_available: bool = False
     htf_alignment_block_timeframe: Optional[str] = None
+    # Block against the short trend (owner, 2026-11-02, "a new pill"): over the last
+    # trend_block_minutes closed 1-min candles, if BTC moved in a fairly straight line (Kaufman
+    # efficiency ratio > trend_block_er), block a fresh/reopen entry AGAINST that move -- no longs
+    # while it has been falling, no shorts while it has been rising; chop trades normally. Research
+    # (research/worker1-tune-2026-11-02/trend_pause.py, real entries since Oct 10 that pass the
+    # good-period rules, tick-replayed exits): ER30 > 0.11 "block against" took the newer half from
+    # 58.8% win -$0.28 to 63.0% +$0.36 and the older half from 72.8% +$0.95 to 77.0% +$1.28; pausing
+    # ALL entries while trending never helped. An Oct 1 study (older rules) found fading a strong
+    # 15-min move was the best group -- watch this live, not proven. trend_block_available gates the
+    # READ and WRITE of the override_trend_block_* / live_trend_* columns (lighter_btc_initial_trend_
+    # block.sql); off = inert. Entry-only, never an exit, same contract as every gate here.
+    trend_block_available: bool = False
+    trend_block_enabled: bool = False
+    trend_block_er: float = 0.11
+    trend_block_minutes: int = 30
     # Schedule rules (2026-10-04, direct request: a master panel controlling Worker 1 and the
     # hedge together, by hour and/or live ER/volume/wiggle/rate conditions). Compiled opt-in,
     # same convention as every other feature this session -- False means zero behavior change.
@@ -2327,6 +2342,8 @@ class StochBot:
         self._live_peak_product = None
         self._peak_window_metrics_last_persist_ts = 0.0
         self._last_htf_k = None  # see BotConfig.htf_alignment_block_timeframe, dashboard readout
+        self._last_trend_er = None   # see BotConfig.trend_block_*, dashboard readout
+        self._last_trend_dir = None
         # Schedule rules (2026-10-04, direct request: a master panel that applies different
         # Worker 1 / hedge settings automatically by hour and/or live ER/volume/wiggle/rate
         # conditions). See _apply_schedule_rules. Cache is a throttled copy of the shared
@@ -4185,6 +4202,35 @@ class StochBot:
             return True
         return (signal == "long" and k < 50) or (signal == "short" and k > 50)
 
+    def _trend_block_settings(self, state):
+        """(enabled, er_threshold, minutes) -- the state row's overrides win over the config."""
+        cfg = self.cfg
+        enabled, er, minutes = cfg.trend_block_enabled, cfg.trend_block_er, cfg.trend_block_minutes
+        if cfg.trend_block_available:
+            o = state.get("override_trend_block_enabled")
+            if o is not None: enabled = bool(o)
+            o = state.get("override_trend_block_er")
+            if o is not None: er = float(o)
+            o = state.get("override_trend_block_minutes")
+            if o is not None: minutes = int(o)
+        return enabled, er, max(2, int(minutes))
+
+    def _trend_blocks_entry(self, state, signal):
+        """See BotConfig.trend_block_*. True blocks `signal` ('long'/'short'): the last N closed
+        candles moved in a fairly straight line (ER > threshold) the OTHER way. Always refreshes the
+        dashboard readout, even when off. Missing data fails CLOSED while on (never guesses)."""
+        cfg = self.cfg
+        if not cfg.trend_block_available:
+            return False
+        enabled, thr, minutes = self._trend_block_settings(state)
+        er, direction = compute_er_and_direction(self.candles, minutes)
+        self._last_trend_er, self._last_trend_dir = er, direction
+        if not enabled or signal is None:
+            return False
+        if er is None:
+            return True
+        return er > thr and direction is not None and direction != signal
+
     def _schedule_current_hour(self):
         """The current hour in Miami local time (0-23), DST-aware. A seam (own method, not
         inlined) so tests can pin a deterministic hour instead of depending on when they run."""
@@ -4694,6 +4740,7 @@ class StochBot:
             "volume_rate_guard_threshold": volume_rate_guard_threshold,
             "volume_rate_pct_now": self._last_volume_rate_pct,
             "volume_now": volume_now, "er_2h": er_2h, "er_2h_direction": er_2h_direction,
+            "trend_er": self._last_trend_er, "trend_dir": self._last_trend_dir,
             "wiggle_vol_rise_exit_pct": self._wiggle_vol_rise_exit_pct(state),
             "entry_wiggle_vol_ratio": self._entry_wiggle_vol_ratio,
             # Which schedule rule was governing at entry -- see schema_has_schedule_rule_tracking.
@@ -6852,6 +6899,13 @@ class StochBot:
                         await self.update_state({"live_htf_k": self._last_htf_k})
                     except Exception:
                         pass
+                # Trend-block readout (2026-11-02) -- requires lighter_btc_initial_trend_block.sql.
+                if cfg.trend_block_available:
+                    try:
+                        await self.update_state({"live_trend_er": self._last_trend_er,
+                                                 "live_trend_dir": self._last_trend_dir})
+                    except Exception:
+                        pass
                 if cfg.color_balance_index_min is not None or cfg.color_balance_index_max is not None:
                     # Isolated best-effort write (2026-10-01) so the dashboard can show the live
                     # color-weighted balance index the entry gate is reading. Written into the
@@ -7096,6 +7150,10 @@ class StochBot:
         # even on a tick with no signal; the method itself returns False when signal is None.
         # Reused below at the reversal-reopen gate with reversal_signal instead.
         if self._htf_alignment_blocks_entry(state, entry_signal):
+            entry_signal = None
+
+        # See BotConfig.trend_block_*. Same call-unconditionally pattern as the HTF block above.
+        if self._trend_blocks_entry(state, entry_signal):
             entry_signal = None
 
         if cfg.trading_hours_utc is not None:
@@ -7807,7 +7865,8 @@ class StochBot:
                     self._clear_burn()
                     reopen_burned = False
                 reopen_overconfirmed = self._entry_overconfirmed(reversal_signal)
-                reopen_htf_blocked = self._htf_alignment_blocks_entry(state, reversal_signal)
+                reopen_htf_blocked = (self._htf_alignment_blocks_entry(state, reversal_signal)
+                                      or self._trend_blocks_entry(state, reversal_signal))
                 if (self.entry_vol_paused or intrabar_dispersion_blocked or zebra_blocked
                         or balance_blocked or self._reversal_cooldown_active() or volume_jump_active
                         or volume_wiggle_locked or volume_rate_guard_active or entry_wiggle_ratio_gate_active

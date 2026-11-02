@@ -1875,6 +1875,30 @@ function CompactStochBtcPanel({
     setSavingHtf(false);
   }
 
+  // Block against the 30-min trend (2026-11-02, owner: "a new pill"). See BotConfig.trend_block_*.
+  const trendOn: boolean = state?.override_trend_block_enabled ?? false;
+  const trendEr: number = state?.override_trend_block_er ?? 0.11;
+  const trendMin: number = state?.override_trend_block_minutes ?? 30;
+  const liveTrendEr: number | null = state?.live_trend_er ?? null;
+  const liveTrendDir: string | null = state?.live_trend_dir ?? null;
+  const trendBlocking = liveTrendEr != null && liveTrendEr > trendEr && liveTrendDir
+    ? (liveTrendDir === "short" ? "longs" : "shorts") : null;
+  const [trendErIn, setTrendErIn] = useState("");
+  const [trendMinIn, setTrendMinIn] = useState("");
+  const [savingTrend, setSavingTrend] = useState(false);
+  async function handleTrend(body: Record<string, unknown>, question: string) {
+    if (!confirm(question)) return;
+    setSavingTrend(true);
+    const res = await btcAdminPost("/api/lighter-btc-initial-settings", { table, ...body });
+    if (!res.ok) {
+      const b = await res.json().catch(() => ({}));
+      alert(b.error || "Could not apply the change.");
+    }
+    setTrendErIn(""); setTrendMinIn("");
+    await onToggled();
+    setSavingTrend(false);
+  }
+
   // Volume-rate guard (2026-10-08, direct request after backtesting it against real trades:
   // "if 20% we dont take the trade and wait for the next signal"). Same instant/no-pause-timer
   // contract as the wiggle lock above, but blocks on HIGH readings, not low -- see
@@ -2920,6 +2944,40 @@ function CompactStochBtcPanel({
       )}
       {showLevers && !loading && (
         <div className="bg-gray-800/60 rounded-lg p-2">
+          {/* 2026-11-02, owner: "a new pill" -- block entries against BTC's last-N-min straight move. */}
+          <div className="flex items-center justify-between">
+            <p className="text-gray-500 text-[10px] uppercase">
+              Block against {trendMin}-min trend <span className={trendOn ? "text-green-400" : "text-gray-600"}>{trendOn ? "ON" : "OFF"}</span>
+            </p>
+            <button onClick={() => handleTrend({ trendBlockEnabled: !trendOn },
+                trendOn ? `Turn OFF the trend block for ${title}?` : `Turn ON the trend block for ${title}? No longs while BTC's last ${trendMin} min fell in a straight line (ER > ${trendEr}), no shorts while it rose.`)}
+              disabled={savingTrend || loading}
+              className={`text-[11px] font-bold px-2.5 py-1 rounded disabled:opacity-30 ${trendOn ? "bg-green-500/20 text-green-400" : "bg-gray-700/50 text-gray-500"}`}>
+              {savingTrend ? "…" : trendOn ? "Turn OFF" : "Turn ON"}
+            </button>
+          </div>
+          <p className="text-[11px] mt-0.5 tabular-nums">
+            <span className="text-gray-500">now ER </span>
+            <span className="text-gray-300">{liveTrendEr != null ? liveTrendEr.toFixed(2) : "—"}</span>
+            <span className="text-gray-500"> · {liveTrendDir === "long" ? "rising" : liveTrendDir === "short" ? "falling" : "flat"} · </span>
+            <span className={trendBlocking ? "text-yellow-300 font-bold" : "text-green-400"}>
+              {trendBlocking ? `blocking ${trendBlocking}` : "nothing blocked"}
+            </span>
+          </p>
+          <div className="flex items-center gap-1.5 mt-1.5">
+            <input value={trendErIn} onChange={(e) => setTrendErIn(e.target.value)} placeholder={`ER ${trendEr}`} inputMode="decimal"
+              className="w-20 bg-gray-900 border border-gray-700 rounded px-1.5 py-1 text-xs text-white tabular-nums" />
+            <input value={trendMinIn} onChange={(e) => setTrendMinIn(e.target.value)} placeholder={`${trendMin} min`} inputMode="numeric"
+              className="w-20 bg-gray-900 border border-gray-700 rounded px-1.5 py-1 text-xs text-white tabular-nums" />
+            <button onClick={() => handleTrend({ trendBlockEr: trendErIn.trim() || undefined, trendBlockMinutes: trendMinIn.trim() || undefined },
+                `Set the trend block to ER ${trendErIn.trim() || trendEr} over ${trendMinIn.trim() || trendMin} min?`)}
+              disabled={savingTrend || loading || (!trendErIn.trim() && !trendMinIn.trim())}
+              className="text-xs font-bold px-2.5 py-1 rounded bg-blue-500/20 text-blue-400 disabled:opacity-30">Set</button>
+          </div>
+        </div>
+      )}
+      {showLevers && !loading && (
+        <div className="bg-gray-800/60 rounded-lg p-2">
           {/* 2026-10-08, direct request after backtesting it against real trades: "if 20% we
               dont take the trade and wait for the next signal." Max |volume_rate_pct| over the
               last 5 closed candles before entry -- skips just the one signal, no pause timer,
@@ -3284,6 +3342,7 @@ function CompactStochBtcPanel({
             ["Trail Dwell", curDwell > 0 ? `ON (${curDwell}s)` : "off"],
             ["SL Dwell", curSlDwell > 0 ? `ON (${curSlDwell}s)` : "off"],
             ["HTF alignment block", curHtfTimeframe !== "off" ? `ON (${curHtfTimeframe})` : "off"],
+            ["Block against trend", trendOn ? `ON (ER > ${trendEr}, ${trendMin} min)` : "off"],
             ["Self-lock / hour ban", "off (compiled, not live-controllable)"],
           ].map(([label, val], i) => (
             // Status right next to its setting (owner, 2026-11-02: "the setting and the status are very far
