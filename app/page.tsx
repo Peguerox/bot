@@ -1881,9 +1881,13 @@ function CompactStochBtcPanel({
   const trendMin: number = state?.override_trend_block_minutes ?? 30;
   const liveTrendEr: number | null = state?.live_trend_er ?? null;
   const liveTrendDir: string | null = state?.live_trend_dir ?? null;
-  const trendBlocking = liveTrendEr != null && liveTrendEr > trendEr && liveTrendDir
-    ? (liveTrendDir === "short" ? "longs" : "shorts") : null;
+  const trendMeasure: string = state?.override_trend_block_measure ?? "range";
+  const trendBand: number = state?.override_trend_block_band ?? 0.35;
+  const liveTrendPos: number | null = state?.live_trend_pos ?? null;
+  // live_trend_dir is already the chosen measure's verdict (null = no trend).
+  const trendBlocking = liveTrendDir ? (liveTrendDir === "short" ? "longs" : "shorts") : null;
   const [trendErIn, setTrendErIn] = useState("");
+  const [trendBandIn, setTrendBandIn] = useState("");
   const [trendMinIn, setTrendMinIn] = useState("");
   const [savingTrend, setSavingTrend] = useState(false);
   async function handleTrend(body: Record<string, unknown>, question: string) {
@@ -1894,7 +1898,7 @@ function CompactStochBtcPanel({
       const b = await res.json().catch(() => ({}));
       alert(b.error || "Could not apply the change.");
     }
-    setTrendErIn(""); setTrendMinIn("");
+    setTrendErIn(""); setTrendMinIn(""); setTrendBandIn("");
     await onToggled();
     setSavingTrend(false);
   }
@@ -2950,28 +2954,43 @@ function CompactStochBtcPanel({
               Block against {trendMin}-min trend <span className={trendOn ? "text-green-400" : "text-gray-600"}>{trendOn ? "ON" : "OFF"}</span>
             </p>
             <button onClick={() => handleTrend({ trendBlockEnabled: !trendOn },
-                trendOn ? `Turn OFF the trend block for ${title}?` : `Turn ON the trend block for ${title}? No longs while BTC's last ${trendMin} min fell in a straight line (ER > ${trendEr}), no shorts while it rose.`)}
+                trendOn ? `Turn OFF the trend block for ${title}?` : trendMeasure === "range"
+                  ? `Turn ON the trend block for ${title}? No shorts while BTC sits in the top ${Math.round(trendBand * 100)}% of its last ${trendMin}-min range, no longs in the bottom ${Math.round(trendBand * 100)}%.`
+                  : `Turn ON the trend block for ${title}? No longs while BTC's last ${trendMin} min fell in a straight line (ER > ${trendEr}), no shorts while it rose.`)}
               disabled={savingTrend || loading}
               className={`text-[11px] font-bold px-2.5 py-1 rounded disabled:opacity-30 ${trendOn ? "bg-green-500/20 text-green-400" : "bg-gray-700/50 text-gray-500"}`}>
               {savingTrend ? "…" : trendOn ? "Turn OFF" : "Turn ON"}
             </button>
           </div>
+          <div className="flex gap-1 mt-1">
+            {(["range", "er"] as const).map((m) => (
+              <button key={m} onClick={() => m !== trendMeasure && handleTrend({ trendBlockMeasure: m }, `Use ${m === "range" ? "range position" : "ER"} as the trend measure?`)}
+                disabled={savingTrend || loading}
+                className={`text-[10px] font-bold px-2 py-0.5 rounded ${trendMeasure === m ? "bg-blue-500/30 text-blue-300" : "bg-gray-700/50 text-gray-500"}`}>
+                {m === "range" ? "Range" : "ER"}
+              </button>
+            ))}
+          </div>
           <p className="text-[11px] mt-0.5 tabular-nums">
-            <span className="text-gray-500">now ER </span>
-            <span className="text-gray-300">{liveTrendEr != null ? liveTrendEr.toFixed(2) : "—"}</span>
-            <span className="text-gray-500"> · {liveTrendDir === "long" ? "rising" : liveTrendDir === "short" ? "falling" : "flat"} · </span>
+            {trendMeasure === "range"
+              ? <><span className="text-gray-500">price at </span><span className="text-gray-300">{liveTrendPos != null ? `${Math.round(liveTrendPos * 100)}%` : "—"}</span><span className="text-gray-500"> of the {trendMin}-min range · </span></>
+              : <><span className="text-gray-500">now ER </span><span className="text-gray-300">{liveTrendEr != null ? liveTrendEr.toFixed(2) : "—"}</span><span className="text-gray-500"> · </span></>}
             <span className={trendBlocking ? "text-yellow-300 font-bold" : "text-green-400"}>
               {trendBlocking ? `blocking ${trendBlocking}` : "nothing blocked"}
             </span>
           </p>
           <div className="flex items-center gap-1.5 mt-1.5">
-            <input value={trendErIn} onChange={(e) => setTrendErIn(e.target.value)} placeholder={`ER ${trendEr}`} inputMode="decimal"
-              className="w-20 bg-gray-900 border border-gray-700 rounded px-1.5 py-1 text-xs text-white tabular-nums" />
+            {trendMeasure === "range"
+              ? <input value={trendBandIn} onChange={(e) => setTrendBandIn(e.target.value)} placeholder={`band ${Math.round(trendBand * 100)}%`} inputMode="decimal"
+                  className="w-20 bg-gray-900 border border-gray-700 rounded px-1.5 py-1 text-xs text-white tabular-nums" />
+              : <input value={trendErIn} onChange={(e) => setTrendErIn(e.target.value)} placeholder={`ER ${trendEr}`} inputMode="decimal"
+                  className="w-20 bg-gray-900 border border-gray-700 rounded px-1.5 py-1 text-xs text-white tabular-nums" />}
             <input value={trendMinIn} onChange={(e) => setTrendMinIn(e.target.value)} placeholder={`${trendMin} min`} inputMode="numeric"
               className="w-20 bg-gray-900 border border-gray-700 rounded px-1.5 py-1 text-xs text-white tabular-nums" />
-            <button onClick={() => handleTrend({ trendBlockEr: trendErIn.trim() || undefined, trendBlockMinutes: trendMinIn.trim() || undefined },
-                `Set the trend block to ER ${trendErIn.trim() || trendEr} over ${trendMinIn.trim() || trendMin} min?`)}
-              disabled={savingTrend || loading || (!trendErIn.trim() && !trendMinIn.trim())}
+            <button onClick={() => handleTrend({ trendBlockEr: trendErIn.trim() || undefined, trendBlockBand: trendBandIn.trim() || undefined,
+                  trendBlockMinutes: trendMinIn.trim() || undefined },
+                `Set the trend block: ${trendMeasure === "range" ? `band ${trendBandIn.trim() || Math.round(trendBand * 100)}%` : `ER ${trendErIn.trim() || trendEr}`} over ${trendMinIn.trim() || trendMin} min?`)}
+              disabled={savingTrend || loading || (!trendErIn.trim() && !trendMinIn.trim() && !trendBandIn.trim())}
               className="text-xs font-bold px-2.5 py-1 rounded bg-blue-500/20 text-blue-400 disabled:opacity-30">Set</button>
           </div>
         </div>
@@ -3342,7 +3361,7 @@ function CompactStochBtcPanel({
             ["Trail Dwell", curDwell > 0 ? `ON (${curDwell}s)` : "off"],
             ["SL Dwell", curSlDwell > 0 ? `ON (${curSlDwell}s)` : "off"],
             ["HTF alignment block", curHtfTimeframe !== "off" ? `ON (${curHtfTimeframe})` : "off"],
-            ["Block against trend", trendOn ? `ON (ER > ${trendEr}, ${trendMin} min)` : "off"],
+            ["Block against trend", trendOn ? (trendMeasure === "range" ? `ON (range ${Math.round(trendBand * 100)}%, ${trendMin} min)` : `ON (ER > ${trendEr}, ${trendMin} min)`) : "off"],
             ["Self-lock / hour ban", "off (compiled, not live-controllable)"],
           ].map(([label, val], i) => (
             // Status right next to its setting (owner, 2026-11-02: "the setting and the status are very far

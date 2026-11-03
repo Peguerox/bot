@@ -8936,17 +8936,39 @@ def _trend_candles(n, path):
 async def t_trend_block_blocks_a_long_while_falling_straight():
     print("\n[trend block: straight fall over 30 min -> a LONG is blocked, a SHORT is not]")
     candles = _trend_candles(40, lambda i: 80000 - 10 * i)          # ER = 1, falling
-    bot = make_bot(FakeExchange(), candles=candles, trend_block_available=True, trend_block_enabled=True)
+    bot = make_bot(FakeExchange(), candles=candles, trend_block_available=True, trend_block_enabled=True, trend_block_measure="er")
     check("long blocked (against the fall)", bot._trend_blocks_entry(bot.state_row, "long") is True)
     check("short allowed (with the fall)", bot._trend_blocks_entry(bot.state_row, "short") is False)
     check("readout cached: ER 1, direction short", abs(bot._last_trend_er - 1.0) < 1e-9 and bot._last_trend_dir == "short",
           (bot._last_trend_er, bot._last_trend_dir))
 
 
+async def t_trend_block_range_catches_an_uptrend_with_pullbacks():
+    print("\n[trend block, range measure: price near the top of a zig-zag climb -> shorts blocked even with a low ER]")
+    candles = _trend_candles(40, lambda i: 80000 + 3 * i + (40 if i % 2 else -40))   # choppy climb, ends high
+    candles[-2]["c"] = max(c["h"] for c in candles[-32:-1])                          # last close at the top
+    bot = make_bot(FakeExchange(), candles=candles, trend_block_available=True, trend_block_enabled=True)
+    er, _ = core.compute_er_and_direction(candles, 30)
+    check("ER alone calls it chop", er is not None and er < 0.11, er)
+    check("range: short blocked", bot._trend_blocks_entry(bot.state_row, "short") is True)
+    check("range: long allowed", bot._trend_blocks_entry(bot.state_row, "long") is False)
+    check("readout: position near 100%", bot._last_trend_pos is not None and bot._last_trend_pos > 0.9, bot._last_trend_pos)
+
+
+async def t_trend_block_range_middle_and_band_override():
+    print("\n[trend block, range: price mid-range trades both ways; a wider band override blocks]")
+    candles = _trend_candles(40, lambda i: 80000 + (100 if i % 2 else -100))
+    candles[-2]["c"] = 80000 + 40                        # 66% of the 30-min range
+    bot = make_bot(FakeExchange(), candles=candles, trend_block_available=True, trend_block_enabled=True)
+    check("66% with a 30% band: allowed", bot._trend_blocks_entry(dict(bot.state_row, override_trend_block_band=0.30), "short") is False)
+    check("66% with the 35% default band: short blocked", bot._trend_blocks_entry(bot.state_row, "short") is True)
+    check("measure override 'er' -> chop -> allowed", bot._trend_blocks_entry(dict(bot.state_row, override_trend_block_measure="er"), "short") is False)
+
+
 async def t_trend_block_lets_chop_trade():
     print("\n[trend block: choppy 30 min (ER below 0.11) -> nothing blocked]")
     candles = _trend_candles(40, lambda i: 80000 + (15 if i % 2 else -15) + i * 0.1)
-    bot = make_bot(FakeExchange(), candles=candles, trend_block_available=True, trend_block_enabled=True)
+    bot = make_bot(FakeExchange(), candles=candles, trend_block_available=True, trend_block_enabled=True, trend_block_measure="er")
     er, _ = core.compute_er_and_direction(candles, 30)
     check("fixture is choppy", er is not None and er < 0.11, er)
     check("long allowed", bot._trend_blocks_entry(bot.state_row, "long") is False)
@@ -8956,7 +8978,7 @@ async def t_trend_block_lets_chop_trade():
 async def t_trend_block_off_by_default_and_panel_switch_turns_it_on():
     print("\n[trend block: compiled available but OFF; the panel override turns it on; threshold override works]")
     candles = _trend_candles(40, lambda i: 80000 + 10 * i)          # rising straight
-    bot = make_bot(FakeExchange(), candles=candles, trend_block_available=True)
+    bot = make_bot(FakeExchange(), candles=candles, trend_block_available=True, trend_block_measure="er")
     check("off: short not blocked", bot._trend_blocks_entry(bot.state_row, "short") is False)
     check("off still refreshes the readout", bot._last_trend_dir == "long", bot._last_trend_dir)
     state = dict(bot.state_row); state["override_trend_block_enabled"] = True
@@ -9638,7 +9660,8 @@ async def main():
               t_htf_alignment_short_signal_mirrors_long,
               t_trend_block_blocks_a_long_while_falling_straight, t_trend_block_lets_chop_trade,
               t_trend_block_off_by_default_and_panel_switch_turns_it_on, t_trend_block_not_available_never_reads_columns,
-              t_trend_block_fails_closed_without_history,
+              t_trend_block_fails_closed_without_history, t_trend_block_range_catches_an_uptrend_with_pullbacks,
+              t_trend_block_range_middle_and_band_override,
               t_htf_alignment_off_by_default,
               t_htf_alignment_inert_without_a_timeframe_selected,
               t_htf_alignment_live_override_selects_timeframe,

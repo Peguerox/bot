@@ -468,9 +468,16 @@ class BotConfig:
     # 15-min move was the best group -- watch this live, not proven. trend_block_available gates the
     # READ and WRITE of the override_trend_block_* / live_trend_* columns (lighter_btc_initial_trend_
     # block.sql); off = inert. Entry-only, never an exit, same contract as every gate here.
+    # Measure (2026-11-02, same night): "range" = where the last closed price sits in the last N
+    # minutes' high-low range -- top `band` share = up (no shorts), bottom `band` = down (no longs).
+    # It ignores the zig-zag that made ER miss a visible uptrend with pullbacks; in the same test
+    # (trend_measures.py / range_combo.py) range 30 min/35% took the newer half to 65.8% +$0.56
+    # (ER 63.0% +$0.36), older half 77.8% +$1.18. "er" keeps the original rule.
     trend_block_available: bool = False
     trend_block_enabled: bool = False
+    trend_block_measure: str = "range"
     trend_block_er: float = 0.11
+    trend_block_band: float = 0.35
     trend_block_minutes: int = 30
     # Schedule rules (2026-10-04, direct request: a master panel controlling Worker 1 and the
     # hedge together, by hour and/or live ER/volume/wiggle/rate conditions). Compiled opt-in,
@@ -2344,6 +2351,7 @@ class StochBot:
         self._last_htf_k = None  # see BotConfig.htf_alignment_block_timeframe, dashboard readout
         self._last_trend_er = None   # see BotConfig.trend_block_*, dashboard readout
         self._last_trend_dir = None
+        self._last_trend_pos = None
         # Schedule rules (2026-10-04, direct request: a master panel that applies different
         # Worker 1 / hedge settings automatically by hour and/or live ER/volume/wiggle/rate
         # conditions). See _apply_schedule_rules. Cache is a throttled copy of the shared
@@ -4203,33 +4211,56 @@ class StochBot:
         return (signal == "long" and k < 50) or (signal == "short" and k > 50)
 
     def _trend_block_settings(self, state):
-        """(enabled, er_threshold, minutes) -- the state row's overrides win over the config."""
+        """(enabled, measure, er_threshold, band, minutes) -- state overrides win over the config."""
         cfg = self.cfg
-        enabled, er, minutes = cfg.trend_block_enabled, cfg.trend_block_er, cfg.trend_block_minutes
+        enabled, measure, er, band, minutes = (cfg.trend_block_enabled, cfg.trend_block_measure,
+                                               cfg.trend_block_er, cfg.trend_block_band, cfg.trend_block_minutes)
         if cfg.trend_block_available:
             o = state.get("override_trend_block_enabled")
             if o is not None: enabled = bool(o)
+            o = state.get("override_trend_block_measure")
+            if o in ("er", "range"): measure = o
             o = state.get("override_trend_block_er")
             if o is not None: er = float(o)
+            o = state.get("override_trend_block_band")
+            if o is not None: band = float(o)
             o = state.get("override_trend_block_minutes")
             if o is not None: minutes = int(o)
-        return enabled, er, max(2, int(minutes))
+        return enabled, measure, er, band, max(2, int(minutes))
+
+    def _trend_reading(self, state):
+        """Trend direction ('long'/'short'/None = no trend) under the chosen measure, or False if
+        there isn't enough history. Refreshes the dashboard readout (ER, direction, range position)."""
+        enabled, measure, thr, band, minutes = self._trend_block_settings(state)
+        er, er_dir = compute_er_and_direction(self.candles, minutes)
+        self._last_trend_er = er
+        closed = self.candles[:-1][-minutes:]
+        pos = None
+        if len(closed) >= minutes:
+            hi, lo = max(c["h"] for c in closed), min(c["l"] for c in closed)
+            pos = (closed[-1]["c"] - lo) / (hi - lo) if hi > lo else 0.5
+        self._last_trend_pos = pos
+        if measure == "range":
+            trend = None if pos is None else ("long" if pos >= 1 - band else ("short" if pos <= band else None))
+            self._last_trend_dir = trend
+            return False if pos is None else trend
+        trend = er_dir if (er is not None and er > thr) else None
+        self._last_trend_dir = trend
+        return False if er is None else trend
 
     def _trend_blocks_entry(self, state, signal):
-        """See BotConfig.trend_block_*. True blocks `signal` ('long'/'short'): the last N closed
-        candles moved in a fairly straight line (ER > threshold) the OTHER way. Always refreshes the
-        dashboard readout, even when off. Missing data fails CLOSED while on (never guesses)."""
+        """See BotConfig.trend_block_*. True blocks `signal` ('long'/'short') when the chosen measure
+        says the market is trending the OTHER way. Missing data fails CLOSED while on."""
         cfg = self.cfg
         if not cfg.trend_block_available:
             return False
-        enabled, thr, minutes = self._trend_block_settings(state)
-        er, direction = compute_er_and_direction(self.candles, minutes)
-        self._last_trend_er, self._last_trend_dir = er, direction
+        enabled = self._trend_block_settings(state)[0]
+        trend = self._trend_reading(state)
         if not enabled or signal is None:
             return False
-        if er is None:
+        if trend is False:
             return True
-        return er > thr and direction is not None and direction != signal
+        return trend is not None and trend != signal
 
     def _schedule_current_hour(self):
         """The current hour in Miami local time (0-23), DST-aware. A seam (own method, not
@@ -4740,7 +4771,7 @@ class StochBot:
             "volume_rate_guard_threshold": volume_rate_guard_threshold,
             "volume_rate_pct_now": self._last_volume_rate_pct,
             "volume_now": volume_now, "er_2h": er_2h, "er_2h_direction": er_2h_direction,
-            "trend_er": self._last_trend_er, "trend_dir": self._last_trend_dir,
+            "trend_er": self._last_trend_er, "trend_dir": self._last_trend_dir, "trend_pos": self._last_trend_pos,
             "wiggle_vol_rise_exit_pct": self._wiggle_vol_rise_exit_pct(state),
             "entry_wiggle_vol_ratio": self._entry_wiggle_vol_ratio,
             # Which schedule rule was governing at entry -- see schema_has_schedule_rule_tracking.
@@ -6902,8 +6933,10 @@ class StochBot:
                 # Trend-block readout (2026-11-02) -- requires lighter_btc_initial_trend_block.sql.
                 if cfg.trend_block_available:
                     try:
+                        self._trend_reading(state)        # fresh even while the bot is OFF
                         await self.update_state({"live_trend_er": self._last_trend_er,
-                                                 "live_trend_dir": self._last_trend_dir})
+                                                 "live_trend_dir": self._last_trend_dir,
+                                                 "live_trend_pos": self._last_trend_pos})
                     except Exception:
                         pass
                 if cfg.color_balance_index_min is not None or cfg.color_balance_index_max is not None:

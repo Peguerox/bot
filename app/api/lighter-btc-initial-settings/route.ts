@@ -213,6 +213,19 @@ export async function POST(req: NextRequest) {
     }
     out["override_trend_block_er"] = v;
   }
+  if (body.trendBlockMeasure !== undefined) {
+    if (body.trendBlockMeasure !== "er" && body.trendBlockMeasure !== "range") {
+      return NextResponse.json({ error: `trendBlockMeasure must be er or range (got "${body.trendBlockMeasure}").` }, { status: 400 });
+    }
+    out["override_trend_block_measure"] = body.trendBlockMeasure;
+  }
+  if (body.trendBlockBand !== undefined && body.trendBlockBand !== null && body.trendBlockBand !== "") {
+    const v = Number(body.trendBlockBand);
+    if (!Number.isFinite(v) || v < 5 || v > 50) {
+      return NextResponse.json({ error: `Range band must be 5-50 % (got ${body.trendBlockBand}).` }, { status: 400 });
+    }
+    out["override_trend_block_band"] = v / 100;
+  }
   if (body.trendBlockMinutes !== undefined && body.trendBlockMinutes !== null && body.trendBlockMinutes !== "") {
     const v = Number(body.trendBlockMinutes);
     if (!Number.isInteger(v) || v < 5 || v > 240) {
