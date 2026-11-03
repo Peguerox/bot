@@ -289,7 +289,8 @@ fixed dc4b888: in-memory ledger, full re-read every 15 min).
 on Worker 2's sub-account (plain LIGHTER_*), LIT perp market 120: owner's direction-switching martingale (30-min range
 start, target +2%, flip at -0.5% x1.5 in ONE order, cap 3x equity). Logic `lit_flip_core.py`, tests `test_lit_flip.py` +
 `test_lit_flip_live.py`, tables `lighter_lit_flip_*`, routes `app/api/lighter-lit-flip/{toggle,flatten}`, panel below
-Worker 1. Starts OFF; $200 planned. Research `research/martingale-dca-2026-11-03/`.
+Worker 1. Starts OFF; $200 planned. Order events arrive on the `account_orders/120/<idx>` websocket and wake the bot
+(position re-read at once, resting orders re-counted 3 s later); REST is a 10 s / 60 s safety net (3 s / 20 s if the socket is down). Research `research/martingale-dca-2026-11-03/`.
 
 **Sizing modes (2026-10-25):** the LIT bot has exactly one of Flat / Dynamic (gates) / Curve
 (`sizing_mode()` in `lit_grid_live.py`; `curve_enabled` wins over `dynamic_dd_enabled`). Curve =

@@ -10,6 +10,8 @@ Strategy and research: lit_flip_core.py (setting A). This file is the I/O:
               reduce-only stop (bust).
   * "watch" fallback (flip_mode): if Lighter refuses the non-reduce-only stop, the bot watches the live order book
     (websocket) every 0.25 s and fires the same single combined market order the moment the stop price is touched.
+  * Order events come over the account_orders websocket and wake the bot at once (position re-read on the next tick,
+    resting orders re-counted 3 s later); REST reads stay as a slow safety net (10 s / 60 s, or 3 s / 20 s if it's down).
   * Reconcile from the REAL position (REST is the truth): position gone -> target (or bust stop) filled -> sequence
     over; position on the other side -> flip filled -> place the next target + flip.
   * OFF (enabled=false) only stops NEW sequences; an open position keeps its target and flip. Flatten
@@ -28,7 +30,11 @@ MIN_BASE = 1.00                       # LIT
 LEVERAGE = 5                          # account setting for this market; the strategy itself caps at 3x
 BASE_URL = "https://mainnet.zklighter.elliot.ai"
 TABLE_STATE, TABLE_TRADES, TABLE_RUNS = "lighter_lit_flip_state", "lighter_lit_flip_trades", "lighter_lit_flip_runs"
-ACCOUNT_EVERY, CANDLES_EVERY, ORDERS_CHECK_EVERY = 3.0, 20.0, 20.0
+ACCOUNT_EVERY, CANDLES_EVERY, ORDERS_CHECK_EVERY = 3.0, 20.0, 20.0     # REST fallback while the orders websocket is down
+ACCOUNT_EVERY_WS, ORDERS_CHECK_EVERY_WS = 10.0, 60.0  # REST safety net while it is live (any order event wakes the bot)
+ORDERS_SETTLE_S = 3.0                 # after an order event, wait this long before counting orders (new ones show late)
+ORDERS_WS_PING_EVERY, ORDERS_WS_RENEW_EVERY = 20.0, 8 * 60.0   # Lighter drops a silent socket; auth tokens live 10 min
+ORDERS_WS_FRESH_S = 60.0              # no frame for this long -> websocket treated as down (REST cadence again)
 TICK_NATIVE, TICK_WATCH = 1.0, 0.25
 PUBLISH_EVERY = 3.0                   # panel readout write, seconds
 MISMATCH_GRACE_S = 8.0                # a fill can take a few seconds to show; wait before "fixing" a mismatch
@@ -64,6 +70,57 @@ class LighterExchange:
         self._co = 0
         self.book = {"bids": [], "asks": []}
         self.book_at = 0.0
+        self.on_orders_event = None           # set by main(): called on every account_orders update (fill, cancel, trigger)
+        self.orders_ws_at = 0.0               # last frame from the orders websocket
+
+    def orders_ws_live(self):
+        return time.time() - self.orders_ws_at < ORDERS_WS_FRESH_S
+
+    async def _orders_ws_session(self):
+        """One account_orders connection for market 120: every order update (our target/flip filled, cancelled, a stop
+        triggered or rejected) wakes the bot at once instead of waiting for the next REST read."""
+        token = self._auth()
+        if not token:
+            raise RuntimeError("no auth token for the orders websocket")
+        channel = f"account_orders/{MARKET_ID}/{self.account_index}"
+        url = BASE_URL.replace("https://", "wss://") + "/stream"
+        opened = last_ping = time.time()
+        async with aiohttp.ClientSession() as s:
+            async with s.ws_connect(url, heartbeat=None, max_msg_size=0) as ws:
+                await ws.send_json({"type": "subscribe", "channel": channel, "auth": token})
+                while time.time() - opened < ORDERS_WS_RENEW_EVERY:
+                    if time.time() - last_ping >= ORDERS_WS_PING_EVERY:
+                        await ws.send_json({"type": "ping"}); last_ping = time.time()
+                    try:
+                        msg = await ws.receive(timeout=5.0)
+                    except asyncio.TimeoutError:
+                        continue
+                    if msg.type in (aiohttp.WSMsgType.CLOSED, aiohttp.WSMsgType.CLOSING, aiohttp.WSMsgType.ERROR):
+                        raise RuntimeError(f"orders websocket closed ({msg.type})")
+                    if msg.type != aiohttp.WSMsgType.TEXT:
+                        continue
+                    data = json.loads(msg.data)
+                    kind = str(data.get("type") or "")
+                    if kind == "ping":
+                        await ws.send_json({"type": "pong"})
+                    if "error" in data or kind == "error":
+                        raise RuntimeError(f"orders websocket error: {str(data)[:200]}")
+                    self.orders_ws_at = time.time()
+                    if kind.startswith("update") and "account_orders" in (kind + str(data.get("channel") or "")):
+                        if self.on_orders_event:
+                            self.on_orders_event()
+
+    async def run_orders_ws_forever(self, log):
+        failures = 0
+        while True:
+            try:
+                await self._orders_ws_session(); failures = 0
+            except Exception as e:
+                failures += 1
+                if failures in (1, 5) or failures % 50 == 0:
+                    await log("orders_ws_reconnect", {"error": str(e)[:200], "failures": failures})
+            self.orders_ws_at = 0.0
+            await asyncio.sleep(min(30.0, 1.0 * failures))
 
     def _co_idx(self):
         self._co = max(int(time.time() * 1000) % 500_000_000, self._co + 1)
@@ -213,6 +270,24 @@ class FlipBot:
         self.loaded = False
         self.fired_at = 0.0
         self.published_at = 0.0
+        self.woken = asyncio.Event()
+
+    def wake(self):
+        """An order event from the websocket: re-read the position on the very next tick and count the resting orders
+        ORDERS_SETTLE_S later (a triggered-but-rejected flip leaves one order missing -> re-placed within seconds)."""
+        self.acct_at = 0.0
+        self.orders_checked_at = min(self.orders_checked_at, time.time() - self._orders_every() + ORDERS_SETTLE_S)
+        self.woken.set()
+
+    def _ws_live(self):
+        f = getattr(self.ex, "orders_ws_live", None)
+        return bool(f and f())
+
+    def _account_every(self):
+        return ACCOUNT_EVERY_WS if self._ws_live() else ACCOUNT_EVERY
+
+    def _orders_every(self):
+        return ORDERS_CHECK_EVERY_WS if self._ws_live() else ORDERS_CHECK_EVERY
 
     # ---- persistence of the sequence (survives restarts) ----
     def _pos_to_state(self):
@@ -262,7 +337,7 @@ class FlipBot:
         return out
 
     async def _read_account(self, force=False):
-        if force or time.time() - self.acct_at >= ACCOUNT_EVERY:
+        if force or time.time() - self.acct_at >= self._account_every():
             try:
                 self.acct = await self.ex.account(); self.acct_at = time.time()
             except Exception as e:
@@ -295,9 +370,15 @@ class FlipBot:
         pos_r, hi, lo = F.range_info(self.candles, self.p.window) if self.candles else (None, None, None)
         await self.db.update_state({"live_price": price, "live_range_pos": pos_r, "live_range_hi": hi, "live_range_lo": lo,
                                     "live_signal": F.range_signal(self.candles, self.p.window, self.p.band) if self.candles else None,
-                                    "live_pos": acct["pos"], "live_upnl": acct.get("upnl"), "equity": acct["equity"],
+                                    "live_pos": acct["pos"], "live_upnl": self._live_upnl(acct, price), "equity": acct["equity"],
                                     "lock_heartbeat": now_iso()})
         self.published_at = time.time()
+
+    def _live_upnl(self, acct, price):
+        """Open P&L from the live websocket price (account reads are only every few seconds)."""
+        if acct.get("pos") and acct.get("entry") and price:
+            return acct["pos"] * (price - acct["entry"])
+        return acct.get("upnl")
 
     # ---- one tick ----
     async def tick(self):
@@ -341,7 +422,7 @@ class FlipBot:
         if self.flip_mode == "watch" and time.time() - self.fired_at >= WATCH_REFIRE_S:
             if await self._watch_trigger():
                 return
-        if time.time() - self.orders_checked_at >= ORDERS_CHECK_EVERY:
+        if time.time() - self.orders_checked_at >= self._orders_every():
             await self._check_orders()
 
     async def _maybe_start(self, st, acct):
@@ -471,6 +552,8 @@ async def main():
     ws = lighter.WsClient(order_book_ids=[MARKET_ID], account_ids=[], on_order_book_update=ex.on_order_book,
                           on_account_update=lambda *a: None)
     asyncio.create_task(ws.run_async())
+    ex.on_orders_event = bot.wake
+    asyncio.create_task(ex.run_orders_ws_forever(db.log))
     errors = 0
     while True:
         try:
@@ -479,7 +562,11 @@ async def main():
             errors += 1
             await db.log("tick_error", {"error": str(e)[:300], "n": errors})
             await asyncio.sleep(min(2 ** min(errors, 6), 60))
-        await asyncio.sleep(TICK_WATCH if bot.flip_mode == "watch" and bot.pos is not None else TICK_NATIVE)
+        try:                                # sleep until the next tick -- or less, if an order event arrives
+            await asyncio.wait_for(bot.woken.wait(), TICK_WATCH if bot.flip_mode == "watch" and bot.pos is not None else TICK_NATIVE)
+        except asyncio.TimeoutError:
+            pass
+        bot.woken.clear()
 
 
 if __name__ == "__main__":

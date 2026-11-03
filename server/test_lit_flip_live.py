@@ -190,13 +190,37 @@ async def t_unknown_position_is_protected():
     check("adopted with target + flip on the book", bot.pos is not None and len(ex.orders) == 2, ex.orders)
 
 
+async def t_ws_wake_and_rejected_flip():
+    print("\n[websocket: an order event re-reads the position at once; a flip that triggered but was rejected is re-placed in ~3 s]")
+    saved = (L.ACCOUNT_EVERY, L.ORDERS_CHECK_EVERY, L.ACCOUNT_EVERY_WS, L.ORDERS_CHECK_EVERY_WS, L.ORDERS_SETTLE_S)
+    L.ACCOUNT_EVERY, L.ORDERS_CHECK_EVERY, L.ACCOUNT_EVERY_WS, L.ORDERS_CHECK_EVERY_WS, L.ORDERS_SETTLE_S = 3.0, 20.0, 10.0, 60.0, 0.0
+    try:
+        ex, db = FakeEx(), FakeDB(); ex.orders_ws_live = lambda: True; bot = L.FlipBot(ex, db)
+        await _ticks(bot, 1)
+        check("websocket live -> slow REST safety net (10 s / 60 s)", bot._account_every() == 10.0 and bot._orders_every() == 60.0)
+        ex.move(2.985)                          # flip fills on the exchange
+        await bot.tick()
+        check("without an event the bot hasn't seen the flip yet", bot.pos.side == F.LONG)
+        bot.wake(); await bot.tick()
+        check("order event -> position re-read at once, now SHORT level 1", bot.pos.side == F.SHORT and bot.pos.level == 1, bot.pos)
+        # the new flip triggers on the exchange but Lighter rejects it: the order is gone, position unchanged
+        ex.orders = [o for o in ex.orders if o["kind"] != "stop"]
+        bot.wake(); await bot.tick()
+        check("rejected flip: missing order re-placed right after the event", sum(o["kind"] == "stop" for o in ex.orders) == 1, ex.orders)
+        check("logged orders_missing_replaced", any(a == "orders_missing_replaced" for a, _ in db.logs))
+        ex2 = FakeEx(); b2 = L.FlipBot(ex2, FakeDB())
+        check("no websocket -> old REST cadence (3 s / 20 s)", b2._account_every() == 3.0 and b2._orders_every() == 20.0)
+    finally:
+        L.ACCOUNT_EVERY, L.ORDERS_CHECK_EVERY, L.ACCOUNT_EVERY_WS, L.ORDERS_CHECK_EVERY_WS, L.ORDERS_SETTLE_S = saved
+
+
 async def _nosleep(*a, **k):
     return None
 
 
 async def main():
     for t in (t_start_flip_win, t_watch_mode_fallback, t_restart_keeps_the_sequence, t_off_keeps_position_flatten_closes,
-              t_bust_at_cap, t_unknown_position_is_protected):
+              t_bust_at_cap, t_unknown_position_is_protected, t_ws_wake_and_rejected_flip):
         await t()
     print(f"\n==== {len(PASS)} passed, {len(FAIL)} failed ====")
 
