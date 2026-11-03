@@ -5,7 +5,7 @@ os.environ.setdefault("NEXT_PUBLIC_SUPABASE_URL", "http://x"); os.environ.setdef
 import lit_flip_core as F
 import lit_flip_live as L
 
-L.ACCOUNT_EVERY = 0.0; L.CANDLES_EVERY = 0.0; L.ORDERS_CHECK_EVERY = 0.0; L.MISMATCH_GRACE_S = 0.0; L.WATCH_REFIRE_S = 0.0
+L.ACCOUNT_EVERY = 0.0; L.CANDLES_EVERY = 0.0; L.ORDERS_CHECK_EVERY = 0.0; L.MISMATCH_GRACE_S = 0.0; L.WATCH_REFIRE_S = 0.0; L.PUBLISH_EVERY = 0.0
 PASS, FAIL = [], []
 
 
@@ -164,6 +164,8 @@ async def t_off_keeps_position_flatten_closes():
     ex2, db2 = FakeEx(), FakeDB(); db2.state["enabled"] = False; b2 = L.FlipBot(ex2, db2)
     await _ticks(b2)
     check("OFF and flat: never opens", ex2.pos == 0 and not ex2.sent)
+    check("OFF still publishes the live signal, price and range for the panel",
+          db2.state.get("live_signal") == F.LONG and db2.state.get("live_price") and db2.state.get("live_range_pos") is not None, db2.state)
 
 
 async def t_bust_at_cap():

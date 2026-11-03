@@ -1330,19 +1330,36 @@ function LitGridLivePanel({
 // routes previously had no auth at all). Stored in localStorage only, never baked into the
 // static JS bundle -- prompts the user once, reuses it after. Returns null if the user cancels.
 // LIT flip martingale panel (2026-11-03, owner's strategy) -- server/lit_flip_live.py on Worker 2's account.
-// Self-loading (own 60 s poll); renders nothing until its state table exists.
+// Self-loading (state + trades + events every 15 s); renders nothing until its state table exists. Owner: "simple, but
+// with everything I need to know what the bot is doing".
+const FLIP_P = { firstPct: 5, mult: 1.5, slPct: 0.5, tpPct: 2, window: 30, band: 0.30, levCap: 3 };
+const FLIP_EVENT_LABEL: Record<string, string> = {
+  started: "bot started", leverage_set: "leverage set", sequence_start: "opened first trade", orders_placed: "target + flip placed",
+  flipped: "FLIPPED", sequence_over: "sequence finished", flip_mode_watch: "switched to watch mode", watch_fired: "watch mode fired the flip",
+  position_adopted: "adopted an open position", orders_missing_replaced: "orders missing -> replaced", flatten_sent: "flatten sent",
+  flattened: "flattened + OFF", too_small_to_start: "account too small to start", tick_error: "ERROR", account_read_failed: "account read failed",
+  candles_failed: "price data failed", cancel_failed: "cancel failed", size_mismatch_adopted: "size mismatch fixed", start_no_fill_seen: "entry not filled",
+};
 function LitFlipPanel() {
   const [st, setSt] = useState<any>(null);
   const [trades, setTrades] = useState<any[]>([]);
+  const [events, setEvents] = useState<any[]>([]);
   const [busy, setBusy] = useState<string | null>(null);
+  const [now, setNow] = useState(Date.now());
   async function load() {
     const { data, error } = await getSupabase().from("lighter_lit_flip_state").select("*").eq("id", 1).maybeSingle();
     if (error || !data) { setSt(null); return; }
     setSt(data);
-    const { data: t } = await getSupabase().from("lighter_lit_flip_trades").select("*").order("id", { ascending: false }).limit(15);
-    setTrades(t ?? []);
+    const [{ data: t }, { data: e }] = await Promise.all([
+      getSupabase().from("lighter_lit_flip_trades").select("*").order("id", { ascending: false }).limit(20),
+      getSupabase().from("lighter_lit_flip_runs").select("ran_at,action,detail").order("id", { ascending: false }).limit(12),
+    ]);
+    setTrades(t ?? []); setEvents(e ?? []);
   }
-  useEffect(() => { load(); const id = setInterval(load, 60_000); return () => clearInterval(id); }, []);
+  useEffect(() => {
+    load(); const a = setInterval(load, 15_000); const b = setInterval(() => setNow(Date.now()), 5_000);
+    return () => { clearInterval(a); clearInterval(b); };
+  }, []);
   if (!st) return null;
   async function act(path: "toggle" | "flatten", q: string) {
     if (!confirm(q)) return;
@@ -1352,20 +1369,41 @@ function LitFlipPanel() {
     if (!res.ok) { const b = await res.json().catch(() => ({})); alert(b.error ?? "Failed."); }
     setBusy(null); load();
   }
+  const usd = (v: number, d = 2) => `${v < 0 ? "-" : ""}$${Math.abs(v).toFixed(d)}`;
+  const age = st.lock_heartbeat ? Math.round((now - Date.parse(st.lock_heartbeat)) / 1000) : null;
+  const alive = age != null && age < 60;
+  const price: number | null = st.live_price != null ? Number(st.live_price) : null;
+  const equity = Number(st.equity ?? 0);
   const side = st.seq_side === 1 ? "LONG" : st.seq_side === -1 ? "SHORT" : null;
-  const entry = Number(st.seq_entry ?? 0);
-  const tgt = side ? entry * (side === "LONG" ? 1.02 : 0.98) : null;
-  const stp = side ? entry * (side === "LONG" ? 0.995 : 1.005) : null;
-  const ladder: number[] = st.seq_ladder ?? [];
+  const entry = Number(st.seq_entry ?? 0), qty = Number(st.seq_qty ?? 0), level = Number(st.seq_level ?? 0);
+  const ladder: number[] = st.seq_ladder ?? (() => { const out: number[] = []; let x = equity * FLIP_P.firstPct / 100;
+    if (x < 10) return out; while (x <= FLIP_P.levCap * equity + 1e-9) { out.push(x); x *= FLIP_P.mult; } return out; })();
+  const tgt = side ? entry * (side === "LONG" ? 1 + FLIP_P.tpPct / 100 : 1 - FLIP_P.tpPct / 100) : null;
+  const stp = side ? entry * (side === "LONG" ? 1 - FLIP_P.slPct / 100 : 1 + FLIP_P.slPct / 100) : null;
+  const dist = (x: number | null) => (x != null && price ? ((x / price - 1) * 100) : null);
+  const nextUsd = side && level + 1 < ladder.length ? ladder[level + 1] : null;
+  const bustLoss = ladder.reduce((a, x) => a + x * FLIP_P.slPct / 100, 0);
+  const seqs = Number(st.sequences ?? 0), wins = Number(st.wins ?? 0), busts = Number(st.busts ?? 0);
+  const done = trades.filter((t) => t.result === "target" || t.result === "bust");
+  const avgSteps = done.length ? done.reduce((a, t) => a + Number(t.level) + 1, 0) / done.length : null;
+  const sig = st.live_signal === 1 ? "LONG" : st.live_signal === -1 ? "SHORT" : "wait";
+  const rangePos = st.live_range_pos != null ? Number(st.live_range_pos) : null;
+  const doing = st.close_requested ? "flattening…" : side ? `${side} · step ${level + 1} of ${ladder.length}`
+    : !st.enabled ? "OFF · not opening trades" : ladder.length === 0 ? "account too small (needs $200)" : sig === "wait" ? "waiting for a 30-min trend" : `opening ${sig}…`;
   return (
     <div className="bg-gray-900 border border-gray-800 rounded-xl p-4 space-y-3">
-      <div className="flex items-center justify-between">
+      <div className="flex items-start justify-between gap-2">
         <div>
           <p className="text-white font-bold">LIT Flip Martingale — Worker 2</p>
-          <p className="text-gray-500 text-[11px]">LIT perp · 30-min range start · target +2% · flip at −0.5% ×1.5 · cap 3x</p>
+          <p className="text-gray-500 text-[11px]">LIT perp · start on the 30-min range · target +{FLIP_P.tpPct}% · flip at −{FLIP_P.slPct}% ×{FLIP_P.mult} · cap {FLIP_P.levCap}x</p>
+          <p className="text-[11px] mt-0.5">
+            <span className={alive ? "text-green-400" : "text-red-400"}>● {alive ? `alive (${age}s)` : age != null ? `NO HEARTBEAT ${age}s` : "not running"}</span>
+            <span className="text-yellow-300 font-semibold"> · {doing}</span>
+            <span className="text-gray-500"> · flip {st.flip_mode === "watch" ? "watch (bot fires it)" : "native (rests on Lighter)"}</span>
+          </p>
         </div>
-        <div className="flex gap-2">
-          <button onClick={() => act("toggle", st.enabled ? "Turn OFF? (open position keeps its orders)" : "Turn ON with REAL money?")}
+        <div className="flex gap-2 shrink-0">
+          <button onClick={() => act("toggle", st.enabled ? "Turn OFF? An open position keeps its target and flip." : "Turn ON with REAL money?")}
             disabled={busy != null} className={`text-xs font-bold px-3 py-1.5 rounded ${st.enabled ? "bg-green-500/20 text-green-400" : "bg-gray-700 text-gray-300"}`}>
             {st.enabled ? "ON" : "OFF"}</button>
           <button onClick={() => act("flatten", "Close the position at market and turn OFF?")} disabled={busy != null}
@@ -1373,22 +1411,56 @@ function LitFlipPanel() {
         </div>
       </div>
       <div className="grid grid-cols-3 gap-2">
-        <Stat label="Account" value={st.equity != null ? `$${Number(st.equity).toFixed(2)}` : "—"} sub={`realized ${Number(st.realized_usd ?? 0) >= 0 ? "+" : ""}$${Number(st.realized_usd ?? 0).toFixed(2)}`} color="text-white" />
-        <Stat label="Sequences" value={String(st.sequences ?? 0)} sub={`${st.wins ?? 0} won · ${st.busts ?? 0} busted`} color="text-gray-300" />
-        <Stat label="Now" value={side ? `${side} · step ${Number(st.seq_level) + 1}/${ladder.length}` : "flat"}
-          sub={side ? `${Number(st.seq_qty).toFixed(2)} LIT @ $${entry.toFixed(4)} · target $${tgt!.toFixed(4)} · flip $${stp!.toFixed(4)}`
-            : `signal ${st.live_signal === 1 ? "long" : st.live_signal === -1 ? "short" : "none"}`}
-          color={side === "LONG" ? "text-green-400" : side === "SHORT" ? "text-red-400" : "text-gray-400"} />
+        <Stat label="Account" value={usd(equity)} sub={`realized ${Number(st.realized_usd ?? 0) >= 0 ? "+" : ""}${usd(Number(st.realized_usd ?? 0))}`} color="text-white" />
+        <Stat label="Sequences" value={`${wins}/${seqs} won`} sub={`${busts} busted · win ${seqs ? Math.round(wins / seqs * 100) : 0}% · avg steps ${avgSteps != null ? avgSteps.toFixed(1) : "—"}`} color="text-gray-300" />
+        <Stat label="LIT price" value={price != null ? `$${price.toFixed(4)}` : "—"}
+          sub={<span>30-min ${st.live_range_lo != null ? Number(st.live_range_lo).toFixed(4) : "—"}–${st.live_range_hi != null ? Number(st.live_range_hi).toFixed(4) : "—"} · at <b className="text-gray-200">{rangePos != null ? `${Math.round(rangePos * 100)}%` : "—"}</b> · signal <b className={sig === "LONG" ? "text-green-400" : sig === "SHORT" ? "text-red-400" : "text-gray-400"}>{sig}</b></span>} color="text-gray-300" />
       </div>
-      <p className="text-[10px] text-gray-500">flip mode: {st.flip_mode === "watch" ? "watch (bot fires the flip)" : "native (flip order rests on Lighter)"}</p>
+      {side && (
+        <div className="grid grid-cols-3 gap-2">
+          <Stat label={`Open ${side}`} value={`${qty.toFixed(2)} LIT`} sub={`$${(qty * entry).toFixed(2)} @ $${entry.toFixed(4)} · open P&L ${usd(Number(st.live_upnl ?? 0), 3)}`}
+            color={side === "LONG" ? "text-green-400" : "text-red-400"} />
+          <Stat label="Target (win)" value={`$${tgt!.toFixed(4)}`} sub={`${dist(tgt) != null ? `${dist(tgt)!.toFixed(2)}% away` : ""} · ends the sequence`} color="text-green-400" />
+          <Stat label={nextUsd ? "Flip (next trade)" : "Stop (last step)"} value={`$${stp!.toFixed(4)}`}
+            sub={`${dist(stp) != null ? `${dist(stp)!.toFixed(2)}% away` : ""} · ${nextUsd ? `flips to ${side === "LONG" ? "SHORT" : "LONG"} ${usd(nextUsd)}` : "sequence busts"}`} color="text-red-400" />
+        </div>
+      )}
+      {ladder.length > 0 && (
+        <div>
+          <p className="text-gray-500 text-[10px] uppercase mb-1">Ladder · a full bust costs about {usd(bustLoss)} ({equity ? (bustLoss / equity * 100).toFixed(0) : 0}% of the account)</p>
+          <div className="flex flex-wrap gap-1">
+            {ladder.map((x, i) => (
+              <span key={i} className={`text-[10px] tabular-nums px-1.5 py-0.5 rounded ${side && i === level ? "bg-yellow-400/20 text-yellow-300 font-bold" : side && i < level ? "bg-red-500/10 text-red-400/70" : "bg-gray-800 text-gray-400"}`}>
+                {i + 1}: ${x.toFixed(0)}
+              </span>
+            ))}
+          </div>
+        </div>
+      )}
       {trades.length > 0 && (
-        <div className="space-y-0.5 text-[11px] tabular-nums max-h-48 overflow-y-auto">
-          {trades.map((t) => (
-            <div key={t.id} className="flex justify-between">
-              <span className="text-gray-500">{new Date(t.at).toLocaleTimeString()} · step {Number(t.level) + 1} · {t.side === 1 ? "long" : "short"} · {t.result}</span>
-              <span className={Number(t.pnl_usd) >= 0 ? "text-green-400" : "text-red-400"}>{Number(t.pnl_usd) >= 0 ? "+" : ""}${Number(t.pnl_usd).toFixed(3)}</span>
-            </div>
-          ))}
+        <div>
+          <p className="text-gray-500 text-[10px] uppercase mb-1">Trades</p>
+          <div className="space-y-0.5 text-[11px] tabular-nums max-h-44 overflow-y-auto">
+            {trades.map((t) => (
+              <div key={t.id} className="flex justify-between gap-2">
+                <span className="text-gray-500">{new Date(t.at).toLocaleTimeString()} · step {Number(t.level) + 1} · {t.side === 1 ? "long" : "short"} {Number(t.qty).toFixed(2)} · ${Number(t.entry).toFixed(4)}→${Number(t.exit_price).toFixed(4)} · <span className={t.result === "target" ? "text-green-400" : t.result === "bust" ? "text-red-400" : "text-gray-400"}>{t.result}</span></span>
+                <span className={Number(t.pnl_usd) >= 0 ? "text-green-400" : "text-red-400"}>{Number(t.pnl_usd) >= 0 ? "+" : ""}{usd(Number(t.pnl_usd), 3)}</span>
+              </div>
+            ))}
+          </div>
+        </div>
+      )}
+      {events.length > 0 && (
+        <div>
+          <p className="text-gray-500 text-[10px] uppercase mb-1">What the bot did</p>
+          <div className="space-y-0.5 text-[10px] text-gray-500 max-h-36 overflow-y-auto">
+            {events.map((e, i) => (
+              <div key={i} className={e.action === "tick_error" || e.action.endsWith("failed") ? "text-red-400" : e.action === "flipped" ? "text-yellow-300" : ""}>
+                {new Date(e.ran_at).toLocaleTimeString()} · {FLIP_EVENT_LABEL[e.action] ?? e.action}
+                {e.detail?.error ? ` · ${String(e.detail.error).slice(0, 80)}` : ""}
+              </div>
+            ))}
+          </div>
         </div>
       )}
     </div>
@@ -5128,6 +5200,9 @@ export default function Dashboard() {
           />
         </div>
 
+        {/* LIT flip martingale (2026-11-03): right below Worker 1, above the LIT grid bots (owner). */}
+        <LitFlipPanel />
+
         {/* Worker 3 twin of the LIT grid, own full-width row ABOVE Worker 4's (2026-10-21,
             direct request: real-money A/B test of two spacings, same component reused with
             its own account/table/API overrides -- see LitGridLivePanel's own props comment). */}
@@ -5174,9 +5249,6 @@ export default function Dashboard() {
             subaccountNote="Worker 4's sub-account · mirror curve (peak −10%) + crash reserve · fresh capital"
           />
         )}
-
-        {/* LIT flip martingale (2026-11-03): hidden until lighter_lit_flip.sql has run. */}
-        <LitFlipPanel />
 
         {/* Worker 4 merged into Worker 3 (2026-10-23); its spot now tracks LIT liquidity for Worker 3. */}
         <LitLiquidityPanel state={litGridWorker3State} />

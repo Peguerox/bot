@@ -30,6 +30,7 @@ BASE_URL = "https://mainnet.zklighter.elliot.ai"
 TABLE_STATE, TABLE_TRADES, TABLE_RUNS = "lighter_lit_flip_state", "lighter_lit_flip_trades", "lighter_lit_flip_runs"
 ACCOUNT_EVERY, CANDLES_EVERY, ORDERS_CHECK_EVERY = 3.0, 20.0, 20.0
 TICK_NATIVE, TICK_WATCH = 1.0, 0.25
+PUBLISH_EVERY = 3.0                   # panel readout write, seconds
 MISMATCH_GRACE_S = 8.0                # a fill can take a few seconds to show; wait before "fixing" a mismatch
 WATCH_REFIRE_S = 5.0                  # watch mode: never fire again within this long of the last shot
 LOCK_STALE_AFTER, LOCK_REFRESH_EVERY = 30.0, 5.0
@@ -82,14 +83,15 @@ class LighterExchange:
         acct = await asyncio.wait_for(api.account(by="index", value=str(self.account_index),
                                                   _headers={"authorization": self._auth() or ""}), REST_TIMEOUT)
         a = acct.accounts[0]
-        pos, entry = 0.0, None
+        pos, entry, upnl = 0.0, None, 0.0
         for p in (a.positions or []):
             if int(p.market_id) == MARKET_ID:
                 sign = 1 if str(p.sign) in ("1", "True", "true") else -1
                 pos = sign * float(p.position or 0)
                 entry = float(p.avg_entry_price) if p.avg_entry_price not in (None, "") and pos else None
+                upnl = float(p.unrealized_pnl) if p.unrealized_pnl not in (None, "") and pos else 0.0
         equity = float(a.total_asset_value) if a.total_asset_value not in (None, "") else float(a.collateral)
-        return {"pos": pos, "entry": entry, "equity": equity}
+        return {"pos": pos, "entry": entry, "equity": equity, "upnl": upnl}
 
     async def candles(self, n=40):
         end = int(time.time() * 1000)
@@ -210,6 +212,7 @@ class FlipBot:
         self.flip_mode = "native"
         self.loaded = False
         self.fired_at = 0.0
+        self.published_at = 0.0
 
     # ---- persistence of the sequence (survives restarts) ----
     def _pos_to_state(self):
@@ -275,6 +278,27 @@ class FlipBot:
             self.lock_at = time.time()
         return self.locked
 
+    async def _refresh_market(self):
+        """LIT candles every CANDLES_EVERY (public data, also while OFF) so the panel always shows the live signal."""
+        if time.time() - self.candles_at >= CANDLES_EVERY:
+            try:
+                self.candles = await self.ex.candles(self.p.window + 5); self.candles_at = time.time()
+            except Exception as e:
+                await self.db.log("candles_failed", {"error": str(e)[:200]})
+
+    async def _publish(self, acct, force=False):
+        """Panel readout (throttled): price, range, signal, position, open P&L, equity, heartbeat."""
+        if not force and time.time() - self.published_at < PUBLISH_EVERY:
+            return
+        bid, ask = self.ex.best_bid_ask()
+        price = ((bid + ask) / 2) if bid and ask else (self.candles[-1]["c"] if self.candles else None)
+        pos_r, hi, lo = F.range_info(self.candles, self.p.window) if self.candles else (None, None, None)
+        await self.db.update_state({"live_price": price, "live_range_pos": pos_r, "live_range_hi": hi, "live_range_lo": lo,
+                                    "live_signal": F.range_signal(self.candles, self.p.window, self.p.band) if self.candles else None,
+                                    "live_pos": acct["pos"], "live_upnl": acct.get("upnl"), "equity": acct["equity"],
+                                    "lock_heartbeat": now_iso()})
+        self.published_at = time.time()
+
     # ---- one tick ----
     async def tick(self):
         st = await self.db.get_state()
@@ -286,6 +310,8 @@ class FlipBot:
         if acct is None:
             return
         live = acct["pos"]
+        await self._refresh_market()
+        await self._publish(acct)
 
         if st.get("close_requested"):
             await self._flatten(acct); return
@@ -317,19 +343,11 @@ class FlipBot:
                 return
         if time.time() - self.orders_checked_at >= ORDERS_CHECK_EVERY:
             await self._check_orders()
-        await self.db.update_state({"live_pos": live, "equity": acct["equity"], "lock_heartbeat": now_iso()})
 
     async def _maybe_start(self, st, acct):
         if not st.get("enabled"):
-            await self.db.update_state({"live_pos": 0, "equity": acct["equity"], "lock_heartbeat": now_iso()}); return
-        if time.time() - self.candles_at >= CANDLES_EVERY:
-            try:
-                self.candles = await self.ex.candles(self.p.window + 5); self.candles_at = time.time()
-            except Exception as e:
-                await self.db.log("candles_failed", {"error": str(e)[:200]}); return
-        sig = F.range_signal(self.candles, self.p.window, self.p.band)
-        await self.db.update_state({"live_signal": sig, "live_pos": 0, "equity": acct["equity"],
-                                    "live_price": self.candles[-1]["c"] if self.candles else None, "lock_heartbeat": now_iso()})
+            return
+        sig = F.range_signal(self.candles, self.p.window, self.p.band) if self.candles else 0
         if sig == 0 or not self.candles:
             return
         bid, ask = self.ex.best_bid_ask()

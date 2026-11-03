@@ -47,6 +47,15 @@ def range_signal(candles, window: int, band: float) -> int:
     return 0
 
 
+def range_info(candles, window: int):
+    """(position 0..1, high, low) of the last closed price inside the last `window` closed candles, or Nones."""
+    closed = candles[:-1][-window:]
+    if len(closed) < window:
+        return None, None, None
+    hi = max(c["h"] for c in closed); lo = min(c["l"] for c in closed)
+    return ((closed[-1]["c"] - lo) / (hi - lo) if hi > lo else 0.5), hi, lo
+
+
 def ladder(equity: float, p: Params) -> List[float]:
     """Trade sizes in USD for one sequence: first_pct of equity, x mult each flip, while <= lev_cap x equity.
     Empty if even the first trade is under the exchange minimum."""

@@ -30,3 +30,10 @@ alter table public.lighter_lit_flip_runs enable row level security;
 create policy "anon_read" on public.lighter_lit_flip_state for select to anon using (true);
 create policy "anon_read" on public.lighter_lit_flip_trades for select to anon using (true);
 create policy "anon_read" on public.lighter_lit_flip_runs for select to anon using (true);
+
+-- Panel readout columns (same day, owner ran this second part too).
+alter table public.lighter_lit_flip_state
+  add column if not exists live_range_pos double precision,
+  add column if not exists live_range_hi double precision,
+  add column if not exists live_range_lo double precision,
+  add column if not exists live_upnl double precision;
