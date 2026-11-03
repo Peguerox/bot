@@ -1329,10 +1329,14 @@ function LitGridLivePanel({
 // Real-money live grid bot controls need a shared secret (2026-10-18, audit finding -- these
 // routes previously had no auth at all). Stored in localStorage only, never baked into the
 // static JS bundle -- prompts the user once, reuses it after. Returns null if the user cancels.
-// LIT flip martingale panel (2026-11-03, owner's strategy) -- server/lit_flip_live.py on Worker 2's account.
+// Flip martingale panels (2026-11-03, owner's strategy) -- server/lit_flip_live.py: LIT on Worker 2, SOL on Worker 1.
 // Self-loading (state + trades + events every 15 s); renders nothing until its state table exists. Owner: "simple, but
 // with everything I need to know what the bot is doing".
 const FLIP_P = { firstPct: 5, mult: 1.5, slPct: 0.5, tpPct: 2, window: 30, band: 0.30, levCap: 3 };
+// One panel per coin (same bot file, FLIP_COIN env var). Params must match COINS in server/lit_flip_live.py.
+type FlipCfg = { coin: string; worker: string; table: string; api: string; P: typeof FLIP_P; pd: number; qd: number };
+const LIT_FLIP: FlipCfg = { coin: "LIT", worker: "Worker 2", table: "lighter_lit_flip", api: "/api/lighter-lit-flip", P: FLIP_P, pd: 4, qd: 2 };
+const SOL_FLIP: FlipCfg = { coin: "SOL", worker: "Worker 1", table: "lighter_sol_flip", api: "/api/lighter-sol-flip", P: { ...FLIP_P, tpPct: 1 }, pd: 3, qd: 3 };
 const FLIP_EVENT_LABEL: Record<string, string> = {
   started: "bot started", leverage_set: "leverage set", sequence_start: "opened first trade", orders_placed: "target + flip placed",
   flipped: "FLIPPED", sequence_over: "sequence finished", flip_mode_watch: "switched to watch mode", watch_fired: "watch mode fired the flip",
@@ -1340,24 +1344,25 @@ const FLIP_EVENT_LABEL: Record<string, string> = {
   flattened: "flattened + OFF", too_small_to_start: "account too small to start", tick_error: "ERROR", account_read_failed: "account read failed",
   candles_failed: "price data failed", cancel_failed: "cancel failed", size_mismatch_adopted: "size mismatch fixed", start_no_fill_seen: "entry not filled",
 };
-function LitFlipPanel() {
+function LitFlipPanel({ cfg = LIT_FLIP }: { cfg?: FlipCfg }) {
+  const FLIP_P = cfg.P;
   const [st, setSt] = useState<any>(null);
   const [trades, setTrades] = useState<any[]>([]);
   const [events, setEvents] = useState<any[]>([]);
   const [busy, setBusy] = useState<string | null>(null);
   const [now, setNow] = useState(Date.now());
   async function load() {
-    const { data, error } = await getSupabase().from("lighter_lit_flip_state").select("*").eq("id", 1).maybeSingle();
+    const { data, error } = await getSupabase().from(`${cfg.table}_state`).select("*").eq("id", 1).maybeSingle();
     if (error || !data) { setSt(null); return; }
     setSt(data);
     const [{ data: t }, { data: e }] = await Promise.all([
-      getSupabase().from("lighter_lit_flip_trades").select("*").order("id", { ascending: false }).limit(20),
-      getSupabase().from("lighter_lit_flip_runs").select("ran_at,action,detail").order("id", { ascending: false }).limit(12),
+      getSupabase().from(`${cfg.table}_trades`).select("*").order("id", { ascending: false }).limit(20),
+      getSupabase().from(`${cfg.table}_runs`).select("ran_at,action,detail").order("id", { ascending: false }).limit(12),
     ]);
     setTrades(t ?? []); setEvents(e ?? []);
   }
   async function loadLive() {
-    const { data } = await getSupabase().from("lighter_lit_flip_state")
+    const { data } = await getSupabase().from(`${cfg.table}_state`)
       .select("live_price,live_upnl,live_pos,equity,seq_side,seq_entry,seq_qty,seq_level,lock_heartbeat").eq("id", 1).maybeSingle();
     if (data) setSt((prev: any) => (prev ? { ...prev, ...data } : prev));
   }
@@ -1371,7 +1376,7 @@ function LitFlipPanel() {
     if (!confirm(q)) return;
     const secret = litGridLiveAdminSecret(); if (!secret) return;
     setBusy(path);
-    const res = await fetch(`/api/lighter-lit-flip/${path}`, { method: "POST", headers: { "x-admin-secret": secret } });
+    const res = await fetch(`${cfg.api}/${path}`, { method: "POST", headers: { "x-admin-secret": secret } });
     if (!res.ok) { const b = await res.json().catch(() => ({})); alert(b.error ?? "Failed."); }
     setBusy(null); load();
   }
@@ -1403,8 +1408,8 @@ function LitFlipPanel() {
     <div className="bg-gray-900 border border-gray-800 rounded-xl p-4 space-y-3">
       <div className="flex items-start justify-between gap-2">
         <div>
-          <p className="text-white font-bold">LIT Flip Martingale — Worker 2</p>
-          <p className="text-gray-500 text-[11px]">LIT perp · start on the 30-min range · target +{FLIP_P.tpPct}% · flip at −{FLIP_P.slPct}% ×{FLIP_P.mult} · cap {FLIP_P.levCap}x</p>
+          <p className="text-white font-bold">{cfg.coin} Flip Martingale — {cfg.worker}</p>
+          <p className="text-gray-500 text-[11px]">{cfg.coin} perp · start on the 30-min range · target +{FLIP_P.tpPct}% · flip at −{FLIP_P.slPct}% ×{FLIP_P.mult} · cap {FLIP_P.levCap}x</p>
           <p className="text-[11px] mt-0.5">
             <span className={alive ? "text-green-400" : "text-red-400"}>● {alive ? `alive (${age}s)` : age != null ? `NO HEARTBEAT ${age}s` : "not running"}</span>
             <span className="text-yellow-300 font-semibold"> · {doing}</span>
@@ -1423,15 +1428,15 @@ function LitFlipPanel() {
         <Stat label="Account" value={usd(equity)} sub={<span>profit <b className={Number(st.realized_usd ?? 0) >= 0 ? "text-green-400" : "text-red-400"}>{Number(st.realized_usd ?? 0) >= 0 ? "+" : ""}{usd(Number(st.realized_usd ?? 0), 3)} · {pctInv(Number(st.realized_usd ?? 0))}</b> of {usd(invest, 0)}</span>}
           color={Number(st.realized_usd ?? 0) > 0 ? "text-green-400" : Number(st.realized_usd ?? 0) < 0 ? "text-red-400" : "text-white"} />
         <Stat label="Sequences" value={`${wins}/${seqs} won`} sub={`${busts} busted · win ${seqs ? Math.round(wins / seqs * 100) : 0}% · avg steps ${avgSteps != null ? avgSteps.toFixed(1) : "—"}`} color="text-gray-300" />
-        <Stat label="LIT price" value={price != null ? `$${price.toFixed(4)}` : "—"}
-          sub={<span>30-min ${st.live_range_lo != null ? Number(st.live_range_lo).toFixed(4) : "—"}–${st.live_range_hi != null ? Number(st.live_range_hi).toFixed(4) : "—"} · at <b className="text-gray-200">{rangePos != null ? `${Math.round(rangePos * 100)}%` : "—"}</b> · signal <b className={sig === "LONG" ? "text-green-400" : sig === "SHORT" ? "text-red-400" : "text-gray-400"}>{sig}</b></span>} color="text-gray-300" />
+        <Stat label={`${cfg.coin} price`} value={price != null ? `$${price.toFixed(cfg.pd)}` : "—"}
+          sub={<span>30-min ${st.live_range_lo != null ? Number(st.live_range_lo).toFixed(cfg.pd) : "—"}–${st.live_range_hi != null ? Number(st.live_range_hi).toFixed(cfg.pd) : "—"} · at <b className="text-gray-200">{rangePos != null ? `${Math.round(rangePos * 100)}%` : "—"}</b> · signal <b className={sig === "LONG" ? "text-green-400" : sig === "SHORT" ? "text-red-400" : "text-gray-400"}>{sig}</b></span>} color="text-gray-300" />
       </div>
       {side && (
         <div className="grid grid-cols-3 gap-2">
-          <Stat label={`Open ${side}`} value={`${qty.toFixed(2)} LIT`} sub={`$${(qty * entry).toFixed(2)} @ $${entry.toFixed(4)} · open P&L ${usd(Number(st.live_upnl ?? 0), 3)}`}
+          <Stat label={`Open ${side}`} value={`${qty.toFixed(cfg.qd)} ${cfg.coin}`} sub={`$${(qty * entry).toFixed(2)} @ $${entry.toFixed(cfg.pd)} · open P&L ${usd(Number(st.live_upnl ?? 0), 3)}`}
             color={side === "LONG" ? "text-green-400" : "text-red-400"} />
-          <Stat label="Target (win)" value={`$${tgt!.toFixed(4)}`} sub={`${dist(tgt) != null ? `${dist(tgt)!.toFixed(2)}% away` : ""} · ends the sequence`} color="text-green-400" />
-          <Stat label={nextUsd ? "Flip (next trade)" : "Stop (last step)"} value={`$${stp!.toFixed(4)}`}
+          <Stat label="Target (win)" value={`$${tgt!.toFixed(cfg.pd)}`} sub={`${dist(tgt) != null ? `${dist(tgt)!.toFixed(2)}% away` : ""} · ends the sequence`} color="text-green-400" />
+          <Stat label={nextUsd ? "Flip (next trade)" : "Stop (last step)"} value={`$${stp!.toFixed(cfg.pd)}`}
             sub={`${dist(stp) != null ? `${dist(stp)!.toFixed(2)}% away` : ""} · ${nextUsd ? `flips to ${side === "LONG" ? "SHORT" : "LONG"} ${usd(nextUsd)}` : "sequence busts"}`} color="text-red-400" />
         </div>
       )}
@@ -1454,9 +1459,9 @@ function LitFlipPanel() {
               <div className="absolute left-1/2 top-0 h-full w-0.5 bg-white/80" />
             </div>
             <div className="flex justify-between text-[10px] text-gray-500 tabular-nums mt-0.5">
-              <span>{nextUsd ? `FLIP → ${other}` : "STOP (bust)"} ${stp!.toFixed(4)} (−{FLIP_P.slPct}%)</span>
-              <span>entry ${entry.toFixed(4)}</span>
-              <span>TARGET ${tgt!.toFixed(4)} (+{FLIP_P.tpPct}%)</span>
+              <span>{nextUsd ? `FLIP → ${other}` : "STOP (bust)"} ${stp!.toFixed(cfg.pd)} (−{FLIP_P.slPct}%)</span>
+              <span>entry ${entry.toFixed(cfg.pd)}</span>
+              <span>TARGET ${tgt!.toFixed(cfg.pd)} (+{FLIP_P.tpPct}%)</span>
             </div>
           </div>
         );
@@ -1479,7 +1484,7 @@ function LitFlipPanel() {
           <div className="space-y-0.5 text-[11px] tabular-nums max-h-44 overflow-y-auto">
             {trades.map((t) => (
               <div key={t.id} className="flex justify-between gap-2">
-                <span className="text-gray-500">{new Date(t.at).toLocaleTimeString()} · step {Number(t.level) + 1} · {t.side === 1 ? "long" : "short"} {Number(t.qty).toFixed(2)} · ${Number(t.entry).toFixed(4)}→${Number(t.exit_price).toFixed(4)} · <span className={t.result === "target" ? "text-green-400" : t.result === "bust" ? "text-red-400" : "text-gray-400"}>{t.result}</span></span>
+                <span className="text-gray-500">{new Date(t.at).toLocaleTimeString()} · step {Number(t.level) + 1} · {t.side === 1 ? "long" : "short"} {Number(t.qty).toFixed(cfg.qd)} · ${Number(t.entry).toFixed(cfg.pd)}→${Number(t.exit_price).toFixed(cfg.pd)} · <span className={t.result === "target" ? "text-green-400" : t.result === "bust" ? "text-red-400" : "text-gray-400"}>{t.result}</span></span>
                 <span className={Number(t.pnl_usd) >= 0 ? "text-green-400" : "text-red-400"}>{Number(t.pnl_usd) >= 0 ? "+" : ""}{usd(Number(t.pnl_usd), 3)} · {pctInv(Number(t.pnl_usd))}</span>
               </div>
             ))}
@@ -4907,9 +4912,9 @@ export default function Dashboard() {
       none,   // retired: lighter_stoch_dca_btc_state
       none,   // retired: lighter_stoch_dca_btc_trades
       none,   // retired: lighter_stoch_dca_btc_runs
-      getSupabase().from("lighter_btc_initial_state").select("*").eq("id", 1).single(),
-      getSupabase().from("lighter_btc_initial_trades").select("*").order("closed_at", { ascending: false }).limit(200),
-      getSupabase().from("lighter_btc_initial_runs").select("*").order("ran_at", { ascending: false }).limit(30),
+      none,   // retired 2026-11-03 (Worker 1 BTC -> SOL flip): lighter_btc_initial_state
+      none,   // retired: lighter_btc_initial_trades
+      none,   // retired: lighter_btc_initial_runs
       none,   // retired: lighter_btc_worker4_state
       none,   // retired: lighter_btc_worker4_trades
       none,   // retired: lighter_btc_worker4_runs
@@ -4922,18 +4927,18 @@ export default function Dashboard() {
       // fetching rows, so the number is correct however large the real total gets.
       none,   // retired: lighter_stoch_dca_btc_trades
       none,   // retired: lighter_stoch_dca_btc_trades
-      getSupabase().from("lighter_btc_initial_trades").select("id", { count: "exact", head: true }),
-      getSupabase().from("lighter_btc_initial_trades").select("id", { count: "exact", head: true }).gt("pnl_usd", 0),
+      none,   // retired: lighter_btc_initial_trades
+      none,   // retired: lighter_btc_initial_trades
       none,   // retired: lighter_btc_optimal_trades
       none,   // retired: lighter_btc_optimal_trades
       // RSI paper test (Worker 1 shadow, 2026-09-26) -- separate table, never touches real
       // money. pnl_pct rows fetched in full (volume is low, a selective signal) to sum
       // cumulative % client-side; Supabase's query builder has no SUM aggregate.
-      getSupabase().from("lighter_btc_rsi_paper_trades").select("id", { count: "exact", head: true }).eq("worker_id", "worker1"),
-      getSupabase().from("lighter_btc_rsi_paper_trades").select("id", { count: "exact", head: true }).eq("worker_id", "worker1").gt("pnl_pct", 0),
-      getSupabase().from("lighter_btc_rsi_paper_trades").select("pnl_pct").eq("worker_id", "worker1"),
+      none,   // retired: lighter_btc_rsi_paper_trades
+      none,   // retired: lighter_btc_rsi_paper_trades
+      none,   // retired: lighter_btc_rsi_paper_trades
       none,   // retired: lighter_btc_optimal_runs
-      getSupabase().from("bot_schedule_rules").select("*").eq("id", 1).single(),
+      none,   // retired 2026-11-03: bot_schedule_rules (Master Schedule only drove the BTC workers)
       none,   // retired: lighter_lit_grid_live_state
       none,   // retired: lighter_lit_grid_live_orders
       none,   // retired: lighter_lit_grid_live_orders
@@ -5164,12 +5169,7 @@ export default function Dashboard() {
     // Lighter BTC workers' runs tables aren't otherwise wired to realtime -- subscribed here
     // specifically so the health banner (below) reflects an error burst live instead of only
     // on the next manual action or full-page reload.
-    const ch5 = sb.channel("lighter-btc-runs")
-      .on("postgres_changes", { event: "INSERT", schema: "public", table: "lighter_btc_initial_runs" }, debouncedLoad)
-      .subscribe();
-    const ch6 = sb.channel("lighter-btc-rsi-paper")
-      .on("postgres_changes", { event: "INSERT", schema: "public", table: "lighter_btc_rsi_paper_trades" }, debouncedLoad)
-      .subscribe();
+    // ch5/ch6 (Worker 1 BTC runs + RSI paper): retired 2026-11-03 with the BTC bot.
     const ch8 = sb.channel("lighter-lit-grid-live")
       .on("postgres_changes", { event: "*", schema: "public", table: "lighter_lit_grid_live_worker3_state" }, debouncedLoad)
       .on("postgres_changes", { event: "*", schema: "public", table: "lighter_lit_grid_live_worker3_orders" }, debouncedLoad)
@@ -5186,8 +5186,7 @@ export default function Dashboard() {
     return () => {
       if (debounceTimer) clearTimeout(debounceTimer);
       clearInterval(pollId);
-      sb.removeChannel(ch5);
-      sb.removeChannel(ch6); sb.removeChannel(ch8);
+      sb.removeChannel(ch8);
     };
   }, []);
 
@@ -5198,45 +5197,10 @@ export default function Dashboard() {
           <h1 className="text-2xl font-bold text-white">TradeBot Dashboard</h1>
         </div>
 
-        <MasterSchedulePanel
-          scheduleState={scheduleState}
-          worker1State={initialBtcState}
-          hedgeLongState={optimalBtcState}
-          worker4State={worker4State}
-          worker1Trades={initialBtcTrades}
-          hedgeLongTrades={optimalBtcTrades}
-          hedgeShortTrades={dcaBtcTrades}
-          worker4Trades={worker4Trades}
-          loading={loading}
-          onToggled={load}
-        />
-
-        {/* Worker 1 alone (2026-10-21: hedge panel removed below -- Worker 2/3's sub-accounts are
-            being repurposed off the BTC hedge; the hedge backend/state fetching is left in place
-            since MasterSchedulePanel still reads it and Worker 3 reuses this same account). */}
-        <div className="grid grid-cols-1 gap-3 items-stretch">
-          <CompactStochBtcPanel
-            title="Worker 1 · Stochastic + Color-Balance Index"
-            subtitle="2026-10-01 v4: enters ONLY on a fresh 25/75 stochastic signal (window 5) while the color-weighted balance index is 65-75 (each of the last 5 closed 1-min candles casts a size-weighted color vote; 100 = perfectly balanced, 0 = one color dominates) -- back to a band after a brief floor-only (70+) run showed both real losses landing above 80. Exits: SL 0.06% / TP 0.10% / profit lock at +0.06% (exits on first tick down). SL tightened from 0.10% same day after a sweep against real data: 0.06 beat 0.10 on both the full 644-trade history (+$2.41 vs +$1.80) and the live 20-trade window since the trigger change (+$0.38 vs +$0.11). A 3-stage ratchet SL (0.10->0.05->0 as the trade goes positive) was tested and rejected -- looked good on a small window, lost badly on the full history. One trade per signal; after a REVERSAL close specifically, a 2-minute cooldown before any new entry (fresh or another reversal) -- the close itself is never delayed. A GREEN position closes immediately (INDEX_EXIT) if the index leaves 65-75; a RED position is never touched by this. Self-lock, hour ban, dispersion and saving lock all OFF."
-            table="lighter_btc_initial_state"
-            state={initialBtcState}
-            trades={initialBtcTrades.filter((t: any) =>
-              t.closed_at >= (initialBtcState?.history_reset_at ?? WORKER1_RESET_AT))}
-            currentPrice={ocoBtcPrice}
-            loading={loading}
-            onToggled={load}
-            // 2026-10-01: OFF for the isolated dispersion test -- self_lock_enabled=False in
-            // the live config right now, so real_trading_locked/paper_* in the DB are inert
-            // leftovers the bot never reads. Showing the self-lock block anyway read as a real
-            // "REAL LOCKED" badge while the bot was actually trading freely underneath it --
-            // confusing, caught live. Flip back to `showSelfLock` once self-lock is re-enabled.
-            combineEquityWinRate
-            // 2026-10-01: hour ban OFF (trading_hours_utc=None in the live config). Pass
-            // tradingHoursUtc={WORKER1_TRADING_HOURS} again when the schedule is restored.
-          />
-        </div>
-
-        {/* LIT flip martingale (2026-11-03): right below Worker 1, above the LIT grid bots (owner). */}
+        {/* 2026-11-03 (owner): the old Worker 1 BTC stochastic panel and the Master Schedule (which only drove the BTC
+            workers) are gone -- Worker 1's slot now runs the SOL flip martingale. Components kept in this file, unrendered. */}
+        {/* Flip martingales (2026-11-03): SOL = Worker 1, LIT = Worker 2, above the LIT grid bots (owner). */}
+        <LitFlipPanel cfg={SOL_FLIP} />
         <LitFlipPanel />
 
         {/* Worker 3 twin of the LIT grid, own full-width row ABOVE Worker 4's (2026-10-21,

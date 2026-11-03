@@ -1,5 +1,7 @@
-"""Flip martingale on the LIT perp (Lighter market 120) -- REAL MONEY, built 2026-11-03; runs on Worker 2's service + account
-(plain LIGHTER_* env vars, Start Command `python server/lit_flip_live.py`). NOT deployed until the owner says so.
+"""Flip martingale on a Lighter perp -- REAL MONEY, built 2026-11-03. One coin per process (FLIP_COIN env var, see COINS):
+  * LIT (market 120): Worker 2's service + account, Start Command `python server/lit_flip_live.py`.
+  * SOL (market 2):   Worker 1's service + account, same Start Command with env FLIP_COIN=SOL (own tables lighter_sol_flip_*).
+Each uses its own service's plain LIGHTER_* env vars.
 
 Strategy and research: lit_flip_core.py (setting A). This file is the I/O:
   * Sequence start: range signal on the last 30 closed 1-min LIT perp candles -> market order, first trade 5% of equity.
@@ -24,12 +26,23 @@ import aiohttp
 
 import lit_flip_core as F
 
-MARKET_ID = 120
-PRICE_DEC, SIZE_DEC = 4, 2            # orderBookDetails market 120 (2026-11-03)
-MIN_BASE = 1.00                       # LIT
+# One file, one coin per process: FLIP_COIN env var (default LIT). Market details from orderBookDetails (2026-11-03).
+COINS = {
+    # Worker 2's service: setting A (stop 0.5 / target 2).
+    "LIT": dict(market=120, price_dec=4, size_dec=2, min_base=1.00, tables="lighter_lit_flip", params=F.Params()),
+    # Worker 1's service (owner, 2026-11-03): SOL 5y backtest picked stop 0.5 / target 1 -- the smoothest
+    # (+6%/month, worst drop 23%, 210 busts in 25,630 sequences). research/martingale-dca-2026-11-03/target_sweep.py
+    "SOL": dict(market=2, price_dec=3, size_dec=3, min_base=0.055, tables="lighter_sol_flip", params=F.Params(sl_pct=0.5, tp_pct=1.0)),
+}
+COIN = os.environ.get("FLIP_COIN", "LIT").upper()
+_C = COINS[COIN]
+MARKET_ID = _C["market"]
+PRICE_DEC, SIZE_DEC = _C["price_dec"], _C["size_dec"]
+MIN_BASE = _C["min_base"]             # exchange minimum order size, in the coin
+PARAMS = _C["params"]
 LEVERAGE = 5                          # account setting for this market; the strategy itself caps at 3x
 BASE_URL = "https://mainnet.zklighter.elliot.ai"
-TABLE_STATE, TABLE_TRADES, TABLE_RUNS = "lighter_lit_flip_state", "lighter_lit_flip_trades", "lighter_lit_flip_runs"
+TABLE_STATE, TABLE_TRADES, TABLE_RUNS = (f"{_C['tables']}_state", f"{_C['tables']}_trades", f"{_C['tables']}_runs")
 ACCOUNT_EVERY, CANDLES_EVERY, ORDERS_CHECK_EVERY = 3.0, 20.0, 20.0     # REST fallback while the orders websocket is down
 ACCOUNT_EVERY_WS, ORDERS_CHECK_EVERY_WS = 10.0, 60.0  # REST safety net while it is live (any order event wakes the bot)
 ORDERS_SETTLE_S = 3.0                 # after an order event, wait this long before counting orders (new ones show late)
@@ -49,7 +62,7 @@ def now_iso():
     return datetime.now(timezone.utc).isoformat()
 
 
-def qty_round(q):                     # sizes: 2 decimals, never below 1 LIT
+def qty_round(q):                     # sizes: SIZE_DEC decimals, never below the exchange minimum
     return max(MIN_BASE, math.floor(q * 10 ** SIZE_DEC + 1e-6) / 10 ** SIZE_DEC)   # +1e-6: 5.02 stored as 5.0199999
 
 
@@ -257,7 +270,7 @@ class SupabaseDB:
 
 # ── The bot ─────────────────────────────────────────────────────────────────────────────────────
 class FlipBot:
-    def __init__(self, ex, db, params=F.Params(), owner="local"):
+    def __init__(self, ex, db, params=PARAMS, owner="local"):
         self.ex, self.db, self.p, self.owner = ex, db, params, owner
         self.pos = None                 # F.Position we expect on the exchange
         self.seq = None                 # {"id", "start_equity"}
@@ -407,7 +420,7 @@ class FlipBot:
             await self._sequence_over(acct); return
         if (live > 0) != (exp_side == F.LONG):
             await self._flipped(acct); return
-        if abs(abs(live) - exp_qty) > max(0.02, exp_qty * 0.01):
+        if abs(abs(live) - exp_qty) > max(2 * 10 ** -SIZE_DEC, exp_qty * 0.01):
             # Same side, different size: a fill in progress (or a partial). Give it a few seconds, then adopt.
             self.mismatch_since = self.mismatch_since or time.time()
             if time.time() - self.mismatch_since >= MISMATCH_GRACE_S:
@@ -437,6 +450,8 @@ class FlipBot:
         if first is None:
             await self.db.log("too_small_to_start", {"equity": acct["equity"]}); return
         qty = qty_round(first.qty)
+        if qty * ref < self.p.min_order_usd:    # rounding down can dip under Lighter's $10 minimum -> one size step up
+            qty = round(qty + 10 ** -SIZE_DEC, SIZE_DEC)
         err = await self.ex.market(sig == F.SHORT, qty, ref)
         await self.db.log("sequence_start", {"side": sig, "qty": qty, "ref": ref, "error": str(err)[:200] if err else None})
         for _ in range(6):                      # the fill can take a few seconds to show
@@ -544,9 +559,9 @@ async def main():
                                   api_private_keys={key_index: os.environ["LIGHTER_API_PRIVATE_KEY"]})
     ex = LighterExchange(client, account_index)
     db = SupabaseDB()
-    owner = f"{os.environ.get('RENDER_INSTANCE_ID', 'local')}:lit-flip"
+    owner = f"{os.environ.get('RENDER_INSTANCE_ID', 'local')}:{COIN.lower()}-flip"
     bot = FlipBot(ex, db, owner=owner)
-    await db.log("started", {"market": MARKET_ID, "params": F.Params().__dict__})
+    await db.log("started", {"coin": COIN, "market": MARKET_ID, "params": PARAMS.__dict__})
     err = await ex.set_leverage()
     await db.log("leverage_set", {"leverage": LEVERAGE, "error": str(err)[:200] if err else None})
     ws = lighter.WsClient(order_book_ids=[MARKET_ID], account_ids=[], on_order_book_update=ex.on_order_book,

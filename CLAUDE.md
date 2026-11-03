@@ -285,6 +285,12 @@ engine_batch_sent / orders_ws_verified are trimmed) and 30 days of lighter_btc_p
 code that re-reads a whole ledger/log table on a short timer (the LIT bot did, ~1.5 GB/day egress;
 fixed dc4b888: in-memory ledger, full re-read every 15 min).
 
+**Worker 1 = SOL flip martingale (2026-11-03, owner):** the BTC stochastic bot is retired (its panel + Master Schedule
+removed from the dashboard; `lighter_stoch_dca_btc_initial.py` kept as code). Worker 1's Render service runs the SAME file
+`python server/lit_flip_live.py` with env `FLIP_COIN=SOL` (COINS table in the file): SOL perp market 2, stop 0.5 / target 1,
+tables `lighter_sol_flip_*` (`supabase/migrations/lighter_sol_flip.sql`), routes `app/api/lighter-sol-flip/*`, test
+`server/test_sol_flip_live.py`. First order rounds UP to stay >= $10.
+
 **Worker 2 = LIT flip martingale (2026-11-03):** Worker 2's Render service (resumed) runs `python server/lit_flip_live.py`
 on Worker 2's sub-account (plain LIGHTER_*), LIT perp market 120: owner's direction-switching martingale (30-min range
 start, target +2%, flip at -0.5% x1.5 in ONE order, cap 3x equity). Logic `lit_flip_core.py`, tests `test_lit_flip.py` +
