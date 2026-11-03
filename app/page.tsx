@@ -1329,6 +1329,72 @@ function LitGridLivePanel({
 // Real-money live grid bot controls need a shared secret (2026-10-18, audit finding -- these
 // routes previously had no auth at all). Stored in localStorage only, never baked into the
 // static JS bundle -- prompts the user once, reuses it after. Returns null if the user cancels.
+// LIT flip martingale panel (2026-11-03, owner's strategy) -- server/lit_flip_live.py on Worker 1's account.
+// Self-loading (own 60 s poll); renders nothing until its state table exists.
+function LitFlipPanel() {
+  const [st, setSt] = useState<any>(null);
+  const [trades, setTrades] = useState<any[]>([]);
+  const [busy, setBusy] = useState<string | null>(null);
+  async function load() {
+    const { data, error } = await getSupabase().from("lighter_lit_flip_state").select("*").eq("id", 1).maybeSingle();
+    if (error || !data) { setSt(null); return; }
+    setSt(data);
+    const { data: t } = await getSupabase().from("lighter_lit_flip_trades").select("*").order("id", { ascending: false }).limit(15);
+    setTrades(t ?? []);
+  }
+  useEffect(() => { load(); const id = setInterval(load, 60_000); return () => clearInterval(id); }, []);
+  if (!st) return null;
+  async function act(path: "toggle" | "flatten", q: string) {
+    if (!confirm(q)) return;
+    const secret = litGridLiveAdminSecret(); if (!secret) return;
+    setBusy(path);
+    const res = await fetch(`/api/lighter-lit-flip/${path}`, { method: "POST", headers: { "x-admin-secret": secret } });
+    if (!res.ok) { const b = await res.json().catch(() => ({})); alert(b.error ?? "Failed."); }
+    setBusy(null); load();
+  }
+  const side = st.seq_side === 1 ? "LONG" : st.seq_side === -1 ? "SHORT" : null;
+  const entry = Number(st.seq_entry ?? 0);
+  const tgt = side ? entry * (side === "LONG" ? 1.02 : 0.98) : null;
+  const stp = side ? entry * (side === "LONG" ? 0.995 : 1.005) : null;
+  const ladder: number[] = st.seq_ladder ?? [];
+  return (
+    <div className="bg-gray-900 border border-gray-800 rounded-xl p-4 space-y-3">
+      <div className="flex items-center justify-between">
+        <div>
+          <p className="text-white font-bold">LIT Flip Martingale — Worker 1</p>
+          <p className="text-gray-500 text-[11px]">LIT perp · 30-min range start · target +2% · flip at −0.5% ×1.5 · cap 3x</p>
+        </div>
+        <div className="flex gap-2">
+          <button onClick={() => act("toggle", st.enabled ? "Turn OFF? (open position keeps its orders)" : "Turn ON with REAL money?")}
+            disabled={busy != null} className={`text-xs font-bold px-3 py-1.5 rounded ${st.enabled ? "bg-green-500/20 text-green-400" : "bg-gray-700 text-gray-300"}`}>
+            {st.enabled ? "ON" : "OFF"}</button>
+          <button onClick={() => act("flatten", "Close the position at market and turn OFF?")} disabled={busy != null}
+            className="text-xs font-bold px-3 py-1.5 rounded bg-red-500/20 text-red-400">Flatten</button>
+        </div>
+      </div>
+      <div className="grid grid-cols-3 gap-2">
+        <Stat label="Account" value={st.equity != null ? `$${Number(st.equity).toFixed(2)}` : "—"} sub={`realized ${Number(st.realized_usd ?? 0) >= 0 ? "+" : ""}$${Number(st.realized_usd ?? 0).toFixed(2)}`} color="text-white" />
+        <Stat label="Sequences" value={String(st.sequences ?? 0)} sub={`${st.wins ?? 0} won · ${st.busts ?? 0} busted`} color="text-gray-300" />
+        <Stat label="Now" value={side ? `${side} · step ${Number(st.seq_level) + 1}/${ladder.length}` : "flat"}
+          sub={side ? `${Number(st.seq_qty).toFixed(2)} LIT @ $${entry.toFixed(4)} · target $${tgt!.toFixed(4)} · flip $${stp!.toFixed(4)}`
+            : `signal ${st.live_signal === 1 ? "long" : st.live_signal === -1 ? "short" : "none"}`}
+          color={side === "LONG" ? "text-green-400" : side === "SHORT" ? "text-red-400" : "text-gray-400"} />
+      </div>
+      <p className="text-[10px] text-gray-500">flip mode: {st.flip_mode === "watch" ? "watch (bot fires the flip)" : "native (flip order rests on Lighter)"}</p>
+      {trades.length > 0 && (
+        <div className="space-y-0.5 text-[11px] tabular-nums max-h-48 overflow-y-auto">
+          {trades.map((t) => (
+            <div key={t.id} className="flex justify-between">
+              <span className="text-gray-500">{new Date(t.at).toLocaleTimeString()} · step {Number(t.level) + 1} · {t.side === 1 ? "long" : "short"} · {t.result}</span>
+              <span className={Number(t.pnl_usd) >= 0 ? "text-green-400" : "text-red-400"}>{Number(t.pnl_usd) >= 0 ? "+" : ""}${Number(t.pnl_usd).toFixed(3)}</span>
+            </div>
+          ))}
+        </div>
+      )}
+    </div>
+  );
+}
+
 function litGridLiveAdminSecret(): string | null {
   try {
     const existing = localStorage.getItem("litGridLiveAdminSecret");
@@ -5108,6 +5174,9 @@ export default function Dashboard() {
             subaccountNote="Worker 4's sub-account · mirror curve (peak −10%) + crash reserve · fresh capital"
           />
         )}
+
+        {/* LIT flip martingale (2026-11-03): hidden until lighter_lit_flip.sql has run. */}
+        <LitFlipPanel />
 
         {/* Worker 4 merged into Worker 3 (2026-10-23); its spot now tracks LIT liquidity for Worker 3. */}
         <LitLiquidityPanel state={litGridWorker3State} />
