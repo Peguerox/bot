@@ -2,7 +2,7 @@ import { NextRequest, NextResponse } from "next/server";
 import { getSupabaseAdmin } from "@/lib/supabase-admin";
 import { checkLitGridLiveAuth } from "@/lib/lit-grid-live-auth";
 
-// REAL MONEY. LIT flip martingale (server/lit_flip_live.py, Worker 1's account). ON/OFF only stops or allows NEW
+// REAL MONEY. LIT flip martingale (server/lit_flip_live.py, Worker 2's account). ON/OFF only stops or allows NEW
 // sequences; an open position keeps its target and flip orders. Turning it ON is the owner's call.
 const TABLE = "lighter_lit_flip_state";
 

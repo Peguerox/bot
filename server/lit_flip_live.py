@@ -1,4 +1,4 @@
-"""Flip martingale on the LIT perp (Lighter market 120) -- REAL MONEY, built 2026-11-03 for Worker 1's account
+"""Flip martingale on the LIT perp (Lighter market 120) -- REAL MONEY, built 2026-11-03; runs on Worker 2's service + account
 (plain LIGHTER_* env vars, Start Command `python server/lit_flip_live.py`). NOT deployed until the owner says so.
 
 Strategy and research: lit_flip_core.py (setting A). This file is the I/O:

@@ -1329,7 +1329,7 @@ function LitGridLivePanel({
 // Real-money live grid bot controls need a shared secret (2026-10-18, audit finding -- these
 // routes previously had no auth at all). Stored in localStorage only, never baked into the
 // static JS bundle -- prompts the user once, reuses it after. Returns null if the user cancels.
-// LIT flip martingale panel (2026-11-03, owner's strategy) -- server/lit_flip_live.py on Worker 1's account.
+// LIT flip martingale panel (2026-11-03, owner's strategy) -- server/lit_flip_live.py on Worker 2's account.
 // Self-loading (own 60 s poll); renders nothing until its state table exists.
 function LitFlipPanel() {
   const [st, setSt] = useState<any>(null);
@@ -1361,7 +1361,7 @@ function LitFlipPanel() {
     <div className="bg-gray-900 border border-gray-800 rounded-xl p-4 space-y-3">
       <div className="flex items-center justify-between">
         <div>
-          <p className="text-white font-bold">LIT Flip Martingale — Worker 1</p>
+          <p className="text-white font-bold">LIT Flip Martingale — Worker 2</p>
           <p className="text-gray-500 text-[11px]">LIT perp · 30-min range start · target +2% · flip at −0.5% ×1.5 · cap 3x</p>
         </div>
         <div className="flex gap-2">
