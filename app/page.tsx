@@ -1356,9 +1356,15 @@ function LitFlipPanel() {
     ]);
     setTrades(t ?? []); setEvents(e ?? []);
   }
+  async function loadLive() {
+    const { data } = await getSupabase().from("lighter_lit_flip_state")
+      .select("live_price,live_upnl,live_pos,equity,seq_side,seq_entry,seq_qty,seq_level,lock_heartbeat").eq("id", 1).maybeSingle();
+    if (data) setSt((prev: any) => (prev ? { ...prev, ...data } : prev));
+  }
   useEffect(() => {
     load(); const a = setInterval(load, 15_000); const b = setInterval(() => setNow(Date.now()), 5_000);
-    return () => { clearInterval(a); clearInterval(b); };
+    const c = setInterval(loadLive, 3_000);
+    return () => { clearInterval(a); clearInterval(b); clearInterval(c); };
   }, []);
   if (!st) return null;
   async function act(path: "toggle" | "flatten", q: string) {
@@ -1411,7 +1417,8 @@ function LitFlipPanel() {
         </div>
       </div>
       <div className="grid grid-cols-3 gap-2">
-        <Stat label="Account" value={usd(equity)} sub={`realized ${Number(st.realized_usd ?? 0) >= 0 ? "+" : ""}${usd(Number(st.realized_usd ?? 0))}`} color="text-white" />
+        <Stat label="Account" value={usd(equity)} sub={<span>profit <b className={Number(st.realized_usd ?? 0) >= 0 ? "text-green-400" : "text-red-400"}>{Number(st.realized_usd ?? 0) >= 0 ? "+" : ""}{usd(Number(st.realized_usd ?? 0), 3)}</b></span>}
+          color={Number(st.realized_usd ?? 0) > 0 ? "text-green-400" : Number(st.realized_usd ?? 0) < 0 ? "text-red-400" : "text-white"} />
         <Stat label="Sequences" value={`${wins}/${seqs} won`} sub={`${busts} busted · win ${seqs ? Math.round(wins / seqs * 100) : 0}% · avg steps ${avgSteps != null ? avgSteps.toFixed(1) : "—"}`} color="text-gray-300" />
         <Stat label="LIT price" value={price != null ? `$${price.toFixed(4)}` : "—"}
           sub={<span>30-min ${st.live_range_lo != null ? Number(st.live_range_lo).toFixed(4) : "—"}–${st.live_range_hi != null ? Number(st.live_range_hi).toFixed(4) : "—"} · at <b className="text-gray-200">{rangePos != null ? `${Math.round(rangePos * 100)}%` : "—"}</b> · signal <b className={sig === "LONG" ? "text-green-400" : sig === "SHORT" ? "text-red-400" : "text-gray-400"}>{sig}</b></span>} color="text-gray-300" />
@@ -1425,6 +1432,32 @@ function LitFlipPanel() {
             sub={`${dist(stp) != null ? `${dist(stp)!.toFixed(2)}% away` : ""} · ${nextUsd ? `flips to ${side === "LONG" ? "SHORT" : "LONG"} ${usd(nextUsd)}` : "sequence busts"}`} color="text-red-400" />
         </div>
       )}
+      {side && price != null && entry > 0 && (() => {
+        // Gauge: centre = entry. Right half fills green toward the target (+tp%), left half red toward the flip (-sl%).
+        const movePct = (side === "LONG" ? price / entry - 1 : 1 - price / entry) * 100;
+        const toTgt = Math.max(0, Math.min(1, movePct / FLIP_P.tpPct));
+        const toFlip = Math.max(0, Math.min(1, -movePct / FLIP_P.slPct));
+        const other = side === "LONG" ? "SHORT" : "LONG";
+        return (
+          <div className="bg-gray-800/60 rounded-lg p-2">
+            <div className="flex justify-between text-[11px] tabular-nums">
+              <span className="text-red-400">{toFlip > 0 ? <b>{Math.round(toFlip * 100)}% to flip</b> : ""}</span>
+              <span className={movePct >= 0 ? "text-green-400 font-bold" : "text-red-400 font-bold"}>{movePct >= 0 ? "+" : ""}{movePct.toFixed(2)}% · {usd(Number(st.live_upnl ?? 0), 3)}</span>
+              <span className="text-green-400">{toTgt > 0 ? <b>{Math.round(toTgt * 100)}% to target</b> : ""}</span>
+            </div>
+            <div className="relative h-3 mt-1 flex rounded-full overflow-hidden bg-gray-700">
+              <div className="w-1/2 flex justify-end"><div className="h-full bg-red-500" style={{ width: `${toFlip * 100}%` }} /></div>
+              <div className="w-1/2"><div className="h-full bg-green-500" style={{ width: `${toTgt * 100}%` }} /></div>
+              <div className="absolute left-1/2 top-0 h-full w-0.5 bg-white/80" />
+            </div>
+            <div className="flex justify-between text-[10px] text-gray-500 tabular-nums mt-0.5">
+              <span>{nextUsd ? `FLIP → ${other}` : "STOP (bust)"} ${stp!.toFixed(4)} (−{FLIP_P.slPct}%)</span>
+              <span>entry ${entry.toFixed(4)}</span>
+              <span>TARGET ${tgt!.toFixed(4)} (+{FLIP_P.tpPct}%)</span>
+            </div>
+          </div>
+        );
+      })()}
       {ladder.length > 0 && (
         <div>
           <p className="text-gray-500 text-[10px] uppercase mb-1">Ladder · a full bust costs about {usd(bustLoss)} ({equity ? (bustLoss / equity * 100).toFixed(0) : 0}% of the account)</p>
