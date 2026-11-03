@@ -1376,6 +1376,9 @@ function LitFlipPanel() {
     setBusy(null); load();
   }
   const usd = (v: number, d = 2) => `${v < 0 ? "-" : ""}$${Math.abs(v).toFixed(d)}`;
+  // Investment = account minus everything the bot made (realized + open), so % scale to any amount ($1k, $10k ...).
+  const invest = Number(st.equity ?? 0) - Number(st.realized_usd ?? 0) - Number(st.live_upnl ?? 0);
+  const pctInv = (v: number) => (invest > 0 ? `${v >= 0 ? "+" : ""}${(v / invest * 100).toFixed(3)}%` : "");
   const age = st.lock_heartbeat ? Math.round((now - Date.parse(st.lock_heartbeat)) / 1000) : null;
   const alive = age != null && age < 60;
   const price: number | null = st.live_price != null ? Number(st.live_price) : null;
@@ -1417,7 +1420,7 @@ function LitFlipPanel() {
         </div>
       </div>
       <div className="grid grid-cols-3 gap-2">
-        <Stat label="Account" value={usd(equity)} sub={<span>profit <b className={Number(st.realized_usd ?? 0) >= 0 ? "text-green-400" : "text-red-400"}>{Number(st.realized_usd ?? 0) >= 0 ? "+" : ""}{usd(Number(st.realized_usd ?? 0), 3)}</b></span>}
+        <Stat label="Account" value={usd(equity)} sub={<span>profit <b className={Number(st.realized_usd ?? 0) >= 0 ? "text-green-400" : "text-red-400"}>{Number(st.realized_usd ?? 0) >= 0 ? "+" : ""}{usd(Number(st.realized_usd ?? 0), 3)} · {pctInv(Number(st.realized_usd ?? 0))}</b> of {usd(invest, 0)}</span>}
           color={Number(st.realized_usd ?? 0) > 0 ? "text-green-400" : Number(st.realized_usd ?? 0) < 0 ? "text-red-400" : "text-white"} />
         <Stat label="Sequences" value={`${wins}/${seqs} won`} sub={`${busts} busted · win ${seqs ? Math.round(wins / seqs * 100) : 0}% · avg steps ${avgSteps != null ? avgSteps.toFixed(1) : "—"}`} color="text-gray-300" />
         <Stat label="LIT price" value={price != null ? `$${price.toFixed(4)}` : "—"}
@@ -1442,7 +1445,7 @@ function LitFlipPanel() {
           <div className="bg-gray-800/60 rounded-lg p-2">
             <div className="flex justify-between text-[11px] tabular-nums">
               <span className="text-red-400">{toFlip > 0 ? <b>{Math.round(toFlip * 100)}% to flip</b> : ""}</span>
-              <span className={movePct >= 0 ? "text-green-400 font-bold" : "text-red-400 font-bold"}>{movePct >= 0 ? "+" : ""}{movePct.toFixed(2)}% · {usd(Number(st.live_upnl ?? 0), 3)}</span>
+              <span className={movePct >= 0 ? "text-green-400 font-bold" : "text-red-400 font-bold"}>{movePct >= 0 ? "+" : ""}{movePct.toFixed(2)}% · {usd(Number(st.live_upnl ?? 0), 3)} ({pctInv(Number(st.live_upnl ?? 0))} of inv.)</span>
               <span className="text-green-400">{toTgt > 0 ? <b>{Math.round(toTgt * 100)}% to target</b> : ""}</span>
             </div>
             <div className="relative h-3 mt-1 flex rounded-full overflow-hidden bg-gray-700">
@@ -1460,7 +1463,7 @@ function LitFlipPanel() {
       })()}
       {ladder.length > 0 && (
         <div>
-          <p className="text-gray-500 text-[10px] uppercase mb-1">Ladder · a full bust costs about {usd(bustLoss)} ({equity ? (bustLoss / equity * 100).toFixed(0) : 0}% of the account)</p>
+          <p className="text-gray-500 text-[10px] uppercase mb-1">Ladder · a full bust costs about {usd(bustLoss)} ({invest > 0 ? (bustLoss / invest * 100).toFixed(1) : 0}% of the investment)</p>
           <div className="flex flex-wrap gap-1">
             {ladder.map((x, i) => (
               <span key={i} className={`text-[10px] tabular-nums px-1.5 py-0.5 rounded ${side && i === level ? "bg-yellow-400/20 text-yellow-300 font-bold" : side && i < level ? "bg-red-500/10 text-red-400/70" : "bg-gray-800 text-gray-400"}`}>
@@ -1477,7 +1480,7 @@ function LitFlipPanel() {
             {trades.map((t) => (
               <div key={t.id} className="flex justify-between gap-2">
                 <span className="text-gray-500">{new Date(t.at).toLocaleTimeString()} · step {Number(t.level) + 1} · {t.side === 1 ? "long" : "short"} {Number(t.qty).toFixed(2)} · ${Number(t.entry).toFixed(4)}→${Number(t.exit_price).toFixed(4)} · <span className={t.result === "target" ? "text-green-400" : t.result === "bust" ? "text-red-400" : "text-gray-400"}>{t.result}</span></span>
-                <span className={Number(t.pnl_usd) >= 0 ? "text-green-400" : "text-red-400"}>{Number(t.pnl_usd) >= 0 ? "+" : ""}{usd(Number(t.pnl_usd), 3)}</span>
+                <span className={Number(t.pnl_usd) >= 0 ? "text-green-400" : "text-red-400"}>{Number(t.pnl_usd) >= 0 ? "+" : ""}{usd(Number(t.pnl_usd), 3)} · {pctInv(Number(t.pnl_usd))}</span>
               </div>
             ))}
           </div>
