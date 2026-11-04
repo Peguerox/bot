@@ -1346,7 +1346,7 @@ const FLIP_EVENT_LABEL: Record<string, string> = {
   flattened: "flattened + OFF", too_small_to_start: "account too small to start", tick_error: "ERROR", account_read_failed: "account read failed",
   candles_failed: "price data failed", cancel_failed: "cancel failed",
   lighter_blocked_backoff: "Lighter busy (firewall) -> pausing reads, orders stay on the exchange",
-  trail_armed: "TARGET reached -> win locked, trailing", trail_raised: "trailing stop raised", trail_market_close: "trail closed at market (win kept)", cancel_unverified: "cancel not confirmed yet -> retrying",
+  trail_armed: "TARGET reached -> win locked, trailing", lock_armed: "DEEP STEP: profit locked (target still open)", lock_raised: "profit lock raised", trail_raised: "trailing stop raised", trail_market_close: "trail closed at market (win kept)", cancel_unverified: "cancel not confirmed yet -> retrying",
   orders_extra_replaced: "leftover order found -> book re-placed", size_mismatch_adopted: "size mismatch fixed", start_no_fill_seen: "entry not filled",
 };
 function LitFlipPanel({ cfg = LIT_FLIP, hideWhenIdle = false }: { cfg?: FlipCfg; hideWhenIdle?: boolean }) {
@@ -1424,7 +1424,7 @@ function LitFlipPanel({ cfg = LIT_FLIP, hideWhenIdle = false }: { cfg?: FlipCfg;
   const nextUsd = side && level + 1 < ladder.length ? ladder[level + 1] : null;
   const bustLoss = ladder.reduce((a, x) => a + x * FLIP_P.slPct / 100, 0);
   const seqs = Number(st.sequences ?? 0), wins = Number(st.wins ?? 0), busts = Number(st.busts ?? 0);
-  const done = trades.filter((t) => t.result === "target" || t.result === "trail" || t.result === "bust" || t.result === "flatten");
+  const done = trades.filter((t) => t.result === "target" || t.result === "trail" || t.result === "lock" || t.result === "bust" || t.result === "flatten");
   const avgSteps = done.length ? done.reduce((a, t) => a + Number(t.level) + 1, 0) / done.length : null;
   const sig = st.live_signal === 1 ? "LONG" : st.live_signal === -1 ? "SHORT" : "wait";
   const rangePos = st.live_range_pos != null ? Number(st.live_range_pos) : null;
@@ -1489,6 +1489,7 @@ function LitFlipPanel({ cfg = LIT_FLIP, hideWhenIdle = false }: { cfg?: FlipCfg;
               const earlier = trades.filter((t) => String(t.seq_id) === String(st.seq_id) && t.result === "flip").reduce((x, t) => x + Number(t.pnl_usd), 0);
               const seqNow = earlier + Number(st.live_upnl ?? 0);
               const tf = (st.live_params ?? {}).trail_floor;
+              const lockF = (st.live_params ?? {}).lock_floor;
               const be = qty > 0 ? entry + (side === "LONG" ? 1 : -1) * (-earlier) / qty : null;
               const bePct = be != null ? Math.abs(be / entry - 1) * 100 : null;
               return (
@@ -1496,6 +1497,7 @@ function LitFlipPanel({ cfg = LIT_FLIP, hideWhenIdle = false }: { cfg?: FlipCfg;
                   Sequence if closed now: <b className={seqNow >= 0 ? "text-green-400" : "text-red-400"}>{seqNow >= 0 ? "+" : ""}{usd(seqNow, 2)}</b>
                   {be != null && <span className="text-gray-400"> · break-even <b className="text-gray-200">${be.toFixed(cfg.pd)}</b> ({bePct!.toFixed(2)}% from entry)</span>}
                   {tf != null && <span className="text-green-400 font-bold"> · TRAILING: win locked, stop ${Number(tf).toFixed(cfg.pd)}</span>}
+                  {lockF != null && tf == null && <span className="text-green-400 font-bold"> · PROFIT LOCKED: stop ${Number(lockF).toFixed(cfg.pd)} (target still open)</span>}
                 </p>
               );
             })()}
@@ -1555,6 +1557,37 @@ function LitFlipPanel({ cfg = LIT_FLIP, hideWhenIdle = false }: { cfg?: FlipCfg;
                 {stepInfo && stepsOn ? <span className="text-yellow-300"> · now step {stepInfo.level} of {stepInfo.of} ({stepInfo.tp}%, profit covers {stepInfo.busts_covered} busts)</span> : null}</> : "Off — every sequence uses the Target % above."}
               {(nextP.trailPct ?? 0) > 0 && <span className="text-green-400"> · trail {nextP.trailPct}% after the target</span>}
             </p>
+            {(() => {
+              // Deep-step profit lock (owner 2026-11-04): toggle + its three numbers. Off = lock_from_step 0.
+              const lp: any = st.live_params ?? {};
+              const fromSaved = Number(ov.lock_from_step ?? lp.lock_from_step ?? 0);
+              const fromNow = edit && edit.lockFromStep !== undefined ? Number(edit.lockFromStep) || 0 : fromSaved;
+              const on = fromNow > 0;
+              const lf: [string, string, number, string][] = [["lockFromStep", "From step", fromNow || 10, "1"],
+                ["lockProfitPct", "Lock +% of account", Number(ov.lock_profit_pct ?? 0.25), "0.05"],
+                ["lockArmPct", "Arm % past it", Number(ov.lock_arm_pct ?? 0.5), "0.05"],
+                ["lockTrailPct", "Trail % (0 = fixed)", Number(ov.lock_trail_pct ?? 0), "0.05"]];
+              return (
+                <div className="mt-2">
+                  <div className="flex items-center gap-2">
+                    <button onClick={() => setEdit({ ...(edit ?? {}), lockFromStep: on ? "0" : "10" })}
+                      className={`text-[11px] font-bold px-2.5 py-1 rounded ${on ? "bg-green-500/20 text-green-400" : "bg-gray-700 text-gray-300"}`}>
+                      Deep-step profit lock {on ? "ON" : "OFF"}</button>
+                    <span className="text-[11px] text-gray-500">{on ? `from step ${fromNow}: once the big trade pays back the ladder + the lock, a stop locks that profit; the target stays` : "deep steps wait for the full target"}</span>
+                  </div>
+                  {on && (
+                    <div className="grid grid-cols-4 gap-2 mt-1">
+                      {lf.map(([k, label, v, step]) => (
+                        <label key={k} className="text-[10px] text-gray-400">{label}
+                          <input type="number" step={step} value={f(k, v)} onChange={(e) => setEdit({ ...(edit ?? {}), [k]: e.target.value })}
+                            className="w-full mt-0.5 bg-gray-900 border border-gray-700 rounded px-1.5 py-1 text-sm text-white tabular-nums" />
+                        </label>
+                      ))}
+                    </div>
+                  )}
+                </div>
+              );
+            })()}
             <div className="flex flex-wrap items-center gap-2 mt-1.5 text-[11px]">
               <button onClick={() => setEdit({ ...(edit ?? {}), fixedBaseUsd: compounding ? String(Math.max(200, Math.floor(equity))) : "0" })}
                 className={`font-bold px-2.5 py-1 rounded ${compounding ? "bg-green-500/20 text-green-400" : "bg-amber-500/20 text-amber-300"}`}>
@@ -1595,7 +1628,7 @@ function LitFlipPanel({ cfg = LIT_FLIP, hideWhenIdle = false }: { cfg?: FlipCfg;
           <div className="space-y-0.5 text-[11px] tabular-nums max-h-44 overflow-y-auto">
             {trades.map((t) => (
               <div key={t.id} className="flex justify-between gap-2">
-                <span className="text-gray-500">{new Date(t.at).toLocaleTimeString()} · step {Number(t.level) + 1} · {t.side === 1 ? "long" : "short"} {Number(t.qty).toFixed(cfg.qd)} · ${Number(t.entry).toFixed(cfg.pd)}→${Number(t.exit_price).toFixed(cfg.pd)} · <span className={t.result === "target" || t.result === "trail" || (t.result === "flatten" && Number(t.pnl_usd) > 0) ? "text-green-400" : t.result === "bust" ? "text-red-400" : "text-gray-400"}>{t.result === "flatten" ? "flattened" : t.result}</span></span>
+                <span className="text-gray-500">{new Date(t.at).toLocaleTimeString()} · step {Number(t.level) + 1} · {t.side === 1 ? "long" : "short"} {Number(t.qty).toFixed(cfg.qd)} · ${Number(t.entry).toFixed(cfg.pd)}→${Number(t.exit_price).toFixed(cfg.pd)} · <span className={t.result === "target" || t.result === "trail" || t.result === "lock" || (t.result === "flatten" && Number(t.pnl_usd) > 0) ? "text-green-400" : t.result === "bust" ? "text-red-400" : "text-gray-400"}>{t.result === "flatten" ? "flattened" : t.result}</span></span>
                 <span className={Number(t.pnl_usd) >= 0 ? "text-green-400" : "text-red-400"}>{Number(t.pnl_usd) >= 0 ? "+" : ""}{usd(Number(t.pnl_usd), 3)} · {pctInv(Number(t.pnl_usd))}</span>
               </div>
             ))}

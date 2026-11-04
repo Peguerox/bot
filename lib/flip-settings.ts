@@ -7,6 +7,8 @@ import { checkLitGridLiveAuth } from "@/lib/lit-grid-live-auth";
 export const FLIP_BOUNDS: Record<string, [string, number, number]> = {
   tpPct: ["tp_pct", 0.2, 10], slPct: ["sl_pct", 0.1, 5], firstPct: ["first_pct", 0.5, 50], mult: ["mult", 1.05, 3], levCap: ["lev_cap", 0.2, 5],
   trailPct: ["trail_pct", 0, 3],
+  lockFromStep: ["lock_from_step", 0, 11], lockProfitPct: ["lock_profit_pct", 0, 5], lockArmPct: ["lock_arm_pct", 0.05, 3],
+  lockTrailPct: ["lock_trail_pct", 0, 3],
 };
 
 export async function flipSettingsPost(req: NextRequest, table: string) {

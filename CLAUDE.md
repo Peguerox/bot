@@ -292,6 +292,11 @@ Also on the panel (2026-11-04, start OFF): **trail after target** (`trail_pct`: 
 removed and a reduce-only stop locks the target, raised behind the peak; stop refused / price already past -> market close)
 and **stepped target** (`step_n/step_start/step_inc`, profit since `step_base_usd` in busts picks the step per sequence).
 Trail state lives in `seq_params` (trail_peak/trail_floor) so it survives restarts. No SQL needed.
+**Deep-step profit lock** (same day, toggle, starts OFF): `lock_from_step` (0 = off, default 10 when on) /
+`lock_profit_pct` 0.25 / `lock_arm_pct` 0.5 / `lock_trail_pct` 0. Once the open deep-step trade pays back the sequence
+(from the REAL account: equity - upnl - seq start) + the lock and is arm% past it, a reduce-only stop locks that; the
+target stays, the flip is removed. Result 'lock'. Backtest: big gain on LIT at 2%, loss on NEAR, none at 1.5% (no room);
+owner put it on both bots anyway to test live.
 **Worker 1 switched SOL -> NEAR (2026-11-04, owner):** env `FLIP_COIN=NEAR` (market 10, target 2%, tables
 `lighter_near_flip_*`, routes `app/api/lighter-near-flip/*`, test `server/test_near_flip_live.py`). Last 120 days: NEAR +14%/mo,
 SOL -3%/mo (research/flip-coins-2026-11-04/). The SOL panel only shows while SOL is ON or holding a trade.

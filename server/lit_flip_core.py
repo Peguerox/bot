@@ -27,6 +27,10 @@ class Params:
     band: float = 0.30            # top/bottom share of the range that counts as a trend
     lev_cap: float = 3.0          # biggest trade = lev_cap x equity
     min_order_usd: float = 10.0   # Lighter's minimum order value
+    lock_from_step: float = 0.0   # deep-step profit lock (owner 2026-11-04): 0 = off; else from this step (1-based) on, once
+    lock_profit_pct: float = 0.25 #   the open trade pays back the whole sequence + lock_profit_pct % of the account and is
+    lock_arm_pct: float = 0.5     #   lock_arm_pct % past that, a stop locks it (target stays; flip removed);
+    lock_trail_pct: float = 0.0   #   0 = fixed lock, >0 = raise it behind the peak by this %
     trail_pct: float = 0.0        # 0 = off. >0: at the target don't close -- lock the target, trail the peak by this % (owner 2026-11-04)
 
 

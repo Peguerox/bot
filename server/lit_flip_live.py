@@ -71,7 +71,8 @@ def is_blocked(e):
 # Panel-editable settings (owner 2026-11-04): override_params JSON on the state row. Each change applies from the NEXT
 # sequence -- an open sequence keeps the params it started with (seq_params), so a running ladder never changes halfway.
 EDITABLE = {"tp_pct": (0.2, 10.0), "sl_pct": (0.1, 5.0), "first_pct": (0.5, 50.0), "mult": (1.05, 3.0), "lev_cap": (0.2, 5.0),
-            "trail_pct": (0.0, 3.0)}
+            "trail_pct": (0.0, 3.0), "lock_from_step": (0.0, 11.0), "lock_profit_pct": (0.0, 5.0), "lock_arm_pct": (0.05, 3.0),
+            "lock_trail_pct": (0.0, 3.0)}
 TRAIL_MIN_PCT = 0.05                  # a trail under this is treated as off (price noise would close it at once)
 TRAIL_RAISE_STEP = 0.0005             # move the trailing stop only when it can rise >= 0.05% (each move = cancel + place)
 # Stepped target (owner 2026-11-04): step_n steps from step_start, +step_inc each; the bot climbs one step per full bust the
@@ -325,6 +326,8 @@ class FlipBot:
         self.step_info = None               # readout: {"level", "tp", "busts_covered"} of the last decision
         self.trail_peak = None              # trail after target: best price since the target was reached (None = not armed)
         self.trail_floor = None             # the trailing stop's trigger
+        self.lock_peak = None               # deep-step profit lock: best price since it armed (None = not armed)
+        self.lock_floor = None              # the lock stop's trigger
         self.pos = None                 # F.Position we expect on the exchange
         self.seq = None                 # {"id", "start_equity"}
         self.acct = None; self.acct_at = 0.0
@@ -370,7 +373,8 @@ class FlipBot:
         patch = self._pos_to_state()
         patch.update({"seq_id": (self.seq or {}).get("id"), "seq_start_equity": (self.seq or {}).get("start_equity"),
                       "flip_mode": self.flip_mode,
-                      "seq_params": (dict({k: getattr(self.p, k) for k in EDITABLE}, trail_peak=self.trail_peak, trail_floor=self.trail_floor)
+                      "seq_params": (dict({k: getattr(self.p, k) for k in EDITABLE}, trail_peak=self.trail_peak, trail_floor=self.trail_floor,
+                                          lock_peak=self.lock_peak, lock_floor=self.lock_floor)
                                      if self.pos is not None else None)})
         patch.update(extra or {})
         await self.db.update_state(patch)
@@ -434,6 +438,8 @@ class FlipBot:
                 self.p = replace(self.base, **{k: float(v) for k, v in d.items() if k in EDITABLE and v is not None})
                 if d.get("trail_floor") is not None:
                     self.trail_peak, self.trail_floor = float(d["trail_peak"]), float(d["trail_floor"])
+                if d.get("lock_floor") is not None:
+                    self.lock_peak, self.lock_floor = float(d["lock_peak"]), float(d["lock_floor"])
             except Exception:
                 pass
         if st.get("seq_side") is not None:
@@ -467,11 +473,13 @@ class FlipBot:
         """What must rest on the book for `pos`. Trail on: no target limit (it would close at the target); once armed,
         ONLY a reduce-only stop at the trailing floor (the flip is gone: the win is locked)."""
         base = F.resting_orders(pos, self.p)
-        if self.p.trail_pct <= 0:
-            return base
-        if self.trail_floor is not None:
+        if self.trail_floor is not None:                 # past the target and trailing: only the trailing stop
             return [F.Order("trail", pos.side == F.LONG, pos.qty, self.trail_floor, True)]
-        return [o for o in base if o.kind != "target"]
+        if self.p.trail_pct > 0:
+            base = [o for o in base if o.kind != "target"]
+        if self.lock_floor is not None:                  # deep-step lock armed: target stays, flip goes, profit stop added
+            base = [o for o in base if o.kind == "target"] + [F.Order("lock", pos.side == F.LONG, pos.qty, self.lock_floor, True)]
+        return base
 
     def _want_count(self, pos):
         return len([o for o in self._orders_for(pos) if not (o.kind == "flip" and self.flip_mode != "native")])
@@ -485,8 +493,8 @@ class FlipBot:
         out = {}
         for o in self._orders_for(pos):
             try:
-                if o.kind == "trail":
-                    out["trail"] = await self.ex.stop(o.is_ask, qty_round(o.qty), o.price, reduce_only=True)
+                if o.kind in ("trail", "lock"):
+                    out[o.kind] = await self.ex.stop(o.is_ask, qty_round(o.qty), o.price, reduce_only=True)
                 elif o.kind == "target":
                     out["target"] = await self.ex.limit(o.is_ask, qty_round(o.qty), o.price, reduce_only=True)
                 elif o.kind == "flip" and self.flip_mode == "native":
@@ -547,7 +555,7 @@ class FlipBot:
                                     "live_pos": acct["pos"], "live_upnl": self._live_upnl(acct, price), "equity": acct["equity"],
                                     "live_params": dict({k: getattr(self.p_next, k) for k in EDITABLE}, fixed_base_usd=self.fixed_base,
                                                         steps=(list(self.steps[:3]) if self.steps else None), step_info=self.step_info,
-                                                        trail_floor=self.trail_floor, trail_peak=self.trail_peak),
+                                                        trail_floor=self.trail_floor, trail_peak=self.trail_peak, lock_floor=self.lock_floor),
                                     "lock_heartbeat": now_iso()})
         self.published_at = time.time()
 
@@ -606,9 +614,11 @@ class FlipBot:
         self.mismatch_since = None
         if self.p.trail_pct > 0 and await self._trail_step(acct):
             return
+        if self.p.lock_from_step > 0 and self.trail_floor is None and await self._lock_step(acct):
+            return
         # Watch mode: only once the real position matches what we expect (never on a stale view -- that would
         # fire a second flip right after the first), fire the flip/stop ourselves when the stop price is touched.
-        if self.flip_mode == "watch" and self.trail_floor is None and time.time() - self.fired_at >= WATCH_REFIRE_S:
+        if self.flip_mode == "watch" and self.trail_floor is None and self.lock_floor is None and time.time() - self.fired_at >= WATCH_REFIRE_S:
             if await self._watch_trigger():
                 return
         if time.time() - self.orders_checked_at >= self._orders_every():
@@ -639,15 +649,53 @@ class FlipBot:
             return await self._trail_apply(px)
         return False
 
-    async def _trail_apply(self, px):
+    async def _trail_apply(self, px, floor=None, kind="trail"):
         long_ = self.pos.side == F.LONG
-        if (px <= self.trail_floor) if long_ else (px >= self.trail_floor):
+        floor = self.trail_floor if floor is None else floor
+        if (px <= floor) if long_ else (px >= floor):
             return await self._trail_close(px, "price already past the stop")
         out = await self._place_orders(self.pos)
-        if out.get("trail"):
-            return await self._trail_close(px, f"stop refused: {str(out['trail'])[:80]}")
+        if out.get(kind):
+            return await self._trail_close(px, f"stop refused: {str(out[kind])[:80]}")
         await self._save()
         return True
+
+    async def _lock_step(self, acct):
+        """Deep-step profit lock. From step lock_from_step on: once the open trade covers the whole sequence's losses +
+        lock_profit_pct % of the sequence-start account and is lock_arm_pct % past that, rest a reduce-only stop there
+        (flip removed, target kept). Optional trail raises it behind the peak. True = acted."""
+        p, pos = self.p, self.pos
+        if pos.level + 1 < p.lock_from_step:
+            return False
+        bid, ask = self.ex.best_bid_ask()
+        if bid is None or not self.seq:
+            return False
+        long_ = pos.side == F.LONG
+        px = bid if long_ else ask
+        if self.lock_floor is None:
+            start = float(self.seq.get("start_equity") or 0)
+            if start <= 0:
+                return False
+            realized_now = acct["equity"] - (acct.get("upnl") or 0.0) - start     # the sequence's closed result so far
+            notional = pos.qty * pos.entry
+            need = (-realized_now + p.lock_profit_pct / 100 * start) / notional * 100   # % move that pays all + the lock
+            fav = (px / pos.entry - 1) * 100 * (1 if long_ else -1)
+            if need <= 0 or fav < need + p.lock_arm_pct or need >= p.tp_pct:
+                return False
+            self.lock_peak = px
+            self.lock_floor = pos.entry * (1 + need / 100) if long_ else pos.entry * (1 - need / 100)
+            await self.db.log("lock_armed", {"level": pos.level + 1, "lock": round(self.lock_floor, PRICE_DEC), "price": px,
+                                             "need_pct": round(need, 3), "sequence_so_far": round(realized_now, 3)})
+            return await self._trail_apply(px, self.lock_floor, "lock")
+        if p.lock_trail_pct <= 0:
+            return False
+        self.lock_peak = max(self.lock_peak, px) if long_ else min(self.lock_peak, px)
+        nf = self.lock_peak * (1 - p.lock_trail_pct / 100) if long_ else self.lock_peak * (1 + p.lock_trail_pct / 100)
+        if (nf >= self.lock_floor * (1 + TRAIL_RAISE_STEP)) if long_ else (nf <= self.lock_floor * (1 - TRAIL_RAISE_STEP)):
+            self.lock_floor = nf
+            await self.db.log("lock_raised", {"peak": self.lock_peak, "lock": round(nf, PRICE_DEC)})
+            return await self._trail_apply(px, self.lock_floor, "lock")
+        return False
 
     async def _trail_close(self, px, why):
         await self.ex.cancel_all()
@@ -683,6 +731,7 @@ class FlipBot:
         if stp_tp is not None:
             self.p = replace(self.p, tp_pct=stp_tp)          # this sequence's target (kept in seq_params)
         self.trail_peak = self.trail_floor = None
+        self.lock_peak = self.lock_floor = None
         first = F.start(sig, ref, self._sizing_equity(acct["equity"]), self.p)
         if first is None:
             await self.db.log("too_small_to_start", {"equity": acct["equity"]}); return
@@ -710,6 +759,7 @@ class FlipBot:
         self.pos = F.Position(side=F.LONG if acct["pos"] > 0 else F.SHORT, qty=abs(acct["pos"]), entry=fill,
                               level=old.level + 1, ladder_usd=old.ladder_usd)
         self.trail_peak = self.trail_floor = None
+        self.lock_peak = self.lock_floor = None
         # Order matters (2026-11-04 duplicate): protect the new position first, persist it, THEN record -- if anything
         # fails midway the next tick sees the new side already saved and never counts the flip twice.
         await self._place_orders(self.pos); await self._save()
@@ -725,14 +775,18 @@ class FlipBot:
         bid, ask = self.ex.best_bid_ask()
         px = ((bid if old.side == F.LONG else ask) or (self.candles[-1]["c"] if self.candles else old.entry))
         trailed = self.trail_floor is not None
-        won = trailed or abs(px - tgt) < abs(px - stp)
+        locked = self.lock_floor is not None and not trailed and abs(px - self.lock_floor) < abs(px - tgt)
+        won = trailed or self.lock_floor is not None or abs(px - tgt) < abs(px - stp)
         if trailed:                                      # closed by the trailing stop (or its market close)
             tgt = self.trail_floor
+        elif locked:                                     # closed by the deep-step profit lock
+            tgt = self.lock_floor
         self.trail_peak = self.trail_floor = None
+        self.lock_peak = self.lock_floor = None
         await self._cancel_verified("sequence_over")
         pnl_seq = acct["equity"] - float((self.seq or {}).get("start_equity") or acct["equity"])
         await self.db.trade({"seq_id": (self.seq or {}).get("id"), "level": old.level, "side": old.side, "qty": old.qty,
-                             "entry": old.entry, "exit_price": tgt if won else stp, "result": ("trail" if trailed else "target") if won else "bust",
+                             "entry": old.entry, "exit_price": tgt if won else stp, "result": ("trail" if trailed else "lock" if locked else "target") if won else "bust",
                              "pnl_usd": (old.qty * ((tgt - old.entry) * old.side) if won else -old.qty * old.entry * self.p.sl_pct / 100)})
         st = await self.db.get_state()
         await self.db.log("sequence_over", {"result": "target" if won else "bust", "level": old.level, "sequence_pnl_usd": round(pnl_seq, 4),
@@ -750,6 +804,7 @@ class FlipBot:
         lad = F.ladder(self._sizing_equity(acct["equity"]), self.p) or [abs(acct["pos"]) * (acct["entry"] or 1)]
         self.pos = F.Position(side, abs(acct["pos"]), acct["entry"] or 0.0, 0, lad)
         self.trail_peak = self.trail_floor = None
+        self.lock_peak = self.lock_floor = None
         self.seq = {"id": int(time.time() * 1000), "start_equity": acct["equity"]}
         await self.db.log("position_adopted", {"pos": acct["pos"], "entry": acct["entry"]})
         await self._place_orders(self.pos); await self._save()
@@ -817,6 +872,7 @@ class FlipBot:
             await self.db.log("sequence_over", {"result": "flatten", "level": old.level, "sequence_pnl_usd": round(pnl_seq, 4)})
         self.pos, self.seq = None, None
         self.trail_peak = self.trail_floor = None
+        self.lock_peak = self.lock_floor = None
         await self._save({"close_requested": False, "enabled": False})
         await self.db.log("flattened", {})
 
@@ -845,7 +901,7 @@ async def main():
             await db.log("tick_error", {"error": str(e)[:300], "n": errors})
             await asyncio.sleep(min(2 ** min(errors, 6), 60))
         try:                                # sleep until the next tick -- or less, if an order event arrives
-            fast = bot.pos is not None and (bot.flip_mode == "watch" or bot.trail_floor is not None)
+            fast = bot.pos is not None and (bot.flip_mode == "watch" or bot.trail_floor is not None or bot.lock_floor is not None)
             await asyncio.wait_for(bot.woken.wait(), TICK_WATCH if fast else TICK_NATIVE)
         except asyncio.TimeoutError:
             pass

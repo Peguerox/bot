@@ -25,7 +25,7 @@ class FakeEx:
 
     # adapter API
     async def account(self):
-        return {"pos": self.pos, "entry": self.entry, "equity": self.equity + self._upnl()}
+        return {"pos": self.pos, "entry": self.entry, "equity": self.equity + self._upnl(), "upnl": self._upnl()}
 
     async def candles(self, n=40):
         base = self.price
@@ -371,13 +371,37 @@ async def t_stepped_target():
     check("panel readout shows the step", db.state["live_params"]["step_info"]["level"] == 1)
 
 
+async def t_deep_step_profit_lock():
+    print("\n[deep-step profit lock (from step 2 for the test): trade pays back the sequence + 0.05% and is 0.5% past it -> stop locks it; target stays, flip goes; pullback = win]")
+    ex, db = FakeEx(), FakeDB(); db.state["override_params"] = {"lock_from_step": 2, "lock_profit_pct": 0.05, "lock_arm_pct": 0.5}
+    bot = L.FlipBot(ex, db); await _ticks(bot, 1)
+    ex.move(2.985); await _ticks(bot, 2)                    # flip -> short, step 2
+    check("step 2 short, no lock yet", bot.pos.level == 1 and bot.lock_floor is None, bot.pos)
+    start = 200.0; loss = start - ex.equity
+    need = (loss + 0.0005 * start) / (bot.pos.qty * bot.pos.entry) * 100
+    ex.price = bot.pos.entry * (1 - (need + 0.3) / 100); await bot.tick()
+    check("not armed before need + 0.5%", bot.lock_floor is None)
+    ex.price = bot.pos.entry * (1 - (need + 0.6) / 100); await bot.tick()
+    kinds = sorted((o["kind"], o["reduce_only"]) for o in ex.orders)
+    check("armed: target limit kept + reduce-only lock stop; flip removed", bot.lock_floor is not None and kinds == [("limit", True), ("stop", True)]
+          and any(a == "lock_armed" for a, _ in db.logs), (bot.lock_floor, ex.orders))
+    check("lock sits where the sequence ends +0.05% of the account", abs(bot.lock_floor - bot.pos.entry * (1 - need / 100)) < 1e-6)
+    bot2 = L.FlipBot(ex, db); await bot2.tick()
+    check("restart keeps the lock", bot2.lock_floor is not None and abs(bot2.lock_floor - bot.lock_floor) < 1e-9)
+    db.state["enabled"] = False
+    ex.move(bot.lock_floor * 1.001); await _ticks(bot2, 2)
+    t = db.trades[-1]
+    check("pullback hits the lock -> sequence over as 'lock', a win, account above where it started",
+          ex.pos == 0 and t["result"] == "lock" and db.state.get("wins") == 1 and ex.equity > start, (t, ex.equity))
+
+
 async def _nosleep(*a, **k):
     return None
 
 
 async def main():
     for t in (t_start_flip_win, t_watch_mode_fallback, t_restart_keeps_the_sequence, t_off_keeps_position_flatten_closes,
-              t_bust_at_cap, t_unknown_position_is_protected, t_ws_wake_and_rejected_flip, t_stale_flip_never_left_behind, t_panel_settings_next_sequence_only, t_failed_placement_rechecked_fast, t_compounding_off, t_waf_block_backs_off, t_trail_after_target, t_trail_stop_refused_closes_at_market, t_stepped_target):
+              t_bust_at_cap, t_unknown_position_is_protected, t_ws_wake_and_rejected_flip, t_stale_flip_never_left_behind, t_panel_settings_next_sequence_only, t_failed_placement_rechecked_fast, t_compounding_off, t_waf_block_backs_off, t_trail_after_target, t_trail_stop_refused_closes_at_market, t_stepped_target, t_deep_step_profit_lock):
         await t()
     print(f"\n==== {len(PASS)} passed, {len(FAIL)} failed ====")
 
