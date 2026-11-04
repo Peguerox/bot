@@ -1351,6 +1351,14 @@ const FLIP_EVENT_LABEL: Record<string, string> = {
 };
 function LitFlipPanel({ cfg = LIT_FLIP, hideWhenIdle = false }: { cfg?: FlipCfg; hideWhenIdle?: boolean }) {
   const [edit, setEdit] = useState<Record<string, string> | null>(null);
+  // Collapsible log sections (owner 2026-11-04), remembered per panel in this browser.
+  const [closed, setClosed] = useState<Record<string, boolean>>({});
+  useEffect(() => { try { setClosed(JSON.parse(localStorage.getItem(`flip_closed_${cfg.table}`) || "{}")); } catch { /* no storage */ } }, [cfg.table]);
+  const toggleSec = (k: string) => setClosed((c) => { const n = { ...c, [k]: !c[k] }; try { localStorage.setItem(`flip_closed_${cfg.table}`, JSON.stringify(n)); } catch { /* ignore */ } return n; });
+  const SecHead = (k: string, label: string) => (
+    <button onClick={() => toggleSec(k)} className="w-full flex items-center justify-between text-gray-400 text-[10px] uppercase mb-1 hover:text-gray-200">
+      <span>{closed[k] ? "▸" : "▾"} {label}</span><span className="normal-case text-gray-600">{closed[k] ? "show" : "hide"}</span>
+    </button>);
   const [st, setSt] = useState<any>(null);
   const [trades, setTrades] = useState<any[]>([]);
   const [events, setEvents] = useState<any[]>([]);
@@ -1551,7 +1559,8 @@ function LitFlipPanel({ cfg = LIT_FLIP, hideWhenIdle = false }: { cfg?: FlipCfg;
           </div>);
         return (
           <div className="bg-gray-800/60 rounded-lg p-3">
-            <p className="text-gray-400 text-[11px] uppercase tracking-wide">Settings <span className="normal-case text-gray-500">— changes start with the next sequence{side ? " (the open trade keeps its own settings until it ends)" : ""}</span></p>
+            {SecHead("settings", `Settings — changes start with the next sequence${side ? " (the open trade keeps its own until it ends)" : ""}`)}
+            {!closed.settings && <>
 
             <p className="text-gray-500 text-[10px] uppercase mt-2">Basic rules</p>
             {Row({ title: "Take profit", children: (<>at {In({ k: "tpPct", v: (nextP.tpPct), step: "0.1" })}% {stOn && <span className="text-gray-500">(not used while Stepped target is ON)</span>}</>) })}
@@ -1583,45 +1592,46 @@ function LitFlipPanel({ cfg = LIT_FLIP, hideWhenIdle = false }: { cfg?: FlipCfg;
               {changed && <button onClick={() => setEdit(null)} className="text-xs px-3 py-1.5 rounded bg-gray-700 text-gray-300">Undo</button>}
               {st.override_params && <button onClick={() => { if (confirm("Reset ALL settings to the default (protections OFF)?")) saveSettings(true); }} disabled={busy != null} className="text-xs px-3 py-1.5 rounded bg-gray-800 text-gray-500 ml-auto">Reset all to default</button>}
             </div>
+            </>}
           </div>
         );
       })()}
       {ladder.length > 0 && (
         <div>
-          <p className="text-gray-500 text-[10px] uppercase mb-1">Ladder · a full bust costs about {usd(bustLoss)} ({invest > 0 ? (bustLoss / invest * 100).toFixed(1) : 0}% of the investment)</p>
-          <div className="flex flex-wrap gap-1">
+          {SecHead("ladder", `Ladder · a full bust costs about ${usd(bustLoss)} (${invest > 0 ? (bustLoss / invest * 100).toFixed(1) : 0}% of the investment)`)}
+          {!closed.ladder && <div className="flex flex-wrap gap-1">
             {ladder.map((x, i) => (
               <span key={i} className={`text-[10px] tabular-nums px-1.5 py-0.5 rounded ${side && i === level ? "bg-yellow-400/20 text-yellow-300 font-bold" : side && i < level ? "bg-red-500/10 text-red-400/70" : "bg-gray-800 text-gray-400"}`}>
                 {i + 1}: ${x.toFixed(0)}
               </span>
             ))}
-          </div>
+          </div>}
         </div>
       )}
       {trades.length > 0 && (
         <div>
-          <p className="text-gray-500 text-[10px] uppercase mb-1">Trades</p>
-          <div className="space-y-0.5 text-[11px] tabular-nums max-h-44 overflow-y-auto">
+          {SecHead("trades", `Trades (${trades.length})`)}
+          {!closed.trades && <div className="space-y-0.5 text-[11px] tabular-nums max-h-44 overflow-y-auto">
             {trades.map((t) => (
               <div key={t.id} className="flex justify-between gap-2">
                 <span className="text-gray-500">{new Date(t.at).toLocaleTimeString()} · step {Number(t.level) + 1} · {t.side === 1 ? "long" : "short"} {Number(t.qty).toFixed(cfg.qd)} · ${Number(t.entry).toFixed(cfg.pd)}→${Number(t.exit_price).toFixed(cfg.pd)} · <span className={t.result === "target" || t.result === "trail" || t.result === "lock" || (t.result === "flatten" && Number(t.pnl_usd) > 0) ? "text-green-400" : t.result === "bust" ? "text-red-400" : "text-gray-400"}>{t.result === "flatten" ? "flattened" : t.result}</span></span>
                 <span className={Number(t.pnl_usd) >= 0 ? "text-green-400" : "text-red-400"}>{Number(t.pnl_usd) >= 0 ? "+" : ""}{usd(Number(t.pnl_usd), 3)} · {pctInv(Number(t.pnl_usd))}</span>
               </div>
             ))}
-          </div>
+          </div>}
         </div>
       )}
       {events.length > 0 && (
         <div>
-          <p className="text-gray-500 text-[10px] uppercase mb-1">What the bot did</p>
-          <div className="space-y-0.5 text-[10px] text-gray-500 max-h-36 overflow-y-auto">
+          {SecHead("events", "What the bot did")}
+          {!closed.events && <div className="space-y-0.5 text-[10px] text-gray-500 max-h-36 overflow-y-auto">
             {events.map((e, i) => (
               <div key={i} className={e.action === "tick_error" || e.action.endsWith("failed") ? "text-red-400" : e.action === "flipped" ? "text-yellow-300" : ""}>
                 {new Date(e.ran_at).toLocaleTimeString()} · {FLIP_EVENT_LABEL[e.action] ?? e.action}
                 {e.detail?.error ? ` · ${String(e.detail.error).slice(0, 80)}` : ""}
               </div>
             ))}
-          </div>
+          </div>}
         </div>
       )}
     </div>
