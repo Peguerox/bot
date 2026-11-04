@@ -4808,6 +4808,8 @@ export default function Dashboard() {
   const [litGridWorker3Toggling,  setLitGridWorker3Toggling]  = useState(false);
   const [litGridWorker3Flattening, setLitGridWorker3Flattening] = useState(false);
   const [litGridWorker3Clearing, setLitGridWorker3Clearing] = useState(false);
+  // Worker 4 hidden (owner, 2026-11-04: "hide worker 4 until we are ready to use it") -- set true to bring it back.
+  const SHOW_WORKER4 = false;
   // Mirror bot (2026-10-27): fresh capital on Worker 4's emptied sub-account, mirror curve (peak
   // -10%) + crash reserve, own tables lighter_lit_grid_live_mirror_*. Hidden until its state row exists.
   const [litMirrorState,     setLitMirrorState]     = useState<any>(null);
@@ -4844,7 +4846,7 @@ export default function Dashboard() {
   }
 
   async function load() {
-    const mirrorLoad = loadMirror().catch(() => {});
+    const mirrorLoad = SHOW_WORKER4 ? loadMirror().catch(() => {}) : Promise.resolve();
     // Retired bots (2026-10-30 load audit): their queries ran every 15s and on every realtime
     // event -- 20,000 dead trades per refresh -- for panels no longer shown. Same slots, no request.
     const none = Promise.resolve({ data: null, count: 0 } as any);
@@ -5227,7 +5229,7 @@ export default function Dashboard() {
           subaccountNote="Worker 3's own sub-account, twin of Worker 4 below at a different spacing"
         />
 
-        {litMirrorState && (
+        {SHOW_WORKER4 && litMirrorState && (
           <LitGridLivePanel
             state={litMirrorState}
             orders={litMirrorOrders}
