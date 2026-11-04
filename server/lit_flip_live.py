@@ -614,11 +614,23 @@ class FlipBot:
             is_ask = acct["pos"] > 0
             ref = (bid if is_ask else ask) or (self.candles[-1]["c"] if self.candles else acct["entry"] or 0)
             err = await self.ex.market(is_ask, abs(acct["pos"]), ref, reduce_only=True)
+            self.flatten_ref = ref
             await self.db.log("flatten_sent", {"pos": acct["pos"], "error": str(err)[:200] if err else None})
             self.acct_at = 0.0
             return
         if self.cancel_pending:                 # flat, but an order still rests -> keep trying before calling it done
             return
+        if self.pos is not None and self.seq:
+            # Owner 2026-11-04: a flattened sequence must show in the trades + counters (it vanished before). P&L from the
+            # real account; exit price = the reference we sent the close at.
+            old, pnl_seq = self.pos, acct["equity"] - float(self.seq.get("start_equity") or acct["equity"])
+            ex_px = getattr(self, "flatten_ref", None) or old.entry
+            await self.db.trade({"seq_id": self.seq.get("id"), "level": old.level, "side": old.side, "qty": old.qty, "entry": old.entry,
+                                 "exit_price": ex_px, "result": "flatten", "pnl_usd": old.qty * (ex_px - old.entry) * old.side})
+            st = await self.db.get_state()
+            await self._save({"sequences": int(st.get("sequences") or 0) + 1, "wins": int(st.get("wins") or 0) + (1 if pnl_seq > 0 else 0),
+                              "realized_usd": float(st.get("realized_usd") or 0) + pnl_seq})
+            await self.db.log("sequence_over", {"result": "flatten", "level": old.level, "sequence_pnl_usd": round(pnl_seq, 4)})
         self.pos, self.seq = None, None
         await self._save({"close_requested": False, "enabled": False})
         await self.db.log("flattened", {})

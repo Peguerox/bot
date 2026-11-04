@@ -163,6 +163,8 @@ async def t_off_keeps_position_flatten_closes():
     check("OFF: position still open with both orders", ex.pos > 0 and len(ex.orders) == 2)
     db.state["close_requested"] = True
     await _ticks(bot, 3)
+    check("flatten is recorded: a 'flatten' trade row + sequence counted", any(t["result"] == "flatten" for t in db.trades)
+          and db.state.get("sequences") == 1, (db.trades, db.state.get("sequences")))
     check("flatten: flat, no orders, OFF, request cleared", ex.pos == 0 and not ex.orders and db.state["close_requested"] is False and db.state["enabled"] is False,
           (ex.pos, ex.orders, db.state.get("close_requested")))
     ex2, db2 = FakeEx(), FakeDB(); db2.state["enabled"] = False; b2 = L.FlipBot(ex2, db2)

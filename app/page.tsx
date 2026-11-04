@@ -1415,7 +1415,7 @@ function LitFlipPanel({ cfg = LIT_FLIP, hideWhenIdle = false }: { cfg?: FlipCfg;
   const nextUsd = side && level + 1 < ladder.length ? ladder[level + 1] : null;
   const bustLoss = ladder.reduce((a, x) => a + x * FLIP_P.slPct / 100, 0);
   const seqs = Number(st.sequences ?? 0), wins = Number(st.wins ?? 0), busts = Number(st.busts ?? 0);
-  const done = trades.filter((t) => t.result === "target" || t.result === "bust");
+  const done = trades.filter((t) => t.result === "target" || t.result === "bust" || t.result === "flatten");
   const avgSteps = done.length ? done.reduce((a, t) => a + Number(t.level) + 1, 0) / done.length : null;
   const sig = st.live_signal === 1 ? "LONG" : st.live_signal === -1 ? "SHORT" : "wait";
   const rangePos = st.live_range_pos != null ? Number(st.live_range_pos) : null;
@@ -1534,7 +1534,7 @@ function LitFlipPanel({ cfg = LIT_FLIP, hideWhenIdle = false }: { cfg?: FlipCfg;
           <div className="space-y-0.5 text-[11px] tabular-nums max-h-44 overflow-y-auto">
             {trades.map((t) => (
               <div key={t.id} className="flex justify-between gap-2">
-                <span className="text-gray-500">{new Date(t.at).toLocaleTimeString()} · step {Number(t.level) + 1} · {t.side === 1 ? "long" : "short"} {Number(t.qty).toFixed(cfg.qd)} · ${Number(t.entry).toFixed(cfg.pd)}→${Number(t.exit_price).toFixed(cfg.pd)} · <span className={t.result === "target" ? "text-green-400" : t.result === "bust" ? "text-red-400" : "text-gray-400"}>{t.result}</span></span>
+                <span className="text-gray-500">{new Date(t.at).toLocaleTimeString()} · step {Number(t.level) + 1} · {t.side === 1 ? "long" : "short"} {Number(t.qty).toFixed(cfg.qd)} · ${Number(t.entry).toFixed(cfg.pd)}→${Number(t.exit_price).toFixed(cfg.pd)} · <span className={t.result === "target" || (t.result === "flatten" && Number(t.pnl_usd) > 0) ? "text-green-400" : t.result === "bust" ? "text-red-400" : "text-gray-400"}>{t.result === "flatten" ? "flattened" : t.result}</span></span>
                 <span className={Number(t.pnl_usd) >= 0 ? "text-green-400" : "text-red-400"}>{Number(t.pnl_usd) >= 0 ? "+" : ""}{usd(Number(t.pnl_usd), 3)} · {pctInv(Number(t.pnl_usd))}</span>
               </div>
             ))}
