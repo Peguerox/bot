@@ -312,13 +312,72 @@ async def t_waf_block_backs_off():
     check("after the pause: reads work again, backoff reset", bot.block_wait == L.BLOCK_BACKOFF_S and bot.pos is not None)
 
 
+async def t_trail_after_target():
+    print("\n[trail after target 0.5%: no target limit; at +2% the flip goes, a stop locks 2%; it rises with the peak; exit = a bigger win]")
+    ex, db = FakeEx(), FakeDB(); db.state["override_params"] = {"trail_pct": 0.5}
+    bot = L.FlipBot(ex, db); await _ticks(bot, 1)
+    check("before the target: only the flip rests (no limit that would close at 2%)", [o["kind"] for o in ex.orders] == ["stop"]
+          and not ex.orders[0]["reduce_only"], ex.orders)
+    ex.price = 3.07; await bot.tick()
+    o = ex.orders
+    check("target reached -> armed: one reduce-only stop at the target 3.06, flip removed", len(o) == 1 and o[0]["reduce_only"]
+          and abs(o[0]["price"] - 3.06) < 1e-9 and any(a == "trail_armed" for a, _ in db.logs), o)
+    bot2 = L.FlipBot(ex, db); await bot2.tick()
+    check("restart while trailing: still armed at the same stop", bot2.trail_floor is not None and abs(bot2.trail_floor - 3.06) < 1e-9)
+    ex.price = 3.12; await bot2.tick()
+    check("price runs to 3.12 -> stop raised to ~3.12 x 0.995 (from the bid) = 3.1043", abs(ex.orders[0]["price"] - 3.1043) < 1e-3, ex.orders)
+    eq0 = ex.equity
+    db.state["enabled"] = False
+    ex.move(3.10); await _ticks(bot2, 2)
+    t = db.trades[-1]
+    check("pullback fills the stop at 3.1044 -> sequence won as 'trail', more than the 2% target",
+          ex.pos == 0 and t["result"] == "trail" and db.state.get("wins") == 1 and abs(t["exit_price"] - 3.1043) < 1e-3
+          and t["pnl_usd"] > 3.33 * 3.0 * 0.02, (ex.pos, t, db.state.get("wins")))
+
+
+async def t_trail_stop_refused_closes_at_market():
+    print("\n[trail: if Lighter refuses the trailing stop, the bot closes at market at once (win kept, never unprotected)]")
+    ex, db = FakeEx(), FakeDB(); db.state["override_params"] = {"trail_pct": 0.5}
+    bot = L.FlipBot(ex, db); await _ticks(bot, 1)
+    real_stop = ex.stop
+    async def refuse_reduce_only(is_ask, qty, trigger, reduce_only):
+        if reduce_only: return "invalid trigger price"
+        return await real_stop(is_ask, qty, trigger, reduce_only)
+    ex.stop = refuse_reduce_only
+    db.state["enabled"] = False
+    ex.price = 3.07; await _ticks(bot, 3)
+    check("closed at market, counted as a win", ex.pos == 0 and any(a == "trail_market_close" for a, _ in db.logs)
+          and db.state.get("wins") == 1, (ex.pos, db.state.get("wins")))
+
+
+async def t_stepped_target():
+    print("\n[stepped target 3 steps from 1% +0.5%: 1% at start, 1.5% once profit covers one bust, 2% after two, back down after a loss]")
+    ex, db = FakeEx(equity=200.0), FakeDB()
+    db.state["override_params"] = {"step_n": 3, "step_start": 1.0, "step_inc": 0.5, "step_base_usd": 200.0}
+    bot = L.FlipBot(ex, db); await _ticks(bot, 1)
+    tgt = [o for o in ex.orders if o["kind"] == "limit"][0]["price"]
+    check("no profit yet -> step 1: target 1%", bot.p.tp_pct == 1.0 and abs(tgt - 3.03) < 1e-9, (bot.p.tp_pct, tgt))
+    bust = sum(F.ladder(200.0, bot.p)) * 0.005
+    db.state["enabled"] = False; ex.move(3.031); await _ticks(bot, 2)
+    ex.equity = 200.0 + bust * 1.2; db.state["enabled"] = True; await _ticks(bot, 1)
+    check("profit covers 1.2 busts -> step 2: target 1.5%", bot.p.tp_pct == 1.5, (bot.p.tp_pct, bot.step_info))
+    db.state["enabled"] = False; ex.move(ex.price * 1.016); await _ticks(bot, 2)
+    ex.equity = 200.0 + bust * 2.5; db.state["enabled"] = True; await _ticks(bot, 1)
+    check("covers 2.5 busts -> step 3: target 2% (top step)", bot.p.tp_pct == 2.0, bot.step_info)
+    db.state["enabled"] = False; ex.move(ex.price * 1.021); await _ticks(bot, 2)
+    ex.equity = 200.0 + bust * 0.5; db.state["enabled"] = True; await _ticks(bot, 1)
+    check("a loss eats the cushion -> back to step 1 (1%)", bot.p.tp_pct == 1.0, bot.step_info)
+    await bot.tick()
+    check("panel readout shows the step", db.state["live_params"]["step_info"]["level"] == 1)
+
+
 async def _nosleep(*a, **k):
     return None
 
 
 async def main():
     for t in (t_start_flip_win, t_watch_mode_fallback, t_restart_keeps_the_sequence, t_off_keeps_position_flatten_closes,
-              t_bust_at_cap, t_unknown_position_is_protected, t_ws_wake_and_rejected_flip, t_stale_flip_never_left_behind, t_panel_settings_next_sequence_only, t_failed_placement_rechecked_fast, t_compounding_off, t_waf_block_backs_off):
+              t_bust_at_cap, t_unknown_position_is_protected, t_ws_wake_and_rejected_flip, t_stale_flip_never_left_behind, t_panel_settings_next_sequence_only, t_failed_placement_rechecked_fast, t_compounding_off, t_waf_block_backs_off, t_trail_after_target, t_trail_stop_refused_closes_at_market, t_stepped_target):
         await t()
     print(f"\n==== {len(PASS)} passed, {len(FAIL)} failed ====")
 

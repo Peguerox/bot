@@ -1332,7 +1332,7 @@ function LitGridLivePanel({
 // Flip martingale panels (2026-11-03, owner's strategy) -- server/lit_flip_live.py: LIT on Worker 2, SOL on Worker 1.
 // Self-loading (state + trades + events every 15 s); renders nothing until its state table exists. Owner: "simple, but
 // with everything I need to know what the bot is doing".
-const FLIP_P = { firstPct: 5, mult: 1.5, slPct: 0.5, tpPct: 2, window: 30, band: 0.30, levCap: 3 };
+const FLIP_P = { firstPct: 5, mult: 1.5, slPct: 0.5, tpPct: 2, window: 30, band: 0.30, levCap: 3, trailPct: 0 };
 // One panel per coin (same bot file, FLIP_COIN env var). Params must match COINS in server/lit_flip_live.py.
 type FlipCfg = { coin: string; worker: string; table: string; api: string; P: typeof FLIP_P; pd: number; qd: number };
 const LIT_FLIP: FlipCfg = { coin: "LIT", worker: "Worker 2", table: "lighter_lit_flip", api: "/api/lighter-lit-flip", P: FLIP_P, pd: 4, qd: 2 };
@@ -1345,7 +1345,8 @@ const FLIP_EVENT_LABEL: Record<string, string> = {
   position_adopted: "adopted an open position", orders_missing_replaced: "orders missing -> replaced", flatten_sent: "flatten sent",
   flattened: "flattened + OFF", too_small_to_start: "account too small to start", tick_error: "ERROR", account_read_failed: "account read failed",
   candles_failed: "price data failed", cancel_failed: "cancel failed",
-  lighter_blocked_backoff: "Lighter busy (firewall) -> pausing reads, orders stay on the exchange", cancel_unverified: "cancel not confirmed yet -> retrying",
+  lighter_blocked_backoff: "Lighter busy (firewall) -> pausing reads, orders stay on the exchange",
+  trail_armed: "TARGET reached -> win locked, trailing", trail_raised: "trailing stop raised", trail_market_close: "trail closed at market (win kept)", cancel_unverified: "cancel not confirmed yet -> retrying",
   orders_extra_replaced: "leftover order found -> book re-placed", size_mismatch_adopted: "size mismatch fixed", start_no_fill_seen: "entry not filled",
 };
 function LitFlipPanel({ cfg = LIT_FLIP, hideWhenIdle = false }: { cfg?: FlipCfg; hideWhenIdle?: boolean }) {
@@ -1380,13 +1381,19 @@ function LitFlipPanel({ cfg = LIT_FLIP, hideWhenIdle = false }: { cfg?: FlipCfg;
   if (hideWhenIdle && !st.enabled && st.seq_side == null && !Number(st.live_pos)) return null;
   // Settings (2026-11-04): the open sequence runs on its own seq_params; the next one on live_params (panel overrides).
   const fromDb = (o: any) => o ? { ...cfg.P, ...(o.tp_pct != null && { tpPct: Number(o.tp_pct) }), ...(o.sl_pct != null && { slPct: Number(o.sl_pct) }),
-    ...(o.first_pct != null && { firstPct: Number(o.first_pct) }), ...(o.mult != null && { mult: Number(o.mult) }), ...(o.lev_cap != null && { levCap: Number(o.lev_cap) }) } : cfg.P;
+    ...(o.first_pct != null && { firstPct: Number(o.first_pct) }), ...(o.mult != null && { mult: Number(o.mult) }), ...(o.lev_cap != null && { levCap: Number(o.lev_cap) }),
+    ...(o.trail_pct != null && { trailPct: Number(o.trail_pct) }) } : cfg.P;
   const nextP = fromDb(st.live_params ?? st.override_params);
   const FLIP_P = st.seq_side != null ? fromDb(st.seq_params) : nextP;
   async function saveSettings(reset = false) {
     const secret = litGridLiveAdminSecret(); if (!secret) return;
     setBusy("settings");
-    const body = reset ? { reset: true } : Object.fromEntries(Object.entries(edit ?? {}).filter(([, v]) => v !== ""));
+    const body: any = reset ? { reset: true } : Object.fromEntries(Object.entries(edit ?? {}).filter(([, v]) => v !== ""));
+    if (!reset && (body.stepN !== undefined || body.stepStart !== undefined || body.stepInc !== undefined)) {
+      // the step settings always go together (defaults 1% and +0.5% when not typed)
+      const ov: any = st.override_params ?? {};
+      body.stepN = body.stepN ?? ov.step_n ?? 0; body.stepStart = body.stepStart ?? ov.step_start ?? 1; body.stepInc = body.stepInc ?? ov.step_inc ?? 0.5;
+    }
     const res = await fetch(`${cfg.api}/settings`, { method: "POST", headers: { "x-admin-secret": secret, "Content-Type": "application/json" }, body: JSON.stringify(body) });
     if (!res.ok) { const b = await res.json().catch(() => ({})); alert(b.error ?? "Failed."); } else setEdit(null);
     setBusy(null); load();
@@ -1417,7 +1424,7 @@ function LitFlipPanel({ cfg = LIT_FLIP, hideWhenIdle = false }: { cfg?: FlipCfg;
   const nextUsd = side && level + 1 < ladder.length ? ladder[level + 1] : null;
   const bustLoss = ladder.reduce((a, x) => a + x * FLIP_P.slPct / 100, 0);
   const seqs = Number(st.sequences ?? 0), wins = Number(st.wins ?? 0), busts = Number(st.busts ?? 0);
-  const done = trades.filter((t) => t.result === "target" || t.result === "bust" || t.result === "flatten");
+  const done = trades.filter((t) => t.result === "target" || t.result === "trail" || t.result === "bust" || t.result === "flatten");
   const avgSteps = done.length ? done.reduce((a, t) => a + Number(t.level) + 1, 0) / done.length : null;
   const sig = st.live_signal === 1 ? "LONG" : st.live_signal === -1 ? "SHORT" : "wait";
   const rangePos = st.live_range_pos != null ? Number(st.live_range_pos) : null;
@@ -1481,12 +1488,14 @@ function LitFlipPanel({ cfg = LIT_FLIP, hideWhenIdle = false }: { cfg?: FlipCfg;
               // Whole sequence if closed now (owner 2026-11-04): this trade's open P&L + the earlier flips of the same sequence.
               const earlier = trades.filter((t) => String(t.seq_id) === String(st.seq_id) && t.result === "flip").reduce((x, t) => x + Number(t.pnl_usd), 0);
               const seqNow = earlier + Number(st.live_upnl ?? 0);
+              const tf = (st.live_params ?? {}).trail_floor;
               const be = qty > 0 ? entry + (side === "LONG" ? 1 : -1) * (-earlier) / qty : null;
               const bePct = be != null ? Math.abs(be / entry - 1) * 100 : null;
               return (
                 <p className="text-[12px] mt-1 tabular-nums text-center">
                   Sequence if closed now: <b className={seqNow >= 0 ? "text-green-400" : "text-red-400"}>{seqNow >= 0 ? "+" : ""}{usd(seqNow, 2)}</b>
                   {be != null && <span className="text-gray-400"> · break-even <b className="text-gray-200">${be.toFixed(cfg.pd)}</b> ({bePct!.toFixed(2)}% from entry)</span>}
+                  {tf != null && <span className="text-green-400 font-bold"> · TRAILING: win locked, stop ${Number(tf).toFixed(cfg.pd)}</span>}
                 </p>
               );
             })()}
@@ -1512,12 +1521,19 @@ function LitFlipPanel({ cfg = LIT_FLIP, hideWhenIdle = false }: { cfg?: FlipCfg;
         const steps: number[] = []; for (let x = firstUsd; x <= pv.cap * sizeEq + 1e-9 && steps.length < 60; x *= pv.mult) steps.push(x);
         const bust = steps.reduce((a, x) => a + x * pv.sl / 100, 0);
         const changed = edit != null && Object.keys(edit).length > 0;
-        const fields: [string, string, number, string][] = [["tpPct", "Target %", nextP.tpPct, "0.01"], ["slPct", "Flip at −%", nextP.slPct, "0.01"],
-          ["firstPct", "First trade %", nextP.firstPct, "0.5"], ["mult", "× each flip", nextP.mult, "0.05"], ["levCap", "Cap × account", nextP.levCap, "0.1"]];
+        const ov: any = st.override_params ?? {};
+        const stepsOn: any = (st.live_params ?? {}).steps;
+        const stepInfo: any = (st.live_params ?? {}).step_info;
+        const fields: [string, string, number, string][] = [["tpPct", stepsOn ? "Target % (steps on)" : "Target %", nextP.tpPct, "0.01"], ["slPct", "Flip at −%", nextP.slPct, "0.01"],
+          ["firstPct", "First trade %", nextP.firstPct, "0.5"], ["mult", "× each flip", nextP.mult, "0.05"], ["levCap", "Cap × account", nextP.levCap, "0.1"],
+          ["trailPct", "Trail after target % (0 = off)", nextP.trailPct ?? 0, "0.05"]];
+        const stepFields: [string, string, number, string][] = [["stepN", "Steps (0 = off)", Number(ov.step_n ?? 0), "1"],
+          ["stepStart", "Start %", Number(ov.step_start ?? 1), "0.1"], ["stepInc", "+ per step %", Number(ov.step_inc ?? 0.5), "0.1"]];
+        const sN = num("stepN", Number(ov.step_n ?? 0)), sS = num("stepStart", Number(ov.step_start ?? 1)), sI = num("stepInc", Number(ov.step_inc ?? 0.5));
         return (
           <div className="bg-gray-800/60 rounded-lg p-2">
             <p className="text-gray-500 text-[10px] uppercase mb-1">Settings · next sequence{side && (FLIP_P.tpPct !== nextP.tpPct || FLIP_P.slPct !== nextP.slPct || FLIP_P.firstPct !== nextP.firstPct || FLIP_P.mult !== nextP.mult || FLIP_P.levCap !== nextP.levCap) ? " (open trade still on its old settings)" : ""}</p>
-            <div className="grid grid-cols-3 sm:grid-cols-5 gap-2">
+            <div className="grid grid-cols-3 sm:grid-cols-6 gap-2">
               {fields.map(([k, label, v, step]) => (
                 <label key={k} className="text-[10px] text-gray-400">{label}
                   <input type="number" step={step} value={f(k, v)} onChange={(e) => setEdit({ ...(edit ?? {}), [k]: e.target.value })}
@@ -1525,6 +1541,20 @@ function LitFlipPanel({ cfg = LIT_FLIP, hideWhenIdle = false }: { cfg?: FlipCfg;
                 </label>
               ))}
             </div>
+            <p className="text-gray-500 text-[10px] uppercase mt-2 mb-1">Stepped target · one step up per bust the profit covers</p>
+            <div className="grid grid-cols-3 gap-2">
+              {stepFields.map(([k, label, v, step]) => (
+                <label key={k} className="text-[10px] text-gray-400">{label}
+                  <input type="number" step={step} value={f(k, v)} onChange={(e) => setEdit({ ...(edit ?? {}), [k]: e.target.value })}
+                    className="w-full mt-0.5 bg-gray-900 border border-gray-700 rounded px-1.5 py-1 text-sm text-white tabular-nums" />
+                </label>
+              ))}
+            </div>
+            <p className="text-[11px] text-gray-400 mt-1">
+              {sN >= 2 ? <>Targets: {Array.from({ length: sN }, (_, i) => `${(sS + sI * i).toFixed(2).replace(/\.?0+$/, "")}%`).join(" → ")}
+                {stepInfo && stepsOn ? <span className="text-yellow-300"> · now step {stepInfo.level} of {stepInfo.of} ({stepInfo.tp}%, profit covers {stepInfo.busts_covered} busts)</span> : null}</> : "Off — every sequence uses the Target % above."}
+              {(nextP.trailPct ?? 0) > 0 && <span className="text-green-400"> · trail {nextP.trailPct}% after the target</span>}
+            </p>
             <div className="flex flex-wrap items-center gap-2 mt-1.5 text-[11px]">
               <button onClick={() => setEdit({ ...(edit ?? {}), fixedBaseUsd: compounding ? String(Math.max(200, Math.floor(equity))) : "0" })}
                 className={`font-bold px-2.5 py-1 rounded ${compounding ? "bg-green-500/20 text-green-400" : "bg-amber-500/20 text-amber-300"}`}>
@@ -1565,7 +1595,7 @@ function LitFlipPanel({ cfg = LIT_FLIP, hideWhenIdle = false }: { cfg?: FlipCfg;
           <div className="space-y-0.5 text-[11px] tabular-nums max-h-44 overflow-y-auto">
             {trades.map((t) => (
               <div key={t.id} className="flex justify-between gap-2">
-                <span className="text-gray-500">{new Date(t.at).toLocaleTimeString()} · step {Number(t.level) + 1} · {t.side === 1 ? "long" : "short"} {Number(t.qty).toFixed(cfg.qd)} · ${Number(t.entry).toFixed(cfg.pd)}→${Number(t.exit_price).toFixed(cfg.pd)} · <span className={t.result === "target" || (t.result === "flatten" && Number(t.pnl_usd) > 0) ? "text-green-400" : t.result === "bust" ? "text-red-400" : "text-gray-400"}>{t.result === "flatten" ? "flattened" : t.result}</span></span>
+                <span className="text-gray-500">{new Date(t.at).toLocaleTimeString()} · step {Number(t.level) + 1} · {t.side === 1 ? "long" : "short"} {Number(t.qty).toFixed(cfg.qd)} · ${Number(t.entry).toFixed(cfg.pd)}→${Number(t.exit_price).toFixed(cfg.pd)} · <span className={t.result === "target" || t.result === "trail" || (t.result === "flatten" && Number(t.pnl_usd) > 0) ? "text-green-400" : t.result === "bust" ? "text-red-400" : "text-gray-400"}>{t.result === "flatten" ? "flattened" : t.result}</span></span>
                 <span className={Number(t.pnl_usd) >= 0 ? "text-green-400" : "text-red-400"}>{Number(t.pnl_usd) >= 0 ? "+" : ""}{usd(Number(t.pnl_usd), 3)} · {pctInv(Number(t.pnl_usd))}</span>
               </div>
             ))}

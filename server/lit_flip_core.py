@@ -27,6 +27,7 @@ class Params:
     band: float = 0.30            # top/bottom share of the range that counts as a trend
     lev_cap: float = 3.0          # biggest trade = lev_cap x equity
     min_order_usd: float = 10.0   # Lighter's minimum order value
+    trail_pct: float = 0.0        # 0 = off. >0: at the target don't close -- lock the target, trail the peak by this % (owner 2026-11-04)
 
 
 def range_signal(candles, window: int, band: float) -> int:
