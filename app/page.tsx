@@ -1527,15 +1527,14 @@ function LitFlipPanel({ cfg = LIT_FLIP, hideWhenIdle = false }: { cfg?: FlipCfg;
         const stepsOn: any = (st.live_params ?? {}).steps;
         const stepInfo: any = (st.live_params ?? {}).step_info;
         const fields: [string, string, number, string][] = [["tpPct", stepsOn ? "Target % (steps on)" : "Target %", nextP.tpPct, "0.01"], ["slPct", "Flip at −%", nextP.slPct, "0.01"],
-          ["firstPct", "First trade %", nextP.firstPct, "0.5"], ["mult", "× each flip", nextP.mult, "0.05"], ["levCap", "Cap × account", nextP.levCap, "0.1"],
-          ["trailPct", "Trail after target % (0 = off)", nextP.trailPct ?? 0, "0.05"]];
+          ["firstPct", "First trade %", nextP.firstPct, "0.5"], ["mult", "× each flip", nextP.mult, "0.05"], ["levCap", "Cap × account", nextP.levCap, "0.1"]];
         const stepFields: [string, string, number, string][] = [["stepN", "Steps (0 = off)", Number(ov.step_n ?? 0), "1"],
           ["stepStart", "Start %", Number(ov.step_start ?? 1), "0.1"], ["stepInc", "+ per step %", Number(ov.step_inc ?? 0.5), "0.1"]];
         const sN = num("stepN", Number(ov.step_n ?? 0)), sS = num("stepStart", Number(ov.step_start ?? 1)), sI = num("stepInc", Number(ov.step_inc ?? 0.5));
         return (
           <div className="bg-gray-800/60 rounded-lg p-2">
             <p className="text-gray-500 text-[10px] uppercase mb-1">Settings · next sequence{side && (FLIP_P.tpPct !== nextP.tpPct || FLIP_P.slPct !== nextP.slPct || FLIP_P.firstPct !== nextP.firstPct || FLIP_P.mult !== nextP.mult || FLIP_P.levCap !== nextP.levCap) ? " (open trade still on its old settings)" : ""}</p>
-            <div className="grid grid-cols-3 sm:grid-cols-6 gap-2">
+            <div className="grid grid-cols-3 sm:grid-cols-5 gap-2">
               {fields.map(([k, label, v, step]) => (
                 <label key={k} className="text-[10px] text-gray-400">{label}
                   <input type="number" step={step} value={f(k, v)} onChange={(e) => setEdit({ ...(edit ?? {}), [k]: e.target.value })}
@@ -1543,20 +1542,40 @@ function LitFlipPanel({ cfg = LIT_FLIP, hideWhenIdle = false }: { cfg?: FlipCfg;
                 </label>
               ))}
             </div>
-            <p className="text-gray-500 text-[10px] uppercase mt-2 mb-1">Stepped target · one step up per bust the profit covers</p>
-            <div className="grid grid-cols-3 gap-2">
-              {stepFields.map(([k, label, v, step]) => (
+            {(() => {
+              // Option toggles (owner 2026-11-04: each one an ON/OFF button like the profit lock, numbers shown when ON).
+              const trNow = num("trailPct", nextP.trailPct ?? 0);
+              const trOn = trNow > 0;
+              const stOn = sN >= 2;
+              const box = (k: string, label: string, v: number, step: string) => (
                 <label key={k} className="text-[10px] text-gray-400">{label}
                   <input type="number" step={step} value={f(k, v)} onChange={(e) => setEdit({ ...(edit ?? {}), [k]: e.target.value })}
                     className="w-full mt-0.5 bg-gray-900 border border-gray-700 rounded px-1.5 py-1 text-sm text-white tabular-nums" />
-                </label>
-              ))}
-            </div>
-            <p className="text-[11px] text-gray-400 mt-1">
-              {sN >= 2 ? <>Targets: {Array.from({ length: sN }, (_, i) => `${(sS + sI * i).toFixed(2).replace(/\.?0+$/, "")}%`).join(" → ")}
-                {stepInfo && stepsOn ? <span className="text-yellow-300"> · now step {stepInfo.level} of {stepInfo.of} ({stepInfo.tp}%, profit covers {stepInfo.busts_covered} busts)</span> : null}</> : "Off — every sequence uses the Target % above."}
-              {(nextP.trailPct ?? 0) > 0 && <span className="text-green-400"> · trail {nextP.trailPct}% after the target</span>}
-            </p>
+                </label>);
+              const btn = (on: boolean, label: string, onClick: () => void) => (
+                <button onClick={onClick} className={`text-[11px] font-bold px-2.5 py-1 rounded ${on ? "bg-green-500/20 text-green-400" : "bg-gray-700 text-gray-300"}`}>{label} {on ? "ON" : "OFF"}</button>);
+              return (
+                <>
+                  <div className="mt-2">
+                    <div className="flex items-center gap-2">
+                      {btn(trOn, "Trail after target", () => setEdit({ ...(edit ?? {}), trailPct: trOn ? "0" : "0.5" }))}
+                      <span className="text-[11px] text-gray-500">{trOn ? `at the target: lock it, then follow the price up ${trNow}% behind` : "closes at the target"}</span>
+                    </div>
+                    {trOn && <div className="grid grid-cols-4 gap-2 mt-1">{box("trailPct", "Trail %", nextP.trailPct || 0.5, "0.05")}</div>}
+                  </div>
+                  <div className="mt-2">
+                    <div className="flex items-center gap-2">
+                      {btn(stOn, "Stepped target", () => setEdit({ ...(edit ?? {}), stepN: stOn ? "0" : "3", stepStart: String(sS || 1), stepInc: String(sI || 0.5) }))}
+                      <span className="text-[11px] text-gray-500">{stOn
+                        ? <>targets {Array.from({ length: sN }, (_, i) => `${(sS + sI * i).toFixed(2).replace(/\.?0+$/, "")}%`).join(" → ")}, one step up per bust the profit covers
+                          {stepInfo && stepsOn ? <span className="text-yellow-300"> · now step {stepInfo.level} of {stepInfo.of} ({stepInfo.tp}%, covers {stepInfo.busts_covered} busts)</span> : null}</>
+                        : "every sequence uses the Target % above"}</span>
+                    </div>
+                    {stOn && <div className="grid grid-cols-4 gap-2 mt-1">{stepFields.map(([k, label, v, step]) => box(k, label, v, step))}</div>}
+                  </div>
+                </>
+              );
+            })()}
             {(() => {
               // Deep-step profit lock (owner 2026-11-04): toggle + its three numbers. Off = lock_from_step 0.
               const lp: any = st.live_params ?? {};
