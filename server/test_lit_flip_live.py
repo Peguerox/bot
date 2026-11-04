@@ -280,13 +280,26 @@ async def t_failed_placement_rechecked_fast():
     check("target + flip on the book after the re-check", sorted(o["kind"] for o in ex.orders) == ["limit", "stop"], ex.orders)
 
 
+async def t_compounding_off():
+    print("\n[compounding OFF: sizes from the fixed amount, not the bigger account; ON (default) uses the whole account]")
+    ex, db = FakeEx(equity=400.0), FakeDB(); db.state["override_params"] = {"fixed_base_usd": 250}
+    bot = L.FlipBot(ex, db); await _ticks(bot, 1)
+    check("first trade = 5% of $250 (not of $400)", abs(bot.pos.ladder_usd[0] - 12.5) < 1e-9 and abs(ex.pos - L.qty_round(12.5 / 3.0)) < 0.02, bot.pos)
+    check("readout shows the fixed amount", db.state["live_params"]["fixed_base_usd"] == 250)
+    ex2, db2 = FakeEx(equity=400.0), FakeDB(); b2 = L.FlipBot(ex2, db2); await _ticks(b2, 1)
+    check("default compounding: 5% of the whole $400", abs(b2.pos.ladder_usd[0] - 20.0) < 1e-9, b2.pos)
+    ex3, db3 = FakeEx(equity=150.0), FakeDB(); db3.state["override_params"] = {"fixed_base_usd": 5000}
+    b3 = L.FlipBot(ex3, db3); await _ticks(b3, 1)
+    check("fixed amount above the real account -> never sizes beyond the real $150 (too small, no trade)", ex3.pos == 0)
+
+
 async def _nosleep(*a, **k):
     return None
 
 
 async def main():
     for t in (t_start_flip_win, t_watch_mode_fallback, t_restart_keeps_the_sequence, t_off_keeps_position_flatten_closes,
-              t_bust_at_cap, t_unknown_position_is_protected, t_ws_wake_and_rejected_flip, t_stale_flip_never_left_behind, t_panel_settings_next_sequence_only, t_failed_placement_rechecked_fast):
+              t_bust_at_cap, t_unknown_position_is_protected, t_ws_wake_and_rejected_flip, t_stale_flip_never_left_behind, t_panel_settings_next_sequence_only, t_failed_placement_rechecked_fast, t_compounding_off):
         await t()
     print(f"\n==== {len(PASS)} passed, {len(FAIL)} failed ====")
 

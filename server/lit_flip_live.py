@@ -305,6 +305,7 @@ class FlipBot:
         self.ex, self.db, self.p, self.owner = ex, db, params, owner
         self.base = params                  # the coin's default settings (COINS)
         self.p_next = params                # what the NEXT sequence will use (base + panel overrides)
+        self.fixed_base = 0.0               # 0 = compounding; > 0 = size from this many USD (panel "Compounding OFF")
         self.pos = None                 # F.Position we expect on the exchange
         self.seq = None                 # {"id", "start_equity"}
         self.acct = None; self.acct_at = 0.0
@@ -366,8 +367,19 @@ class FlipBot:
                 continue
             if lo <= v <= hi:
                 ch[k] = v
+        # Compounding (owner 2026-11-04): fixed_base_usd > 0 = size every sequence from that amount (never more than the
+        # real account); 0 / missing = compound on the whole account (default).
+        try:
+            fb = float(ov.get("fixed_base_usd") or 0)
+        except (TypeError, ValueError):
+            fb = 0.0
+        self.fixed_base = fb if 0 < fb <= 1e7 else 0.0
         p = replace(self.base, **ch)
         return p if p.tp_pct > p.sl_pct else self.base
+
+    def _sizing_equity(self, equity):
+        """What the ladder is sized from: the whole account (compounding) or the fixed base, whichever is smaller."""
+        return min(equity, self.fixed_base) if self.fixed_base else equity
 
     def _load(self, st):
         self.flip_mode = st.get("flip_mode") or "native"
@@ -468,7 +480,7 @@ class FlipBot:
         await self.db.update_state({"live_price": price, "live_range_pos": pos_r, "live_range_hi": hi, "live_range_lo": lo,
                                     "live_signal": F.range_signal(self.candles, self.p.window, self.p.band) if self.candles else None,
                                     "live_pos": acct["pos"], "live_upnl": self._live_upnl(acct, price), "equity": acct["equity"],
-                                    "live_params": {k: getattr(self.p_next, k) for k in EDITABLE},
+                                    "live_params": dict({k: getattr(self.p_next, k) for k in EDITABLE}, fixed_base_usd=self.fixed_base),
                                     "lock_heartbeat": now_iso()})
         self.published_at = time.time()
 
@@ -541,7 +553,7 @@ class FlipBot:
             return
         bid, ask = self.ex.best_bid_ask()
         ref = (ask if sig == F.LONG else bid) or self.candles[-1]["c"]
-        first = F.start(sig, ref, acct["equity"], self.p)
+        first = F.start(sig, ref, self._sizing_equity(acct["equity"]), self.p)
         if first is None:
             await self.db.log("too_small_to_start", {"equity": acct["equity"]}); return
         qty = qty_round(first.qty)
@@ -600,7 +612,7 @@ class FlipBot:
         """A position we don't know about (first start, or the state row was lost): treat it as level 0 of a new
         sequence sized from today's equity and protect it at once."""
         side = F.LONG if acct["pos"] > 0 else F.SHORT
-        lad = F.ladder(acct["equity"], self.p) or [abs(acct["pos"]) * (acct["entry"] or 1)]
+        lad = F.ladder(self._sizing_equity(acct["equity"]), self.p) or [abs(acct["pos"]) * (acct["entry"] or 1)]
         self.pos = F.Position(side, abs(acct["pos"]), acct["entry"] or 0.0, 0, lad)
         self.seq = {"id": int(time.time() * 1000), "start_equity": acct["equity"]}
         await self.db.log("position_adopted", {"pos": acct["pos"], "entry": acct["entry"]})

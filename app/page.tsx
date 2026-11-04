@@ -1488,8 +1488,13 @@ function LitFlipPanel({ cfg = LIT_FLIP, hideWhenIdle = false }: { cfg?: FlipCfg;
         const f = (k: string, v: number) => (edit && edit[k] !== undefined ? edit[k] : String(v));
         const num = (k: string, v: number) => { const x = Number(f(k, v)); return Number.isFinite(x) ? x : v; };
         const pv = { tp: num("tpPct", nextP.tpPct), sl: num("slPct", nextP.slPct), first: num("firstPct", nextP.firstPct), mult: num("mult", nextP.mult), cap: num("levCap", nextP.levCap) };
-        const firstUsd = equity * pv.first / 100;
-        const steps: number[] = []; for (let x = firstUsd; x <= pv.cap * equity + 1e-9 && steps.length < 60; x *= pv.mult) steps.push(x);
+        // Compounding: fixed_base_usd > 0 = size from that amount (never more than the account); 0 = whole account.
+        const savedBase = Number((st.live_params ?? st.override_params ?? {}).fixed_base_usd ?? 0);
+        const baseIn = edit && edit.fixedBaseUsd !== undefined ? Number(edit.fixedBaseUsd) || 0 : savedBase;
+        const compounding = !(baseIn > 0);
+        const sizeEq = compounding ? equity : Math.min(equity, baseIn);
+        const firstUsd = sizeEq * pv.first / 100;
+        const steps: number[] = []; for (let x = firstUsd; x <= pv.cap * sizeEq + 1e-9 && steps.length < 60; x *= pv.mult) steps.push(x);
         const bust = steps.reduce((a, x) => a + x * pv.sl / 100, 0);
         const changed = edit != null && Object.keys(edit).length > 0;
         const fields: [string, string, number, string][] = [["tpPct", "Target %", nextP.tpPct, "0.01"], ["slPct", "Flip at −%", nextP.slPct, "0.01"],
@@ -1504,6 +1509,17 @@ function LitFlipPanel({ cfg = LIT_FLIP, hideWhenIdle = false }: { cfg?: FlipCfg;
                     className="w-full mt-0.5 bg-gray-900 border border-gray-700 rounded px-1.5 py-1 text-sm text-white tabular-nums" />
                 </label>
               ))}
+            </div>
+            <div className="flex flex-wrap items-center gap-2 mt-1.5 text-[11px]">
+              <button onClick={() => setEdit({ ...(edit ?? {}), fixedBaseUsd: compounding ? String(Math.max(200, Math.floor(equity))) : "0" })}
+                className={`font-bold px-2.5 py-1 rounded ${compounding ? "bg-green-500/20 text-green-400" : "bg-amber-500/20 text-amber-300"}`}>
+                Compounding {compounding ? "ON" : "OFF"}</button>
+              {compounding ? <span className="text-gray-500">trades grow with the whole account</span> : (
+                <label className="text-gray-400 flex items-center gap-1">size from $
+                  <input type="number" step="100" value={edit?.fixedBaseUsd ?? String(savedBase)} onChange={(e) => setEdit({ ...(edit ?? {}), fixedBaseUsd: e.target.value })}
+                    className="w-24 bg-gray-900 border border-gray-700 rounded px-1.5 py-0.5 text-sm text-white tabular-nums" />
+                  <span className="text-gray-500">· profit above it stays idle (free to move)</span>
+                </label>)}
             </div>
             <p className={`text-[11px] mt-1 ${firstUsd < 10 ? "text-red-400" : "text-gray-400"}`}>
               First trade {usd(firstUsd)}{firstUsd < 10 ? " — under Lighter's $10 minimum, it won't start" : ""} · {steps.length} steps · biggest {usd(steps[steps.length - 1] ?? 0, 0)} · full bust ≈ {usd(bust)} ({equity ? (bust / equity * 100).toFixed(1) : 0}%)
