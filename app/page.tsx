@@ -1477,6 +1477,19 @@ function LitFlipPanel({ cfg = LIT_FLIP, hideWhenIdle = false }: { cfg?: FlipCfg;
               <div className="w-1/2"><div className="h-full bg-green-500" style={{ width: `${toTgt * 100}%` }} /></div>
               <div className="absolute left-1/2 top-0 h-full w-0.5 bg-white/80" />
             </div>
+            {(() => {
+              // Whole sequence if closed now (owner 2026-11-04): this trade's open P&L + the earlier flips of the same sequence.
+              const earlier = trades.filter((t) => String(t.seq_id) === String(st.seq_id) && t.result === "flip").reduce((x, t) => x + Number(t.pnl_usd), 0);
+              const seqNow = earlier + Number(st.live_upnl ?? 0);
+              const be = qty > 0 ? entry + (side === "LONG" ? 1 : -1) * (-earlier) / qty : null;
+              const bePct = be != null ? Math.abs(be / entry - 1) * 100 : null;
+              return (
+                <p className="text-[12px] mt-1 tabular-nums text-center">
+                  Sequence if closed now: <b className={seqNow >= 0 ? "text-green-400" : "text-red-400"}>{seqNow >= 0 ? "+" : ""}{usd(seqNow, 2)}</b>
+                  {be != null && <span className="text-gray-400"> · break-even <b className="text-gray-200">${be.toFixed(cfg.pd)}</b> ({bePct!.toFixed(2)}% from entry)</span>}
+                </p>
+              );
+            })()}
             <div className="flex justify-between text-[10px] text-gray-500 tabular-nums mt-0.5">
               <span>{nextUsd ? `FLIP → ${other}` : "STOP (bust)"} ${stp!.toFixed(cfg.pd)} (−{FLIP_P.slPct}%)</span>
               <span>entry ${entry.toFixed(cfg.pd)}</span>
