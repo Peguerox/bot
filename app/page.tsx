@@ -1574,6 +1574,19 @@ function LitFlipPanel({ cfg = LIT_FLIP, hideWhenIdle = false }: { cfg?: FlipCfg;
               take profit at {In({ k: "stepStart", v: Number(ov.step_start ?? 1) })}%, then {In({ k: "stepInc", v: Number(ov.step_inc ?? 0.5) })}% more for each bust the profit can cover, {In({ k: "stepN", v: Number(ov.step_n ?? 3), step: "1", w: "w-10" })} steps
               <div className="text-[12px] text-gray-400">= {Array.from({ length: Math.max(2, Math.min(10, sN)) }, (_, i) => fmt(sS + sI * i)).join(" → ")}
                 {stOn && stepInfo ? <span className="text-yellow-300"> · now: step {stepInfo.level} ({stepInfo.tp}%)</span> : null}</div>
+              {stOn && (() => {
+                // Account levels where the target steps up (same math as the bot's _stepped_tp): the profit since the
+                // setting was saved must cover k busts; a bust = the full ladder's stop losses at the current size.
+                const base = Number(ov.step_base_usd ?? 0);
+                if (!(base > 0)) return null;
+                const fracs: number[] = []; for (let x = pv.first / 100; x <= pv.cap + 1e-9 && fracs.length < 60; x *= pv.mult) fracs.push(x);
+                const f = fracs.reduce((a, x) => a + x, 0) * pv.sl / 100;          // a full bust as a share of the sizing amount
+                const fixed = compounding ? 0 : num("fixedBaseUsd", savedBase);
+                const lvl = (k: number) => fixed > 0 ? base + k * f * fixed : (1 - k * f > 0 ? base / (1 - k * f) : null);
+                const n = Math.max(2, Math.min(10, sN));
+                const parts = Array.from({ length: n - 1 }, (_, i) => { const L = lvl(i + 1); return L ? `${fmt(sS + sI * (i + 1))} when the account reaches ${usd(L, 0)}` : null; }).filter(Boolean);
+                return <div className="text-[12px] text-gray-300">Steps up: {parts.join(" · ")} <span className="text-gray-500">(now {usd(equity, 0)}; counted from {usd(base, 0)} when it was switched on; drops back if a bust takes it below)</span></div>;
+              })()}
             </>) })}
             {Row({ on: trOn, onToggle: () => toggleSetting({ trailPct: trOn ? 0 : (num("trailPct", 0.5) > 0 ? num("trailPct", 0.5) : 0.5) }, "Ride the winner"), title: "Ride the winner", children: (<>
               when the profit target is reached, don't sell yet: the win is locked, and it sells only when the price falls {In({ k: "trailPct", v: Number(ov.trail_pct ?? 0) || 0.5, step: "0.05" })}% from its best
