@@ -57,6 +57,7 @@ PUBLISH_EVERY = 3.0                   # panel readout write, seconds
 MISMATCH_GRACE_S = 8.0                # a fill can take a few seconds to show; wait before "fixing" a mismatch
 WATCH_REFIRE_S = 5.0                  # watch mode: never fire again within this long of the last shot
 LOCK_STALE_AFTER, LOCK_REFRESH_EVERY = 30.0, 5.0
+CANCEL_TRIES, CANCEL_SETTLE_S = 3, 0.5    # verified cancel: retries, and wait before re-counting resting orders
 ORDER_TIMEOUT, REST_TIMEOUT = 12.0, 8.0
 MARKET_BAND = 0.005                   # market orders: worst average price 0.5% away
 STOP_BAND = 0.005                     # stop orders: execution limit 0.5% beyond the trigger
@@ -157,15 +158,17 @@ class LighterExchange:
         acct = await asyncio.wait_for(api.account(by="index", value=str(self.account_index),
                                                   _headers={"authorization": self._auth() or ""}), REST_TIMEOUT)
         a = acct.accounts[0]
-        pos, entry, upnl = 0.0, None, 0.0
+        pos, entry, upnl, funding = 0.0, None, 0.0, None
         for p in (a.positions or []):
             if int(p.market_id) == MARKET_ID:
                 sign = 1 if str(p.sign) in ("1", "True", "true") else -1
                 pos = sign * float(p.position or 0)
                 entry = float(p.avg_entry_price) if p.avg_entry_price not in (None, "") and pos else None
                 upnl = float(p.unrealized_pnl) if p.unrealized_pnl not in (None, "") and pos else 0.0
+                tf = getattr(p, "total_funding_paid_out", None)
+                funding = float(tf) if tf not in (None, "") else None     # Lighter's running funding total on this market
         equity = float(a.total_asset_value) if a.total_asset_value not in (None, "") else float(a.collateral)
-        return {"pos": pos, "entry": entry, "equity": equity, "upnl": upnl}
+        return {"pos": pos, "entry": entry, "equity": equity, "upnl": upnl, "funding": funding}
 
     async def candles(self, n=40):
         end = int(time.time() * 1000)
@@ -287,6 +290,7 @@ class FlipBot:
         self.loaded = False
         self.fired_at = 0.0
         self.published_at = 0.0
+        self.cancel_pending = False       # a sequence ended but Lighter still showed resting orders -> no new sequence yet
         self.woken = asyncio.Event()
 
     def wake(self):
@@ -329,11 +333,32 @@ class FlipBot:
         self.loaded = True
 
     # ---- exchange helpers ----
+    async def _cancel_verified(self, why):
+        """cancel_all, then confirm Lighter shows no resting order on this market (Astra review 2026-11-04: a stale
+        non-reduce-only flip left on the book after a sequence ends could open an unwanted position). Up to 3 tries."""
+        n = None
+        for _ in range(CANCEL_TRIES):
+            err = await self.ex.cancel_all()
+            if err:
+                await self.db.log("cancel_failed", {"why": why, "error": str(err)[:200]})
+            await asyncio.sleep(CANCEL_SETTLE_S)
+            try:
+                n = await self.ex.open_order_count()
+            except Exception as e:
+                n = None; await self.db.log("orders_read_failed", {"why": why, "error": str(e)[:200]})
+            if n == 0:
+                self.cancel_pending = False
+                return True
+        self.cancel_pending = True
+        await self.db.log("cancel_unverified", {"why": why, "open": n})
+        return False
+
     async def _place_orders(self, pos):
-        """Cancel everything on the market, then put the target and the flip (or bust stop) on the book."""
+        """Cancel everything on the market, then put the target and the flip (or bust stop) on the book at once (a position
+        must never wait unprotected for a verification; a leftover order is caught by _check_orders' n > want)."""
         err = await self.ex.cancel_all()
         if err:
-            await self.db.log("cancel_failed", {"error": str(err)[:200]})
+            await self.db.log("cancel_failed", {"why": "replace", "error": str(err)[:200]})
         out = {}
         for o in F.resting_orders(pos, self.p):
             if o.kind == "target":
@@ -417,6 +442,8 @@ class FlipBot:
         if self.pos is None:
             if abs(live) >= MIN_BASE / 2:
                 await self._adopt(acct); return
+            if self.cancel_pending and not await self._cancel_verified("retry_before_start"):
+                return                          # never start a new sequence on top of a stale flip order
             await self._maybe_start(st, acct); return
 
         exp_side, exp_qty = self.pos.side, self.pos.qty
@@ -479,7 +506,8 @@ class FlipBot:
             await self.db.log("flip_past_cap", {"live": acct["pos"]})
         self.pos = F.Position(side=F.LONG if acct["pos"] > 0 else F.SHORT, qty=abs(acct["pos"]), entry=fill,
                               level=old.level + 1, ladder_usd=old.ladder_usd)
-        await self.db.log("flipped", {"to": self.pos.side, "qty": round(self.pos.qty, 2), "entry": fill, "level": self.pos.level})
+        await self.db.log("flipped", {"to": self.pos.side, "qty": round(self.pos.qty, 2), "entry": fill, "level": self.pos.level,
+                                      "trigger": round(F.stop_price(old, self.p), PRICE_DEC), "funding_total": acct.get("funding")})
         await self._place_orders(self.pos); await self._save()
 
     async def _sequence_over(self, acct):
@@ -488,13 +516,14 @@ class FlipBot:
         bid, ask = self.ex.best_bid_ask()
         px = ((bid if old.side == F.LONG else ask) or (self.candles[-1]["c"] if self.candles else old.entry))
         won = abs(px - tgt) < abs(px - stp)
-        await self.ex.cancel_all()
+        await self._cancel_verified("sequence_over")
         pnl_seq = acct["equity"] - float((self.seq or {}).get("start_equity") or acct["equity"])
         await self.db.trade({"seq_id": (self.seq or {}).get("id"), "level": old.level, "side": old.side, "qty": old.qty,
                              "entry": old.entry, "exit_price": tgt if won else stp, "result": "target" if won else "bust",
                              "pnl_usd": (old.qty * old.entry * (self.p.tp_pct if won else -self.p.sl_pct) / 100)})
         st = await self.db.get_state()
-        await self.db.log("sequence_over", {"result": "target" if won else "bust", "level": old.level, "sequence_pnl_usd": round(pnl_seq, 4)})
+        await self.db.log("sequence_over", {"result": "target" if won else "bust", "level": old.level, "sequence_pnl_usd": round(pnl_seq, 4),
+                                            "funding_total": acct.get("funding")})
         self.pos, self.seq = None, None
         await self._save({"sequences": int(st.get("sequences") or 0) + 1,
                           "wins": int(st.get("wins") or 0) + (1 if won else 0),
@@ -521,6 +550,9 @@ class FlipBot:
         if n < want:
             await self.db.log("orders_missing_replaced", {"open": n, "want": want})
             await self._place_orders(self.pos)
+        elif n > want:                          # a stale order survived a cancel -> clear the book and re-place ours
+            await self.db.log("orders_extra_replaced", {"open": n, "want": want})
+            await self._place_orders(self.pos)
 
     async def _watch_trigger(self):
         bid, ask = self.ex.best_bid_ask()
@@ -542,7 +574,7 @@ class FlipBot:
         return True
 
     async def _flatten(self, acct):
-        await self.ex.cancel_all()
+        await self._cancel_verified("flatten")
         if abs(acct["pos"]) >= 0.005:
             bid, ask = self.ex.best_bid_ask()
             is_ask = acct["pos"] > 0
@@ -550,6 +582,8 @@ class FlipBot:
             err = await self.ex.market(is_ask, abs(acct["pos"]), ref, reduce_only=True)
             await self.db.log("flatten_sent", {"pos": acct["pos"], "error": str(err)[:200] if err else None})
             self.acct_at = 0.0
+            return
+        if self.cancel_pending:                 # flat, but an order still rests -> keep trying before calling it done
             return
         self.pos, self.seq = None, None
         await self._save({"close_requested": False, "enabled": False})

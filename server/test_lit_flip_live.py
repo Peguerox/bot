@@ -44,7 +44,11 @@ class FakeEx:
             return "reduce only required"
         self.orders.append(dict(kind="stop", is_ask=is_ask, qty=qty, price=trigger, reduce_only=reduce_only)); return None
 
+    cancel_fails = 0                           # tests: how many cancel_all calls are silently ignored by the "exchange"
+
     async def cancel_all(self):
+        if self.cancel_fails > 0:
+            self.cancel_fails -= 1; return None
         self.orders = []; return None
 
     async def open_order_count(self):
@@ -214,13 +218,32 @@ async def t_ws_wake_and_rejected_flip():
         L.ACCOUNT_EVERY, L.ORDERS_CHECK_EVERY, L.ACCOUNT_EVERY_WS, L.ORDERS_CHECK_EVERY_WS, L.ORDERS_SETTLE_S = saved
 
 
+async def t_stale_flip_never_left_behind():
+    print("\n[target fills but the first cancels are ignored: the bot retries until the old flip order is gone, never starts on top of it]")
+    ex, db = FakeEx(), FakeDB(); bot = L.FlipBot(ex, db)
+    await _ticks(bot, 1)
+    ex.cancel_fails = 4                         # 3 tries in _sequence_over all fail, the 4th (next tick) too
+    ex.move(3.0 * 1.02)                         # target fills -> flat, the non-reduce-only flip still rests
+    await bot.tick()
+    check("sequence over but cancel unverified -> flagged, logged", bot.cancel_pending and any(a == "cancel_unverified" for a, _ in db.logs))
+    check("no new sequence while the stale flip rests", ex.pos == 0, ex.pos)
+    await bot.tick()
+    check("next tick: cancel goes through, book is clean before anything new", not ex.orders or bot.pos is not None, ex.orders)
+    check("flag cleared", not bot.cancel_pending)
+    ex2, db2 = FakeEx(), FakeDB(); b2 = L.FlipBot(ex2, db2); await _ticks(b2, 1)
+    ex2.orders.append(dict(kind="stop", is_ask=False, qty=9.0, price=9.9, reduce_only=False))   # a leftover order
+    await b2.tick()
+    check("an extra resting order is detected and the book re-placed with just ours", len(ex2.orders) == 2
+          and any(a == "orders_extra_replaced" for a, _ in db2.logs), ex2.orders)
+
+
 async def _nosleep(*a, **k):
     return None
 
 
 async def main():
     for t in (t_start_flip_win, t_watch_mode_fallback, t_restart_keeps_the_sequence, t_off_keeps_position_flatten_closes,
-              t_bust_at_cap, t_unknown_position_is_protected, t_ws_wake_and_rejected_flip):
+              t_bust_at_cap, t_unknown_position_is_protected, t_ws_wake_and_rejected_flip, t_stale_flip_never_left_behind):
         await t()
     print(f"\n==== {len(PASS)} passed, {len(FAIL)} failed ====")
 
