@@ -395,13 +395,24 @@ async def t_deep_step_profit_lock():
           ex.pos == 0 and t["result"] == "lock" and db.state.get("wins") == 1 and ex.equity > start, (t, ex.equity))
 
 
+async def t_dead_book_socket_uses_rest():
+    print("\n[order-book websocket dead: the bot reads the price over REST and still arms the trail]")
+    ex, db = FakeEx(), FakeDB(); db.state["override_params"] = {"trail_pct": 0.5}
+    bot = L.FlipBot(ex, db); await _ticks(bot, 1)
+    ex.best_bid_ask = lambda: (None, None)                       # socket silent
+    async def rest(): return ex.price - 0.0001, ex.price + 0.0001
+    ex.rest_bid_ask = rest
+    ex.price = 3.07; await bot.tick()
+    check("trail armed from the REST price", bot.trail_floor is not None and any(o["reduce_only"] for o in ex.orders), (bot.trail_floor, ex.orders))
+
+
 async def _nosleep(*a, **k):
     return None
 
 
 async def main():
     for t in (t_start_flip_win, t_watch_mode_fallback, t_restart_keeps_the_sequence, t_off_keeps_position_flatten_closes,
-              t_bust_at_cap, t_unknown_position_is_protected, t_ws_wake_and_rejected_flip, t_stale_flip_never_left_behind, t_panel_settings_next_sequence_only, t_failed_placement_rechecked_fast, t_compounding_off, t_waf_block_backs_off, t_trail_after_target, t_trail_stop_refused_closes_at_market, t_stepped_target, t_deep_step_profit_lock):
+              t_bust_at_cap, t_unknown_position_is_protected, t_ws_wake_and_rejected_flip, t_stale_flip_never_left_behind, t_panel_settings_next_sequence_only, t_failed_placement_rechecked_fast, t_compounding_off, t_waf_block_backs_off, t_trail_after_target, t_trail_stop_refused_closes_at_market, t_stepped_target, t_deep_step_profit_lock, t_dead_book_socket_uses_rest):
         await t()
     print(f"\n==== {len(PASS)} passed, {len(FAIL)} failed ====")
 

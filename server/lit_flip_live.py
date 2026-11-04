@@ -53,6 +53,8 @@ ACCOUNT_EVERY_WS, ORDERS_CHECK_EVERY_WS = 10.0, 60.0  # REST safety net while it
 ORDERS_SETTLE_S = 3.0                 # after an order event, wait this long before counting orders (new ones show late)
 ORDERS_WS_PING_EVERY, ORDERS_WS_RENEW_EVERY = 20.0, 8 * 60.0   # Lighter drops a silent socket; auth tokens live 10 min
 ORDERS_WS_FRESH_S = 60.0              # no frame for this long -> websocket treated as down (REST cadence again)
+BOOK_WS_STALE_S = 20.0                # order-book websocket silent this long -> reconnect it
+BOOK_REST_CACHE_S = 2.0               # backup REST top-of-book read at most this often while the socket is quiet
 TICK_NATIVE, TICK_WATCH = 1.0, 0.25
 PUBLISH_EVERY = 3.0                   # panel readout write, seconds
 MISMATCH_GRACE_S = 8.0                # a fill can take a few seconds to show; wait before "fixing" a mismatch
@@ -109,6 +111,7 @@ class LighterExchange:
         self.book = {"bids": [], "asks": []}
         self.book_at = 0.0
         self.on_orders_event = None           # set by main(): called on every account_orders update (fill, cancel, trigger)
+        self._rest_book, self._rest_book_at = (None, None), 0.0
         self.orders_ws_at = 0.0               # last frame from the orders websocket
 
     def orders_ws_live(self):
@@ -262,6 +265,47 @@ class LighterExchange:
     def on_order_book(self, market_id, state):
         if str(market_id) == str(MARKET_ID):
             self.book, self.book_at = state, time.time()
+
+    async def rest_bid_ask(self):
+        """Backup price when the order-book websocket is quiet: one public REST read of the top of the book, cached
+        BOOK_REST_CACHE_S (2026-11-04: LIT's book socket died silently and the trail never armed at +2.5%)."""
+        if time.time() - self._rest_book_at < BOOK_REST_CACHE_S:
+            return self._rest_book
+        url = f"{BASE_URL}/api/v1/orderBookOrders?market_id={MARKET_ID}&limit=1"
+        async with aiohttp.ClientSession() as s:
+            async with s.get(url, timeout=aiohttp.ClientTimeout(total=REST_TIMEOUT)) as r:
+                d = await r.json(content_type=None)
+        b, a = d.get("bids") or [], d.get("asks") or []
+        self._rest_book = (float(b[0]["price"]), float(a[0]["price"])) if b and a else (None, None)
+        self._rest_book_at = time.time()
+        return self._rest_book
+
+    async def run_book_ws_forever(self, log):
+        """Keeps the order-book websocket alive: a new connection when the old one ends OR goes quiet for
+        BOOK_WS_STALE_S (the SDK's run_async can hang without raising -- that is what happened)."""
+        import lighter
+        failures = 0
+        while True:
+            ws = lighter.WsClient(order_book_ids=[MARKET_ID], account_ids=[], on_order_book_update=self.on_order_book,
+                                  on_account_update=lambda *a: None)
+            started = time.time()
+            task = asyncio.create_task(ws.run_async())
+            reason = None
+            while reason is None:
+                await asyncio.sleep(2.0)
+                if task.done():
+                    reason = f"ended: {str(task.exception())[:150] if not task.cancelled() and task.exception() else 'closed'}"
+                elif time.time() - max(self.book_at, started) > BOOK_WS_STALE_S:
+                    reason = f"quiet {time.time() - max(self.book_at, started):.0f}s"
+            if not task.done():
+                task.cancel()
+                try:
+                    await task
+                except BaseException:
+                    pass
+            failures = failures + 1 if time.time() - started < 60 else 1
+            await log("book_ws_reconnect", {"reason": reason, "failures": failures})
+            await asyncio.sleep(min(30.0, 1.0 * failures))
 
     def best_bid_ask(self, max_age=5.0):
         if time.time() - self.book_at > max_age:
@@ -425,6 +469,18 @@ class FlipBot:
     def _reads_paused(self):
         return time.time() < self.blocked_until
 
+    async def _bid_ask(self):
+        """Live top of the book: the websocket, or (if it's quiet) one cached REST read. (None, None) only if both fail."""
+        bid, ask = self.ex.best_bid_ask()
+        if bid is not None or not hasattr(self.ex, "rest_bid_ask") or self._reads_paused():
+            return bid, ask
+        try:
+            return await self.ex.rest_bid_ask()
+        except Exception as e:
+            if not await self._blocked(e, "book"):
+                await self.db.log("book_read_failed", {"error": str(e)[:200]})
+            return None, None
+
     def _sizing_equity(self, equity):
         """What the ladder is sized from: the whole account (compounding) or the fixed base, whichever is smaller."""
         return min(equity, self.fixed_base) if self.fixed_base else equity
@@ -547,7 +603,7 @@ class FlipBot:
         """Panel readout (throttled): price, range, signal, position, open P&L, equity, heartbeat."""
         if not force and time.time() - self.published_at < PUBLISH_EVERY:
             return
-        bid, ask = self.ex.best_bid_ask()
+        bid, ask = await self._bid_ask()
         price = ((bid + ask) / 2) if bid and ask else (self.candles[-1]["c"] if self.candles else None)
         pos_r, hi, lo = F.range_info(self.candles, self.p.window) if self.candles else (None, None, None)
         await self.db.update_state({"live_price": price, "live_range_pos": pos_r, "live_range_hi": hi, "live_range_lo": lo,
@@ -628,7 +684,7 @@ class FlipBot:
         """Trail after target. Not armed: arm when the exit-side price reaches the target -> remove the flip, rest a
         reduce-only stop at the target. Armed: raise the stop behind the peak. If price is already past the floor when
         the stop would go in (or the stop is refused), close at market at once -- the win is kept. True = acted."""
-        bid, ask = self.ex.best_bid_ask()
+        bid, ask = await self._bid_ask()
         if bid is None:
             return False
         pos, long_ = self.pos, self.pos.side == F.LONG
@@ -667,7 +723,7 @@ class FlipBot:
         p, pos = self.p, self.pos
         if pos.level + 1 < p.lock_from_step:
             return False
-        bid, ask = self.ex.best_bid_ask()
+        bid, ask = await self._bid_ask()
         if bid is None or not self.seq:
             return False
         long_ = pos.side == F.LONG
@@ -725,7 +781,7 @@ class FlipBot:
         sig = F.range_signal(self.candles, self.p.window, self.p.band) if self.candles else 0
         if sig == 0 or not self.candles:
             return
-        bid, ask = self.ex.best_bid_ask()
+        bid, ask = await self._bid_ask()
         ref = (ask if sig == F.LONG else bid) or self.candles[-1]["c"]
         stp_tp = self._stepped_tp(self._sizing_equity(acct["equity"]), acct["equity"])
         if stp_tp is not None:
@@ -772,7 +828,7 @@ class FlipBot:
     async def _sequence_over(self, acct):
         old = self.pos
         tgt, stp = F.target_price(old, self.p), F.stop_price(old, self.p)
-        bid, ask = self.ex.best_bid_ask()
+        bid, ask = await self._bid_ask()
         px = ((bid if old.side == F.LONG else ask) or (self.candles[-1]["c"] if self.candles else old.entry))
         trailed = self.trail_floor is not None
         locked = self.lock_floor is not None and not trailed and abs(px - self.lock_floor) < abs(px - tgt)
@@ -828,7 +884,7 @@ class FlipBot:
             await self._place_orders(self.pos)
 
     async def _watch_trigger(self):
-        bid, ask = self.ex.best_bid_ask()
+        bid, ask = await self._bid_ask()
         if bid is None:
             return False
         stp = F.stop_price(self.pos, self.p)
@@ -849,7 +905,7 @@ class FlipBot:
     async def _flatten(self, acct):
         await self._cancel_verified("flatten")
         if abs(acct["pos"]) >= 0.005:
-            bid, ask = self.ex.best_bid_ask()
+            bid, ask = await self._bid_ask()
             is_ask = acct["pos"] > 0
             ref = (bid if is_ask else ask) or (self.candles[-1]["c"] if self.candles else acct["entry"] or 0)
             err = await self.ex.market(is_ask, abs(acct["pos"]), ref, reduce_only=True)
@@ -887,9 +943,7 @@ async def main():
     owner = f"{os.environ.get('RENDER_INSTANCE_ID', 'local')}:{COIN.lower()}-flip"
     bot = FlipBot(ex, db, owner=owner)
     await db.log("started", {"coin": COIN, "market": MARKET_ID, "params": PARAMS.__dict__})
-    ws = lighter.WsClient(order_book_ids=[MARKET_ID], account_ids=[], on_order_book_update=ex.on_order_book,
-                          on_account_update=lambda *a: None)
-    asyncio.create_task(ws.run_async())
+    asyncio.create_task(ex.run_book_ws_forever(db.log))     # supervised (reconnects when it ends or goes quiet)
     ex.on_orders_event = bot.wake
     asyncio.create_task(ex.run_orders_ws_forever(db.log))
     errors = 0
