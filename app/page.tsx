@@ -1519,123 +1519,69 @@ function LitFlipPanel({ cfg = LIT_FLIP, hideWhenIdle = false }: { cfg?: FlipCfg;
         );
       })()}
       {(() => {
-        // Settings card: what the NEXT sequence uses; a change never touches the open sequence.
+        // Settings card, plain-words version (owner 2026-11-04: "I can't understand anything in these panels").
+        // Every option = one sentence with its numbers inside; switches save at once; numbers need "Save changes".
+        // All of it applies from the NEXT sequence; an open sequence keeps its own settings.
         const f = (k: string, v: number) => (edit && edit[k] !== undefined ? edit[k] : String(v));
         const num = (k: string, v: number) => { const x = Number(f(k, v)); return Number.isFinite(x) ? x : v; };
-        const pv = { tp: num("tpPct", nextP.tpPct), sl: num("slPct", nextP.slPct), first: num("firstPct", nextP.firstPct), mult: num("mult", nextP.mult), cap: num("levCap", nextP.levCap) };
-        // Compounding: fixed_base_usd > 0 = size from that amount (never more than the account); 0 = whole account.
-        const savedBase = Number((st.live_params ?? st.override_params ?? {}).fixed_base_usd ?? 0);
-        const baseIn = edit && edit.fixedBaseUsd !== undefined ? Number(edit.fixedBaseUsd) || 0 : savedBase;
-        const compounding = !(baseIn > 0);
-        const sizeEq = compounding ? equity : Math.min(equity, baseIn);
-        const firstUsd = sizeEq * pv.first / 100;
-        const steps: number[] = []; for (let x = firstUsd; x <= pv.cap * sizeEq + 1e-9 && steps.length < 60; x *= pv.mult) steps.push(x);
-        const bust = steps.reduce((a, x) => a + x * pv.sl / 100, 0);
-        const changed = edit != null && Object.keys(edit).length > 0;
         const ov: any = st.override_params ?? {};
-        const stepsOn: any = (st.live_params ?? {}).steps;
-        const stepInfo: any = (st.live_params ?? {}).step_info;
-        const fields: [string, string, number, string][] = [["tpPct", stepsOn ? "Target % (not used: steps ON)" : "Target %", nextP.tpPct, "0.01"], ["slPct", "Flip at −%", nextP.slPct, "0.01"],
-          ["firstPct", "First trade %", nextP.firstPct, "0.5"], ["mult", "× each flip", nextP.mult, "0.05"], ["levCap", "Cap × account", nextP.levCap, "0.1"]];
-        const stepFields: [string, string, number, string][] = [["stepN", "Steps (0 = off)", Number(ov.step_n ?? 0), "1"],
-          ["stepStart", "Start %", Number(ov.step_start ?? 1), "0.1"], ["stepInc", "+ per step %", Number(ov.step_inc ?? 0.5), "0.1"]];
-        const sN = num("stepN", Number(ov.step_n ?? 0)), sS = num("stepStart", Number(ov.step_start ?? 1)), sI = num("stepInc", Number(ov.step_inc ?? 0.5));
+        const lp: any = st.live_params ?? {};
+        const stepInfo: any = lp.step_info;
+        const pv = { tp: num("tpPct", nextP.tpPct), sl: num("slPct", nextP.slPct), first: num("firstPct", nextP.firstPct), mult: num("mult", nextP.mult), cap: num("levCap", nextP.levCap) };
+        const savedBase = Number(ov.fixed_base_usd ?? lp.fixed_base_usd ?? 0);
+        const compounding = !(savedBase > 0);
+        const sizeEq = compounding ? equity : Math.min(equity, num("fixedBaseUsd", savedBase));
+        const firstUsd = sizeEq * pv.first / 100;
+        const ladderUsd: number[] = []; for (let x = firstUsd; x <= pv.cap * sizeEq + 1e-9 && ladderUsd.length < 60; x *= pv.mult) ladderUsd.push(x);
+        const bust = ladderUsd.reduce((a, x) => a + x * pv.sl / 100, 0);
+        const changed = edit != null && Object.keys(edit).length > 0;
+        const stOn = Number(ov.step_n ?? 0) >= 2, trOn = Number(ov.trail_pct ?? 0) > 0, lkOn = Number(ov.lock_from_step ?? 0) > 0;
+        const sN = num("stepN", Number(ov.step_n ?? 3)), sS = num("stepStart", Number(ov.step_start ?? 1)), sI = num("stepInc", Number(ov.step_inc ?? 0.5));
+        const fmt = (x: number) => `${Number(x.toFixed(2))}%`;
+        const In = ({ k, v, step = "0.1", w = "w-14" }: { k: string; v: number; step?: string; w?: string }) => (
+          <input type="number" step={step} value={f(k, v)} onChange={(e) => setEdit({ ...(edit ?? {}), [k]: e.target.value })}
+            className={`${w} mx-1 bg-gray-900 border border-gray-600 rounded px-1 py-0.5 text-[13px] text-white tabular-nums text-center`} />);
+        const Switch = ({ on, onClick }: { on: boolean; onClick: () => void }) => (
+          <button onClick={onClick} disabled={busy != null}
+            className={`shrink-0 w-14 text-[11px] font-bold py-1 rounded-full ${on ? "bg-green-500 text-gray-900" : "bg-gray-700 text-gray-300"}`}>{on ? "ON" : "OFF"}</button>);
+        const Row = ({ on, onToggle, title, children }: { on?: boolean; onToggle?: () => void; title: string; children: React.ReactNode }) => (
+          <div className="flex items-start gap-2 py-1.5 border-t border-gray-700/60">
+            {onToggle ? Switch({ on: !!on, onClick: onToggle }) : <span className="shrink-0 w-14" />}
+            <div className={`text-[13px] leading-6 ${onToggle && !on ? "text-gray-500" : "text-gray-200"}`}><b className="text-white">{title}.</b> {children}</div>
+          </div>);
         return (
-          <div className="bg-gray-800/60 rounded-lg p-2">
-            <p className="text-gray-500 text-[10px] uppercase mb-1">Settings · next sequence{side && (FLIP_P.tpPct !== nextP.tpPct || FLIP_P.slPct !== nextP.slPct || FLIP_P.firstPct !== nextP.firstPct || FLIP_P.mult !== nextP.mult || FLIP_P.levCap !== nextP.levCap) ? " (open trade still on its old settings)" : ""}</p>
-            <div className="grid grid-cols-3 sm:grid-cols-5 gap-2">
-              {fields.map(([k, label, v, step]) => (
-                <label key={k} className="text-[10px] text-gray-400">{label}
-                  <input type="number" step={step} value={f(k, v)} onChange={(e) => setEdit({ ...(edit ?? {}), [k]: e.target.value })}
-                    className="w-full mt-0.5 bg-gray-900 border border-gray-700 rounded px-1.5 py-1 text-sm text-white tabular-nums" />
-                </label>
-              ))}
-            </div>
-            {(() => {
-              // Option toggles (owner 2026-11-04: each one an ON/OFF button like the profit lock, numbers shown when ON).
-              const trSaved = Number(ov.trail_pct ?? 0);
-              const trNow = num("trailPct", trSaved || 0.5);
-              const trOn = trSaved > 0;
-              const stOn = Number(ov.step_n ?? 0) >= 2;
-              const box = (k: string, label: string, v: number, step: string) => (
-                <label key={k} className="text-[10px] text-gray-400">{label}
-                  <input type="number" step={step} value={f(k, v)} onChange={(e) => setEdit({ ...(edit ?? {}), [k]: e.target.value })}
-                    className="w-full mt-0.5 bg-gray-900 border border-gray-700 rounded px-1.5 py-1 text-sm text-white tabular-nums" />
-                </label>);
-              const btn = (on: boolean, label: string, onClick: () => void) => (
-                <button onClick={onClick} disabled={busy != null} className={`text-[11px] font-bold px-2.5 py-1 rounded min-w-[11rem] text-left ${on ? "bg-green-500/20 text-green-400" : "bg-gray-700 text-gray-300"}`}>{on ? "● " : "○ "}{label} {on ? "ON" : "OFF"}</button>);
-              return (
-                <>
-                  <p className="text-gray-500 text-[10px] uppercase mt-2">Options · one click switches + saves · applies from the next sequence</p>
-                  <div className="mt-1">
-                    <div className="flex items-center gap-2">
-                      {btn(trOn, "Trail after target", () => toggleSetting({ trailPct: trOn ? 0 : (trNow > 0 ? trNow : 0.5) }, "Trail after target"))}
-                      <span className="text-[11px] text-gray-500">{trOn ? `at the target: lock it, then follow the price up ${trNow}% behind` : "closes at the target"}</span>
-                    </div>
-                    {trOn && <div className="grid grid-cols-4 gap-2 mt-1">{box("trailPct", "Trail % (edit + Save)", trSaved, "0.05")}</div>}
-                  </div>
-                  <div className="mt-2">
-                    <div className="flex items-center gap-2">
-                      {btn(stOn, "Stepped target", () => toggleSetting({ stepN: stOn ? 0 : (sN >= 2 ? sN : 3), stepStart: sS || 1, stepInc: sI || 0.5 }, "Stepped target"))}
-                      <span className="text-[11px] text-gray-500">{stOn
-                        ? <>targets {Array.from({ length: Math.max(2, sN) }, (_, i) => `${(sS + sI * i).toFixed(2).replace(/\.?0+$/, "")}%`).join(" → ")}, one step up per bust the profit covers
-                          {stepInfo && stepsOn ? <span className="text-yellow-300"> · now step {stepInfo.level} of {stepInfo.of} ({stepInfo.tp}%, covers {stepInfo.busts_covered} busts)</span> : null}</>
-                        : "every sequence uses the Target % above"}</span>
-                    </div>
-                    {stOn && <div className="grid grid-cols-4 gap-2 mt-1">{stepFields.filter(([k]) => k !== "stepN").map(([k, label, v, step]) => box(k, label + " (edit + Save)", v, step))}{box("stepN", "Steps", Number(ov.step_n ?? 3), "1")}</div>}
-                  </div>
-                </>
-              );
-            })()}
-            {(() => {
-              // Deep-step profit lock (owner 2026-11-04): toggle + its three numbers. Off = lock_from_step 0.
-              const lp: any = st.live_params ?? {};
-              const fromSaved = Number(ov.lock_from_step ?? lp.lock_from_step ?? 0);
-              const fromNow = edit && edit.lockFromStep !== undefined ? Number(edit.lockFromStep) || 0 : fromSaved;
-              const on = fromSaved > 0;
-              const lf: [string, string, number, string][] = [["lockFromStep", "From step", fromNow || 10, "1"],
-                ["lockProfitPct", "Lock +% of account", Number(ov.lock_profit_pct ?? 0.25), "0.05"],
-                ["lockArmPct", "Arm % past it", Number(ov.lock_arm_pct ?? 0.5), "0.05"],
-                ["lockTrailPct", "Trail % (0 = fixed)", Number(ov.lock_trail_pct ?? 0), "0.05"]];
-              return (
-                <div className="mt-2">
-                  <div className="flex items-center gap-2">
-                    <button onClick={() => toggleSetting({ lockFromStep: on ? 0 : 10 }, "Deep-step profit lock")} disabled={busy != null}
-                      className={`text-[11px] font-bold px-2.5 py-1 rounded min-w-[11rem] text-left ${on ? "bg-green-500/20 text-green-400" : "bg-gray-700 text-gray-300"}`}>
-                      {on ? "● " : "○ "}Deep-step profit lock {on ? "ON" : "OFF"}</button>
-                    <span className="text-[11px] text-gray-500">{on ? `from step ${fromSaved}: once the big trade pays back the ladder + the lock, a stop locks that profit; the target stays` : "deep steps wait for the full target"}</span>
-                  </div>
-                  {on && (
-                    <div className="grid grid-cols-4 gap-2 mt-1">
-                      {lf.map(([k, label, v, step]) => (
-                        <label key={k} className="text-[10px] text-gray-400">{label}
-                          <input type="number" step={step} value={f(k, v)} onChange={(e) => setEdit({ ...(edit ?? {}), [k]: e.target.value })}
-                            className="w-full mt-0.5 bg-gray-900 border border-gray-700 rounded px-1.5 py-1 text-sm text-white tabular-nums" />
-                        </label>
-                      ))}
-                    </div>
-                  )}
-                </div>
-              );
-            })()}
-            <div className="flex flex-wrap items-center gap-2 mt-1.5 text-[11px]">
-              <button onClick={() => setEdit({ ...(edit ?? {}), fixedBaseUsd: compounding ? String(Math.max(200, Math.floor(equity))) : "0" })}
-                className={`font-bold px-2.5 py-1 rounded ${compounding ? "bg-green-500/20 text-green-400" : "bg-amber-500/20 text-amber-300"}`}>
-                Compounding {compounding ? "ON" : "OFF"}</button>
-              {compounding ? <span className="text-gray-500">trades grow with the whole account</span> : (
-                <label className="text-gray-400 flex items-center gap-1">size from $
-                  <input type="number" step="100" value={edit?.fixedBaseUsd ?? String(savedBase)} onChange={(e) => setEdit({ ...(edit ?? {}), fixedBaseUsd: e.target.value })}
-                    className="w-24 bg-gray-900 border border-gray-700 rounded px-1.5 py-0.5 text-sm text-white tabular-nums" />
-                  <span className="text-gray-500">· profit above it stays idle (free to move)</span>
-                </label>)}
-            </div>
-            <p className={`text-[11px] mt-1 ${firstUsd < 10 ? "text-red-400" : "text-gray-400"}`}>
-              First trade {usd(firstUsd)}{firstUsd < 10 ? " — under Lighter's $10 minimum, it won't start" : ""} · {steps.length} steps · biggest {usd(steps[steps.length - 1] ?? 0, 0)} · full bust ≈ {usd(bust)} ({equity ? (bust / equity * 100).toFixed(1) : 0}%)
-            </p>
-            <div className="flex gap-2 mt-1.5">
-              <button onClick={() => saveSettings()} disabled={!changed || busy != null} className={`text-xs font-bold px-3 py-1 rounded ${changed ? "bg-yellow-400/20 text-yellow-300" : "bg-gray-700 text-gray-500"}`}>Save</button>
-              {changed && <button onClick={() => setEdit(null)} className="text-xs px-3 py-1 rounded bg-gray-700 text-gray-300">Undo</button>}
-              {st.override_params && <button onClick={() => saveSettings(true)} disabled={busy != null} className="text-xs px-3 py-1 rounded bg-gray-700 text-gray-300">Back to default ({cfg.P.tpPct}% / −{cfg.P.slPct}% / {cfg.P.firstPct}% ×{cfg.P.mult} cap {cfg.P.levCap}x)</button>}
+          <div className="bg-gray-800/60 rounded-lg p-3">
+            <p className="text-gray-400 text-[11px] uppercase tracking-wide">Settings <span className="normal-case text-gray-500">— changes start with the next sequence{side ? " (the open trade keeps its own settings until it ends)" : ""}</span></p>
+
+            <p className="text-gray-500 text-[10px] uppercase mt-2">Basic rules</p>
+            {Row({ title: "Take profit", children: (<>at {In({ k: "tpPct", v: (nextP.tpPct), step: "0.1" })}% {stOn && <span className="text-gray-500">(not used while Stepped target is ON)</span>}</>) })}
+            {Row({ title: "Flip", children: (<>to the other side when the price goes {In({ k: "slPct", v: (nextP.slPct), step: "0.05" })}% against the trade</>) })}
+            {Row({ title: "Size", children: (<>first trade {In({ k: "firstPct", v: (nextP.firstPct), step: "0.5" })}% of the account, ×{In({ k: "mult", v: (nextP.mult), step: "0.05" })} bigger each flip, never more than {In({ k: "levCap", v: (nextP.levCap), step: "0.5" })}× the account
+              <div className={`text-[12px] ${firstUsd < 10 ? "text-red-400" : "text-gray-400"}`}>= first trade {usd(firstUsd)}{firstUsd < 10 ? " (under Lighter's $10 minimum — it won't start)" : ""} · {ladderUsd.length} steps · biggest {usd(ladderUsd[ladderUsd.length - 1] ?? 0, 0)} · a full bust costs ≈ {usd(bust)} ({equity ? (bust / equity * 100).toFixed(1) : 0}%)</div>
+            </>) })}
+
+            <p className="text-gray-500 text-[10px] uppercase mt-3">Protections <span className="normal-case">· the switch saves at once</span></p>
+            {Row({ on: stOn, onToggle: () => toggleSetting({ stepN: stOn ? 0 : (sN >= 2 ? sN : 3), stepStart: sS || 1, stepInc: sI || 0.5 }, "Stepped target"), title: "Stepped target", children: (<>
+              take profit at {In({ k: "stepStart", v: Number(ov.step_start ?? 1) })}%, then {In({ k: "stepInc", v: Number(ov.step_inc ?? 0.5) })}% more for each bust the profit can cover, {In({ k: "stepN", v: Number(ov.step_n ?? 3), step: "1", w: "w-10" })} steps
+              <div className="text-[12px] text-gray-400">= {Array.from({ length: Math.max(2, Math.min(10, sN)) }, (_, i) => fmt(sS + sI * i)).join(" → ")}
+                {stOn && stepInfo ? <span className="text-yellow-300"> · now: step {stepInfo.level} ({stepInfo.tp}%)</span> : null}</div>
+            </>) })}
+            {Row({ on: trOn, onToggle: () => toggleSetting({ trailPct: trOn ? 0 : (num("trailPct", 0.5) > 0 ? num("trailPct", 0.5) : 0.5) }, "Ride the winner"), title: "Ride the winner", children: (<>
+              when the profit target is reached, don't sell yet: the win is locked, and it sells only when the price falls {In({ k: "trailPct", v: Number(ov.trail_pct ?? 0) || 0.5, step: "0.05" })}% from its best
+            </>) })}
+            {Row({ on: lkOn, onToggle: () => toggleSetting({ lockFromStep: lkOn ? 0 : 10 }, "Deep-step protection"), title: "Deep-step protection", children: (<>
+              from step {In({ k: "lockFromStep", v: Number(ov.lock_from_step ?? 0) || 10, step: "1", w: "w-10" })} on: once the big trade has won back the whole ladder plus {In({ k: "lockProfitPct", v: Number(ov.lock_profit_pct ?? 0.25), step: "0.05" })}% of the account (and is {In({ k: "lockArmPct", v: Number(ov.lock_arm_pct ?? 0.5), step: "0.1" })}% past that), lock that profit — the full target can still fill
+            </>) })}
+
+            <p className="text-gray-500 text-[10px] uppercase mt-3">Money</p>
+            {Row({ on: compounding, onToggle: () => toggleSetting({ fixedBaseUsd: compounding ? Math.max(200, Math.floor(equity)) : 0 }, "Compounding"), title: "Compounding", children: (<>
+              {compounding ? "trades grow with the whole account" : <>trade as if the account were ${In({ k: "fixedBaseUsd", v: savedBase, step: "100", w: "w-20" })}; profit above it stays free to move</>}
+            </>) })}
+
+            <div className="flex flex-wrap gap-2 mt-2">
+              <button onClick={() => saveSettings()} disabled={!changed || busy != null} className={`text-xs font-bold px-3 py-1.5 rounded ${changed ? "bg-yellow-400 text-gray-900" : "bg-gray-700 text-gray-500"}`}>{changed ? "Save changes" : "No changes"}</button>
+              {changed && <button onClick={() => setEdit(null)} className="text-xs px-3 py-1.5 rounded bg-gray-700 text-gray-300">Undo</button>}
+              {st.override_params && <button onClick={() => { if (confirm("Reset ALL settings to the default (protections OFF)?")) saveSettings(true); }} disabled={busy != null} className="text-xs px-3 py-1.5 rounded bg-gray-800 text-gray-500 ml-auto">Reset all to default</button>}
             </div>
           </div>
         );
