@@ -59,6 +59,15 @@ MISMATCH_GRACE_S = 8.0                # a fill can take a few seconds to show; w
 WATCH_REFIRE_S = 5.0                  # watch mode: never fire again within this long of the last shot
 LOCK_STALE_AFTER, LOCK_REFRESH_EVERY = 30.0, 5.0
 CANCEL_TRIES, CANCEL_SETTLE_S = 3, 0.5
+# Lighter's firewall (CloudFront WAF, HTTP 405) / rate limiter (429): on a refusal, pause ALL REST reads (orders keep resting on
+# the exchange) and back off 20 s, doubling up to 120 s while it continues (2026-11-04 12:12: both bots retried every second
+# for 34 s, which is exactly what keeps a WAF block going; the LIT grid, which backs off, was not affected).
+BLOCK_BACKOFF_S, BLOCK_BACKOFF_MAX_S = 20.0, 120.0
+
+
+def is_blocked(e):
+    m = str(e)
+    return "(405)" in m or "405," in m or "Not Allowed" in m or "(429)" in m or "429," in m or "Too Many Requests" in m
 # Panel-editable settings (owner 2026-11-04): override_params JSON on the state row. Each change applies from the NEXT
 # sequence -- an open sequence keeps the params it started with (seq_params), so a running ladder never changes halfway.
 EDITABLE = {"tp_pct": (0.2, 10.0), "sl_pct": (0.1, 5.0), "first_pct": (0.5, 50.0), "mult": (1.05, 3.0), "lev_cap": (0.2, 5.0)}    # verified cancel: retries, and wait before re-counting resting orders
@@ -318,6 +327,8 @@ class FlipBot:
         self.fired_at = 0.0
         self.published_at = 0.0
         self.leverage_done = False
+        self.blocked_until = 0.0              # REST reads paused until this time (WAF / rate limit)
+        self.block_wait = BLOCK_BACKOFF_S
         self.cancel_pending = False       # a sequence ended but Lighter still showed resting orders -> no new sequence yet
         self.woken = asyncio.Event()
 
@@ -376,6 +387,20 @@ class FlipBot:
         self.fixed_base = fb if 0 < fb <= 1e7 else 0.0
         p = replace(self.base, **ch)
         return p if p.tp_pct > p.sl_pct else self.base
+
+    async def _blocked(self, e, what):
+        """True if e is a WAF/rate-limit refusal: start (or extend) the read pause and log it once per pause."""
+        if not is_blocked(e):
+            return False
+        first = time.time() >= self.blocked_until
+        self.blocked_until = time.time() + self.block_wait
+        if first:
+            await self.db.log("lighter_blocked_backoff", {"what": what, "pause_s": self.block_wait, "error": str(e)[:120]})
+        self.block_wait = min(BLOCK_BACKOFF_MAX_S, self.block_wait * 2)
+        return True
+
+    def _reads_paused(self):
+        return time.time() < self.blocked_until
 
     def _sizing_equity(self, equity):
         """What the ladder is sized from: the whole account (compounding) or the fixed base, whichever is smaller."""
@@ -446,11 +471,13 @@ class FlipBot:
         return out
 
     async def _read_account(self, force=False):
-        if force or time.time() - self.acct_at >= self._account_every():
+        if (force or time.time() - self.acct_at >= self._account_every()) and not self._reads_paused():
             try:
                 self.acct = await self.ex.account(); self.acct_at = time.time()
+                self.block_wait = BLOCK_BACKOFF_S          # a clean read resets the backoff
             except Exception as e:
-                await self.db.log("account_read_failed", {"error": str(e)[:200]})
+                if not await self._blocked(e, "account"):
+                    await self.db.log("account_read_failed", {"error": str(e)[:200]})
         return self.acct
 
     async def _lock(self):
@@ -464,11 +491,12 @@ class FlipBot:
 
     async def _refresh_market(self):
         """LIT candles every CANDLES_EVERY (public data, also while OFF) so the panel always shows the live signal."""
-        if time.time() - self.candles_at >= CANDLES_EVERY:
+        if time.time() - self.candles_at >= CANDLES_EVERY and not self._reads_paused():
             try:
                 self.candles = await self.ex.candles(self.p.window + 5); self.candles_at = time.time()
             except Exception as e:
-                await self.db.log("candles_failed", {"error": str(e)[:200]})
+                if not await self._blocked(e, "candles"):
+                    await self.db.log("candles_failed", {"error": str(e)[:200]})
 
     async def _publish(self, acct, force=False):
         """Panel readout (throttled): price, range, signal, position, open P&L, equity, heartbeat."""
@@ -619,10 +647,14 @@ class FlipBot:
         await self._place_orders(self.pos); await self._save()
 
     async def _check_orders(self):
+        if self._reads_paused():
+            return
         try:
             n = await self.ex.open_order_count()
         except Exception as e:
-            await self.db.log("orders_read_failed", {"error": str(e)[:200]}); return
+            if not await self._blocked(e, "orders"):
+                await self.db.log("orders_read_failed", {"error": str(e)[:200]})
+            return
         want = 2 if self.flip_mode == "native" else 1
         self.orders_checked_at = time.time()
         if n < want:

@@ -1344,7 +1344,9 @@ const FLIP_EVENT_LABEL: Record<string, string> = {
   flipped: "FLIPPED", sequence_over: "sequence finished", flip_mode_watch: "switched to watch mode", watch_fired: "watch mode fired the flip",
   position_adopted: "adopted an open position", orders_missing_replaced: "orders missing -> replaced", flatten_sent: "flatten sent",
   flattened: "flattened + OFF", too_small_to_start: "account too small to start", tick_error: "ERROR", account_read_failed: "account read failed",
-  candles_failed: "price data failed", cancel_failed: "cancel failed", size_mismatch_adopted: "size mismatch fixed", start_no_fill_seen: "entry not filled",
+  candles_failed: "price data failed", cancel_failed: "cancel failed",
+  lighter_blocked_backoff: "Lighter busy (firewall) -> pausing reads, orders stay on the exchange", cancel_unverified: "cancel not confirmed yet -> retrying",
+  orders_extra_replaced: "leftover order found -> book re-placed", size_mismatch_adopted: "size mismatch fixed", start_no_fill_seen: "entry not filled",
 };
 function LitFlipPanel({ cfg = LIT_FLIP, hideWhenIdle = false }: { cfg?: FlipCfg; hideWhenIdle?: boolean }) {
   const [edit, setEdit] = useState<Record<string, string> | null>(null);

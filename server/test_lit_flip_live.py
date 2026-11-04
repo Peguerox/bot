@@ -293,13 +293,32 @@ async def t_compounding_off():
     check("fixed amount above the real account -> never sizes beyond the real $150 (too small, no trade)", ex3.pos == 0)
 
 
+async def t_waf_block_backs_off():
+    print("\n[Lighter firewall 405: reads pause and back off (logged once), resume after; orders untouched]")
+    ex, db = FakeEx(), FakeDB(); bot = L.FlipBot(ex, db)
+    await _ticks(bot, 1)
+    orders_before = list(ex.orders)
+    real_acct = ex.account; calls = {"n": 0}
+    async def blocked(*a, **k):
+        calls["n"] += 1; raise RuntimeError("(405)\nReason: Not Allowed")
+    ex.account = blocked
+    await _ticks(bot, 5)
+    check("one 405 -> reads paused: 1 request, not 5", calls["n"] == 1, calls["n"])
+    check("logged once as lighter_blocked_backoff, no flood of read errors",
+          sum(a == "lighter_blocked_backoff" for a, _ in db.logs) == 1 and not any(a == "account_read_failed" for a, _ in db.logs))
+    check("resting orders untouched during the pause", ex.orders == orders_before)
+    ex.account = real_acct; bot.blocked_until = 0.0
+    await _ticks(bot, 1)
+    check("after the pause: reads work again, backoff reset", bot.block_wait == L.BLOCK_BACKOFF_S and bot.pos is not None)
+
+
 async def _nosleep(*a, **k):
     return None
 
 
 async def main():
     for t in (t_start_flip_win, t_watch_mode_fallback, t_restart_keeps_the_sequence, t_off_keeps_position_flatten_closes,
-              t_bust_at_cap, t_unknown_position_is_protected, t_ws_wake_and_rejected_flip, t_stale_flip_never_left_behind, t_panel_settings_next_sequence_only, t_failed_placement_rechecked_fast, t_compounding_off):
+              t_bust_at_cap, t_unknown_position_is_protected, t_ws_wake_and_rejected_flip, t_stale_flip_never_left_behind, t_panel_settings_next_sequence_only, t_failed_placement_rechecked_fast, t_compounding_off, t_waf_block_backs_off):
         await t()
     print(f"\n==== {len(PASS)} passed, {len(FAIL)} failed ====")
 
