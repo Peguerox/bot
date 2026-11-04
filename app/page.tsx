@@ -1385,6 +1385,15 @@ function LitFlipPanel({ cfg = LIT_FLIP, hideWhenIdle = false }: { cfg?: FlipCfg;
     ...(o.trail_pct != null && { trailPct: Number(o.trail_pct) }) } : cfg.P;
   const nextP = fromDb(st.live_params ?? st.override_params);
   const FLIP_P = st.seq_side != null ? fromDb(st.seq_params) : nextP;
+  async function toggleSetting(body: Record<string, any>, label: string) {
+    // One click = switched and saved at once (owner 2026-11-04: the buttons looked like they did nothing until Save).
+    const secret = litGridLiveAdminSecret(); if (!secret) return;
+    setBusy("settings");
+    const res = await fetch(`${cfg.api}/settings`, { method: "POST", headers: { "x-admin-secret": secret, "Content-Type": "application/json" }, body: JSON.stringify(body) });
+    if (!res.ok) { const b = await res.json().catch(() => ({})); alert(b.error ?? `${label}: failed.`); }
+    else setEdit((e) => { if (!e) return e; const n = { ...e }; for (const k of Object.keys(body)) delete n[k]; return Object.keys(n).length ? n : null; });
+    setBusy(null); load();
+  }
   async function saveSettings(reset = false) {
     const secret = litGridLiveAdminSecret(); if (!secret) return;
     setBusy("settings");
@@ -1526,7 +1535,7 @@ function LitFlipPanel({ cfg = LIT_FLIP, hideWhenIdle = false }: { cfg?: FlipCfg;
         const ov: any = st.override_params ?? {};
         const stepsOn: any = (st.live_params ?? {}).steps;
         const stepInfo: any = (st.live_params ?? {}).step_info;
-        const fields: [string, string, number, string][] = [["tpPct", stepsOn ? "Target % (steps on)" : "Target %", nextP.tpPct, "0.01"], ["slPct", "Flip at −%", nextP.slPct, "0.01"],
+        const fields: [string, string, number, string][] = [["tpPct", stepsOn ? "Target % (not used: steps ON)" : "Target %", nextP.tpPct, "0.01"], ["slPct", "Flip at −%", nextP.slPct, "0.01"],
           ["firstPct", "First trade %", nextP.firstPct, "0.5"], ["mult", "× each flip", nextP.mult, "0.05"], ["levCap", "Cap × account", nextP.levCap, "0.1"]];
         const stepFields: [string, string, number, string][] = [["stepN", "Steps (0 = off)", Number(ov.step_n ?? 0), "1"],
           ["stepStart", "Start %", Number(ov.step_start ?? 1), "0.1"], ["stepInc", "+ per step %", Number(ov.step_inc ?? 0.5), "0.1"]];
@@ -1544,34 +1553,36 @@ function LitFlipPanel({ cfg = LIT_FLIP, hideWhenIdle = false }: { cfg?: FlipCfg;
             </div>
             {(() => {
               // Option toggles (owner 2026-11-04: each one an ON/OFF button like the profit lock, numbers shown when ON).
-              const trNow = num("trailPct", nextP.trailPct ?? 0);
-              const trOn = trNow > 0;
-              const stOn = sN >= 2;
+              const trSaved = Number(ov.trail_pct ?? 0);
+              const trNow = num("trailPct", trSaved || 0.5);
+              const trOn = trSaved > 0;
+              const stOn = Number(ov.step_n ?? 0) >= 2;
               const box = (k: string, label: string, v: number, step: string) => (
                 <label key={k} className="text-[10px] text-gray-400">{label}
                   <input type="number" step={step} value={f(k, v)} onChange={(e) => setEdit({ ...(edit ?? {}), [k]: e.target.value })}
                     className="w-full mt-0.5 bg-gray-900 border border-gray-700 rounded px-1.5 py-1 text-sm text-white tabular-nums" />
                 </label>);
               const btn = (on: boolean, label: string, onClick: () => void) => (
-                <button onClick={onClick} className={`text-[11px] font-bold px-2.5 py-1 rounded ${on ? "bg-green-500/20 text-green-400" : "bg-gray-700 text-gray-300"}`}>{label} {on ? "ON" : "OFF"}</button>);
+                <button onClick={onClick} disabled={busy != null} className={`text-[11px] font-bold px-2.5 py-1 rounded min-w-[11rem] text-left ${on ? "bg-green-500/20 text-green-400" : "bg-gray-700 text-gray-300"}`}>{on ? "● " : "○ "}{label} {on ? "ON" : "OFF"}</button>);
               return (
                 <>
-                  <div className="mt-2">
+                  <p className="text-gray-500 text-[10px] uppercase mt-2">Options · one click switches + saves · applies from the next sequence</p>
+                  <div className="mt-1">
                     <div className="flex items-center gap-2">
-                      {btn(trOn, "Trail after target", () => setEdit({ ...(edit ?? {}), trailPct: trOn ? "0" : "0.5" }))}
+                      {btn(trOn, "Trail after target", () => toggleSetting({ trailPct: trOn ? 0 : (trNow > 0 ? trNow : 0.5) }, "Trail after target"))}
                       <span className="text-[11px] text-gray-500">{trOn ? `at the target: lock it, then follow the price up ${trNow}% behind` : "closes at the target"}</span>
                     </div>
-                    {trOn && <div className="grid grid-cols-4 gap-2 mt-1">{box("trailPct", "Trail %", nextP.trailPct || 0.5, "0.05")}</div>}
+                    {trOn && <div className="grid grid-cols-4 gap-2 mt-1">{box("trailPct", "Trail % (edit + Save)", trSaved, "0.05")}</div>}
                   </div>
                   <div className="mt-2">
                     <div className="flex items-center gap-2">
-                      {btn(stOn, "Stepped target", () => setEdit({ ...(edit ?? {}), stepN: stOn ? "0" : "3", stepStart: String(sS || 1), stepInc: String(sI || 0.5) }))}
+                      {btn(stOn, "Stepped target", () => toggleSetting({ stepN: stOn ? 0 : (sN >= 2 ? sN : 3), stepStart: sS || 1, stepInc: sI || 0.5 }, "Stepped target"))}
                       <span className="text-[11px] text-gray-500">{stOn
-                        ? <>targets {Array.from({ length: sN }, (_, i) => `${(sS + sI * i).toFixed(2).replace(/\.?0+$/, "")}%`).join(" → ")}, one step up per bust the profit covers
+                        ? <>targets {Array.from({ length: Math.max(2, sN) }, (_, i) => `${(sS + sI * i).toFixed(2).replace(/\.?0+$/, "")}%`).join(" → ")}, one step up per bust the profit covers
                           {stepInfo && stepsOn ? <span className="text-yellow-300"> · now step {stepInfo.level} of {stepInfo.of} ({stepInfo.tp}%, covers {stepInfo.busts_covered} busts)</span> : null}</>
                         : "every sequence uses the Target % above"}</span>
                     </div>
-                    {stOn && <div className="grid grid-cols-4 gap-2 mt-1">{stepFields.map(([k, label, v, step]) => box(k, label, v, step))}</div>}
+                    {stOn && <div className="grid grid-cols-4 gap-2 mt-1">{stepFields.filter(([k]) => k !== "stepN").map(([k, label, v, step]) => box(k, label + " (edit + Save)", v, step))}{box("stepN", "Steps", Number(ov.step_n ?? 3), "1")}</div>}
                   </div>
                 </>
               );
@@ -1581,7 +1592,7 @@ function LitFlipPanel({ cfg = LIT_FLIP, hideWhenIdle = false }: { cfg?: FlipCfg;
               const lp: any = st.live_params ?? {};
               const fromSaved = Number(ov.lock_from_step ?? lp.lock_from_step ?? 0);
               const fromNow = edit && edit.lockFromStep !== undefined ? Number(edit.lockFromStep) || 0 : fromSaved;
-              const on = fromNow > 0;
+              const on = fromSaved > 0;
               const lf: [string, string, number, string][] = [["lockFromStep", "From step", fromNow || 10, "1"],
                 ["lockProfitPct", "Lock +% of account", Number(ov.lock_profit_pct ?? 0.25), "0.05"],
                 ["lockArmPct", "Arm % past it", Number(ov.lock_arm_pct ?? 0.5), "0.05"],
@@ -1589,10 +1600,10 @@ function LitFlipPanel({ cfg = LIT_FLIP, hideWhenIdle = false }: { cfg?: FlipCfg;
               return (
                 <div className="mt-2">
                   <div className="flex items-center gap-2">
-                    <button onClick={() => setEdit({ ...(edit ?? {}), lockFromStep: on ? "0" : "10" })}
-                      className={`text-[11px] font-bold px-2.5 py-1 rounded ${on ? "bg-green-500/20 text-green-400" : "bg-gray-700 text-gray-300"}`}>
-                      Deep-step profit lock {on ? "ON" : "OFF"}</button>
-                    <span className="text-[11px] text-gray-500">{on ? `from step ${fromNow}: once the big trade pays back the ladder + the lock, a stop locks that profit; the target stays` : "deep steps wait for the full target"}</span>
+                    <button onClick={() => toggleSetting({ lockFromStep: on ? 0 : 10 }, "Deep-step profit lock")} disabled={busy != null}
+                      className={`text-[11px] font-bold px-2.5 py-1 rounded min-w-[11rem] text-left ${on ? "bg-green-500/20 text-green-400" : "bg-gray-700 text-gray-300"}`}>
+                      {on ? "● " : "○ "}Deep-step profit lock {on ? "ON" : "OFF"}</button>
+                    <span className="text-[11px] text-gray-500">{on ? `from step ${fromSaved}: once the big trade pays back the ladder + the lock, a stop locks that profit; the target stays` : "deep steps wait for the full target"}</span>
                   </div>
                   {on && (
                     <div className="grid grid-cols-4 gap-2 mt-1">
