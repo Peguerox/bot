@@ -182,32 +182,52 @@ class LighterExchange:
                 c = (await r.json()).get("c") or []
         return [{"t": x["t"], "h": float(x["h"]), "l": float(x["l"]), "c": float(x["c"])} for x in c]
 
+    async def _resync_nonce(self):
+        """Re-read the next nonce from Lighter. Needed after a deploy: the old instance (same API key) used nonces the new
+        one didn't know about -> "invalid nonce" (NEAR flip 2026-11-04 09:51 sat 31 s with no orders because of it)."""
+        nm = getattr(self.client, "nonce_manager", None)
+        for key in list(getattr(nm, "api_keys_list", []) or []) if nm else []:
+            try:
+                await nm.async_hard_refresh_nonce(key)
+            except Exception:
+                pass
+
+    async def _send(self, make):
+        """One signed transaction; on "invalid nonce" (returned or raised) resync and try exactly once more."""
+        for attempt in (1, 2):
+            try:
+                _o, _r, err = await asyncio.wait_for(make(), ORDER_TIMEOUT)
+            except Exception as e:
+                err = e
+                if "invalid nonce" not in str(e).lower():
+                    await self._resync_nonce()       # unknown outcome: the SDK's optimistic nonce may be off
+                    raise
+            if err and "invalid nonce" in str(err).lower() and attempt == 1:
+                await self._resync_nonce(); continue
+            return err
+
     async def market(self, is_ask, qty, ref_price, reduce_only=False):
         worst = ref_price * (1 - MARKET_BAND if is_ask else 1 + MARKET_BAND)
-        _o, _r, err = await asyncio.wait_for(self.client.create_market_order(
+        return await self._send(lambda: self.client.create_market_order(
             market_index=MARKET_ID, client_order_index=self._co_idx(), base_amount=qty_int(qty),
-            avg_execution_price=px_int(worst), is_ask=is_ask, reduce_only=reduce_only), ORDER_TIMEOUT)
-        return err
+            avg_execution_price=px_int(worst), is_ask=is_ask, reduce_only=reduce_only))
 
     async def limit(self, is_ask, qty, price, reduce_only=True):
         c = self.client
-        _o, _r, err = await asyncio.wait_for(c.create_order(
+        return await self._send(lambda: c.create_order(
             MARKET_ID, self._co_idx(), qty_int(qty), px_int(price), is_ask, c.ORDER_TYPE_LIMIT,
-            c.ORDER_TIME_IN_FORCE_GOOD_TILL_TIME, reduce_only=reduce_only, order_expiry=c.DEFAULT_28_DAY_ORDER_EXPIRY), ORDER_TIMEOUT)
-        return err
+            c.ORDER_TIME_IN_FORCE_GOOD_TILL_TIME, reduce_only=reduce_only, order_expiry=c.DEFAULT_28_DAY_ORDER_EXPIRY))
 
     async def stop(self, is_ask, qty, trigger, reduce_only):
         worst = trigger * (1 - STOP_BAND if is_ask else 1 + STOP_BAND)
-        _o, _r, err = await asyncio.wait_for(self.client.create_sl_order(
+        return await self._send(lambda: self.client.create_sl_order(
             market_index=MARKET_ID, client_order_index=self._co_idx(), base_amount=qty_int(qty),
-            trigger_price=px_int(trigger), price=px_int(worst), is_ask=is_ask, reduce_only=reduce_only), ORDER_TIMEOUT)
-        return err
+            trigger_price=px_int(trigger), price=px_int(worst), is_ask=is_ask, reduce_only=reduce_only))
 
     async def cancel_all(self):
         c = self.client
-        _o, _r, err = await asyncio.wait_for(c.cancel_all_orders(
-            time_in_force=c.CANCEL_ALL_TIF_IMMEDIATE, timestamp_ms=0, cancel_all_market_index=MARKET_ID), ORDER_TIMEOUT)
-        return err
+        return await self._send(lambda: c.cancel_all_orders(
+            time_in_force=c.CANCEL_ALL_TIF_IMMEDIATE, timestamp_ms=0, cancel_all_market_index=MARKET_ID))
 
     async def open_order_count(self):
         api = self.lighter.OrderApi(self.client.api_client)
@@ -296,6 +316,7 @@ class FlipBot:
         self.loaded = False
         self.fired_at = 0.0
         self.published_at = 0.0
+        self.leverage_done = False
         self.cancel_pending = False       # a sequence ended but Lighter still showed resting orders -> no new sequence yet
         self.woken = asyncio.Event()
 
@@ -303,7 +324,7 @@ class FlipBot:
         """An order event from the websocket: re-read the position on the very next tick and count the resting orders
         ORDERS_SETTLE_S later (a triggered-but-rejected flip leaves one order missing -> re-placed within seconds)."""
         self.acct_at = 0.0
-        self.orders_checked_at = min(self.orders_checked_at, time.time() - self._orders_every() + ORDERS_SETTLE_S)
+        self.orders_checked_at = min(self.orders_checked_at, time.time() - max(0.0, self._orders_every() - ORDERS_SETTLE_S))
         self.woken.set()
 
     def _ws_live(self):
@@ -391,18 +412,22 @@ class FlipBot:
             await self.db.log("cancel_failed", {"why": "replace", "error": str(err)[:200]})
         out = {}
         for o in F.resting_orders(pos, self.p):
-            if o.kind == "target":
-                out["target"] = await self.ex.limit(o.is_ask, qty_round(o.qty), o.price, reduce_only=True)
-            elif o.kind == "flip" and self.flip_mode == "native":
-                e = await self.ex.stop(o.is_ask, qty_round(o.qty), o.price, reduce_only=False)
-                if e:
-                    # Lighter refused the non-reduce-only stop -> from now on the bot fires the flip itself.
-                    self.flip_mode = "watch"
-                    await self.db.log("flip_mode_watch", {"reason": str(e)[:200]})
-                out["flip"] = e
-            elif o.kind == "stop":
-                out["stop"] = await self.ex.stop(o.is_ask, qty_round(o.qty), o.price, reduce_only=True)
-        self.orders_checked_at = time.time()
+            try:
+                if o.kind == "target":
+                    out["target"] = await self.ex.limit(o.is_ask, qty_round(o.qty), o.price, reduce_only=True)
+                elif o.kind == "flip" and self.flip_mode == "native":
+                    e = await self.ex.stop(o.is_ask, qty_round(o.qty), o.price, reduce_only=False)
+                    if e and "nonce" not in str(e).lower() and "429" not in str(e) and "timeout" not in str(e).lower():
+                        # Lighter refused the non-reduce-only stop itself -> from now on the bot fires the flip.
+                        self.flip_mode = "watch"
+                        await self.db.log("flip_mode_watch", {"reason": str(e)[:200]})
+                    out["flip"] = e
+                elif o.kind == "stop":
+                    out["stop"] = await self.ex.stop(o.is_ask, qty_round(o.qty), o.price, reduce_only=True)
+            except Exception as e:          # one failed order must never skip the other
+                out[o.kind] = e
+        # Any failure -> count the book again in ORDERS_SETTLE_S (missing ones re-placed), not after the slow safety net.
+        self.orders_checked_at = time.time() - (max(0.0, self._orders_every() - ORDERS_SETTLE_S) if any(out.values()) else 0)
         await self.db.log("orders_placed", {"side": pos.side, "qty": round(pos.qty, 2), "entry": pos.entry, "level": pos.level,
                                             "target": round(F.target_price(pos, self.p), 4), "stop": round(F.stop_price(pos, self.p), 4),
                                             "mode": self.flip_mode, "errors": {k: str(v)[:120] for k, v in out.items() if v}})
@@ -463,6 +488,11 @@ class FlipBot:
             self.p = self.p_next                # flat: the next sequence uses the current panel settings
         if not await self._lock():
             return
+        if not self.leverage_done and hasattr(self.ex, "set_leverage"):
+            # Only once we hold the lock: during a deploy the old instance is still trading with the same API key, and
+            # any signed request from the new one (this is one) desyncs the old one's nonces (2026-11-04 NEAR incident).
+            err = await self.ex.set_leverage(); self.leverage_done = True
+            await self.db.log("leverage_set", {"leverage": LEVERAGE, "error": str(err)[:200] if err else None})
         acct = await self._read_account()
         if acct is None:
             return
@@ -533,16 +563,18 @@ class FlipBot:
         old = self.pos
         nq = F.next_qty(old, self.p)
         fill = acct["entry"] or F.stop_price(old, self.p)
-        await self.db.trade({"seq_id": self.seq["id"] if self.seq else None, "level": old.level, "side": old.side, "qty": old.qty,
-                             "entry": old.entry, "exit_price": F.stop_price(old, self.p), "result": "flip",
-                             "pnl_usd": -old.qty * old.entry * self.p.sl_pct / 100})
         if nq is None:                          # should not happen (last step has a reduce-only stop); stay safe
             await self.db.log("flip_past_cap", {"live": acct["pos"]})
         self.pos = F.Position(side=F.LONG if acct["pos"] > 0 else F.SHORT, qty=abs(acct["pos"]), entry=fill,
                               level=old.level + 1, ladder_usd=old.ladder_usd)
+        # Order matters (2026-11-04 duplicate): protect the new position first, persist it, THEN record -- if anything
+        # fails midway the next tick sees the new side already saved and never counts the flip twice.
+        await self._place_orders(self.pos); await self._save()
+        await self.db.trade({"seq_id": self.seq["id"] if self.seq else None, "level": old.level, "side": old.side, "qty": old.qty,
+                             "entry": old.entry, "exit_price": F.stop_price(old, self.p), "result": "flip",
+                             "pnl_usd": -old.qty * old.entry * self.p.sl_pct / 100})
         await self.db.log("flipped", {"to": self.pos.side, "qty": round(self.pos.qty, 2), "entry": fill, "level": self.pos.level,
                                       "trigger": round(F.stop_price(old, self.p), PRICE_DEC), "funding_total": acct.get("funding")})
-        await self._place_orders(self.pos); await self._save()
 
     async def _sequence_over(self, acct):
         old = self.pos
@@ -646,8 +678,6 @@ async def main():
     owner = f"{os.environ.get('RENDER_INSTANCE_ID', 'local')}:{COIN.lower()}-flip"
     bot = FlipBot(ex, db, owner=owner)
     await db.log("started", {"coin": COIN, "market": MARKET_ID, "params": PARAMS.__dict__})
-    err = await ex.set_leverage()
-    await db.log("leverage_set", {"leverage": LEVERAGE, "error": str(err)[:200] if err else None})
     ws = lighter.WsClient(order_book_ids=[MARKET_ID], account_ids=[], on_order_book_update=ex.on_order_book,
                           on_account_update=lambda *a: None)
     asyncio.create_task(ws.run_async())

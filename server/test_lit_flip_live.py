@@ -262,13 +262,31 @@ async def t_panel_settings_next_sequence_only():
           and bot2._params_from_state(db.state).mult == 1.5)
 
 
+async def t_failed_placement_rechecked_fast():
+    print("\n[after a flip the first placement fails (e.g. nonce): no duplicate trade row, orders back within the quick re-check]")
+    ex, db = FakeEx(), FakeDB(); bot = L.FlipBot(ex, db)
+    await _ticks(bot, 1)
+    real_limit = ex.limit
+    fails = {"n": 1}
+    async def flaky_limit(*a, **k):
+        if fails["n"] > 0:
+            fails["n"] -= 1; raise RuntimeError("code=21104 message='invalid nonce'")
+        return await real_limit(*a, **k)
+    ex.limit = flaky_limit
+    ex.move(2.985)                              # flip fills on the exchange
+    await _ticks(bot, 3)
+    flips = [t for t in db.trades if t["result"] == "flip"]
+    check("flip recorded exactly once", len(flips) == 1, flips)
+    check("target + flip on the book after the re-check", sorted(o["kind"] for o in ex.orders) == ["limit", "stop"], ex.orders)
+
+
 async def _nosleep(*a, **k):
     return None
 
 
 async def main():
     for t in (t_start_flip_win, t_watch_mode_fallback, t_restart_keeps_the_sequence, t_off_keeps_position_flatten_closes,
-              t_bust_at_cap, t_unknown_position_is_protected, t_ws_wake_and_rejected_flip, t_stale_flip_never_left_behind, t_panel_settings_next_sequence_only):
+              t_bust_at_cap, t_unknown_position_is_protected, t_ws_wake_and_rejected_flip, t_stale_flip_never_left_behind, t_panel_settings_next_sequence_only, t_failed_placement_rechecked_fast):
         await t()
     print(f"\n==== {len(PASS)} passed, {len(FAIL)} failed ====")
 
