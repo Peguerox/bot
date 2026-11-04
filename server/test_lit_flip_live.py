@@ -237,13 +237,36 @@ async def t_stale_flip_never_left_behind():
           and any(a == "orders_extra_replaced" for a, _ in db2.logs), ex2.orders)
 
 
+async def t_panel_settings_next_sequence_only():
+    print("\n[panel settings: a new target applies from the NEXT sequence; the open one keeps its own; bad values ignored; survives restart]")
+    ex, db = FakeEx(), FakeDB(); bot = L.FlipBot(ex, db)
+    await _ticks(bot, 1)
+    tgt0 = [o for o in ex.orders if o["kind"] == "limit"][0]["price"]
+    db.state["override_params"] = {"tp_pct": 1.0, "first_pct": 10}
+    await _ticks(bot, 2)
+    tgt1 = [o for o in ex.orders if o["kind"] == "limit"][0]["price"]
+    check("open sequence keeps its 2% target after the panel change", abs(tgt0 - 3.06) < 1e-9 and abs(tgt1 - tgt0) < 1e-9, (tgt0, tgt1))
+    check("panel readout shows what the next sequence will use", db.state["live_params"]["tp_pct"] == 1.0 and db.state["live_params"]["first_pct"] == 10)
+    bot2 = L.FlipBot(ex, db); await _ticks(bot2, 1)
+    check("restart mid-sequence: still the sequence's own 2% (seq_params)", bot2.p.tp_pct == 2.0 and db.state["seq_params"]["tp_pct"] == 2.0, bot2.p)
+    db.state["enabled"] = False
+    ex.move(3.06); await _ticks(bot2, 2)
+    db.state["enabled"] = True; await _ticks(bot2, 1)
+    tgt2 = [o for o in ex.orders if o["kind"] == "limit"][0]
+    check("next sequence: 1% target and a 10% first trade", bot2.p.tp_pct == 1.0 and abs(tgt2["qty"] - L.qty_round(ex.equity * 0.10 / 3.06)) < 0.02,
+          (bot2.p, tgt2))
+    db.state["override_params"] = {"tp_pct": 0.3, "sl_pct": 0.5, "mult": 99}
+    check("invalid (target <= stop, mult out of range) -> defaults kept", bot2._params_from_state(db.state).tp_pct == 2.0
+          and bot2._params_from_state(db.state).mult == 1.5)
+
+
 async def _nosleep(*a, **k):
     return None
 
 
 async def main():
     for t in (t_start_flip_win, t_watch_mode_fallback, t_restart_keeps_the_sequence, t_off_keeps_position_flatten_closes,
-              t_bust_at_cap, t_unknown_position_is_protected, t_ws_wake_and_rejected_flip, t_stale_flip_never_left_behind):
+              t_bust_at_cap, t_unknown_position_is_protected, t_ws_wake_and_rejected_flip, t_stale_flip_never_left_behind, t_panel_settings_next_sequence_only):
         await t()
     print(f"\n==== {len(PASS)} passed, {len(FAIL)} failed ====")
 

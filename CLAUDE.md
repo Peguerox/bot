@@ -285,6 +285,9 @@ engine_batch_sent / orders_ws_verified are trimmed) and 30 days of lighter_btc_p
 code that re-reads a whole ledger/log table on a short timer (the LIT bot did, ~1.5 GB/day egress;
 fixed dc4b888: in-memory ledger, full re-read every 15 min).
 
+**Flip settings on the panel (2026-11-04):** target / stop / first % / multiplier / cap editable per bot
+(`app/api/lighter-{lit,near,sol}-flip/settings`, `lib/flip-settings.ts`, bounds = EDITABLE in `lit_flip_live.py`). Stored in
+`override_params`; applied from the NEXT sequence only -- an open sequence keeps `seq_params`. Migration `lighter_flip_settings.sql`.
 **Worker 1 switched SOL -> NEAR (2026-11-04, owner):** env `FLIP_COIN=NEAR` (market 10, target 2%, tables
 `lighter_near_flip_*`, routes `app/api/lighter-near-flip/*`, test `server/test_near_flip_live.py`). Last 120 days: NEAR +14%/mo,
 SOL -3%/mo (research/flip-coins-2026-11-04/). The SOL panel only shows while SOL is ON or holding a trade.

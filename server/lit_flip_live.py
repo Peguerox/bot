@@ -26,6 +26,7 @@ from datetime import datetime, timezone
 import aiohttp
 
 import lit_flip_core as F
+from dataclasses import asdict, replace
 
 # One file, one coin per process: FLIP_COIN env var (default LIT). Market details from orderBookDetails (2026-11-03).
 COINS = {
@@ -57,7 +58,10 @@ PUBLISH_EVERY = 3.0                   # panel readout write, seconds
 MISMATCH_GRACE_S = 8.0                # a fill can take a few seconds to show; wait before "fixing" a mismatch
 WATCH_REFIRE_S = 5.0                  # watch mode: never fire again within this long of the last shot
 LOCK_STALE_AFTER, LOCK_REFRESH_EVERY = 30.0, 5.0
-CANCEL_TRIES, CANCEL_SETTLE_S = 3, 0.5    # verified cancel: retries, and wait before re-counting resting orders
+CANCEL_TRIES, CANCEL_SETTLE_S = 3, 0.5
+# Panel-editable settings (owner 2026-11-04): override_params JSON on the state row. Each change applies from the NEXT
+# sequence -- an open sequence keeps the params it started with (seq_params), so a running ladder never changes halfway.
+EDITABLE = {"tp_pct": (0.2, 10.0), "sl_pct": (0.1, 5.0), "first_pct": (0.5, 50.0), "mult": (1.05, 3.0), "lev_cap": (0.2, 5.0)}    # verified cancel: retries, and wait before re-counting resting orders
 ORDER_TIMEOUT, REST_TIMEOUT = 12.0, 8.0
 MARKET_BAND = 0.005                   # market orders: worst average price 0.5% away
 STOP_BAND = 0.005                     # stop orders: execution limit 0.5% beyond the trigger
@@ -279,6 +283,8 @@ class SupabaseDB:
 class FlipBot:
     def __init__(self, ex, db, params=PARAMS, owner="local"):
         self.ex, self.db, self.p, self.owner = ex, db, params, owner
+        self.base = params                  # the coin's default settings (COINS)
+        self.p_next = params                # what the NEXT sequence will use (base + panel overrides)
         self.pos = None                 # F.Position we expect on the exchange
         self.seq = None                 # {"id", "start_equity"}
         self.acct = None; self.acct_at = 0.0
@@ -320,12 +326,36 @@ class FlipBot:
     async def _save(self, extra=None):
         patch = self._pos_to_state()
         patch.update({"seq_id": (self.seq or {}).get("id"), "seq_start_equity": (self.seq or {}).get("start_equity"),
-                      "flip_mode": self.flip_mode})
+                      "flip_mode": self.flip_mode,
+                      "seq_params": ({k: getattr(self.p, k) for k in EDITABLE} if self.pos is not None else None)})
         patch.update(extra or {})
         await self.db.update_state(patch)
 
+    def _params_from_state(self, st):
+        """base settings + the panel's override_params; anything missing or out of range keeps the base value."""
+        ov = st.get("override_params") or {}
+        if isinstance(ov, str):
+            try: ov = json.loads(ov)
+            except Exception: ov = {}
+        ch = {}
+        for k, (lo, hi) in EDITABLE.items():
+            try:
+                v = float(ov[k])
+            except (KeyError, TypeError, ValueError):
+                continue
+            if lo <= v <= hi:
+                ch[k] = v
+        p = replace(self.base, **ch)
+        return p if p.tp_pct > p.sl_pct else self.base
+
     def _load(self, st):
         self.flip_mode = st.get("flip_mode") or "native"
+        sp = st.get("seq_params")
+        if sp and st.get("seq_side") is not None:
+            try:
+                self.p = replace(self.base, **{k: float(v) for k, v in (sp if isinstance(sp, dict) else json.loads(sp)).items() if k in EDITABLE})
+            except Exception:
+                pass
         if st.get("seq_side") is not None:
             self.pos = F.Position(side=int(st["seq_side"]), qty=float(st["seq_qty"]), entry=float(st["seq_entry"]),
                                   level=int(st["seq_level"]), ladder_usd=list(st.get("seq_ladder") or []))
@@ -413,6 +443,7 @@ class FlipBot:
         await self.db.update_state({"live_price": price, "live_range_pos": pos_r, "live_range_hi": hi, "live_range_lo": lo,
                                     "live_signal": F.range_signal(self.candles, self.p.window, self.p.band) if self.candles else None,
                                     "live_pos": acct["pos"], "live_upnl": self._live_upnl(acct, price), "equity": acct["equity"],
+                                    "live_params": {k: getattr(self.p_next, k) for k in EDITABLE},
                                     "lock_heartbeat": now_iso()})
         self.published_at = time.time()
 
@@ -427,6 +458,9 @@ class FlipBot:
         st = await self.db.get_state()
         if not self.loaded:
             self._load(st)
+        self.p_next = self._params_from_state(st)
+        if self.pos is None:
+            self.p = self.p_next                # flat: the next sequence uses the current panel settings
         if not await self._lock():
             return
         acct = await self._read_account()

@@ -1347,7 +1347,7 @@ const FLIP_EVENT_LABEL: Record<string, string> = {
   candles_failed: "price data failed", cancel_failed: "cancel failed", size_mismatch_adopted: "size mismatch fixed", start_no_fill_seen: "entry not filled",
 };
 function LitFlipPanel({ cfg = LIT_FLIP, hideWhenIdle = false }: { cfg?: FlipCfg; hideWhenIdle?: boolean }) {
-  const FLIP_P = cfg.P;
+  const [edit, setEdit] = useState<Record<string, string> | null>(null);
   const [st, setSt] = useState<any>(null);
   const [trades, setTrades] = useState<any[]>([]);
   const [events, setEvents] = useState<any[]>([]);
@@ -1376,6 +1376,19 @@ function LitFlipPanel({ cfg = LIT_FLIP, hideWhenIdle = false }: { cfg?: FlipCfg;
   if (!st) return null;
   // A retired coin's panel (hideWhenIdle) only shows while it is still ON or holding a trade.
   if (hideWhenIdle && !st.enabled && st.seq_side == null && !Number(st.live_pos)) return null;
+  // Settings (2026-11-04): the open sequence runs on its own seq_params; the next one on live_params (panel overrides).
+  const fromDb = (o: any) => o ? { ...cfg.P, ...(o.tp_pct != null && { tpPct: Number(o.tp_pct) }), ...(o.sl_pct != null && { slPct: Number(o.sl_pct) }),
+    ...(o.first_pct != null && { firstPct: Number(o.first_pct) }), ...(o.mult != null && { mult: Number(o.mult) }), ...(o.lev_cap != null && { levCap: Number(o.lev_cap) }) } : cfg.P;
+  const nextP = fromDb(st.live_params ?? st.override_params);
+  const FLIP_P = st.seq_side != null ? fromDb(st.seq_params) : nextP;
+  async function saveSettings(reset = false) {
+    const secret = litGridLiveAdminSecret(); if (!secret) return;
+    setBusy("settings");
+    const body = reset ? { reset: true } : Object.fromEntries(Object.entries(edit ?? {}).filter(([, v]) => v !== ""));
+    const res = await fetch(`${cfg.api}/settings`, { method: "POST", headers: { "x-admin-secret": secret, "Content-Type": "application/json" }, body: JSON.stringify(body) });
+    if (!res.ok) { const b = await res.json().catch(() => ({})); alert(b.error ?? "Failed."); } else setEdit(null);
+    setBusy(null); load();
+  }
   async function act(path: "toggle" | "flatten", q: string) {
     if (!confirm(q)) return;
     const secret = litGridLiveAdminSecret(); if (!secret) return;
@@ -1466,6 +1479,39 @@ function LitFlipPanel({ cfg = LIT_FLIP, hideWhenIdle = false }: { cfg?: FlipCfg;
               <span>{nextUsd ? `FLIP → ${other}` : "STOP (bust)"} ${stp!.toFixed(cfg.pd)} (−{FLIP_P.slPct}%)</span>
               <span>entry ${entry.toFixed(cfg.pd)}</span>
               <span>TARGET ${tgt!.toFixed(cfg.pd)} (+{FLIP_P.tpPct}%)</span>
+            </div>
+          </div>
+        );
+      })()}
+      {(() => {
+        // Settings card: what the NEXT sequence uses; a change never touches the open sequence.
+        const f = (k: string, v: number) => (edit && edit[k] !== undefined ? edit[k] : String(v));
+        const num = (k: string, v: number) => { const x = Number(f(k, v)); return Number.isFinite(x) ? x : v; };
+        const pv = { tp: num("tpPct", nextP.tpPct), sl: num("slPct", nextP.slPct), first: num("firstPct", nextP.firstPct), mult: num("mult", nextP.mult), cap: num("levCap", nextP.levCap) };
+        const firstUsd = equity * pv.first / 100;
+        const steps: number[] = []; for (let x = firstUsd; x <= pv.cap * equity + 1e-9 && steps.length < 60; x *= pv.mult) steps.push(x);
+        const bust = steps.reduce((a, x) => a + x * pv.sl / 100, 0);
+        const changed = edit != null && Object.keys(edit).length > 0;
+        const fields: [string, string, number, string][] = [["tpPct", "Target %", nextP.tpPct, "0.01"], ["slPct", "Flip at −%", nextP.slPct, "0.01"],
+          ["firstPct", "First trade %", nextP.firstPct, "0.5"], ["mult", "× each flip", nextP.mult, "0.05"], ["levCap", "Cap × account", nextP.levCap, "0.1"]];
+        return (
+          <div className="bg-gray-800/60 rounded-lg p-2">
+            <p className="text-gray-500 text-[10px] uppercase mb-1">Settings · next sequence{side && (FLIP_P.tpPct !== nextP.tpPct || FLIP_P.slPct !== nextP.slPct || FLIP_P.firstPct !== nextP.firstPct || FLIP_P.mult !== nextP.mult || FLIP_P.levCap !== nextP.levCap) ? " (open trade still on its old settings)" : ""}</p>
+            <div className="grid grid-cols-3 sm:grid-cols-5 gap-2">
+              {fields.map(([k, label, v, step]) => (
+                <label key={k} className="text-[10px] text-gray-400">{label}
+                  <input type="number" step={step} value={f(k, v)} onChange={(e) => setEdit({ ...(edit ?? {}), [k]: e.target.value })}
+                    className="w-full mt-0.5 bg-gray-900 border border-gray-700 rounded px-1.5 py-1 text-sm text-white tabular-nums" />
+                </label>
+              ))}
+            </div>
+            <p className={`text-[11px] mt-1 ${firstUsd < 10 ? "text-red-400" : "text-gray-400"}`}>
+              First trade {usd(firstUsd)}{firstUsd < 10 ? " — under Lighter's $10 minimum, it won't start" : ""} · {steps.length} steps · biggest {usd(steps[steps.length - 1] ?? 0, 0)} · full bust ≈ {usd(bust)} ({equity ? (bust / equity * 100).toFixed(1) : 0}%)
+            </p>
+            <div className="flex gap-2 mt-1.5">
+              <button onClick={() => saveSettings()} disabled={!changed || busy != null} className={`text-xs font-bold px-3 py-1 rounded ${changed ? "bg-yellow-400/20 text-yellow-300" : "bg-gray-700 text-gray-500"}`}>Save</button>
+              {changed && <button onClick={() => setEdit(null)} className="text-xs px-3 py-1 rounded bg-gray-700 text-gray-300">Undo</button>}
+              {st.override_params && <button onClick={() => saveSettings(true)} disabled={busy != null} className="text-xs px-3 py-1 rounded bg-gray-700 text-gray-300">Back to default ({cfg.P.tpPct}% / −{cfg.P.slPct}% / {cfg.P.firstPct}% ×{cfg.P.mult} cap {cfg.P.levCap}x)</button>}
             </div>
           </div>
         );
