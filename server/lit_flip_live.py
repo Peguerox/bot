@@ -1,6 +1,7 @@
 """Flip martingale on a Lighter perp -- REAL MONEY, built 2026-11-03. One coin per process (FLIP_COIN env var, see COINS):
   * LIT (market 120): Worker 2's service + account, Start Command `python server/lit_flip_live.py`.
-  * SOL (market 2):   Worker 1's service + account, same Start Command with env FLIP_COIN=SOL (own tables lighter_sol_flip_*).
+  * NEAR (market 10): Worker 1's service + account, same Start Command with env FLIP_COIN=NEAR (own tables lighter_near_flip_*).
+    (SOL, market 2, ran there 2026-11-03/04 -- kept in COINS.)
 Each uses its own service's plain LIGHTER_* env vars.
 
 Strategy and research: lit_flip_core.py (setting A). This file is the I/O:
@@ -33,6 +34,9 @@ COINS = {
     # Worker 1's service (owner, 2026-11-03): SOL 5y backtest picked stop 0.5 / target 1 -- the smoothest
     # (+6%/month, worst drop 23%, 210 busts in 25,630 sequences). research/martingale-dca-2026-11-03/target_sweep.py
     "SOL": dict(market=2, price_dec=3, size_dec=3, min_base=0.055, tables="lighter_sol_flip", params=F.Params(sl_pct=0.5, tp_pct=1.0)),
+    # Worker 1 from 2026-11-04 (owner): NEAR, target 2% -- last 120 days on Lighter candles NEAR +14%/month (2nd after LIT
+    # +26%) while SOL lost -3%/-1.6%. research/flip-coins-2026-11-04/test_coins.py
+    "NEAR": dict(market=10, price_dec=5, size_dec=1, min_base=2.0, tables="lighter_near_flip", params=F.Params()),
 }
 COIN = os.environ.get("FLIP_COIN", "LIT").upper()
 _C = COINS[COIN]

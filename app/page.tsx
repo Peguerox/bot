@@ -1336,7 +1336,9 @@ const FLIP_P = { firstPct: 5, mult: 1.5, slPct: 0.5, tpPct: 2, window: 30, band:
 // One panel per coin (same bot file, FLIP_COIN env var). Params must match COINS in server/lit_flip_live.py.
 type FlipCfg = { coin: string; worker: string; table: string; api: string; P: typeof FLIP_P; pd: number; qd: number };
 const LIT_FLIP: FlipCfg = { coin: "LIT", worker: "Worker 2", table: "lighter_lit_flip", api: "/api/lighter-lit-flip", P: FLIP_P, pd: 4, qd: 2 };
-const SOL_FLIP: FlipCfg = { coin: "SOL", worker: "Worker 1", table: "lighter_sol_flip", api: "/api/lighter-sol-flip", P: { ...FLIP_P, tpPct: 1 }, pd: 3, qd: 3 };
+const SOL_FLIP: FlipCfg = { coin: "SOL", worker: "Worker 1 (old)", table: "lighter_sol_flip", api: "/api/lighter-sol-flip", P: { ...FLIP_P, tpPct: 1 }, pd: 3, qd: 3 };
+// Worker 1 switched SOL -> NEAR 2026-11-04 (owner): NEAR target 2%, same as LIT.
+const NEAR_FLIP: FlipCfg = { coin: "NEAR", worker: "Worker 1", table: "lighter_near_flip", api: "/api/lighter-near-flip", P: FLIP_P, pd: 5, qd: 1 };
 const FLIP_EVENT_LABEL: Record<string, string> = {
   started: "bot started", leverage_set: "leverage set", sequence_start: "opened first trade", orders_placed: "target + flip placed",
   flipped: "FLIPPED", sequence_over: "sequence finished", flip_mode_watch: "switched to watch mode", watch_fired: "watch mode fired the flip",
@@ -1344,7 +1346,7 @@ const FLIP_EVENT_LABEL: Record<string, string> = {
   flattened: "flattened + OFF", too_small_to_start: "account too small to start", tick_error: "ERROR", account_read_failed: "account read failed",
   candles_failed: "price data failed", cancel_failed: "cancel failed", size_mismatch_adopted: "size mismatch fixed", start_no_fill_seen: "entry not filled",
 };
-function LitFlipPanel({ cfg = LIT_FLIP }: { cfg?: FlipCfg }) {
+function LitFlipPanel({ cfg = LIT_FLIP, hideWhenIdle = false }: { cfg?: FlipCfg; hideWhenIdle?: boolean }) {
   const FLIP_P = cfg.P;
   const [st, setSt] = useState<any>(null);
   const [trades, setTrades] = useState<any[]>([]);
@@ -1372,6 +1374,8 @@ function LitFlipPanel({ cfg = LIT_FLIP }: { cfg?: FlipCfg }) {
     return () => { clearInterval(a); clearInterval(b); clearInterval(c); };
   }, []);
   if (!st) return null;
+  // A retired coin's panel (hideWhenIdle) only shows while it is still ON or holding a trade.
+  if (hideWhenIdle && !st.enabled && st.seq_side == null && !Number(st.live_pos)) return null;
   async function act(path: "toggle" | "flatten", q: string) {
     if (!confirm(q)) return;
     const secret = litGridLiveAdminSecret(); if (!secret) return;
@@ -5201,8 +5205,9 @@ export default function Dashboard() {
 
         {/* 2026-11-03 (owner): the old Worker 1 BTC stochastic panel and the Master Schedule (which only drove the BTC
             workers) are gone -- Worker 1's slot now runs the SOL flip martingale. Components kept in this file, unrendered. */}
-        {/* Flip martingales (2026-11-03): SOL = Worker 1, LIT = Worker 2, above the LIT grid bots (owner). */}
-        <LitFlipPanel cfg={SOL_FLIP} />
+        {/* Flip martingales: NEAR = Worker 1 (was SOL until 2026-11-04), LIT = Worker 2, above the LIT grid bots (owner). */}
+        <LitFlipPanel cfg={NEAR_FLIP} />
+        <LitFlipPanel cfg={SOL_FLIP} hideWhenIdle />
         <LitFlipPanel />
 
         {/* Worker 3 twin of the LIT grid, own full-width row ABOVE Worker 4's (2026-10-21,

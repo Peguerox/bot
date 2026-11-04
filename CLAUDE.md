@@ -285,6 +285,9 @@ engine_batch_sent / orders_ws_verified are trimmed) and 30 days of lighter_btc_p
 code that re-reads a whole ledger/log table on a short timer (the LIT bot did, ~1.5 GB/day egress;
 fixed dc4b888: in-memory ledger, full re-read every 15 min).
 
+**Worker 1 switched SOL -> NEAR (2026-11-04, owner):** env `FLIP_COIN=NEAR` (market 10, target 2%, tables
+`lighter_near_flip_*`, routes `app/api/lighter-near-flip/*`, test `server/test_near_flip_live.py`). Last 120 days: NEAR +14%/mo,
+SOL -3%/mo (research/flip-coins-2026-11-04/). The SOL panel only shows while SOL is ON or holding a trade.
 **Worker 1 = SOL flip martingale (2026-11-03, owner):** the BTC stochastic bot is retired (its panel + Master Schedule
 removed from the dashboard; `lighter_stoch_dca_btc_initial.py` kept as code). Worker 1's Render service runs the SAME file
 `python server/lit_flip_live.py` with env `FLIP_COIN=SOL` (COINS table in the file): SOL perp market 2, stop 0.5 / target 1,
