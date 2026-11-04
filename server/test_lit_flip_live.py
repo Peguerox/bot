@@ -406,13 +406,30 @@ async def t_dead_book_socket_uses_rest():
     check("trail armed from the REST price", bot.trail_floor is not None and any(o["reduce_only"] for o in ex.orders), (bot.trail_floor, ex.orders))
 
 
+async def t_takeover_reloads_state():
+    print("\n[a new instance waiting for the lock while the old one finishes a sequence must not count it twice]")
+    ex, db = FakeEx(), FakeDB(); old = L.FlipBot(ex, db); await _ticks(old, 2)
+    new = L.FlipBot(ex, db); new_lock = {"ok": False}
+    async def lock(owner): return new_lock["ok"]
+    db_new = db; orig = db.try_lock
+    db.try_lock = lock
+    await new.tick()                               # loads the state (open sequence) but has no lock yet
+    db.try_lock = orig
+    db.state["close_requested"] = True; await _ticks(old, 3)   # old instance flattens and records it
+    seqs = db.state.get("sequences")
+    db.try_lock = lock; new_lock["ok"] = True; db.state["enabled"] = False
+    new.lock_at = 0.0                              # the lock check is cached 5 s; expire it
+    await _ticks(new, 3)
+    check("takeover: no second count of the flattened sequence", db.state.get("sequences") == seqs and new.pos is None, (seqs, db.state.get("sequences"), new.pos))
+
+
 async def _nosleep(*a, **k):
     return None
 
 
 async def main():
     for t in (t_start_flip_win, t_watch_mode_fallback, t_restart_keeps_the_sequence, t_off_keeps_position_flatten_closes,
-              t_bust_at_cap, t_unknown_position_is_protected, t_ws_wake_and_rejected_flip, t_stale_flip_never_left_behind, t_panel_settings_next_sequence_only, t_failed_placement_rechecked_fast, t_compounding_off, t_waf_block_backs_off, t_trail_after_target, t_trail_stop_refused_closes_at_market, t_stepped_target, t_deep_step_profit_lock, t_dead_book_socket_uses_rest):
+              t_bust_at_cap, t_unknown_position_is_protected, t_ws_wake_and_rejected_flip, t_stale_flip_never_left_behind, t_panel_settings_next_sequence_only, t_failed_placement_rechecked_fast, t_compounding_off, t_waf_block_backs_off, t_trail_after_target, t_trail_stop_refused_closes_at_market, t_stepped_target, t_deep_step_profit_lock, t_dead_book_socket_uses_rest, t_takeover_reloads_state):
         await t()
     print(f"\n==== {len(PASS)} passed, {len(FAIL)} failed ====")
 

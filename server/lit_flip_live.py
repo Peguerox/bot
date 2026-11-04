@@ -384,6 +384,7 @@ class FlipBot:
         self.fired_at = 0.0
         self.published_at = 0.0
         self.leverage_done = False
+        self.had_lock = False                 # False until this instance holds the lock (then the state is reloaded once)
         self.blocked_until = 0.0              # REST reads paused until this time (WAF / rate limit)
         self.block_wait = BLOCK_BACKOFF_S
         self.cancel_pending = False       # a sequence ended but Lighter still showed resting orders -> no new sequence yet
@@ -630,7 +631,22 @@ class FlipBot:
         if self.pos is None:
             self.p = self.p_next                # flat: the next sequence uses the current panel settings
         if not await self._lock():
+            self.had_lock = False
             return
+        if not self.had_lock:
+            # Just took over (startup or after another instance): reload the sequence from the state row NOW -- what was
+            # read at startup can be stale (2026-11-04: the old instance flattened while this one waited for the lock, and
+            # this one then counted that finished sequence a second time).
+            self.had_lock = True
+            self.pos, self.seq = None, None
+            self.trail_peak = self.trail_floor = self.lock_peak = self.lock_floor = None
+            self.p = self.p_next
+            st = await self.db.get_state()
+            self._load(st)
+            self.p_next = self._params_from_state(st)
+            if self.pos is None:
+                self.p = self.p_next
+            self.acct_at = 0.0                  # and a fresh account read below
         if not self.leverage_done and hasattr(self.ex, "set_leverage"):
             # Only once we hold the lock: during a deploy the old instance is still trading with the same API key, and
             # any signed request from the new one (this is one) desyncs the old one's nonces (2026-11-04 NEAR incident).
