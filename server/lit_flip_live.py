@@ -58,6 +58,8 @@ BOOK_REST_CACHE_S = 2.0               # backup REST top-of-book read at most thi
 TICK_NATIVE, TICK_WATCH = 1.0, 0.25
 PUBLISH_EVERY = 3.0                   # panel readout write, seconds
 MISMATCH_GRACE_S = 8.0                # a fill can take a few seconds to show; wait before "fixing" a mismatch
+FLAT_CONFIRM_S = 4.0                  # a "flat" read must still be flat on a fresh read this much later before the sequence
+                                      # counts as over (2026-11-05: LIT read flat 3 s after its entry -> a fake "bust")
 WATCH_REFIRE_S = 5.0                  # watch mode: never fire again within this long of the last shot
 LOCK_STALE_AFTER, LOCK_REFRESH_EVERY = 30.0, 5.0
 CANCEL_TRIES, CANCEL_SETTLE_S = 3, 0.5
@@ -378,6 +380,7 @@ class FlipBot:
         self.candles = []; self.candles_at = 0.0
         self.orders_checked_at = 0.0
         self.mismatch_since = None
+        self.flat_since = None
         self.locked = False; self.lock_at = 0.0
         self.flip_mode = "native"
         self.loaded = False
@@ -675,6 +678,7 @@ class FlipBot:
             await self._flatten(acct); return
 
         if self.pos is None:
+            self.flat_since = None
             if abs(live) >= MIN_BASE / 2:
                 await self._adopt(acct); return
             if self.cancel_pending and not await self._cancel_verified("retry_before_start"):
@@ -683,7 +687,19 @@ class FlipBot:
 
         exp_side, exp_qty = self.pos.side, self.pos.qty
         if abs(live) < MIN_BASE / 2:
+            # Lighter can show a just-filled position late (or briefly as flat): confirm on a fresh read FLAT_CONFIRM_S
+            # later before ending the sequence. The resting orders stay in place meanwhile.
+            if self.flat_since is None:
+                self.flat_since = time.time()
+                await self.db.log("flat_seen_confirming", {"expected": exp_qty, "side": exp_side})
+            if time.time() - self.flat_since < FLAT_CONFIRM_S:
+                self.acct_at = 0.0              # fresh account read on the next tick
+                return
+            self.flat_since = None
             await self._sequence_over(acct); return
+        if self.flat_since is not None:
+            await self.db.log("flat_was_false", {"live": live, "seconds": round(time.time() - self.flat_since, 1)})
+            self.flat_since = None
         if (live > 0) != (exp_side == F.LONG):
             await self._flipped(acct); return
         if self.p.add_mode >= 0.5 and abs(live) > exp_qty * 1.01:

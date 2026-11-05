@@ -5,7 +5,7 @@ os.environ.setdefault("NEXT_PUBLIC_SUPABASE_URL", "http://x"); os.environ.setdef
 import lit_flip_core as F
 import lit_flip_live as L
 
-L.ACCOUNT_EVERY = 0.0; L.CANDLES_EVERY = 0.0; L.ORDERS_CHECK_EVERY = 0.0; L.MISMATCH_GRACE_S = 0.0; L.WATCH_REFIRE_S = 0.0; L.PUBLISH_EVERY = 0.0
+L.ACCOUNT_EVERY = 0.0; L.CANDLES_EVERY = 0.0; L.ORDERS_CHECK_EVERY = 0.0; L.MISMATCH_GRACE_S = 0.0; L.FLAT_CONFIRM_S = 0.0; L.WATCH_REFIRE_S = 0.0; L.PUBLISH_EVERY = 0.0
 PASS, FAIL = [], []
 
 
@@ -465,13 +465,36 @@ async def t_add_mode_partial_and_bust():
     check("bust: flat, counted", ex.pos == 0 and db.state.get("busts") == 1, (ex.pos, db.state.get("busts")))
 
 
+async def t_flat_read_is_confirmed():
+    print("\n[2026-11-05 LIT: the account read flat 3 s after the entry, then the position was back -> no fake bust]")
+    ex, db = FakeEx(), FakeDB(); bot = L.FlipBot(ex, db); await _ticks(bot, 1)
+    real = ex.pos; L.FLAT_CONFIRM_S = 4.0
+    clock = [__import__("time").time() + 100]; L.time.time = lambda: clock[0]
+    try:
+        ex.pos = 0.0; await bot.tick()               # Lighter shows flat for a moment
+        check("a flat read alone does not end the sequence", bot.pos is not None and not db.trades and not db.state.get("busts"), (bot.pos, db.trades))
+        check("orders left in place while confirming", len(ex.orders) == 2, ex.orders)
+        clock[0] += 1.0; ex.pos = real; await bot.tick() # the position shows again
+        check("position back -> same sequence, logged as a false flat", bot.pos is not None and bot.pos.level == 0 and not db.trades
+              and any(a == "flat_was_false" for a, _ in db.logs), db.logs[-3:])
+        db.state["enabled"] = False
+        ex.move([o for o in ex.orders if o["kind"] == "limit"][0]["price"] + 0.0001)   # really closed at the target
+        await bot.tick()
+        check("a real close is not counted at once", bot.pos is not None and not db.trades)
+        clock[0] += 4.5; await bot.tick()
+        check("still flat 4 s later -> counted once, as a win", bot.pos is None and [x["result"] for x in db.trades] == ["target"]
+              and db.state.get("wins") == 1 and not db.state.get("busts"), (db.trades, db.state))
+    finally:
+        L.FLAT_CONFIRM_S = 0.0; L.time.time = __import__("time").time
+
+
 async def _nosleep(*a, **k):
     return None
 
 
 async def main():
     for t in (t_start_flip_win, t_watch_mode_fallback, t_restart_keeps_the_sequence, t_off_keeps_position_flatten_closes,
-              t_bust_at_cap, t_unknown_position_is_protected, t_ws_wake_and_rejected_flip, t_stale_flip_never_left_behind, t_panel_settings_next_sequence_only, t_failed_placement_rechecked_fast, t_compounding_off, t_waf_block_backs_off, t_trail_after_target, t_trail_stop_refused_closes_at_market, t_stepped_target, t_deep_step_profit_lock, t_dead_book_socket_uses_rest, t_takeover_reloads_state, t_add_mode, t_add_mode_partial_and_bust):
+              t_bust_at_cap, t_unknown_position_is_protected, t_ws_wake_and_rejected_flip, t_stale_flip_never_left_behind, t_panel_settings_next_sequence_only, t_failed_placement_rechecked_fast, t_compounding_off, t_waf_block_backs_off, t_trail_after_target, t_trail_stop_refused_closes_at_market, t_stepped_target, t_deep_step_profit_lock, t_dead_book_socket_uses_rest, t_takeover_reloads_state, t_add_mode, t_add_mode_partial_and_bust, t_flat_read_is_confirmed):
         await t()
     print(f"\n==== {len(PASS)} passed, {len(FAIL)} failed ====")
 
