@@ -297,6 +297,10 @@ Trail state lives in `seq_params` (trail_peak/trail_floor) so it survives restar
 (from the REAL account: equity - upnl - seq start) + the lock and is arm% past it, a reduce-only stop locks that; the
 target stays, the flip is removed. Result 'lock'. Backtest: big gain on LIT at 2%, loss on NEAR, none at 1.5% (no room);
 owner put it on both bots anyway to test live.
+**Add-same-side mode (2026-11-04, `add_mode` 0/1, panel "When it goes wrong: Flip / Add more"):** instead of flipping at
+-sl%, a resting same-side LIMIT adds up to the next ladder size (`resting_orders_add` in the core); target = tp% from the last
+add's LEVEL price for the whole position; last step = reduce-only bust stop. Adds under Lighter's $10 / min size are rounded up.
+Ride / Stepped / Deep-step are ignored in add mode. Backtest: NEAR same-side 1.5% x1.5 +23%/mo (both halves positive) vs flip +2%.
 **Worker 1 switched SOL -> NEAR (2026-11-04, owner):** env `FLIP_COIN=NEAR` (market 10, target 2%, tables
 `lighter_near_flip_*`, routes `app/api/lighter-near-flip/*`, test `server/test_near_flip_live.py`). Last 120 days: NEAR +14%/mo,
 SOL -3%/mo (research/flip-coins-2026-11-04/). The SOL panel only shows while SOL is ON or holding a trade.

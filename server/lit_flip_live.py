@@ -74,7 +74,7 @@ def is_blocked(e):
 # sequence -- an open sequence keeps the params it started with (seq_params), so a running ladder never changes halfway.
 EDITABLE = {"tp_pct": (0.2, 10.0), "sl_pct": (0.1, 5.0), "first_pct": (0.5, 50.0), "mult": (1.05, 3.0), "lev_cap": (0.2, 5.0),
             "trail_pct": (0.0, 3.0), "lock_from_step": (0.0, 11.0), "lock_profit_pct": (0.0, 5.0), "lock_arm_pct": (0.05, 3.0),
-            "lock_trail_pct": (0.0, 3.0)}
+            "lock_trail_pct": (0.0, 3.0), "add_mode": (0.0, 1.0)}
 TRAIL_MIN_PCT = 0.05                  # a trail under this is treated as off (price noise would close it at once)
 TRAIL_RAISE_STEP = 0.0005             # move the trailing stop only when it can rise >= 0.05% (each move = cancel + place)
 # Stepped target (owner 2026-11-04): step_n steps from step_start, +step_inc each; the bot climbs one step per full bust the
@@ -529,6 +529,16 @@ class FlipBot:
     def _orders_for(self, pos):
         """What must rest on the book for `pos`. Trail on: no target limit (it would close at the target); once armed,
         ONLY a reduce-only stop at the trailing floor (the flip is gone: the win is locked)."""
+        if self.p.add_mode >= 0.5:                       # add mode: target + same-side add (or the bust stop); no trail/lock
+            out = []
+            for o in F.resting_orders_add(pos, self.p):
+                if o.kind == "add":
+                    # Lighter refuses orders under $10 / the minimum size: small adds (early steps on a small account, or
+                    # the rest of a partial add) are rounded UP to the minimum -- slightly bigger than the exact ladder.
+                    min_q = max(MIN_BASE, math.ceil(self.p.min_order_usd / o.price * 10 ** SIZE_DEC) / 10 ** SIZE_DEC)
+                    o = F.Order(o.kind, o.is_ask, max(o.qty, min_q), o.price, o.reduce_only)
+                out.append(o)
+            return out
         base = F.resting_orders(pos, self.p)
         if self.trail_floor is not None:                 # past the target and trailing: only the trailing stop
             return [F.Order("trail", pos.side == F.LONG, pos.qty, self.trail_floor, True)]
@@ -554,6 +564,8 @@ class FlipBot:
                     out[o.kind] = await self.ex.stop(o.is_ask, qty_round(o.qty), o.price, reduce_only=True)
                 elif o.kind == "target":
                     out["target"] = await self.ex.limit(o.is_ask, qty_round(o.qty), o.price, reduce_only=True)
+                elif o.kind == "add":
+                    out["add"] = await self.ex.limit(o.is_ask, math.ceil(o.qty * 10 ** SIZE_DEC - 1e-6) / 10 ** SIZE_DEC, o.price, reduce_only=False)
                 elif o.kind == "flip" and self.flip_mode == "native":
                     e = await self.ex.stop(o.is_ask, qty_round(o.qty), o.price, reduce_only=False)
                     if e and "nonce" not in str(e).lower() and "429" not in str(e) and "timeout" not in str(e).lower():
@@ -674,23 +686,32 @@ class FlipBot:
             await self._sequence_over(acct); return
         if (live > 0) != (exp_side == F.LONG):
             await self._flipped(acct); return
+        if self.p.add_mode >= 0.5 and abs(live) > exp_qty * 1.01:
+            nxt = self.pos.level + 1
+            if nxt < len(self.pos.ladder_usd):
+                full = self.pos.ladder_usd[nxt] / F.add_price(self.pos, self.p)
+                if abs(live) >= full * 0.98:            # the add filled -> next level
+                    await self._added(acct); return
         if abs(abs(live) - exp_qty) > max(2 * 10 ** -SIZE_DEC, exp_qty * 0.01):
             # Same side, different size: a fill in progress (or a partial). Give it a few seconds, then adopt.
             self.mismatch_since = self.mismatch_since or time.time()
             if time.time() - self.mismatch_since >= MISMATCH_GRACE_S:
                 await self.db.log("size_mismatch_adopted", {"expected": exp_qty, "live": live})
-                self.pos = F.Position(self.pos.side, abs(live), acct["entry"] or self.pos.entry, self.pos.level, self.pos.ladder_usd)
+                # Add mode: a partial add -- keep the LEVEL price (targets are counted from levels, not the exchange average);
+                # the rest of the add stays on the book (re-placed for what's missing).
+                keep_entry = self.pos.entry if self.p.add_mode >= 0.5 else (acct["entry"] or self.pos.entry)
+                self.pos = F.Position(self.pos.side, abs(live), keep_entry, self.pos.level, self.pos.ladder_usd)
                 self.mismatch_since = None
                 await self._place_orders(self.pos); await self._save()
             return
         self.mismatch_since = None
-        if self.p.trail_pct > 0 and await self._trail_step(acct):
+        if self.p.add_mode < 0.5 and self.p.trail_pct > 0 and await self._trail_step(acct):
             return
-        if self.p.lock_from_step > 0 and self.trail_floor is None and await self._lock_step(acct):
+        if self.p.add_mode < 0.5 and self.p.lock_from_step > 0 and self.trail_floor is None and await self._lock_step(acct):
             return
         # Watch mode: only once the real position matches what we expect (never on a stale view -- that would
         # fire a second flip right after the first), fire the flip/stop ourselves when the stop price is touched.
-        if self.flip_mode == "watch" and self.trail_floor is None and self.lock_floor is None and time.time() - self.fired_at >= WATCH_REFIRE_S:
+        if self.flip_mode == "watch" and self.p.add_mode < 0.5 and self.trail_floor is None and self.lock_floor is None and time.time() - self.fired_at >= WATCH_REFIRE_S:
             if await self._watch_trigger():
                 return
         if time.time() - self.orders_checked_at >= self._orders_every():
@@ -799,7 +820,7 @@ class FlipBot:
             return
         bid, ask = await self._bid_ask()
         ref = (ask if sig == F.LONG else bid) or self.candles[-1]["c"]
-        stp_tp = self._stepped_tp(self._sizing_equity(acct["equity"]), acct["equity"])
+        stp_tp = self._stepped_tp(self._sizing_equity(acct["equity"]), acct["equity"]) if self.p.add_mode < 0.5 else None
         if stp_tp is not None:
             self.p = replace(self.p, tp_pct=stp_tp)          # this sequence's target (kept in seq_params)
         self.trail_peak = self.trail_floor = None
@@ -840,6 +861,20 @@ class FlipBot:
                              "pnl_usd": -old.qty * old.entry * self.p.sl_pct / 100})
         await self.db.log("flipped", {"to": self.pos.side, "qty": round(self.pos.qty, 2), "entry": fill, "level": self.pos.level,
                                       "trigger": round(F.stop_price(old, self.p), PRICE_DEC), "funding_total": acct.get("funding")})
+
+    async def _added(self, acct):
+        """Add mode: the same-side add filled -> next level at the add price; protect first, then record (same order as
+        _flipped, so a crash can never count it twice)."""
+        old = self.pos
+        lvl_px = F.add_price(old, self.p)
+        self.pos = F.Position(side=old.side, qty=abs(acct["pos"]), entry=lvl_px, level=old.level + 1, ladder_usd=old.ladder_usd)
+        await self._place_orders(self.pos); await self._save()
+        # Same money as closing this level at its stop and re-opening bigger: book this level's stop-loss equivalent.
+        await self.db.trade({"seq_id": self.seq["id"] if self.seq else None, "level": old.level, "side": old.side, "qty": old.qty,
+                             "entry": old.entry, "exit_price": lvl_px, "result": "add",
+                             "pnl_usd": -old.qty * old.entry * self.p.sl_pct / 100})
+        await self.db.log("added", {"side": old.side, "qty": round(self.pos.qty, 2), "level": self.pos.level, "level_price": round(lvl_px, PRICE_DEC),
+                                    "exchange_avg": acct.get("entry"), "funding_total": acct.get("funding")})
 
     async def _sequence_over(self, acct):
         old = self.pos

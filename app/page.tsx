@@ -1332,7 +1332,7 @@ function LitGridLivePanel({
 // Flip martingale panels (2026-11-03, owner's strategy) -- server/lit_flip_live.py: LIT on Worker 2, SOL on Worker 1.
 // Self-loading (state + trades + events every 15 s); renders nothing until its state table exists. Owner: "simple, but
 // with everything I need to know what the bot is doing".
-const FLIP_P = { firstPct: 5, mult: 1.5, slPct: 0.5, tpPct: 2, window: 30, band: 0.30, levCap: 3, trailPct: 0 };
+const FLIP_P = { firstPct: 5, mult: 1.5, slPct: 0.5, tpPct: 2, window: 30, band: 0.30, levCap: 3, trailPct: 0, addMode: 0 };
 // One panel per coin (same bot file, FLIP_COIN env var). Params must match COINS in server/lit_flip_live.py.
 type FlipCfg = { coin: string; worker: string; table: string; api: string; P: typeof FLIP_P; pd: number; qd: number };
 const LIT_FLIP: FlipCfg = { coin: "LIT", worker: "Worker 2", table: "lighter_lit_flip", api: "/api/lighter-lit-flip", P: FLIP_P, pd: 4, qd: 2 };
@@ -1390,7 +1390,7 @@ function LitFlipPanel({ cfg = LIT_FLIP, hideWhenIdle = false }: { cfg?: FlipCfg;
   // Settings (2026-11-04): the open sequence runs on its own seq_params; the next one on live_params (panel overrides).
   const fromDb = (o: any) => o ? { ...cfg.P, ...(o.tp_pct != null && { tpPct: Number(o.tp_pct) }), ...(o.sl_pct != null && { slPct: Number(o.sl_pct) }),
     ...(o.first_pct != null && { firstPct: Number(o.first_pct) }), ...(o.mult != null && { mult: Number(o.mult) }), ...(o.lev_cap != null && { levCap: Number(o.lev_cap) }),
-    ...(o.trail_pct != null && { trailPct: Number(o.trail_pct) }) } : cfg.P;
+    ...(o.trail_pct != null && { trailPct: Number(o.trail_pct) }), ...(o.add_mode != null && { addMode: Number(o.add_mode) }) } : cfg.P;
   const nextP = fromDb(st.live_params ?? st.override_params);
   const FLIP_P = st.seq_side != null ? fromDb(st.seq_params) : nextP;
   async function toggleSetting(body: Record<string, any>, label: string) {
@@ -1452,7 +1452,7 @@ function LitFlipPanel({ cfg = LIT_FLIP, hideWhenIdle = false }: { cfg?: FlipCfg;
       <div className="flex items-start justify-between gap-2">
         <div>
           <p className="text-white font-bold">{cfg.coin} Flip Martingale — {cfg.worker}</p>
-          <p className="text-gray-500 text-[11px]">{cfg.coin} perp · start on the 30-min range · target +{FLIP_P.tpPct}% · flip at −{FLIP_P.slPct}% ×{FLIP_P.mult} · cap {FLIP_P.levCap}x</p>
+          <p className="text-gray-500 text-[11px]">{cfg.coin} perp · start on the 30-min range · target +{FLIP_P.tpPct}% · {FLIP_P.addMode ? "ADD same side" : "flip"} at −{FLIP_P.slPct}% ×{FLIP_P.mult} · cap {FLIP_P.levCap}x</p>
           <p className="text-[11px] mt-0.5">
             <span className={alive ? "text-green-400" : "text-red-400"}>● {alive ? `alive (${age}s)` : age != null ? `NO HEARTBEAT ${age}s` : "not running"}</span>
             <span className="text-yellow-300 font-semibold"> · {doing}</span>
@@ -1479,8 +1479,8 @@ function LitFlipPanel({ cfg = LIT_FLIP, hideWhenIdle = false }: { cfg?: FlipCfg;
           <Stat label={`Open ${side}`} value={`${qty.toFixed(cfg.qd)} ${cfg.coin}`} sub={`$${(qty * entry).toFixed(2)} @ $${entry.toFixed(cfg.pd)} · open P&L ${usd(Number(st.live_upnl ?? 0), 3)}`}
             color={side === "LONG" ? "text-green-400" : "text-red-400"} />
           <Stat label="Target (win)" value={`$${tgt!.toFixed(cfg.pd)}`} sub={`${dist(tgt) != null ? `${dist(tgt)!.toFixed(2)}% away` : ""} · ends the sequence`} color="text-green-400" />
-          <Stat label={nextUsd ? "Flip (next trade)" : "Stop (last step)"} value={`$${stp!.toFixed(cfg.pd)}`}
-            sub={`${dist(stp) != null ? `${dist(stp)!.toFixed(2)}% away` : ""} · ${nextUsd ? `flips to ${side === "LONG" ? "SHORT" : "LONG"} ${usd(nextUsd)}` : "sequence busts"}`} color="text-red-400" />
+          <Stat label={nextUsd ? (FLIP_P.addMode ? "Add (next level)" : "Flip (next trade)") : "Stop (last step)"} value={`$${stp!.toFixed(cfg.pd)}`}
+            sub={`${dist(stp) != null ? `${dist(stp)!.toFixed(2)}% away` : ""} · ${nextUsd ? (FLIP_P.addMode ? `adds up to ${usd(nextUsd)} ${side}` : `flips to ${side === "LONG" ? "SHORT" : "LONG"} ${usd(nextUsd)}`) : "sequence busts"}`} color="text-red-400" />
         </div>
       )}
       {side && price != null && entry > 0 && (() => {
@@ -1503,11 +1503,14 @@ function LitFlipPanel({ cfg = LIT_FLIP, hideWhenIdle = false }: { cfg?: FlipCfg;
             </div>
             {(() => {
               // Whole sequence if closed now (owner 2026-11-04): this trade's open P&L + the earlier flips of the same sequence.
-              const earlier = trades.filter((t) => String(t.seq_id) === String(st.seq_id) && t.result === "flip").reduce((x, t) => x + Number(t.pnl_usd), 0);
-              const seqNow = earlier + Number(st.live_upnl ?? 0);
+              const upnl = Number(st.live_upnl ?? 0), lpos = Number(st.live_pos ?? 0);
+              // Flip mode: earlier flips are closed losses + this trade's open P&L. Add mode: nothing was closed -- the whole
+              // sequence is the position's open P&L, and break-even is the exchange's average entry.
+              const earlier = FLIP_P.addMode ? 0 : trades.filter((t) => String(t.seq_id) === String(st.seq_id) && t.result === "flip").reduce((x, t) => x + Number(t.pnl_usd), 0);
+              const seqNow = earlier + upnl;
               const tf = (st.live_params ?? {}).trail_floor;
               const lockF = (st.live_params ?? {}).lock_floor;
-              const be = qty > 0 ? entry + (side === "LONG" ? 1 : -1) * (-earlier) / qty : null;
+              const be = FLIP_P.addMode ? (lpos && price != null ? price - upnl / lpos : null) : (qty > 0 ? entry + (side === "LONG" ? 1 : -1) * (-earlier) / qty : null);
               const bePct = be != null ? Math.abs(be / entry - 1) * 100 : null;
               return (
                 <p className="text-[12px] mt-1 tabular-nums text-center">
@@ -1519,7 +1522,7 @@ function LitFlipPanel({ cfg = LIT_FLIP, hideWhenIdle = false }: { cfg?: FlipCfg;
               );
             })()}
             <div className="flex justify-between text-[10px] text-gray-500 tabular-nums mt-0.5">
-              <span>{nextUsd ? `FLIP → ${other}` : "STOP (bust)"} ${stp!.toFixed(cfg.pd)} (−{FLIP_P.slPct}%)</span>
+              <span>{nextUsd ? (FLIP_P.addMode ? `ADD more ${side}` : `FLIP → ${other}`) : "STOP (bust)"} ${stp!.toFixed(cfg.pd)} (−{FLIP_P.slPct}%)</span>
               <span>entry ${entry.toFixed(cfg.pd)}</span>
               <span>TARGET ${tgt!.toFixed(cfg.pd)} (+{FLIP_P.tpPct}%)</span>
             </div>
@@ -1564,7 +1567,12 @@ function LitFlipPanel({ cfg = LIT_FLIP, hideWhenIdle = false }: { cfg?: FlipCfg;
 
             <p className="text-gray-500 text-[10px] uppercase mt-2">Basic rules</p>
             {Row({ title: "Take profit", children: (<>at {In({ k: "tpPct", v: (nextP.tpPct), step: "0.1" })}% {stOn && <span className="text-gray-500">(not used while Stepped target is ON)</span>}</>) })}
-            {Row({ title: "Flip", children: (<>to the other side when the price goes {In({ k: "slPct", v: (nextP.slPct), step: "0.05" })}% against the trade</>) })}
+            {Row({ title: "When it goes wrong", children: (<>after a move of {In({ k: "slPct", v: (nextP.slPct), step: "0.05" })}% against the trade:
+              <span className="inline-flex ml-2 rounded overflow-hidden border border-gray-600 align-middle">
+                <button onClick={() => toggleSetting({ addMode: 0 }, "Flip")} disabled={busy != null} className={`px-2 text-[12px] ${!nextP.addMode ? "bg-green-500 text-gray-900 font-bold" : "bg-gray-800 text-gray-400"}`}>Flip to the other side</button>
+                <button onClick={() => toggleSetting({ addMode: 1 }, "Add same side")} disabled={busy != null} className={`px-2 text-[12px] ${nextP.addMode ? "bg-green-500 text-gray-900 font-bold" : "bg-gray-800 text-gray-400"}`}>Add more, same side</button>
+              </span>
+              {nextP.addMode ? <div className="text-[12px] text-gray-400">keeps the trade and adds more with a limit order (no slippage); target = {fmt(pv.tp)} above the last add; Ride / Stepped / Deep-step are ignored in this mode</div> : null}</>) })}
             {Row({ title: "Size", children: (<>first trade {In({ k: "firstPct", v: (nextP.firstPct), step: "0.5" })}% of the account, ×{In({ k: "mult", v: (nextP.mult), step: "0.05" })} bigger each flip, never more than {In({ k: "levCap", v: (nextP.levCap), step: "0.5" })}× the account
               <div className={`text-[12px] ${firstUsd < 10 ? "text-red-400" : "text-gray-400"}`}>= first trade {usd(firstUsd)}{firstUsd < 10 ? " (under Lighter's $10 minimum — it won't start)" : ""} · {ladderUsd.length} steps · biggest {usd(ladderUsd[ladderUsd.length - 1] ?? 0, 0)} · a full bust costs ≈ {usd(bust)} ({equity ? (bust / equity * 100).toFixed(1) : 0}%)</div>
             </>) })}

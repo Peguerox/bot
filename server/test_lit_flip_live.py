@@ -423,13 +423,55 @@ async def t_takeover_reloads_state():
     check("takeover: no second count of the flattened sequence", db.state.get("sequences") == seqs and new.pos is None, (seqs, db.state.get("sequences"), new.pos))
 
 
+async def t_add_mode():
+    print("\n[add mode: target limit + same-side add limit at -0.5%; add fills -> next level; target closes ALL; same money as close+reopen]")
+    ex, db = FakeEx(), FakeDB(); db.state["override_params"] = {"add_mode": 1, "tp_pct": 1.5}
+    bot = L.FlipBot(ex, db); await _ticks(bot, 1)
+    o = sorted(((x["kind"], x["is_ask"], x["reduce_only"]) for x in ex.orders))
+    check("long: target SELL limit (reduce-only) + add BUY limit (not reduce-only), no flip stop",
+          o == [("limit", False, False), ("limit", True, True)], ex.orders)
+    add = [x for x in ex.orders if not x["reduce_only"]][0]
+    check("add sits at -0.5% (2.985); 15/2.985 - 3.33 = 1.69 LIT is under $10 -> rounded up to 3.36 LIT ($10)",
+          abs(add["price"] - 2.985) < 1e-9 and add["qty"] * 2.985 >= 10 and abs(add["qty"] - 3.36) < 0.02, add)
+    ex.move(2.985); await _ticks(bot, 1)
+    check("add filled -> level 2, still LONG, level price 2.985, one 'add' row", bot.pos.level == 1 and bot.pos.side == F.LONG
+          and abs(bot.pos.entry - 2.985) < 1e-9 and [t["result"] for t in db.trades] == ["add"], (bot.pos, db.trades))
+    tgt = [x for x in ex.orders if x["reduce_only"]][0]
+    check("target now 1.5% above the LEVEL price (3.0298) for the whole position (3.33 + 3.36)", abs(tgt["price"] - 2.985 * 1.015) < 1e-9 and abs(tgt["qty"] - 6.69) < 0.02, tgt)
+    eq0 = 200.0; db.state["enabled"] = False
+    ex.move(2.985 * 1.015 + 0.0001); await _ticks(bot, 2)
+    flip_equiv = -3.33 * 3.0 * 0.005 + 6.69 * 2.985 * 0.015       # close level 1 at its stop, reopen the (rounded-up) position and win 1.5%
+    check("target closed everything -> win; money = the close+reopen math", ex.pos == 0 and db.state.get("wins") == 1
+          and abs((ex.equity - eq0) - flip_equiv) < 0.03, (ex.equity - eq0, flip_equiv))
+
+
+async def t_add_mode_partial_and_bust():
+    print("\n[add mode: a partial add keeps the level price and leaves the rest on the book; the last step's stop busts everything]")
+    ex, db = FakeEx(), FakeDB(); db.state["override_params"] = {"add_mode": 1, "tp_pct": 1.5}
+    bot = L.FlipBot(ex, db); await _ticks(bot, 1)
+    ex._fill(False, 0.8, 2.985, False); ex.orders = [x for x in ex.orders if x["reduce_only"]]   # 0.8 of the 1.69 add filled
+    ex.price = 2.986; await _ticks(bot, 2)
+    rest = [x for x in ex.orders if not x["reduce_only"]]
+    check("partial: still level 1 at 3.0; the rest is re-placed at 2.985 (rounded up to the $10 minimum)", bot.pos.level == 0 and abs(bot.pos.entry - 3.0) < 1e-9
+          and rest and rest[0]["qty"] * 2.985 >= 10 and abs(rest[0]["price"] - 2.985) < 1e-9, (bot.pos, ex.orders))
+    for _ in range(12):
+        nxt = [x for x in ex.orders if not x["reduce_only"]]
+        if not nxt: break
+        ex.move(nxt[0]["price"] - 0.0001); await _ticks(bot, 1)
+    stop = [x for x in ex.orders if x["kind"] == "stop"]
+    check("at the last step: no add, a reduce-only stop for the whole position", bot.pos.level == 10 and stop and stop[0]["reduce_only"], (bot.pos, ex.orders))
+    db.state["enabled"] = False
+    ex.move(stop[0]["price"] - 0.0001); await _ticks(bot, 2)
+    check("bust: flat, counted", ex.pos == 0 and db.state.get("busts") == 1, (ex.pos, db.state.get("busts")))
+
+
 async def _nosleep(*a, **k):
     return None
 
 
 async def main():
     for t in (t_start_flip_win, t_watch_mode_fallback, t_restart_keeps_the_sequence, t_off_keeps_position_flatten_closes,
-              t_bust_at_cap, t_unknown_position_is_protected, t_ws_wake_and_rejected_flip, t_stale_flip_never_left_behind, t_panel_settings_next_sequence_only, t_failed_placement_rechecked_fast, t_compounding_off, t_waf_block_backs_off, t_trail_after_target, t_trail_stop_refused_closes_at_market, t_stepped_target, t_deep_step_profit_lock, t_dead_book_socket_uses_rest, t_takeover_reloads_state):
+              t_bust_at_cap, t_unknown_position_is_protected, t_ws_wake_and_rejected_flip, t_stale_flip_never_left_behind, t_panel_settings_next_sequence_only, t_failed_placement_rechecked_fast, t_compounding_off, t_waf_block_backs_off, t_trail_after_target, t_trail_stop_refused_closes_at_market, t_stepped_target, t_deep_step_profit_lock, t_dead_book_socket_uses_rest, t_takeover_reloads_state, t_add_mode, t_add_mode_partial_and_bust):
         await t()
     print(f"\n==== {len(PASS)} passed, {len(FAIL)} failed ====")
 

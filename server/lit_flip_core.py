@@ -31,6 +31,7 @@ class Params:
     lock_profit_pct: float = 0.25 #   the open trade pays back the whole sequence + lock_profit_pct % of the account and is
     lock_arm_pct: float = 0.5     #   lock_arm_pct % past that, a stop locks it (target stays; flip removed);
     lock_trail_pct: float = 0.0   #   0 = fixed lock, >0 = raise it behind the peak by this %
+    add_mode: float = 0.0         # 0 = FLIP to the other side at -sl%; 1 = ADD on the SAME side at -sl% (owner 2026-11-04, NEAR)
     trail_pct: float = 0.0        # 0 = off. >0: at the target don't close -- lock the target, trail the peak by this % (owner 2026-11-04)
 
 
@@ -117,6 +118,33 @@ def resting_orders(pos: Position, p: Params) -> List[Order]:
     else:
         # ONE order: closes pos.qty and opens nq on the other side.
         orders.append(Order("flip", is_ask_close, pos.qty + nq, stop_price(pos, p), False))
+    return orders
+
+
+def add_price(pos: Position, p: Params) -> float:
+    """Add mode: the next level's price = this level's stop price (a resting LIMIT on the same side, no slippage)."""
+    return stop_price(pos, p)
+
+
+def add_qty(pos: Position, p: Params) -> Optional[float]:
+    """Add mode: base units to ADD at the next level so the whole position equals the next ladder size there (the same money
+    as closing at the stop and re-opening the same side mult x bigger). None at the last step (-> bust stop)."""
+    nxt = pos.level + 1
+    if nxt >= len(pos.ladder_usd):
+        return None
+    return max(0.0, pos.ladder_usd[nxt] / add_price(pos, p) - pos.qty)
+
+
+def resting_orders_add(pos: Position, p: Params) -> List[Order]:
+    """Add mode: target (reduce-only limit, whole position, tp from this LEVEL's price) + add (same-side limit at the stop
+    price, NOT reduce-only), or at the last step a reduce-only stop for everything (bust)."""
+    close_is_ask = pos.side == LONG
+    orders = [Order("target", close_is_ask, pos.qty, target_price(pos, p), True)]
+    aq = add_qty(pos, p)
+    if aq is None:
+        orders.append(Order("stop", close_is_ask, pos.qty, stop_price(pos, p), True))
+    else:
+        orders.append(Order("add", not close_is_ask, aq, add_price(pos, p), False))
     return orders
 
 
