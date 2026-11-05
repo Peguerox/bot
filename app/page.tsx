@@ -647,7 +647,9 @@ function LitGridLivePanel({
   const modelTradesPerDay = 693 * Math.pow(0.125 / Math.max(Number(st?.internal_spacing_pct ?? st?.spacing_pct ?? 0.125), 0.01), 1.85);
   const sinceResetHours = sinceReset ? Math.max((nowTick - Date.parse(sinceReset.at)) / 3_600_000, 1 / 60) : 0;
   const liveRate = sinceReset != null && sinceResetHours >= 1;
-  const curveTradesPerDay = liveRate ? sinceReset!.lastHour * 24 : modelTradesPerDay;
+  // 2026-11-05 (owner): the $/mo table uses the AVERAGE rate since the last reset, not the last hour (which jumps to
+  // 80/h in a busy hour). The last hour is still shown in yellow next to it.
+  const curveTradesPerDay = liveRate ? sinceReset!.count / (sinceResetHours / 24) : modelTradesPerDay;
   const unrealizedPnl = totalPnl != null ? totalPnl - botProfit : null;
   const unrealizedPct = unrealizedPnl != null && putInUsd > 0 ? (unrealizedPnl / putInUsd) * 100 : null;
   const pnlColor = (v: number | null) => v == null ? "text-gray-500" : Math.abs(v) < 0.005 ? "text-gray-300" : v >= 0 ? "text-green-400" : "text-red-400";
@@ -1203,7 +1205,7 @@ function LitGridLivePanel({
           ? <p className="text-gray-500 text-xs">Planning the curve at the current price…</p>
           : <CurveView curve={curve} livePrice={livePrice} spacingPct={baseSpacingPct ?? 0.125}
               tradesPerDay={curveTradesPerDay}
-              rateNote={liveRate ? "· your real rate in the last hour" : "· estimate until 1h after a reset"} ago={curveAgo != null ? fmtAgo(curveAgo) : null} />)}
+              rateNote={liveRate ? `· your average since the reset (last hour: ${sinceReset!.lastHour}/h)` : "· estimate until 1h after a reset"} ago={curveAgo != null ? fmtAgo(curveAgo) : null} />)}
         <div className="flex items-end gap-2">
           <label className="flex-1 text-[10px] text-gray-500">n
             <input value={curveNIn} onChange={(e) => setCurveNIn(e.target.value)} placeholder={String(st?.curve_n ?? 10)}
