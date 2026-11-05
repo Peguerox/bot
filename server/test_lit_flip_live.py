@@ -488,13 +488,39 @@ async def t_flat_read_is_confirmed():
         L.FLAT_CONFIRM_S = 0.0; L.time.time = __import__("time").time
 
 
+async def t_fixed_first_and_last_stop():
+    print("\n[owner 2026-11-05: first trade a fixed $; the cap counts the whole account (more steps); the last step's stop wider]")
+    lad = F.ladder(500.0, F.Params(first_usd=10.0, lev_cap=4.5))
+    check("$500, first $10, cap 4.5x -> 14 steps from $10", len(lad) == 14 and abs(lad[0] - 10) < 1e-9 and lad[-1] <= 2250, (len(lad), lad[-1]))
+    check("first $5 is rounded up to Lighter's $10", abs(F.ladder(500.0, F.Params(first_usd=5.0))[0] - 10) < 1e-9)
+    p = F.Params(last_sl_pct=2.0)
+    pos = F.Position(F.LONG, 1.0, 100.0, 2, [10, 15, 22.5])
+    check("last step: bust stop 2% away; earlier steps keep 0.5%", abs(F.stop_price(pos, p) - 98.0) < 1e-9
+          and abs(F.stop_price(F.Position(F.LONG, 1.0, 100.0, 1, [10, 15, 22.5]), p) - 99.5) < 1e-9)
+    for mode in (0, 1):
+        ex, db = FakeEx(equity=500.0), FakeDB()
+        db.state["override_params"] = {"first_usd": 10, "lev_cap": 4.5, "last_sl_pct": 2.0, "add_mode": mode, "tp_pct": 1.5}
+        bot = L.FlipBot(ex, db); await _ticks(bot, 1)
+        check(f"mode {mode}: bot ladder 14 steps from $10 on a $500 account", bot.pos is not None and len(bot.pos.ladder_usd) == 14
+              and abs(bot.pos.ladder_usd[0] - 10) < 1e-6, bot.pos and len(bot.pos.ladder_usd))
+        for _ in range(20):
+            nxt = [x for x in ex.orders if not x["reduce_only"]]
+            if not nxt: break
+            ex.move(nxt[0]["price"] - 0.0001 if (nxt[0]["is_ask"] or mode) else nxt[0]["price"] + 0.0001); await _ticks(bot, 1)
+        stop = [x for x in ex.orders if x["kind"] == "stop" and x["reduce_only"]]
+        lvl = bot.pos.level if bot.pos else None
+        ref = bot.pos.entry if bot.pos else None
+        check(f"mode {mode}: at step 14 the bust stop is 2% from the level price", lvl == 13 and stop
+              and abs(abs(stop[0]["price"] / ref - 1) - 0.02) < 1e-4, (lvl, stop, ref))
+
+
 async def _nosleep(*a, **k):
     return None
 
 
 async def main():
     for t in (t_start_flip_win, t_watch_mode_fallback, t_restart_keeps_the_sequence, t_off_keeps_position_flatten_closes,
-              t_bust_at_cap, t_unknown_position_is_protected, t_ws_wake_and_rejected_flip, t_stale_flip_never_left_behind, t_panel_settings_next_sequence_only, t_failed_placement_rechecked_fast, t_compounding_off, t_waf_block_backs_off, t_trail_after_target, t_trail_stop_refused_closes_at_market, t_stepped_target, t_deep_step_profit_lock, t_dead_book_socket_uses_rest, t_takeover_reloads_state, t_add_mode, t_add_mode_partial_and_bust, t_flat_read_is_confirmed):
+              t_bust_at_cap, t_unknown_position_is_protected, t_ws_wake_and_rejected_flip, t_stale_flip_never_left_behind, t_panel_settings_next_sequence_only, t_failed_placement_rechecked_fast, t_compounding_off, t_waf_block_backs_off, t_trail_after_target, t_trail_stop_refused_closes_at_market, t_stepped_target, t_deep_step_profit_lock, t_dead_book_socket_uses_rest, t_takeover_reloads_state, t_add_mode, t_add_mode_partial_and_bust, t_flat_read_is_confirmed, t_fixed_first_and_last_stop):
         await t()
     print(f"\n==== {len(PASS)} passed, {len(FAIL)} failed ====")
 

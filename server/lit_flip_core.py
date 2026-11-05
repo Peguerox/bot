@@ -33,6 +33,9 @@ class Params:
     lock_trail_pct: float = 0.0   #   0 = fixed lock, >0 = raise it behind the peak by this %
     add_mode: float = 0.0         # 0 = FLIP to the other side at -sl%; 1 = ADD on the SAME side at -sl% (owner 2026-11-04, NEAR)
     trail_pct: float = 0.0        # 0 = off. >0: at the target don't close -- lock the target, trail the peak by this % (owner 2026-11-04)
+    first_usd: float = 0.0        # 0 = first trade is first_pct of equity; >0 = first trade is this many USD (owner 2026-11-05: the
+                                  #   cap still grows with the whole account, so steps grow as the account grows)
+    last_sl_pct: float = 0.0      # 0 = the last step's bust stop is sl_pct away; >0 = this % instead (more room before a bust)
 
 
 def range_signal(candles, window: int, band: float) -> int:
@@ -65,9 +68,13 @@ def range_info(candles, window: int):
 def ladder(equity: float, p: Params) -> List[float]:
     """Trade sizes in USD for one sequence: first_pct of equity, x mult each flip, while <= lev_cap x equity.
     Empty if even the first trade is under the exchange minimum."""
-    sizes, s = [], equity * p.first_pct / 100.0
-    if s < p.min_order_usd:
-        return []
+    if p.first_usd > 0:
+        s = max(p.first_usd, p.min_order_usd)       # a fixed first trade (never under Lighter's minimum)
+    else:
+        s = equity * p.first_pct / 100.0
+        if s < p.min_order_usd:
+            return []
+    sizes = []
     while s <= p.lev_cap * equity + 1e-9:
         sizes.append(s)
         s *= p.mult
@@ -96,8 +103,16 @@ def target_price(pos: Position, p: Params) -> float:
     return pos.entry * (1 + p.tp_pct / 100.0) if pos.side == LONG else pos.entry * (1 - p.tp_pct / 100.0)
 
 
+def stop_pct(pos: Position, p: Params) -> float:
+    """The stop distance for this level: sl_pct, or last_sl_pct (if set) at the last step (the bust stop)."""
+    if p.last_sl_pct > 0 and pos.level >= len(pos.ladder_usd) - 1:
+        return p.last_sl_pct
+    return p.sl_pct
+
+
 def stop_price(pos: Position, p: Params) -> float:
-    return pos.entry * (1 - p.sl_pct / 100.0) if pos.side == LONG else pos.entry * (1 + p.sl_pct / 100.0)
+    d = stop_pct(pos, p)
+    return pos.entry * (1 - d / 100.0) if pos.side == LONG else pos.entry * (1 + d / 100.0)
 
 
 def next_qty(pos: Position, p: Params) -> Optional[float]:

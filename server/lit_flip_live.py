@@ -76,7 +76,7 @@ def is_blocked(e):
 # sequence -- an open sequence keeps the params it started with (seq_params), so a running ladder never changes halfway.
 EDITABLE = {"tp_pct": (0.2, 10.0), "sl_pct": (0.1, 5.0), "first_pct": (0.5, 50.0), "mult": (1.05, 3.0), "lev_cap": (0.2, 5.0),
             "trail_pct": (0.0, 3.0), "lock_from_step": (0.0, 11.0), "lock_profit_pct": (0.0, 5.0), "lock_arm_pct": (0.05, 3.0),
-            "lock_trail_pct": (0.0, 3.0), "add_mode": (0.0, 1.0)}
+            "lock_trail_pct": (0.0, 3.0), "add_mode": (0.0, 1.0), "first_usd": (0.0, 1e6), "last_sl_pct": (0.0, 10.0)}
 TRAIL_MIN_PCT = 0.05                  # a trail under this is treated as off (price noise would close it at once)
 TRAIL_RAISE_STEP = 0.0005             # move the trailing stop only when it can rise >= 0.05% (each move = cancel + place)
 # Stepped target (owner 2026-11-04): step_n steps from step_start, +step_inc each; the bot climbs one step per full bust the
@@ -457,6 +457,8 @@ class FlipBot:
         if "trail_pct" in ch and ch["trail_pct"] < TRAIL_MIN_PCT:
             ch["trail_pct"] = 0.0
         p = replace(self.base, **ch)
+        if p.last_sl_pct and p.last_sl_pct < p.sl_pct:      # a last stop tighter than the others makes no sense: off
+            p = replace(p, last_sl_pct=0.0)
         return p if p.tp_pct > p.sl_pct else self.base
 
     async def _blocked(self, e, what):
@@ -487,6 +489,8 @@ class FlipBot:
 
     def _sizing_equity(self, equity):
         """What the ladder is sized from: the whole account (compounding) or the fixed base, whichever is smaller."""
+        if self.p.first_usd > 0:                # fixed first trade: the cap counts the whole account (steps grow with it)
+            return equity
         return min(equity, self.fixed_base) if self.fixed_base else equity
 
     def _load(self, st):
@@ -821,7 +825,7 @@ class FlipBot:
             return None
         n, start, inc, base_usd = self.steps
         lad = F.ladder(sizing_eq, self.p)
-        bust = sum(lad) * self.p.sl_pct / 100 if lad else 0.0
+        bust = (sum(lad[:-1]) * self.p.sl_pct + lad[-1] * (self.p.last_sl_pct or self.p.sl_pct)) / 100 if lad else 0.0
         covered = (equity - base_usd) / bust if bust > 0 and base_usd > 0 else 0.0
         level = max(0, min(n - 1, int(covered)))
         tp = round(start + inc * level, 4)
@@ -910,7 +914,7 @@ class FlipBot:
         pnl_seq = acct["equity"] - float((self.seq or {}).get("start_equity") or acct["equity"])
         await self.db.trade({"seq_id": (self.seq or {}).get("id"), "level": old.level, "side": old.side, "qty": old.qty,
                              "entry": old.entry, "exit_price": tgt if won else stp, "result": ("trail" if trailed else "lock" if locked else "target") if won else "bust",
-                             "pnl_usd": (old.qty * ((tgt - old.entry) * old.side) if won else -old.qty * old.entry * self.p.sl_pct / 100)})
+                             "pnl_usd": (old.qty * ((tgt - old.entry) * old.side) if won else -old.qty * abs(stp - old.entry))})
         st = await self.db.get_state()
         await self.db.log("sequence_over", {"result": "target" if won else "bust", "level": old.level, "sequence_pnl_usd": round(pnl_seq, 4),
                                             "funding_total": acct.get("funding")})

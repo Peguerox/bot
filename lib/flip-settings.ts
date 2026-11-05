@@ -10,6 +10,7 @@ export const FLIP_BOUNDS: Record<string, [string, number, number]> = {
   lockFromStep: ["lock_from_step", 0, 11], lockProfitPct: ["lock_profit_pct", 0, 5], lockArmPct: ["lock_arm_pct", 0.05, 3],
   lockTrailPct: ["lock_trail_pct", 0, 3],
   addMode: ["add_mode", 0, 1],
+  firstUsd: ["first_usd", 0, 1_000_000], lastSlPct: ["last_sl_pct", 0, 10],
 };
 
 export async function flipSettingsPost(req: NextRequest, table: string) {
@@ -58,6 +59,11 @@ export async function flipSettingsPost(req: NextRequest, table: string) {
     return NextResponse.json({ error: "Trail must be 0 (off) or at least 0.05%." }, { status: 400 });
   const tp = next.tp_pct ?? 2, sl = next.sl_pct ?? 0.5;
   if (tp <= sl) return NextResponse.json({ error: "Target must be bigger than the stop." }, { status: 400 });
+  // Fixed first trade (owner 2026-11-05): 0 = use first % of the account; else at least Lighter's $10 minimum.
+  if (next.first_usd !== undefined && next.first_usd > 0 && next.first_usd < 10)
+    return NextResponse.json({ error: "Fixed first trade must be 0 (use the %) or at least $10." }, { status: 400 });
+  if (next.last_sl_pct !== undefined && next.last_sl_pct > 0 && next.last_sl_pct < sl)
+    return NextResponse.json({ error: "The last step's stop must be 0 (same as the others) or at least the normal stop." }, { status: 400 });
   const { error } = await sb.from(table).update({ override_params: next }).eq("id", 1);
   if (error) return NextResponse.json({ error: error.message }, { status: 500 });
   return NextResponse.json({ ok: true, override_params: next });
