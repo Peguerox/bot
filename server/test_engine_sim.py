@@ -545,6 +545,52 @@ async def run_scenario(name, kind, seed, p429=0.0, p_timeout=0.0, restart_every=
           f"lit={ex.lit:.2f} usdc={ex.usdc:.2f}")
 
 
+async def partial_buy_scenario():
+    """2026-11-06 Worker 3: a buy filled 50 of 86.47 LIT, price rose, and the 50 had no sell for ~2 h (the order wasn't
+    finished). Now: once price is a line above it for PARTIAL_BUY_CANCEL_S, the rest is cancelled and the filled part
+    gets its sell."""
+    rng = random.Random(7)
+    Clock.t = T0
+    ex = SimExchange(3.50, 1000.0, 0.0, rng)
+    db = SimDb(base_state(spacing_pct=0.5, levels_up=5, levels_down=5, capital_usd=1000.0, drawdown_pct=5))
+    limiter = core.ExchangeLimiter()
+    feed = core.OrdersFeed()
+    bot = make_sim_bot(db, ex, limiter)
+    bot._orders_feed = feed
+
+    async def ticks(n, p):
+        for _ in range(n):
+            Clock.t += 2.0
+            ex.set_price(p)
+            push_feed(feed, ex, rng, 0.0)
+            try:
+                await bot.tick()
+            except (RateLimited, asyncio.TimeoutError):
+                pass
+    await ticks(15, 3.50)
+    buys = sorted([o for o in ex.orders.values() if o["status"] == "open" and o["side"] == "buy"], key=lambda o: -o["price"])
+    check("[partial] buys resting below price", bool(buys), len(ex.orders))
+    if not buys:
+        return
+    o = buys[0]
+    q = round(max(1.2, o["remaining"] * 0.5), 2)
+    check("[partial] the buy is big enough to fill part of it (>= 1 LIT left over)", o["remaining"] - q >= 1.0, o["remaining"])
+    o["filled"] += q; o["quote"] += q * o["price"]; o["remaining"] -= q; o["filled_t"] = Clock.t
+    ex.usdc -= q * o["price"]; ex.lit += q
+    up = round(o["price"] * 1.012, 4)                      # two lines above the buy, below the next sells
+    await ticks(25, up)                                    # 50 s
+    check("[partial] the rest of the partly filled buy was cancelled", ex.orders[o["oi"]]["status"] == "canceled",
+          ex.orders[o["oi"]]["status"])
+    row = next((r for r in db.orders if r.get("client_order_index") == o["co"]), None)
+    check("[partial] its ledger row is booked with the filled part only", row is not None and row.get("status") == "filled"
+          and abs(float(row.get("filled_qty") or 0) - q) < 1e-6, row and (row.get("status"), row.get("filled_qty")))
+    lot = lot_costs(db).get(row["level"]) if row else None
+    sold = [r for r in db.orders if r["side"] == "sell" and r.get("closes_level") == (row or {}).get("level")]
+    check("[partial] the filled part got its sell (resting or already sold)", bool(sold), (lot, sold[-1:] if sold else None))
+    ledger_lit = sum(h["qty"] for h in lot_costs(db).values())
+    check("[partial] ledger LIT = exchange LIT", abs(ledger_lit - ex.lit) < 0.02, (ledger_lit, ex.lit))
+
+
 async def main():
     scenarios = [
         ("chop, clean", "chop", 1, 0.0, 0.0, None),
@@ -560,6 +606,7 @@ async def main():
     for name, kind, seed, p429, pto, rs in scenarios:
         kw = {"spacing": 0.125, "levels": (10, 10)} if "0.125" in name else {}
         await run_scenario(name, kind, seed, p429, pto, rs, **kw)
+    await partial_buy_scenario()
 
     dyn = {"dynamic_dd_enabled": True, "gate_spacing_growth_enabled": True, "dynamic_dd_high": None,
            "dynamic_dd_tier": None, "dynamic_dd_base_capital_usd": None,

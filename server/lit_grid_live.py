@@ -382,6 +382,7 @@ ORDERS_WS_VERIFY_EVERY = 60.0       # one REST read a minute cross-checks the fe
 ORDERS_WS_DISTRUST_S = 300.0        # after a mismatch, REST only for this long
 ORDERS_WS_SETTLE_S = 5.0            # an order changed this recently may differ between the two
 INFLIGHT_S = 12.0
+PARTIAL_BUY_CANCEL_S = 30.0   # a partly filled buy with price a line above it: its rest is cancelled after this
 REJECT_COOLDOWN_S = 60.0
 REJECT_RETRY_S = 4.0          # first refusal in a rejected batch: retry after this, not the full cooldown
 BATCH_MAX = 20
@@ -2619,13 +2620,42 @@ class LitGridLive:
             wants.append(grid_engine.Want("sell", w.price, clamp_order_size(w.size), w.line,
                                           closes_line=w.closes_line))
         resting_keys = {(o["side"], price_to_int(o["price"])) for o in actual}
+        # Partly filled buy, price gone a line above it (2026-11-06, owner): its filled LIT is a lot with no sell until the
+        # order finishes -- 50 of 86.47 LIT filled at 08:59 and got its sell only when the rest was cancelled at 10:52.
+        # After PARTIAL_BUY_CANCEL_S, stop keeping the rest (the diff cancels it); reconcile then books the filled part
+        # as a lot and it gets its sell like any other. Only for a filled part of at least the 1 LIT minimum.
+        drop_partial = set()
+        seen_partial = getattr(self, "_partial_since", {})
+        for rows in resting.values():
+            for r in rows:
+                if r["side"] != "buy" or r.get("client_order_index") is None:
+                    continue
+                co = int(r["client_order_index"])
+                if co not in on_book_cos:
+                    continue
+                size_r = float(r.get("size") or 0)
+                done = max(float(r.get("filled_qty") or 0), size_r - remaining_by_co.get(co, size_r))
+                if clamp_order_size(done) is None:
+                    seen_partial.pop(co, None)
+                    continue
+                since = seen_partial.setdefault(co, now)
+                if (price >= float(r.get("limit_price") or 0) * (1 + spacing_pct / 100.0)
+                        and now - since >= PARTIAL_BUY_CANCEL_S):
+                    drop_partial.add(co)
+        self._partial_since = {co: t for co, t in seen_partial.items() if co in on_book_cos}
+        if drop_partial:
+            await self.log_run("partial_buy_rest_cancelled", {"client_order_indexes": sorted(drop_partial), "price": price})
+        dropped_lines = {lv for lv, rows in resting.items() for r in rows
+                         if r["side"] == "buy" and r.get("client_order_index") is not None
+                         and int(r["client_order_index"]) in drop_partial}
         funds_ok = True
         buys_need_release = False   # a new buy is funded only by cancelling a far buy in this batch
         if not entries:
             # Paused (OFF, balance check, stale order): no NEW buys, but the ones already resting
             # stay -- cancelling and re-placing them on every pause was churn, and v1 kept them too.
             for o in actual:
-                if o["side"] == "buy" and o["client_order_index"] in row_by_co:
+                if (o["side"] == "buy" and o["client_order_index"] in row_by_co
+                        and o["client_order_index"] not in drop_partial):
                     wants.append(grid_engine.Want("buy", o["price"], 0.0, 0))
         if entries:
             _, base_remaining, available = self._funding(state, holdings, resting)
@@ -2636,7 +2666,7 @@ class LitGridLive:
             kept_far = []    # (px, want) resting buys beyond the window, cancellable to fund near ones
             for ln, px in keep_plan.buy_lines:
                 key = ("buy", price_to_int(px))
-                if ln not in new_buy_lines and key in resting_keys:
+                if ln not in new_buy_lines and key in resting_keys and ln not in dropped_lines:
                     sz = size_at(px)
                     rows_here = [r for r in resting.get(ln, []) if r["side"] == "buy"]
                     if any(off_curve(r, sz) for r in rows_here):
@@ -2652,6 +2682,8 @@ class LitGridLive:
                 if sz is None:
                     continue
                 if line_rows:
+                    if ln in dropped_lines:
+                        continue   # its partly filled buy is being cancelled; the filled part becomes this line's lot
                     # This line already has an open buy row. Keep it only if it is resting at this
                     # exact price; otherwise (filled but not yet recorded, in flight, old price)
                     # wait for reconcile -- a second buy here would stack two lots on one line.
