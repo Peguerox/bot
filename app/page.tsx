@@ -1369,7 +1369,9 @@ function LitFlipPanel({ cfg = LIT_FLIP, hideWhenIdle = false }: { cfg?: FlipCfg;
     if (error || !data) { setSt(null); return; }
     setSt(data);
     const [{ data: t }, { data: e }] = await Promise.all([
-      getSupabase().from(`${cfg.table}_trades`).select("*").order("id", { ascending: false }).limit(20),
+      // Only trades since the last reset (owner 2026-11-05: "so we have an idea of earnings"); history_reset_at on the state row.
+      (data.history_reset_at ? getSupabase().from(`${cfg.table}_trades`).select("*").gte("at", data.history_reset_at)
+        : getSupabase().from(`${cfg.table}_trades`).select("*")).order("id", { ascending: false }).limit(30),
       getSupabase().from(`${cfg.table}_runs`).select("ran_at,action,detail").order("id", { ascending: false }).limit(12),
     ]);
     setTrades(t ?? []); setEvents(e ?? []);
@@ -1640,7 +1642,9 @@ function LitFlipPanel({ cfg = LIT_FLIP, hideWhenIdle = false }: { cfg?: FlipCfg;
       )}
       {trades.length > 0 && (
         <div>
-          {SecHead("trades", `Trades (${trades.length})`)}
+          {SecHead("trades", st.history_reset_at
+            ? `Trades since the reset (${new Date(st.history_reset_at).toLocaleString([], { month: "short", day: "numeric", hour: "numeric", minute: "2-digit" })}) · profit ${Number(st.realized_usd ?? 0) >= 0 ? "+" : ""}${usd(Number(st.realized_usd ?? 0))} ${pctInv(Number(st.realized_usd ?? 0))} · last ${trades.length}`
+            : `Trades (${trades.length})`)}
           {!closed.trades && <div className="space-y-0.5 text-[11px] tabular-nums max-h-44 overflow-y-auto">
             {trades.map((t) => (
               <div key={t.id} className="flex justify-between gap-2">
