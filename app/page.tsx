@@ -1482,13 +1482,15 @@ function LitFlipPanel({ cfg = LIT_FLIP, hideWhenIdle = false }: { cfg?: FlipCfg;
       </div>
       {st.history_reset_at && (() => {
         // Since the last reset (owner 2026-11-06): hours, $/hour and sequences/hour, and the same rate per day / month.
-        const hrs = Math.max(0, (now - Date.parse(st.history_reset_at)) / 36e5);
+        // Time the bot was stuck (not trading) is left out of the rate (owner 2026-11-06: rate_excluded_hours).
+        const excl = Math.max(0, Number(st.rate_excluded_hours ?? 0));
+        const hrs = Math.max(0, (now - Date.parse(st.history_reset_at)) / 36e5 - excl);
         const prof = Number(st.realized_usd ?? 0);
         const perH = hrs > 0 ? prof / hrs : 0;
         const pctH = invest > 0 ? perH / invest * 100 : 0;
         return (
           <div className="text-[12px] text-gray-300 bg-gray-800/60 rounded-lg px-3 py-2 flex flex-wrap gap-x-4 gap-y-1">
-            <span>since reset <b className="text-white">{hrs.toFixed(1)} h</b></span>
+            <span>since reset <b className="text-white">{hrs.toFixed(1)} h</b>{excl > 0 ? <span className="text-gray-500"> (not counting {excl} h stuck)</span> : null}</span>
             <span>earnings <b className={perH >= 0 ? "text-green-400" : "text-red-400"}>{perH >= 0 ? "+" : ""}{usd(perH, 3)}/h</b> ({pctH >= 0 ? "+" : ""}{pctH.toFixed(3)}%/h)</span>
             <span>{hrs > 0 ? (seqs / hrs).toFixed(1) : "0"} sequences/h · avg {usd(wins ? prof / Math.max(1, seqs) : 0, 3)} each</span>
             <span className="text-gray-400">same pace: {usd(perH * 24)}/day · {usd(perH * 24 * 30, 0)}/month ({(pctH * 24 * 30).toFixed(0)}%)</span>
