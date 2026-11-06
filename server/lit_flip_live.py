@@ -384,6 +384,8 @@ class FlipBot:
         self.mismatch_since = None
         self.flat_since = None
         self.dust_at = 0.0                  # last attempt to close a leftover under $10
+        self.dust_until = 0.0               # until then the leftover's add/close fills are not adopted as the position
+        self.dust_won = None                # the closed leftover's sequence result (decided before it was grown)
         self.too_small_until = 0.0          # Lighter refused an order as under $10 -> no re-place until then
         self.locked = False; self.lock_at = 0.0
         self.flip_mode = "native"
@@ -713,6 +715,8 @@ class FlipBot:
             self.flat_since = None
         if (live > 0) != (exp_side == F.LONG):
             await self._flipped(acct); return
+        if time.time() < self.dust_until:      # closing a leftover: its add/close fills show up late -- don't adopt them
+            return
         px_now = (self.candles[-1]["c"] if self.candles else 0) or acct.get("entry") or self.pos.entry
         smallest = (self.pos.ladder_usd[0] / self.pos.entry) if self.pos.ladder_usd and self.pos.entry else 0.0
         if abs(live) * px_now < self.p.min_order_usd and abs(live) < 0.9 * smallest:
@@ -926,6 +930,8 @@ class FlipBot:
         trailed = self.trail_floor is not None
         locked = self.lock_floor is not None and not trailed and abs(px - self.lock_floor) < abs(px - tgt)
         won = trailed or self.lock_floor is not None or abs(px - tgt) < abs(px - stp)
+        if self.dust_won is not None:                    # a leftover closed by _close_dust: judged before it was grown
+            won, self.dust_won = self.dust_won, None
         if trailed:                                      # closed by the trailing stop (or its market close)
             tgt = self.trail_floor
         elif locked:                                     # closed by the deep-step profit lock
@@ -964,6 +970,11 @@ class FlipBot:
         if time.time() - self.dust_at < DUST_RETRY_S:
             return
         self.dust_at = time.time()
+        # Decide win / bust NOW, from the sequence's own target and stop (2026-11-06: judged after the close, from the
+        # grown position's average, a +$0.01 target leftover was counted as a bust).
+        tgt, stp = F.target_price(self.pos, self.p), F.stop_price(self.pos, self.p)
+        self.dust_won = abs(px - tgt) < abs(px - stp)
+        self.dust_until = time.time() + DUST_RETRY_S
         await self._cancel_verified("dust")
         side, left = self.pos.side, abs(acct["pos"])
         add = max(MIN_BASE, math.ceil(self.p.min_order_usd * 1.2 / px * 10 ** SIZE_DEC) / 10 ** SIZE_DEC)

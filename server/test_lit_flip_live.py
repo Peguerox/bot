@@ -532,8 +532,15 @@ async def t_dust_and_small_targets():
     # the target partly fills: 0.5 LIT short stays (~$1.5)
     db.state["enabled"] = False
     ex.price = tgt[0]["price"]; ex._fill(False, abs(ex.pos) - 0.5, ex.price, True); ex.orders = [o for o in ex.orders if o["kind"] != "limit"]
+    real_market = ex.market; seen = []
+    async def late_market(is_ask, qty, ref, reduce_only=False):   # Lighter shows the grown position before the close
+        r = await real_market(is_ask, qty, ref, reduce_only)
+        if not reduce_only: seen.append(ex.pos)
+        return r
+    ex.market = late_market
     await _ticks(bot, 3)
     check("leftover grown past $10 and closed: flat", ex.pos == 0, ex.pos)
+    check("the grown position was never adopted as the sequence's position", not any(a == "size_mismatch_adopted" for a, _ in db.logs), db.logs[-5:])
     check("dust_closed logged, no 4-second retry storm", any(a == "dust_closed" for a, _ in db.logs)
           and sum(1 for a, _ in db.logs if a == "orders_missing_replaced") <= 1, [a for a, _ in db.logs][-6:])
     await _ticks(bot, 2)
