@@ -58,6 +58,8 @@ BOOK_REST_CACHE_S = 2.0               # backup REST top-of-book read at most thi
 TICK_NATIVE, TICK_WATCH = 1.0, 0.25
 PUBLISH_EVERY = 3.0                   # panel readout write, seconds
 MISMATCH_GRACE_S = 8.0                # a fill can take a few seconds to show; wait before "fixing" a mismatch
+DUST_RETRY_S = 30.0                   # a leftover under $10 is grown past $10 and closed; retried at most this often
+TOO_SMALL_PAUSE_S = 60.0              # after Lighter refuses an order as under $10, wait this long before re-placing
 FLAT_CONFIRM_S = 4.0                  # a "flat" read must still be flat on a fresh read this much later before the sequence
                                       # counts as over (2026-11-05: LIT read flat 3 s after its entry -> a fake "bust")
 WATCH_REFIRE_S = 5.0                  # watch mode: never fire again within this long of the last shot
@@ -381,6 +383,8 @@ class FlipBot:
         self.orders_checked_at = 0.0
         self.mismatch_since = None
         self.flat_since = None
+        self.dust_at = 0.0                  # last attempt to close a leftover under $10
+        self.too_small_until = 0.0          # Lighter refused an order as under $10 -> no re-place until then
         self.locked = False; self.lock_at = 0.0
         self.flip_mode = "native"
         self.loaded = False
@@ -584,6 +588,9 @@ class FlipBot:
                     out["stop"] = await self.ex.stop(o.is_ask, qty_round(o.qty), o.price, reduce_only=True)
             except Exception as e:          # one failed order must never skip the other
                 out[o.kind] = e
+        if any(v and "21706" in str(v) for v in out.values()):   # "invalid order base or quote amount" (under $10)
+            self.too_small_until = time.time() + TOO_SMALL_PAUSE_S
+            await self.db.log("order_too_small", {"pause_s": TOO_SMALL_PAUSE_S, "qty": round(pos.qty, SIZE_DEC)})
         # Any failure -> count the book again in ORDERS_SETTLE_S (missing ones re-placed), not after the slow safety net.
         self.orders_checked_at = time.time() - (max(0.0, self._orders_every() - ORDERS_SETTLE_S) if any(out.values()) else 0)
         await self.db.log("orders_placed", {"side": pos.side, "qty": round(pos.qty, 2), "entry": pos.entry, "level": pos.level,
@@ -706,6 +713,19 @@ class FlipBot:
             self.flat_since = None
         if (live > 0) != (exp_side == F.LONG):
             await self._flipped(acct); return
+        px_now = (self.candles[-1]["c"] if self.candles else 0) or acct.get("entry") or self.pos.entry
+        smallest = (self.pos.ladder_usd[0] / self.pos.entry) if self.pos.ladder_usd and self.pos.entry else 0.0
+        if abs(live) * px_now < self.p.min_order_usd and abs(live) < 0.9 * smallest:
+            # (only a real leftover: smaller than the smallest trade of the ladder -- a full $10 first trade that is
+            # briefly worth $9.97 after a small move is NOT dust)
+            # Left over under Lighter's $10 minimum (2026-11-06 LIT: the target filled 24.4 of 25.8, the 1.38 left could
+            # never get a target -> refused every 4 s for 3.5 h). Give a fill in progress the usual few seconds, then
+            # grow it past $10 and close it all; the sequence then ends normally (flat -> confirmed -> counted once).
+            if abs(abs(live) - exp_qty) > max(2 * 10 ** -SIZE_DEC, exp_qty * 0.01):
+                self.mismatch_since = self.mismatch_since or time.time()
+                if time.time() - self.mismatch_since < MISMATCH_GRACE_S:
+                    return
+            await self._close_dust(acct, px_now); return
         if self.p.add_mode >= 0.5 and abs(live) > exp_qty * 1.01:
             nxt = self.pos.level + 1
             if nxt < len(self.pos.ladder_usd):
@@ -849,8 +869,10 @@ class FlipBot:
         if first is None:
             await self.db.log("too_small_to_start", {"equity": acct["equity"]}); return
         qty = qty_round(first.qty)
-        if qty * ref < self.p.min_order_usd:    # rounding down can dip under Lighter's $10 minimum -> one size step up
-            qty = round(qty + 10 ** -SIZE_DEC, SIZE_DEC)
+        # Lighter's $10 minimum applies to the entry AND to the target that closes it -- a short's target is tp% lower
+        # (2026-11-05: a $10 short's $9.87 target was refused 93 times). Size up so both clear it.
+        low = ref * (1 - self.p.tp_pct / 100) / 1.003 if sig == F.SHORT else ref     # (+0.3% room for a short's fill)
+        qty = max(qty, math.ceil(self.p.min_order_usd / low * 10 ** SIZE_DEC - 1e-6) / 10 ** SIZE_DEC)
         err = await self.ex.market(sig == F.SHORT, qty, ref)
         await self.db.log("sequence_start", {"side": sig, "qty": qty, "ref": ref, "error": str(err)[:200] if err else None})
         for _ in range(6):                      # the fill can take a few seconds to show
@@ -936,8 +958,33 @@ class FlipBot:
         await self.db.log("position_adopted", {"pos": acct["pos"], "entry": acct["entry"]})
         await self._place_orders(self.pos); await self._save()
 
+    async def _close_dust(self, acct, px):
+        """A position worth less than Lighter's $10 minimum: no order can close it. Add a bit over $10 on the same side
+        (market), then close the whole thing reduce-only. Tried at most every DUST_RETRY_S."""
+        if time.time() - self.dust_at < DUST_RETRY_S:
+            return
+        self.dust_at = time.time()
+        await self._cancel_verified("dust")
+        side, left = self.pos.side, abs(acct["pos"])
+        add = max(MIN_BASE, math.ceil(self.p.min_order_usd * 1.2 / px * 10 ** SIZE_DEC) / 10 ** SIZE_DEC)
+        bid, ask = await self._bid_ask()
+        e1 = await self.ex.market(side == F.SHORT, add, (bid if side == F.SHORT else ask) or px)
+        total = left + add
+        for _ in range(6):                      # the fill can take a few seconds to show
+            await asyncio.sleep(0.5)
+            a = await self._read_account(force=True)
+            if a and abs(abs(a["pos"]) - (left + add)) <= 2 * 10 ** -SIZE_DEC:
+                total = abs(a["pos"]); break
+        bid, ask = await self._bid_ask()
+        e2 = await self.ex.market(side == F.LONG, qty_round(total), (bid if side == F.LONG else ask) or px, reduce_only=True)
+        self.acct_at = 0.0
+        await self.db.log("dust_closed", {"left": left, "added": add, "closed": round(total, SIZE_DEC),
+                                          "errors": {k: str(v)[:120] for k, v in (("add", e1), ("close", e2)) if v}})
+
     async def _check_orders(self):
         if self._reads_paused():
+            return
+        if time.time() < self.too_small_until:  # Lighter refused an order as too small: don't hammer it every 4 s
             return
         try:
             n = await self.ex.open_order_count()

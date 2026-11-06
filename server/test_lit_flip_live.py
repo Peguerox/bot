@@ -33,10 +33,17 @@ class FakeEx:
                  "c": base - self.trend * (n - i) * 0.001} for i in range(n)] + [{"t": n, "h": base, "l": base, "c": base}]
 
     async def market(self, is_ask, qty, ref, reduce_only=False):
+        if self._too_small(qty, self.price): return "code=21706 message='invalid order base or quote amount'"
         self.sent.append(("market", is_ask, round(qty, 2), reduce_only))
         self._fill(is_ask, qty, self.price, reduce_only); return None
 
+    min_usd = 0.0                              # tests: > 0 = refuse orders worth less (Lighter's $10 minimum)
+
+    def _too_small(self, qty, px):
+        return self.min_usd and qty * px < self.min_usd
+
     async def limit(self, is_ask, qty, price, reduce_only=True):
+        if self._too_small(qty, price): return "code=21706 message='invalid order base or quote amount'"
         self.orders.append(dict(kind="limit", is_ask=is_ask, qty=qty, price=price, reduce_only=reduce_only)); return None
 
     async def stop(self, is_ask, qty, trigger, reduce_only):
@@ -514,13 +521,37 @@ async def t_fixed_first_and_last_stop():
               and abs(abs(stop[0]["price"] / ref - 1) - 0.02) < 1e-4, (lvl, stop, ref))
 
 
+async def t_dust_and_small_targets():
+    print("\n[2026-11-06: a target fills 24.4 of 25.8 -> the 1.38 left (< $10) is grown past $10 and closed; a $10 short's target clears $10]")
+    ex, db = FakeEx(equity=210.0), FakeDB(); ex.min_usd = 10.0; ex.trend = -1      # falling range -> SHORT first
+    db.state["override_params"] = {"first_usd": 10, "lev_cap": 4.5, "tp_pct": 1.3, "sl_pct": 0.25, "mult": 1.2}
+    bot = L.FlipBot(ex, db); await _ticks(bot, 1)
+    tgt = [o for o in ex.orders if o["kind"] == "limit"]
+    check("first SHORT opened and its target (1.3% lower) is on the book, worth >= $10", bot.pos is not None and bot.pos.side == F.SHORT
+          and tgt and tgt[0]["qty"] * tgt[0]["price"] >= 10, (bot.pos, ex.orders, [a for a, _ in db.logs][-3:]))
+    # the target partly fills: 0.5 LIT short stays (~$1.5)
+    db.state["enabled"] = False
+    ex.price = tgt[0]["price"]; ex._fill(False, abs(ex.pos) - 0.5, ex.price, True); ex.orders = [o for o in ex.orders if o["kind"] != "limit"]
+    await _ticks(bot, 3)
+    check("leftover grown past $10 and closed: flat", ex.pos == 0, ex.pos)
+    check("dust_closed logged, no 4-second retry storm", any(a == "dust_closed" for a, _ in db.logs)
+          and sum(1 for a, _ in db.logs if a == "orders_missing_replaced") <= 1, [a for a, _ in db.logs][-6:])
+    await _ticks(bot, 2)
+    check("sequence counted once, as a win", db.state.get("sequences") == 1 and db.state.get("wins") == 1 and not db.state.get("busts"), db.state)
+    ex2, db2 = FakeEx(equity=210.0), FakeDB(); ex2.min_usd = 10.0
+    db2.state["override_params"] = {"first_usd": 10, "lev_cap": 4.5, "tp_pct": 1.3, "sl_pct": 0.25, "mult": 1.2}
+    bot2 = L.FlipBot(ex2, db2); await _ticks(bot2, 1)
+    ex2.price *= 0.998; await _ticks(bot2, 2)       # a full $10 long now worth $9.98: NOT dust
+    check("a full first trade briefly under $10 is not touched", ex2.pos > 0 and not any(a == "dust_closed" for a, _ in db2.logs), (ex2.pos, db2.logs[-3:]))
+
+
 async def _nosleep(*a, **k):
     return None
 
 
 async def main():
     for t in (t_start_flip_win, t_watch_mode_fallback, t_restart_keeps_the_sequence, t_off_keeps_position_flatten_closes,
-              t_bust_at_cap, t_unknown_position_is_protected, t_ws_wake_and_rejected_flip, t_stale_flip_never_left_behind, t_panel_settings_next_sequence_only, t_failed_placement_rechecked_fast, t_compounding_off, t_waf_block_backs_off, t_trail_after_target, t_trail_stop_refused_closes_at_market, t_stepped_target, t_deep_step_profit_lock, t_dead_book_socket_uses_rest, t_takeover_reloads_state, t_add_mode, t_add_mode_partial_and_bust, t_flat_read_is_confirmed, t_fixed_first_and_last_stop):
+              t_bust_at_cap, t_unknown_position_is_protected, t_ws_wake_and_rejected_flip, t_stale_flip_never_left_behind, t_panel_settings_next_sequence_only, t_failed_placement_rechecked_fast, t_compounding_off, t_waf_block_backs_off, t_trail_after_target, t_trail_stop_refused_closes_at_market, t_stepped_target, t_deep_step_profit_lock, t_dead_book_socket_uses_rest, t_takeover_reloads_state, t_add_mode, t_add_mode_partial_and_bust, t_flat_read_is_confirmed, t_fixed_first_and_last_stop, t_dust_and_small_targets):
         await t()
     print(f"\n==== {len(PASS)} passed, {len(FAIL)} failed ====")
 
