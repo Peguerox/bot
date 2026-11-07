@@ -64,7 +64,7 @@ MISMATCH_GRACE_S = 8.0                # a fill can take a few seconds to show; w
 DUST_RETRY_S = 30.0                   # a leftover under $10 is grown past $10 and closed; retried at most this often
 TOO_SMALL_PAUSE_S = 60.0              # after Lighter refuses an order as under $10, wait this long before re-placing
 STATE_READ_EVERY_POS, STATE_READ_EVERY_FLAT = 2.0, 5.0   # state row (settings / ON / flatten) read with / without a position
-FLIP_LIMIT_GRACE_S = 2.0              # stop-limit flip: price this long past the limit without a fill -> flip at market
+FLIP_LIMIT_GRACE_S = 1.0              # stop-limit flip: price this long past the limit without a fill -> flip at market (2 s -> 1 s, owner 2026-11-07)
 FLAT_CONFIRM_S = 4.0                  # a "flat" read must still be flat on a fresh read this much later before the sequence
                                       # counts as over (2026-11-05: LIT read flat 3 s after its entry -> a fake "bust")
 WATCH_REFIRE_S = 5.0                  # watch mode: never fire again within this long of the last shot
@@ -1068,6 +1068,16 @@ class FlipBot:
             self.acct_at = 0.0                  # fresh position read next tick (the limit may be filling)
             return True
         self.limit_miss_since = None
+        # Double-flip guard (the wait is only 1 s): if the flip order is no longer on the book it has most likely just filled
+        # and Lighter hasn't shown the new position yet -- don't fire a second flip; the next ticks read the position.
+        try:
+            n = await self.ex.open_order_count()
+        except Exception:
+            n = None
+        if n is not None and n < self._want_count(self.pos):
+            await self.db.log("flip_limit_fallback_skipped", {"open": n, "want": self._want_count(self.pos)})
+            self.acct_at = 0.0
+            return True
         await self._cancel_verified("limit_fallback")
         a = await self._read_account(force=True)
         if a is None or abs(a["pos"]) < MIN_BASE / 2 or (a["pos"] > 0) != (self.pos.side == F.LONG):

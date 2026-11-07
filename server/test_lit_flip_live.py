@@ -578,9 +578,9 @@ async def t_stop_limit_flip():
     try:
         ex.move(sl2["price"] * 1.003)                             # jumps 0.3% past the trigger: the limit can't fill
         await bot.tick()
-        check("jumped past the limit: not flipped yet (waiting the 2 s)", bot.pos.side == F.SHORT and ex.pos < 0, ex.pos)
-        clock[0] += 2.5; await _ticks(bot, 3)
-        check("after 2 s: flipped at market to LONG step 3", ex.pos > 0 and bot.pos.side == F.LONG and bot.pos.level == 2
+        check("jumped past the limit: not flipped yet (waiting the 1 s)", bot.pos.side == F.SHORT and ex.pos < 0, ex.pos)
+        clock[0] += 1.5; await _ticks(bot, 3)
+        check("after 1 s: flipped at market to LONG step 3", ex.pos > 0 and bot.pos.side == F.LONG and bot.pos.level == 2
               and any(a == "flip_limit_fallback" for a, _ in db.logs), (ex.pos, bot.pos, [a for a, _ in db.logs][-5:]))
         check("no stale stop-limit left behind (one flip order for the new step)", sum(1 for o in ex.orders if o["kind"] == "stoplimit") == 1, ex.orders)
     finally:
@@ -608,13 +608,30 @@ async def t_state_read_throttled_trading_not():
         L.time.time = __import__("time").time; L.STATE_READ_EVERY_POS = L.STATE_READ_EVERY_FLAT = 0.0
 
 
+async def t_limit_fallback_no_double_flip():
+    print("\n[stop-limit filled but Lighter shows the position late: the 1 s fallback must NOT flip a second time]")
+    ex, db = FakeEx(equity=210.0), FakeDB()
+    db.state["override_params"] = {"first_usd": 10, "lev_cap": 4.5, "tp_pct": 1.3, "sl_pct": 0.25, "mult": 1.2, "flip_limit_pct": 0.04}
+    bot = L.FlipBot(ex, db); await _ticks(bot, 1)
+    sl = [o for o in ex.orders if o["kind"] == "stoplimit"][0]
+    clock = [__import__("time").time() + 100]; L.time.time = lambda: clock[0]
+    try:
+        ex.orders.remove(sl)                                  # it filled on Lighter...
+        ex.price = sl["price"] * 0.996                        # ...price now far past the limit, but the position still shows LONG
+        await bot.tick(); clock[0] += 1.5; await bot.tick()
+        check("no market flip sent while the flip order is missing from the book", not any(x[0] == "market" for x in ex.sent[1:])
+              and any(a == "flip_limit_fallback_skipped" for a, _ in db.logs), (ex.sent, [a for a, _ in db.logs][-4:]))
+    finally:
+        L.time.time = __import__("time").time
+
+
 async def _nosleep(*a, **k):
     return None
 
 
 async def main():
     for t in (t_start_flip_win, t_watch_mode_fallback, t_restart_keeps_the_sequence, t_off_keeps_position_flatten_closes,
-              t_bust_at_cap, t_unknown_position_is_protected, t_ws_wake_and_rejected_flip, t_stale_flip_never_left_behind, t_panel_settings_next_sequence_only, t_failed_placement_rechecked_fast, t_compounding_off, t_waf_block_backs_off, t_trail_after_target, t_trail_stop_refused_closes_at_market, t_stepped_target, t_deep_step_profit_lock, t_dead_book_socket_uses_rest, t_takeover_reloads_state, t_add_mode, t_add_mode_partial_and_bust, t_flat_read_is_confirmed, t_fixed_first_and_last_stop, t_dust_and_small_targets, t_stop_limit_flip, t_state_read_throttled_trading_not):
+              t_bust_at_cap, t_unknown_position_is_protected, t_ws_wake_and_rejected_flip, t_stale_flip_never_left_behind, t_panel_settings_next_sequence_only, t_failed_placement_rechecked_fast, t_compounding_off, t_waf_block_backs_off, t_trail_after_target, t_trail_stop_refused_closes_at_market, t_stepped_target, t_deep_step_profit_lock, t_dead_book_socket_uses_rest, t_takeover_reloads_state, t_add_mode, t_add_mode_partial_and_bust, t_flat_read_is_confirmed, t_fixed_first_and_last_stop, t_dust_and_small_targets, t_stop_limit_flip, t_state_read_throttled_trading_not, t_limit_fallback_no_double_flip):
         await t()
     print(f"\n==== {len(PASS)} passed, {len(FAIL)} failed ====")
 
