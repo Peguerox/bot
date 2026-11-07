@@ -1,6 +1,7 @@
 """Flip martingale on a Lighter perp -- REAL MONEY, built 2026-11-03. One coin per process (FLIP_COIN env var, see COINS):
   * LIT (market 120): Worker 2's service + account, Start Command `python server/lit_flip_live.py`.
   * NEAR (market 10): Worker 1's service + account, same Start Command with env FLIP_COIN=NEAR (own tables lighter_near_flip_*).
+  * LIT2 (market 120, 2026-11-07): Worker 1's account trading LIT with stop-limit flips (flip_limit_pct), tables lighter_lit2_flip_*.
     (SOL, market 2, ran there 2026-11-03/04 -- kept in COINS.)
 Each uses its own service's plain LIGHTER_* env vars.
 
@@ -38,6 +39,8 @@ COINS = {
     # Worker 1 from 2026-11-04 (owner): NEAR, target 2% -- last 120 days on Lighter candles NEAR +14%/month (2nd after LIT
     # +26%) while SOL lost -3%/-1.6%. research/flip-coins-2026-11-04/test_coins.py
     "NEAR": dict(market=10, price_dec=5, size_dec=1, min_base=2.0, tables="lighter_near_flip", params=F.Params()),
+    # Owner 2026-11-07: a second LIT bot on Worker 1's account (env FLIP_COIN=LIT2) racing Worker 2 with stop-limit flips.
+    "LIT2": dict(market=120, price_dec=4, size_dec=2, min_base=1.00, tables="lighter_lit2_flip", params=F.Params()),
 }
 COIN = os.environ.get("FLIP_COIN", "LIT").upper()
 _C = COINS[COIN]
@@ -60,6 +63,7 @@ PUBLISH_EVERY = 3.0                   # panel readout write, seconds
 MISMATCH_GRACE_S = 8.0                # a fill can take a few seconds to show; wait before "fixing" a mismatch
 DUST_RETRY_S = 30.0                   # a leftover under $10 is grown past $10 and closed; retried at most this often
 TOO_SMALL_PAUSE_S = 60.0              # after Lighter refuses an order as under $10, wait this long before re-placing
+FLIP_LIMIT_GRACE_S = 2.0              # stop-limit flip: price this long past the limit without a fill -> flip at market
 FLAT_CONFIRM_S = 4.0                  # a "flat" read must still be flat on a fresh read this much later before the sequence
                                       # counts as over (2026-11-05: LIT read flat 3 s after its entry -> a fake "bust")
 WATCH_REFIRE_S = 5.0                  # watch mode: never fire again within this long of the last shot
@@ -78,7 +82,8 @@ def is_blocked(e):
 # sequence -- an open sequence keeps the params it started with (seq_params), so a running ladder never changes halfway.
 EDITABLE = {"tp_pct": (0.2, 10.0), "sl_pct": (0.1, 5.0), "first_pct": (0.5, 50.0), "mult": (1.05, 3.0), "lev_cap": (0.2, 5.0),
             "trail_pct": (0.0, 3.0), "lock_from_step": (0.0, 11.0), "lock_profit_pct": (0.0, 5.0), "lock_arm_pct": (0.05, 3.0),
-            "lock_trail_pct": (0.0, 3.0), "add_mode": (0.0, 1.0), "first_usd": (0.0, 1e6), "last_sl_pct": (0.0, 10.0)}
+            "lock_trail_pct": (0.0, 3.0), "add_mode": (0.0, 1.0), "first_usd": (0.0, 1e6), "last_sl_pct": (0.0, 10.0),
+            "flip_limit_pct": (0.0, 1.0)}
 TRAIL_MIN_PCT = 0.05                  # a trail under this is treated as off (price noise would close it at once)
 TRAIL_RAISE_STEP = 0.0005             # move the trailing stop only when it can rise >= 0.05% (each move = cancel + place)
 # Stepped target (owner 2026-11-04): step_n steps from step_start, +step_inc each; the bot climbs one step per full bust the
@@ -247,6 +252,12 @@ class LighterExchange:
             market_index=MARKET_ID, client_order_index=self._co_idx(), base_amount=qty_int(qty),
             trigger_price=px_int(trigger), price=px_int(worst), is_ask=is_ask, reduce_only=reduce_only))
 
+    async def stop_limit(self, is_ask, qty, trigger, limit_px, reduce_only):
+        """Stop-LIMIT: triggers like stop(), then rests as a limit at limit_px (fills no worse than that)."""
+        return await self._send(lambda: self.client.create_sl_limit_order(
+            market_index=MARKET_ID, client_order_index=self._co_idx(), base_amount=qty_int(qty),
+            trigger_price=px_int(trigger), price=px_int(limit_px), is_ask=is_ask, reduce_only=reduce_only))
+
     async def cancel_all(self):
         c = self.client
         return await self._send(lambda: c.cancel_all_orders(
@@ -386,6 +397,7 @@ class FlipBot:
         self.dust_at = 0.0                  # last attempt to close a leftover under $10
         self.dust_until = 0.0               # until then the leftover's add/close fills are not adopted as the position
         self.dust_won = None                # the closed leftover's sequence result (decided before it was grown)
+        self.limit_miss_since = None        # stop-limit flip: when price first went past the limit unfilled
         self.too_small_until = 0.0          # Lighter refused an order as under $10 -> no re-place until then
         self.locked = False; self.lock_at = 0.0
         self.flip_mode = "native"
@@ -580,7 +592,11 @@ class FlipBot:
                 elif o.kind == "add":
                     out["add"] = await self.ex.limit(o.is_ask, math.ceil(o.qty * 10 ** SIZE_DEC - 1e-6) / 10 ** SIZE_DEC, o.price, reduce_only=False)
                 elif o.kind == "flip" and self.flip_mode == "native":
-                    e = await self.ex.stop(o.is_ask, qty_round(o.qty), o.price, reduce_only=False)
+                    if self.p.flip_limit_pct > 0:       # stop-limit: no worse than flip_limit_pct past the trigger
+                        lim = o.price * (1 - self.p.flip_limit_pct / 100 if o.is_ask else 1 + self.p.flip_limit_pct / 100)
+                        e = await self.ex.stop_limit(o.is_ask, qty_round(o.qty), o.price, lim, reduce_only=False)
+                    else:
+                        e = await self.ex.stop(o.is_ask, qty_round(o.qty), o.price, reduce_only=False)
                     if e and "nonce" not in str(e).lower() and "429" not in str(e) and "timeout" not in str(e).lower():
                         # Lighter refused the non-reduce-only stop itself -> from now on the bot fires the flip.
                         self.flip_mode = "watch"
@@ -752,6 +768,8 @@ class FlipBot:
         if self.p.add_mode < 0.5 and self.p.trail_pct > 0 and await self._trail_step(acct):
             return
         if self.p.add_mode < 0.5 and self.p.lock_from_step > 0 and self.trail_floor is None and await self._lock_step(acct):
+            return
+        if self.flip_mode == "native" and self.p.add_mode < 0.5 and self.p.flip_limit_pct > 0 and await self._limit_fallback(acct):
             return
         # Watch mode: only once the real position matches what we expect (never on a stale view -- that would
         # fire a second flip right after the first), fire the flip/stop ourselves when the stop price is touched.
@@ -1011,6 +1029,40 @@ class FlipBot:
         elif n > want:                          # a stale order survived a cancel -> clear the book and re-place ours
             await self.db.log("orders_extra_replaced", {"open": n, "want": want})
             await self._place_orders(self.pos)
+
+    async def _limit_fallback(self, acct):
+        """Stop-limit flip (owner 2026-11-07): if price has run past the limit for FLIP_LIMIT_GRACE_S and the flip still hasn't
+        filled, cancel and flip at market -- a position is never left without its flip. The last step's bust stop is a plain
+        stop-market, so only steps with a next trade get here."""
+        nq = F.next_qty(self.pos, self.p)
+        if nq is None:
+            self.limit_miss_since = None
+            return False
+        bid, ask = await self._bid_ask()
+        if bid is None or ask is None:
+            return False
+        stp = F.stop_price(self.pos, self.p)
+        k = self.p.flip_limit_pct / 100
+        missed = (bid < stp * (1 - k)) if self.pos.side == F.LONG else (ask > stp * (1 + k))
+        if not missed:
+            self.limit_miss_since = None
+            return False
+        self.limit_miss_since = self.limit_miss_since or time.time()
+        if time.time() - self.limit_miss_since < FLIP_LIMIT_GRACE_S:
+            self.acct_at = 0.0                  # fresh position read next tick (the limit may be filling)
+            return True
+        self.limit_miss_since = None
+        await self._cancel_verified("limit_fallback")
+        a = await self._read_account(force=True)
+        if a is None or abs(a["pos"]) < MIN_BASE / 2 or (a["pos"] > 0) != (self.pos.side == F.LONG):
+            self.acct_at = 0.0                  # it filled (or closed) meanwhile: the next tick handles it
+            return True
+        is_ask = self.pos.side == F.LONG
+        err = await self.ex.market(is_ask, qty_round(abs(a["pos"]) + nq), bid if is_ask else ask)
+        await self.db.log("flip_limit_fallback", {"stop": stp, "bid": bid, "ask": ask, "qty": round(abs(a["pos"]) + nq, SIZE_DEC),
+                                                  "error": str(err)[:200] if err else None})
+        self.acct_at = 0.0
+        return True
 
     async def _watch_trigger(self):
         bid, ask = await self._bid_ask()

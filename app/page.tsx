@@ -1332,13 +1332,15 @@ function LitGridLivePanel({
 // Flip martingale panels (2026-11-03, owner's strategy) -- server/lit_flip_live.py: LIT on Worker 2, SOL on Worker 1.
 // Self-loading (state + trades + events every 15 s); renders nothing until its state table exists. Owner: "simple, but
 // with everything I need to know what the bot is doing".
-const FLIP_P = { firstPct: 5, mult: 1.5, slPct: 0.5, tpPct: 2, window: 30, band: 0.30, levCap: 3, trailPct: 0, addMode: 0, firstUsd: 0, lastSlPct: 0 };
+const FLIP_P = { firstPct: 5, mult: 1.5, slPct: 0.5, tpPct: 2, window: 30, band: 0.30, levCap: 3, trailPct: 0, addMode: 0, firstUsd: 0, lastSlPct: 0, flipLimitPct: 0 };
 // One panel per coin (same bot file, FLIP_COIN env var). Params must match COINS in server/lit_flip_live.py.
 type FlipCfg = { coin: string; worker: string; table: string; api: string; P: typeof FLIP_P; pd: number; qd: number };
 const LIT_FLIP: FlipCfg = { coin: "LIT", worker: "Worker 2", table: "lighter_lit_flip", api: "/api/lighter-lit-flip", P: FLIP_P, pd: 4, qd: 2 };
 const SOL_FLIP: FlipCfg = { coin: "SOL", worker: "Worker 1 (old)", table: "lighter_sol_flip", api: "/api/lighter-sol-flip", P: { ...FLIP_P, tpPct: 1 }, pd: 3, qd: 3 };
 // Worker 1 switched SOL -> NEAR 2026-11-04 (owner): NEAR target 2%, same as LIT.
 const NEAR_FLIP: FlipCfg = { coin: "NEAR", worker: "Worker 1", table: "lighter_near_flip", api: "/api/lighter-near-flip", P: FLIP_P, pd: 5, qd: 1 };
+// Owner 2026-11-07: Worker 1 now races Worker 2 on LIT -- same settings, STOP-LIMIT flips (FLIP_COIN=LIT2). NEAR is parked.
+const LIT2_FLIP: FlipCfg = { coin: "LIT", worker: "Worker 1 · stop-limit flips", table: "lighter_lit2_flip", api: "/api/lighter-lit2-flip", P: FLIP_P, pd: 4, qd: 2 };
 const FLIP_EVENT_LABEL: Record<string, string> = {
   started: "bot started", leverage_set: "leverage set", sequence_start: "opened first trade", orders_placed: "target + flip placed",
   flipped: "FLIPPED", sequence_over: "sequence finished", flip_mode_watch: "switched to watch mode", watch_fired: "watch mode fired the flip",
@@ -1393,7 +1395,8 @@ function LitFlipPanel({ cfg = LIT_FLIP, hideWhenIdle = false }: { cfg?: FlipCfg;
   const fromDb = (o: any) => o ? { ...cfg.P, ...(o.tp_pct != null && { tpPct: Number(o.tp_pct) }), ...(o.sl_pct != null && { slPct: Number(o.sl_pct) }),
     ...(o.first_pct != null && { firstPct: Number(o.first_pct) }), ...(o.mult != null && { mult: Number(o.mult) }), ...(o.lev_cap != null && { levCap: Number(o.lev_cap) }),
     ...(o.trail_pct != null && { trailPct: Number(o.trail_pct) }), ...(o.add_mode != null && { addMode: Number(o.add_mode) }),
-    ...(o.first_usd != null && { firstUsd: Number(o.first_usd) }), ...(o.last_sl_pct != null && { lastSlPct: Number(o.last_sl_pct) }) } : cfg.P;
+    ...(o.first_usd != null && { firstUsd: Number(o.first_usd) }), ...(o.last_sl_pct != null && { lastSlPct: Number(o.last_sl_pct) }),
+    ...(o.flip_limit_pct != null && { flipLimitPct: Number(o.flip_limit_pct) }) } : cfg.P;
   const nextP = fromDb(st.live_params ?? st.override_params);
   const FLIP_P = st.seq_side != null ? fromDb(st.seq_params) : nextP;
   async function toggleSetting(body: Record<string, any>, label: string) {
@@ -1599,7 +1602,14 @@ function LitFlipPanel({ cfg = LIT_FLIP, hideWhenIdle = false }: { cfg?: FlipCfg;
                 <button onClick={() => toggleSetting({ addMode: 1 }, "Add same side")} disabled={busy != null} className={`px-2 text-[12px] ${nextP.addMode ? "bg-green-500 text-gray-900 font-bold" : "bg-gray-800 text-gray-400"}`}>Add more, same side</button>
               </span>
               {nextP.addMode ? <div className="text-[12px] text-gray-400">keeps the trade and adds more with a limit order (no slippage); target = {fmt(pv.tp)} above the last add; Ride / Stepped / Deep-step are ignored in this mode</div> : null}
-              <div>at the last step the stop is {In({ k: "lastSlPct", v: nextP.lastSlPct, step: "0.25" })}% away <span className="text-gray-500">(0 = same as the others)</span></div></>) })}
+              <div>at the last step the stop is {In({ k: "lastSlPct", v: nextP.lastSlPct, step: "0.25" })}% away <span className="text-gray-500">(0 = same as the others)</span></div>
+              {!nextP.addMode && <div>the flip order is
+                <span className="inline-flex ml-2 rounded overflow-hidden border border-gray-600 align-middle">
+                  <button onClick={() => toggleSetting({ flipLimitPct: 0 }, "Market flip")} disabled={busy != null} className={`px-2 text-[12px] ${!(nextP.flipLimitPct > 0) ? "bg-green-500 text-gray-900 font-bold" : "bg-gray-800 text-gray-400"}`}>Market</button>
+                  <button onClick={() => toggleSetting({ flipLimitPct: nextP.flipLimitPct > 0 ? nextP.flipLimitPct : 0.02 }, "Limit flip")} disabled={busy != null} className={`px-2 text-[12px] ${nextP.flipLimitPct > 0 ? "bg-green-500 text-gray-900 font-bold" : "bg-gray-800 text-gray-400"}`}>Limit</button>
+                </span>
+                {nextP.flipLimitPct > 0 && <> fills no worse than {In({ k: "flipLimitPct", v: nextP.flipLimitPct, step: "0.01" })}% past the trigger <span className="text-gray-500">(if price jumps past it, the bot flips at market after 2 s)</span></>}
+              </div>}</>) })}
             {Row({ title: "Size", children: (<>first trade {pv.fixedFirst > 0 ? <span className="text-gray-500">(fixed $ below)</span> : <>{In({ k: "firstPct", v: (nextP.firstPct), step: "0.5" })}% of the account</>} or a fixed ${In({ k: "firstUsd", v: nextP.firstUsd, step: "5", w: "w-16" })} <span className="text-gray-500">(0 = use the %)</span>, ×{In({ k: "mult", v: (nextP.mult), step: "0.05" })} bigger each flip, never more than {In({ k: "levCap", v: (nextP.levCap), step: "0.5" })}× the account
               <div className={`text-[12px] ${firstUsd < 10 ? "text-red-400" : "text-gray-400"}`}>= first trade {usd(firstUsd)}{firstUsd < 10 ? " (under Lighter's $10 minimum — it won't start)" : ""} · {ladderUsd.length} steps · busts after a {runToBust.toFixed(1)}% run · biggest {usd(ladderUsd[ladderUsd.length - 1] ?? 0, 0)} · a full bust costs ≈ {usd(bust)} ({equity ? (bust / equity * 100).toFixed(1) : 0}%){pv.fixedFirst > 0 ? " · one more step each time the account grows ×" + pv.mult : ""}</div>
             </>) })}
@@ -5382,9 +5392,10 @@ export default function Dashboard() {
         {/* 2026-11-03 (owner): the old Worker 1 BTC stochastic panel and the Master Schedule (which only drove the BTC
             workers) are gone -- Worker 1's slot now runs the SOL flip martingale. Components kept in this file, unrendered. */}
         {/* Flip martingales: NEAR = Worker 1 (was SOL until 2026-11-04), LIT = Worker 2, above the LIT grid bots (owner). */}
-        <LitFlipPanel cfg={NEAR_FLIP} />
-        <LitFlipPanel cfg={SOL_FLIP} hideWhenIdle />
+        <LitFlipPanel cfg={LIT2_FLIP} />
         <LitFlipPanel />
+        <LitFlipPanel cfg={NEAR_FLIP} hideWhenIdle />
+        <LitFlipPanel cfg={SOL_FLIP} hideWhenIdle />
 
         {/* Worker 3 twin of the LIT grid, own full-width row ABOVE Worker 4's (2026-10-21,
             direct request: real-money A/B test of two spacings, same component reused with

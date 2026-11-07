@@ -36,6 +36,8 @@ class Params:
     first_usd: float = 0.0        # 0 = first trade is first_pct of equity; >0 = first trade is this many USD (owner 2026-11-05: the
                                   #   cap still grows with the whole account, so steps grow as the account grows)
     last_sl_pct: float = 0.0      # 0 = the last step's bust stop is sl_pct away; >0 = this % instead (more room before a bust)
+    flip_limit_pct: float = 0.0   # 0 = the flip is a stop-MARKET order; >0 = a stop-LIMIT that fills no worse than this % past the
+                                  #   trigger (owner 2026-11-07: cut the ~0.04% flip slippage; the bot flips at market if it misses)
 
 
 def range_signal(candles, window: int, band: float) -> int:

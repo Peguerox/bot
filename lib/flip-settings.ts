@@ -11,6 +11,7 @@ export const FLIP_BOUNDS: Record<string, [string, number, number]> = {
   lockTrailPct: ["lock_trail_pct", 0, 3],
   addMode: ["add_mode", 0, 1],
   firstUsd: ["first_usd", 0, 1_000_000], lastSlPct: ["last_sl_pct", 0, 10],
+  flipLimitPct: ["flip_limit_pct", 0, 1],
 };
 
 export async function flipSettingsPost(req: NextRequest, table: string) {

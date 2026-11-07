@@ -51,6 +51,9 @@ class FakeEx:
             return "reduce only required"
         self.orders.append(dict(kind="stop", is_ask=is_ask, qty=qty, price=trigger, reduce_only=reduce_only)); return None
 
+    async def stop_limit(self, is_ask, qty, trigger, limit_px, reduce_only):
+        self.orders.append(dict(kind="stoplimit", is_ask=is_ask, qty=qty, price=trigger, limit=limit_px, reduce_only=reduce_only)); return None
+
     cancel_fails = 0                           # tests: how many cancel_all calls are silently ignored by the "exchange"
 
     async def cancel_all(self):
@@ -89,6 +92,13 @@ class FakeEx:
         for o in list(self.orders):
             hit = (o["kind"] == "limit" and ((o["is_ask"] and price >= o["price"]) or (not o["is_ask"] and price <= o["price"]))) or \
                   (o["kind"] == "stop" and ((o["is_ask"] and price <= o["price"]) or (not o["is_ask"] and price >= o["price"])))
+            if o["kind"] == "stoplimit":         # triggered -> fills at the limit only if price is still within it, else rests
+                trig = (o["is_ask"] and price <= o["price"]) or (not o["is_ask"] and price >= o["price"])
+                if trig and o in self.orders:
+                    within = (o["is_ask"] and price >= o["limit"]) or (not o["is_ask"] and price <= o["limit"])
+                    if within:
+                        self.orders.remove(o); self._fill(o["is_ask"], o["qty"], price, o["reduce_only"])
+                continue
             if hit and o in self.orders:
                 self.orders.remove(o)
                 self._fill(o["is_ask"], o["qty"], o["price"], o["reduce_only"])
@@ -552,13 +562,38 @@ async def t_dust_and_small_targets():
     check("a full first trade briefly under $10 is not touched", ex2.pos > 0 and not any(a == "dust_closed" for a, _ in db2.logs), (ex2.pos, db2.logs[-3:]))
 
 
+async def t_stop_limit_flip():
+    print("\n[2026-11-07 LIT2: the flip is a stop-LIMIT (no worse than +0.02%); if price jumps past it, flip at market after 2 s]")
+    ex, db = FakeEx(equity=210.0), FakeDB()
+    db.state["override_params"] = {"first_usd": 10, "lev_cap": 4.5, "tp_pct": 1.3, "sl_pct": 0.25, "mult": 1.2, "flip_limit_pct": 0.02}
+    bot = L.FlipBot(ex, db); await _ticks(bot, 1)
+    sl = [o for o in ex.orders if o["kind"] == "stoplimit"]
+    check("the flip rests as a stop-limit, limit 0.02% past the trigger", len(sl) == 1 and not sl[0]["reduce_only"]
+          and abs(sl[0]["limit"] / sl[0]["price"] - (1 - 0.0002)) < 1e-9, ex.orders)
+    ex.move(sl[0]["price"] - 0.0001); await _ticks(bot, 2)        # a normal touch: fills within the limit
+    check("normal move: flipped by the stop-limit, no market fallback", bot.pos.side == F.SHORT and bot.pos.level == 1
+          and not any(a == "flip_limit_fallback" for a, _ in db.logs), (bot.pos, db.logs[-3:]))
+    sl2 = [o for o in ex.orders if o["kind"] == "stoplimit"][0]
+    clock = [__import__("time").time() + 100]; L.time.time = lambda: clock[0]
+    try:
+        ex.move(sl2["price"] * 1.003)                             # jumps 0.3% past the trigger: the limit can't fill
+        await bot.tick()
+        check("jumped past the limit: not flipped yet (waiting the 2 s)", bot.pos.side == F.SHORT and ex.pos < 0, ex.pos)
+        clock[0] += 2.5; await _ticks(bot, 3)
+        check("after 2 s: flipped at market to LONG step 3", ex.pos > 0 and bot.pos.side == F.LONG and bot.pos.level == 2
+              and any(a == "flip_limit_fallback" for a, _ in db.logs), (ex.pos, bot.pos, [a for a, _ in db.logs][-5:]))
+        check("no stale stop-limit left behind (one flip order for the new step)", sum(1 for o in ex.orders if o["kind"] == "stoplimit") == 1, ex.orders)
+    finally:
+        L.time.time = __import__("time").time
+
+
 async def _nosleep(*a, **k):
     return None
 
 
 async def main():
     for t in (t_start_flip_win, t_watch_mode_fallback, t_restart_keeps_the_sequence, t_off_keeps_position_flatten_closes,
-              t_bust_at_cap, t_unknown_position_is_protected, t_ws_wake_and_rejected_flip, t_stale_flip_never_left_behind, t_panel_settings_next_sequence_only, t_failed_placement_rechecked_fast, t_compounding_off, t_waf_block_backs_off, t_trail_after_target, t_trail_stop_refused_closes_at_market, t_stepped_target, t_deep_step_profit_lock, t_dead_book_socket_uses_rest, t_takeover_reloads_state, t_add_mode, t_add_mode_partial_and_bust, t_flat_read_is_confirmed, t_fixed_first_and_last_stop, t_dust_and_small_targets):
+              t_bust_at_cap, t_unknown_position_is_protected, t_ws_wake_and_rejected_flip, t_stale_flip_never_left_behind, t_panel_settings_next_sequence_only, t_failed_placement_rechecked_fast, t_compounding_off, t_waf_block_backs_off, t_trail_after_target, t_trail_stop_refused_closes_at_market, t_stepped_target, t_deep_step_profit_lock, t_dead_book_socket_uses_rest, t_takeover_reloads_state, t_add_mode, t_add_mode_partial_and_bust, t_flat_read_is_confirmed, t_fixed_first_and_last_stop, t_dust_and_small_targets, t_stop_limit_flip):
         await t()
     print(f"\n==== {len(PASS)} passed, {len(FAIL)} failed ====")
 
