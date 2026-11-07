@@ -63,6 +63,7 @@ PUBLISH_EVERY = 3.0                   # panel readout write, seconds
 MISMATCH_GRACE_S = 8.0                # a fill can take a few seconds to show; wait before "fixing" a mismatch
 DUST_RETRY_S = 30.0                   # a leftover under $10 is grown past $10 and closed; retried at most this often
 TOO_SMALL_PAUSE_S = 60.0              # after Lighter refuses an order as under $10, wait this long before re-placing
+STATE_READ_EVERY_POS, STATE_READ_EVERY_FLAT = 2.0, 5.0   # state row (settings / ON / flatten) read with / without a position
 FLIP_LIMIT_GRACE_S = 2.0              # stop-limit flip: price this long past the limit without a fill -> flip at market
 FLAT_CONFIRM_S = 4.0                  # a "flat" read must still be flat on a fresh read this much later before the sequence
                                       # counts as over (2026-11-05: LIT read flat 3 s after its entry -> a fake "bust")
@@ -335,19 +336,27 @@ class LighterExchange:
 class SupabaseDB:
     def __init__(self):
         self.url, self.key = os.environ["NEXT_PUBLIC_SUPABASE_URL"], os.environ["SUPABASE_SERVICE_ROLE_KEY"]
+        self._s = None
+
+    async def _session(self):
+        # One kept-alive connection pool for every Supabase request (2026-11-07 bandwidth audit: a new session per request
+        # repeated the whole TLS handshake ~130k times a day -- about half of Render's outbound bandwidth).
+        if self._s is None or self._s.closed:
+            self._s = aiohttp.ClientSession()
+        return self._s
 
     async def _req(self, method, path, body=None, headers=None):
         h = {"apikey": self.key, "Authorization": f"Bearer {self.key}", "Content-Type": "application/json"}
         if method in ("POST", "PATCH"):
             h["Prefer"] = "return=representation"
         h.update(headers or {})
-        async with aiohttp.ClientSession() as s:
-            async with s.request(method, f"{self.url}/rest/v1/{path}", json=body, headers=h,
-                                 timeout=aiohttp.ClientTimeout(total=REST_TIMEOUT)) as r:
-                if r.status >= 400:
-                    raise RuntimeError(f"supabase {method} {path} {r.status}: {(await r.text())[:200]}")
-                t = await r.text()
-                return json.loads(t) if t else None
+        s = await self._session()
+        async with s.request(method, f"{self.url}/rest/v1/{path}", json=body, headers=h,
+                             timeout=aiohttp.ClientTimeout(total=REST_TIMEOUT)) as r:
+            if r.status >= 400:
+                raise RuntimeError(f"supabase {method} {path} {r.status}: {(await r.text())[:200]}")
+            t = await r.text()
+            return json.loads(t) if t else None
 
     async def get_state(self):
         return (await self._req("GET", f"{TABLE_STATE}?id=eq.1&select=*"))[0]
@@ -398,6 +407,7 @@ class FlipBot:
         self.dust_until = 0.0               # until then the leftover's add/close fills are not adopted as the position
         self.dust_won = None                # the closed leftover's sequence result (decided before it was grown)
         self.limit_miss_since = None        # stop-limit flip: when price first went past the limit unfilled
+        self.state_cache = None; self.state_at = 0.0   # last read of the state row (settings / ON / flatten)
         self.too_small_until = 0.0          # Lighter refused an order as under $10 -> no re-place until then
         self.locked = False; self.lock_at = 0.0
         self.flip_mode = "native"
@@ -668,7 +678,13 @@ class FlipBot:
 
     # ---- one tick ----
     async def tick(self):
-        st = await self.db.get_state()
+        # The settings/ON/flatten row is read every STATE_READ_EVERY_* seconds, not every tick (2026-11-07 bandwidth audit).
+        # Trading reactions don't use it: fills wake the bot through the orders websocket and the position comes from the
+        # exchange; the sequence counters are always re-read fresh before they are written.
+        every = STATE_READ_EVERY_POS if self.pos is not None else STATE_READ_EVERY_FLAT
+        if self.state_cache is None or time.time() - self.state_at >= every:
+            self.state_cache = await self.db.get_state(); self.state_at = time.time()
+        st = dict(self.state_cache)
         if not self.loaded:
             self._load(st)
         self.p_next = self._params_from_state(st)

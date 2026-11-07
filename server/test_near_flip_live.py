@@ -5,7 +5,7 @@ os.environ["FLIP_COIN"] = "NEAR"
 os.environ.setdefault("NEXT_PUBLIC_SUPABASE_URL", "http://x"); os.environ.setdefault("SUPABASE_SERVICE_ROLE_KEY", "x")
 import lit_flip_core as F
 import lit_flip_live as L
-L.ACCOUNT_EVERY = 0.0; L.CANDLES_EVERY = 0.0; L.ORDERS_CHECK_EVERY = 0.0; L.MISMATCH_GRACE_S = 0.0; L.FLAT_CONFIRM_S = 0.0; L.WATCH_REFIRE_S = 0.0; L.PUBLISH_EVERY = 0.0
+L.ACCOUNT_EVERY = 0.0; L.CANDLES_EVERY = 0.0; L.ORDERS_CHECK_EVERY = 0.0; L.MISMATCH_GRACE_S = 0.0; L.FLAT_CONFIRM_S = 0.0; L.STATE_READ_EVERY_POS = L.STATE_READ_EVERY_FLAT = 0.0; L.WATCH_REFIRE_S = 0.0; L.PUBLISH_EVERY = 0.0
 src = open(os.path.join(os.path.dirname(os.path.abspath(__file__)), "test_lit_flip_live.py")).read()
 exec(src[src.index("class FakeEx"):src.index("async def _ticks")])
 PASS, FAIL = [], []

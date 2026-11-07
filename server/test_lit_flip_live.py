@@ -5,7 +5,7 @@ os.environ.setdefault("NEXT_PUBLIC_SUPABASE_URL", "http://x"); os.environ.setdef
 import lit_flip_core as F
 import lit_flip_live as L
 
-L.ACCOUNT_EVERY = 0.0; L.CANDLES_EVERY = 0.0; L.ORDERS_CHECK_EVERY = 0.0; L.MISMATCH_GRACE_S = 0.0; L.FLAT_CONFIRM_S = 0.0; L.WATCH_REFIRE_S = 0.0; L.PUBLISH_EVERY = 0.0
+L.ACCOUNT_EVERY = 0.0; L.CANDLES_EVERY = 0.0; L.ORDERS_CHECK_EVERY = 0.0; L.MISMATCH_GRACE_S = 0.0; L.FLAT_CONFIRM_S = 0.0; L.STATE_READ_EVERY_POS = L.STATE_READ_EVERY_FLAT = 0.0; L.WATCH_REFIRE_S = 0.0; L.PUBLISH_EVERY = 0.0
 PASS, FAIL = [], []
 
 
@@ -587,13 +587,34 @@ async def t_stop_limit_flip():
         L.time.time = __import__("time").time
 
 
+async def t_state_read_throttled_trading_not():
+    print("\n[2026-11-07 bandwidth: the state row is read every 2 s (in a position) / 5 s (flat), but a flip is followed at once]")
+    ex, db = FakeEx(), FakeDB(); bot = L.FlipBot(ex, db)
+    reads = [0]; real_get = db.get_state
+    async def counted(): reads[0] += 1; return await real_get()
+    db.get_state = counted
+    clock = [__import__("time").time() + 100]; L.time.time = lambda: clock[0]
+    L.STATE_READ_EVERY_POS, L.STATE_READ_EVERY_FLAT = 2.0, 5.0
+    try:
+        await bot.tick()                                   # opens the first trade
+        n0 = reads[0]
+        for _ in range(10): clock[0] += 0.5; await bot.tick()   # 5 s of 0.5 s ticks in a position
+        check("state row read ~every 2 s, not every tick", reads[0] - n0 <= 3, reads[0] - n0)
+        flip = [o for o in ex.orders if o["kind"] == "stop"][0]
+        ex.move(flip["price"] - 0.0001 if flip["is_ask"] else flip["price"] + 0.0001)
+        clock[0] += 0.5; await bot.tick()
+        check("a flip on the exchange is followed on the very next tick", bot.pos.level == 1 and (ex.pos < 0) == (bot.pos.side == F.SHORT), (bot.pos, ex.pos))
+    finally:
+        L.time.time = __import__("time").time; L.STATE_READ_EVERY_POS = L.STATE_READ_EVERY_FLAT = 0.0
+
+
 async def _nosleep(*a, **k):
     return None
 
 
 async def main():
     for t in (t_start_flip_win, t_watch_mode_fallback, t_restart_keeps_the_sequence, t_off_keeps_position_flatten_closes,
-              t_bust_at_cap, t_unknown_position_is_protected, t_ws_wake_and_rejected_flip, t_stale_flip_never_left_behind, t_panel_settings_next_sequence_only, t_failed_placement_rechecked_fast, t_compounding_off, t_waf_block_backs_off, t_trail_after_target, t_trail_stop_refused_closes_at_market, t_stepped_target, t_deep_step_profit_lock, t_dead_book_socket_uses_rest, t_takeover_reloads_state, t_add_mode, t_add_mode_partial_and_bust, t_flat_read_is_confirmed, t_fixed_first_and_last_stop, t_dust_and_small_targets, t_stop_limit_flip):
+              t_bust_at_cap, t_unknown_position_is_protected, t_ws_wake_and_rejected_flip, t_stale_flip_never_left_behind, t_panel_settings_next_sequence_only, t_failed_placement_rechecked_fast, t_compounding_off, t_waf_block_backs_off, t_trail_after_target, t_trail_stop_refused_closes_at_market, t_stepped_target, t_deep_step_profit_lock, t_dead_book_socket_uses_rest, t_takeover_reloads_state, t_add_mode, t_add_mode_partial_and_bust, t_flat_read_is_confirmed, t_fixed_first_and_last_stop, t_dust_and_small_targets, t_stop_limit_flip, t_state_read_throttled_trading_not):
         await t()
     print(f"\n==== {len(PASS)} passed, {len(FAIL)} failed ====")
 
